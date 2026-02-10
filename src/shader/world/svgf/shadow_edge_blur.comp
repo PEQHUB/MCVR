@@ -1,0 +1,187 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D shadowInputImage;   // R: visibility, G: hitDist, B: NoL
+layout(set = 0, binding = 1, rgba16f) uniform image2D shadowOutputImage;
+layout(set = 0, binding = 2, r32f) uniform image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+
+float computeShadowEdge(ivec2 pixel, ivec2 size) {
+    float minV = 1.0;
+    float maxV = 0.0;
+    bool anyV = false;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = pixel + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+            float v = imageLoad(shadowInputImage, q).r;
+            if (v < 0.0) continue;
+            minV = min(minV, v);
+            maxV = max(maxV, v);
+            anyV = true;
+        }
+    }
+    return anyV ? (maxV - minV) : 0.0;
+}
+
+vec3 normalizeSafe(vec3 v) {
+    float len = length(v);
+    return (len > 1e-4) ? (v / len) : vec3(0.0, 0.0, 1.0);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(shadowInputImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec4 center = imageLoad(shadowInputImage, pixel);
+    float centerVis = center.x;
+    float centerHit = center.y;
+    float centerNoL = clamp(center.z, 0.0, 1.0);
+    float centerA = center.w;
+    
+    
+    float centerDepth = imageLoad(linearDepthImage, pixel).r;
+    vec3 centerNormal = normalizeSafe(imageLoad(normalRoughnessImage, pixel).xyz);
+
+    if (centerVis < 0.0 || centerDepth >= (INF_DISTANCE * 0.5)) {
+        imageStore(shadowOutputImage, pixel, vec4(centerVis, centerHit, centerNoL, centerA));
+        return;
+    }
+    if (centerA < 0.2) {
+        imageStore(shadowOutputImage, pixel, vec4(centerVis, centerHit, centerNoL, centerA));
+        return;
+    }
+
+    // Local edge + variance for edge-noise detection
+    float minV = 1.0;
+    float maxV = 0.0;
+    float sumV = 0.0;
+    float sumV2 = 0.0;
+    float countV = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = pixel + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+            float v = imageLoad(shadowInputImage, q).r;
+            if (v < 0.0) continue;
+            minV = min(minV, v);
+            maxV = max(maxV, v);
+            sumV += v;
+            sumV2 += v * v;
+            countV += 1.0;
+        }
+    }
+    float edge = (countV > 0.0) ? (maxV - minV) : 0.0;
+    float meanV = (countV > 0.0) ? (sumV / countV) : centerVis;
+    float varianceV = max(0.0, (countV > 0.0 ? (sumV2 / countV) : 0.0) - meanV * meanV);
+
+    float edgeBoost = smoothstep(0.05, 0.35, edge);
+    float noiseBoost = smoothstep(0.01, 0.06, varianceV);
+    // Always apply a light blur to reduce static grain; stronger on edges/noisy areas
+    float smoothStrength = max(max(edgeBoost, noiseBoost), 0.20);
+
+    float softness = smoothstep(0.0, 10.0, centerHit);
+    float occlusion = clamp(centerHit / 10.0, 0.0, 1.0); // shadow thickness / confidence
+    // Penumbra size proxy (hitDist + NoL + light size)
+    float lightSize = 1.5;
+    float penumbra = (centerHit / max(centerDepth, 1e-3)) * lightSize;
+    penumbra *= mix(0.6, 1.4, 1.0 - centerNoL);
+    float penumbraFactor = clamp(penumbra * 0.5, 0.0, 1.0);
+    float softBoost = smoothstep(0.05, 0.50, penumbraFactor);
+    smoothStrength = max(smoothStrength, mix(0.35, 0.75, softBoost));
+    float edgeFactor = mix(1.0, 2.2, max(edgeBoost, noiseBoost));
+    edgeFactor *= mix(1.0, 2.0, softBoost);
+    float phiShadow = mix(0.28, 0.55, softness) * edgeFactor;
+    float phiDepth = mix(0.8, 2.0, softness) * edgeFactor;
+    float phiNormal = mix(1.0, 2.2, softness) * edgeFactor;
+    float phiNoL = mix(0.22, 0.40, softness) * edgeFactor;
+    phiShadow *= mix(1.0, 4.0, penumbraFactor);
+    phiDepth *= mix(1.0, 2.4, penumbraFactor);
+    phiNormal *= mix(1.0, 2.4, penumbraFactor);
+    phiNoL *= mix(1.0, 3.0, penumbraFactor);
+    float sigma = mix(2.0, 6.0, softness) * mix(1.2, 3.0, smoothStrength) * mix(1.0, 5.0, penumbraFactor);
+    int radius = 1;
+    if (smoothStrength > 0.10) radius = 2;
+    if (smoothStrength > 0.22) radius = 3;
+    if (smoothStrength > 0.40) radius = 4;
+
+    float sumW = 1.0;
+    float sumVis = centerVis;
+    float sumHit = centerHit;
+    float sumNoL = centerNoL;
+
+    for (int dy = -4; dy <= 4; ++dy) {
+        for (int dx = -4; dx <= 4; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            if (abs(dx) > radius || abs(dy) > radius) continue;
+            ivec2 q = pixel + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+
+            vec4 vhdn = imageLoad(shadowInputImage, q);
+            float v = vhdn.x;
+            if (v < 0.0) continue;
+
+            float d = imageLoad(linearDepthImage, q).r;
+            vec3 n = normalizeSafe(imageLoad(normalRoughnessImage, q).xyz);
+
+            float depthDiff = abs(centerDepth - d) / max(abs(centerDepth), 1e-3);
+            float normalDiff = 1.0 - max(0.0, dot(centerNormal, n));
+            float shadowDiff = abs(centerVis - v);
+            float nolDiff = abs(centerNoL - vhdn.z);
+
+            float w = exp(-depthDiff / phiDepth)
+                    * exp(-normalDiff / phiNormal)
+                    * exp(-shadowDiff / phiShadow)
+                    * exp(-nolDiff / phiNoL);
+
+            float dist2 = float(dx * dx + dy * dy);
+            w *= exp(-dist2 / (2.0 * sigma * sigma));
+
+            sumVis += v * w;
+            sumHit += vhdn.y * w;
+            sumNoL += vhdn.z * w;
+            sumW += w;
+        }
+    }
+
+    float outVis = sumVis / max(sumW, 1e-4);
+    float outHit = sumHit / max(sumW, 1e-4);
+    float outNoL = clamp(sumNoL / max(sumW, 1e-4), 0.0, 1.0);
+    // Pull noisy edges toward local mean / median to remove dirty speckles
+    float meanMix = (0.45 * noiseBoost + 0.25 * edgeBoost) * mix(0.7, 1.4, occlusion) * mix(1.0, 1.6, softBoost);
+    meanMix = clamp(meanMix, 0.0, 0.70);
+    outVis = mix(outVis, meanV, meanMix);
+
+    // Edge-only median clamp (robust against isolated outliers)
+    float vals[9];
+    int idx = 0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = pixel + ivec2(dx, dy);
+            float v = centerVis;
+            if (q.x >= 0 && q.y >= 0 && q.x < size.x && q.y < size.y) {
+                float sv = imageLoad(shadowInputImage, q).r;
+                if (sv >= 0.0) v = sv;
+            }
+            vals[idx++] = v;
+        }
+    }
+    for (int i = 0; i < 9; ++i) {
+        for (int j = i + 1; j < 9; ++j) {
+            if (vals[j] < vals[i]) {
+                float tmp = vals[i];
+                vals[i] = vals[j];
+                vals[j] = tmp;
+            }
+        }
+    }
+    float medianV = vals[4];
+    float medianMix = smoothstep(0.08, 0.45, max(edgeBoost, noiseBoost)) * 0.60 * mix(1.0, 1.6, softBoost);
+    outVis = mix(outVis, medianV, medianMix);
+    imageStore(shadowOutputImage, pixel, vec4(outVis, outHit, outNoL, centerA));
+}

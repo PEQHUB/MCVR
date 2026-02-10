@@ -1,0 +1,62 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D shadowInputImage;   // R: visibility, G: hitDist, B: NoL, A: flags
+layout(set = 0, binding = 1, rgba16f) uniform image2D shadowOutputImage;
+layout(set = 0, binding = 2, r32f) uniform image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(shadowInputImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec4 center = imageLoad(shadowInputImage, pixel);
+    float centerVis = center.x;
+    float centerHit = center.y;
+    float centerNoL = center.z;
+    float centerDepth = imageLoad(linearDepthImage, pixel).r;
+
+    if (centerVis < 0.0 || centerDepth >= (INF_DISTANCE * 0.5)) {
+        imageStore(shadowOutputImage, pixel, vec4(centerVis, centerHit, centerNoL, 0.0));
+        return;
+    }
+
+    // 17x17 neighborhood mean/variance for robust clamp
+    float sum = 0.0;
+    float sum2 = 0.0;
+    float count = 0.0;
+    for (int dy = -8; dy <= 8; ++dy) {
+        for (int dx = -8; dx <= 8; ++dx) {
+            ivec2 q = pixel + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+            float v = imageLoad(shadowInputImage, q).r;
+            if (v < 0.0) continue;
+            sum += v;
+            sum2 += v * v;
+            count += 1.0;
+        }
+    }
+
+    float mean = (count > 0.0) ? (sum / count) : centerVis;
+    float variance = max(0.0, (count > 0.0 ? (sum2 / count) : 0.0) - mean * mean);
+    float stddev = sqrt(variance);
+
+    float k = 0.6; // clamp strength (more aggressive)
+    float minV = mean - k * stddev;
+    float maxV = mean + k * stddev;
+    float outVis = clamp(centerVis, minV, maxV);
+
+    // extra pull toward mean for mid-penumbra to kill speckles
+    float meanPull = smoothstep(0.15, 0.85, mean) * smoothstep(0.0008, 0.02, variance);
+    outVis = mix(outVis, mean, 0.35 * meanPull);
+
+    // Tile-level denoise flag stored per pixel (A)
+    float denoiseNeeded = (variance > 0.0008 || (mean > 0.03 && mean < 0.97)) ? 1.0 : 0.0;
+
+    imageStore(shadowOutputImage, pixel, vec4(outVis, centerHit, centerNoL, denoiseNeeded));
+}

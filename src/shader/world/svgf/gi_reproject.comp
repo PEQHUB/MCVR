@@ -1,0 +1,149 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// --- Bindings ---
+layout(set = 0, binding = 0, rgba16f) uniform image2D giRadianceImage;
+layout(set = 0, binding = 1, rg16f) uniform image2D motionVectorImage;
+layout(set = 0, binding = 2, r16f) uniform image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+
+layout(set = 0, binding = 4, rgba16f) uniform image2D giHistoryPrev;
+layout(set = 0, binding = 5, r16f) uniform image2D giDepthPrev;
+layout(set = 0, binding = 6, rgba16f) uniform image2D giNormalPrev;
+
+layout(set = 0, binding = 7, rgba16f) uniform image2D giHistoryOut;
+layout(set = 0, binding = 8, r16f) uniform image2D giDepthOut;
+layout(set = 0, binding = 9, rgba16f) uniform image2D giNormalOut;
+
+layout(set = 0, binding = 10) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+
+layout(set = 0, binding = 11, rgba8) uniform readonly image2D diffuseAlbedoImage;
+layout(set = 0, binding = 12, r16f) uniform image2D giHistoryLengthPrev;
+layout(set = 0, binding = 13, r16f) uniform image2D giHistoryLengthOut;
+
+layout(set = 0, binding = 14, rgba16f) uniform image2D directRadianceImage;
+layout(set = 0, binding = 15, rgba16f) uniform image2D directHistoryPrev;
+layout(set = 0, binding = 16, rgba16f) uniform image2D directHistoryOut;
+layout(set = 0, binding = 17, rgba8) uniform readonly image2D giIndirectAlbedoImage;
+layout(set = 0, binding = 18, rg32f) uniform image2D giMomentsPrev;
+layout(set = 0, binding = 19, rg32f) uniform image2D giMomentsOut;
+layout(set = 0, binding = 20, rg32f) uniform image2D directMomentsPrev;
+layout(set = 0, binding = 21, rg32f) uniform image2D directMomentsOut;
+
+const float gAlpha = 0.1;         
+const float gMomentsAlpha = 0.2;  
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+bool isReprjValid(ivec2 coord, float Z, float Zprev, float fwidthZ, vec3 normal, vec3 normalPrev, ivec2 size) {
+    if (coord.x < 0 || coord.y < 0 || coord.x >= size.x || coord.y >= size.y) return false;
+    if (Zprev <= 0.0 || Zprev >= INF_DISTANCE) return false;
+    // Tighter depth threshold for hand-held items (close to camera)
+    float depthThreshold = mix(2.0, 5.0, clamp(Z / 10.0, 0.0, 1.0));
+    if (abs(Zprev - Z) / (fwidthZ + 1e-4) > depthThreshold) return false;
+    if (dot(normal, normalPrev) < 0.85) return false; 
+    return true;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(giRadianceImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec3 currGiDemod = imageLoad(giRadianceImage, pixel).rgb;
+    vec3 currDirect = imageLoad(directRadianceImage, pixel).rgb;
+    float currDepth = imageLoad(linearDepthImage, pixel).r;
+    vec3 currNormal = imageLoad(normalRoughnessImage, pixel).xyz;
+    vec2 motion = imageLoad(motionVectorImage, pixel).xy;
+
+    vec2 posPrev = vec2(pixel) + 0.5 + motion * vec2(size);
+    ivec2 iposPrev = ivec2(floor(posPrev));
+    vec2 fracPos = fract(posPrev);
+    
+    vec3 prevGi = vec3(0); vec3 prevDirect = vec3(0);
+    vec2 prevGiM = vec2(0); vec2 prevDirM = vec2(0);
+    float sumW = 0.0;
+    float fwidthZ = abs(currDepth) * 0.02 + 1e-3; 
+
+    ivec2 offsets[4] = {ivec2(0,0), ivec2(1,0), ivec2(0,1), ivec2(1,1)};
+    float weights[4] = {(1-fracPos.x)*(1-fracPos.y), fracPos.x*(1-fracPos.y), (1-fracPos.x)*fracPos.y, fracPos.x*fracPos.y};
+    
+    for (int i=0; i<4; ++i) {
+        ivec2 loc = iposPrev + offsets[i];
+        if (isReprjValid(loc, currDepth, imageLoad(giDepthPrev, loc).r, fwidthZ, currNormal, imageLoad(giNormalPrev, loc).xyz, size)) {
+            float w = weights[i];
+            prevGi += imageLoad(giHistoryPrev, loc).rgb * w;
+            prevDirect += imageLoad(directHistoryPrev, loc).rgb * w;
+            prevGiM += imageLoad(giMomentsPrev, loc).rg * w;
+            prevDirM += imageLoad(directMomentsPrev, loc).rg * w;
+            sumW += w;
+        }
+    }
+    
+    bool valid = sumW > 0.01;
+    if (valid) {
+        prevGi /= sumW; prevDirect /= sumW; prevGiM /= sumW; prevDirM /= sumW;
+    }
+
+    float historyLength = 0.0;
+    if (valid) {
+        historyLength = imageLoad(giHistoryLengthPrev, iposPrev).r;
+        
+        // --- GHOSTING FIX 1: Depth Disocclusion ---
+        float dPrev = imageLoad(giDepthPrev, iposPrev).r;
+        if (abs(currDepth - dPrev) / max(currDepth, 0.1) > 0.1) historyLength = 0.0;
+        
+        // --- GHOSTING FIX 2: Luma Step Detection (Hand-held lights) ---
+        float currLum = luminance(currGiDemod);
+        if (currLum > prevGiM.x * 10.0 && currLum > 0.1) historyLength = min(historyLength, 2.0);
+
+        historyLength = min(32.0, historyLength + 1.0);
+    } else {
+        historyLength = 1.0;
+    }
+
+    // Use max(1.0, historyLength) to prevent Inf alpha
+    float alpha = valid ? max(gAlpha, 1.0 / max(1.0, historyLength)) : 1.0;
+    
+    // --- SMART CLAMPING ---
+    vec3 clampedGi = currGiDemod;
+    vec3 clampedDirect = currDirect;
+    if (historyLength <= 2.0) {
+        vec3 minG = currGiDemod, maxG = currGiDemod;
+        vec3 minD = currDirect, maxD = currDirect;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec2 q = pixel + ivec2(dx, dy);
+                if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+                minG = min(minG, imageLoad(giRadianceImage, q).rgb);
+                maxG = max(maxG, imageLoad(giRadianceImage, q).rgb);
+                minD = min(minD, imageLoad(directRadianceImage, q).rgb);
+                maxD = max(maxD, imageLoad(directRadianceImage, q).rgb);
+            }
+        }
+        clampedGi = clamp(currGiDemod, minG, maxG);
+        clampedDirect = clamp(currDirect, minD, maxD);
+    }
+
+    vec3 outGi = mix(prevGi, clampedGi, alpha);
+    vec3 outDirect = mix(prevDirect, clampedDirect, alpha);
+    vec2 curM = vec2(luminance(outGi), luminance(outGi)*luminance(outGi));
+    vec2 outGiM = mix(prevGiM, curM, max(gMomentsAlpha, alpha));
+
+    if (any(isnan(outGi)) || any(isinf(outGi))) outGi = currGiDemod;
+
+    imageStore(giHistoryOut, pixel, vec4(outGi, 1.0));
+    imageStore(directHistoryOut, pixel, vec4(outDirect, 1.0));
+    imageStore(giMomentsOut, pixel, vec4(outGiM, 0.0, 0.0));
+    imageStore(giHistoryLengthOut, pixel, vec4(historyLength, 0.0, 0.0, 0.0));
+    imageStore(giDepthOut, pixel, vec4(currDepth, 0, 0, 0));
+    imageStore(giNormalOut, pixel, vec4(currNormal, 0));
+}

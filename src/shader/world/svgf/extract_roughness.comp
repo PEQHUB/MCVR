@@ -1,0 +1,19 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Using Sampler + texelFetch for optimized extraction
+layout(set = 0, binding = 0) uniform sampler2D normalRoughnessSampler;
+layout(set = 0, binding = 1, r16f) uniform image2D extractedRoughnessImage;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(extractedRoughnessImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    // Extract roughness from W channel (perceptual roughness)
+    float roughness = texelFetch(normalRoughnessSampler, pixel, 0).w;
+
+    imageStore(extractedRoughnessImage, pixel, vec4(roughness, 0.0, 0.0, 0.0));
+}

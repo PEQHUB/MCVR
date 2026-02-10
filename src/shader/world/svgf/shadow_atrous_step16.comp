@@ -1,0 +1,113 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D shadowInputImage;   // R: visibility, G: hitDist, B: NoL
+layout(set = 0, binding = 1, rgba16f) uniform image2D shadowOutputImage;
+layout(set = 0, binding = 2, r32f) uniform image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+
+const int STEP_SIZE = 16;
+
+vec3 normalizeSafe(vec3 v) {
+    float len = length(v);
+    return (len > 1e-4) ? (v / len) : vec3(0.0, 0.0, 1.0);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(shadowInputImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) {
+        return;
+    }
+
+    vec4 center = imageLoad(shadowInputImage, pixel);
+    float centerVis = center.x;
+    float centerHit = center.y;
+    float centerNoL = clamp(center.z, 0.0, 1.0);
+    float centerA = center.w;
+    
+    
+    float centerDepth = imageLoad(linearDepthImage, pixel).r;
+    vec3 centerNormal = normalizeSafe(imageLoad(normalRoughnessImage, pixel).xyz);
+
+    if (centerVis < 0.0 || centerDepth >= (INF_DISTANCE * 0.5)) {
+        imageStore(shadowOutputImage, pixel, vec4(centerVis, centerHit, centerNoL, centerA));
+        return;
+    }
+    if (centerA < 0.0) {
+        imageStore(shadowOutputImage, pixel, vec4(centerVis, centerHit, centerNoL, centerA));
+        return;
+    }
+
+    float phiDepth = 1.5;
+    float phiNormal = 2.0;
+    float softness = smoothstep(0.0, 10.0, centerHit);
+    float lightSize = 1.5;
+    float penumbra = (centerHit / max(centerDepth, 1e-3)) * lightSize;
+    penumbra *= mix(0.6, 1.4, 1.0 - centerNoL);
+    float penumbraFactor = clamp(penumbra * 0.5, 0.0, 1.0);
+    float phiShadow = mix(0.2, 0.4, softness);
+    float phiNoL = mix(0.2, 0.35, softness);
+    float sigma = mix(1.0, 2.5, softness);
+    phiShadow *= mix(1.0, 4.0, penumbraFactor);
+    phiDepth *= mix(1.0, 2.5, penumbraFactor);
+    phiNormal *= mix(1.0, 2.5, penumbraFactor);
+    phiNoL *= mix(1.0, 3.0, penumbraFactor);
+    sigma *= mix(1.0, 4.5, penumbraFactor);
+    const float phiHit = 3.0;
+
+    float sumW = 1.0;
+    float sumVis = centerVis;
+    float sumHit = centerHit;
+    float sumNoL = centerNoL;
+
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 q = pixel + ivec2(dx * STEP_SIZE, dy * STEP_SIZE);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+
+            vec4 vhdn = imageLoad(shadowInputImage, q);
+            float v = vhdn.x;
+            if (v < 0.0) continue;
+
+            float d = imageLoad(linearDepthImage, q).r;
+            vec3 n = normalizeSafe(imageLoad(normalRoughnessImage, q).xyz);
+
+            float depthDiff = abs(centerDepth - d) / max(abs(centerDepth), 1e-3);
+            float normalDiff = 1.0 - max(0.0, dot(centerNormal, n));
+            float shadowDiff = abs(centerVis - v);
+            float hitDiff = abs(centerHit - vhdn.y) / max(centerHit, 1.0);
+            float nolDiff = abs(centerNoL - vhdn.z);
+
+            float relax = smoothstep(0.10, 0.50, penumbraFactor);
+            float wDepth = exp(-depthDiff / phiDepth);
+            float wNormal = exp(-normalDiff / phiNormal);
+            wDepth = mix(wDepth, 1.0, relax);
+            wNormal = mix(wNormal, 1.0, relax);
+
+            float w = wDepth
+                    * wNormal
+                    * exp(-shadowDiff / phiShadow)
+                    * exp(-hitDiff / phiHit)
+                    * exp(-nolDiff / phiNoL);
+
+            float dist2 = float(dx * dx + dy * dy);
+            w *= exp(-dist2 / (2.0 * sigma * sigma));
+
+            sumVis += v * w;
+            sumHit += vhdn.y * w;
+            sumNoL += vhdn.z * w;
+            sumW += w;
+        }
+    }
+
+    float outVis = sumVis / max(sumW, 1e-4);
+    float outHit = sumHit / max(sumW, 1e-4);
+    float outNoL = clamp(sumNoL / max(sumW, 1e-4), 0.0, 1.0);
+    imageStore(shadowOutputImage, pixel, vec4(outVis, outHit, outNoL, centerA));
+}

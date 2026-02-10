@@ -1,0 +1,168 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D specInputImage;
+layout(set = 0, binding = 1, rgba16f) uniform image2D specOutputImage;
+layout(set = 0, binding = 2, r32f) uniform image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+layout(set = 0, binding = 4, r16f) uniform image2D specVarianceInput;
+layout(set = 0, binding = 5, rgba16f) uniform image2D specularAlbedoImage;
+layout(set = 0, binding = 6, r16f) uniform image2D specVarianceOutput;
+
+const int STEP_SIZE = 1;
+
+layout(push_constant) uniform PushConstants {
+    float phiColor;
+} pushConstants;
+#define kPhiColor pushConstants.phiColor
+
+const float kPhiNormal = 64.0;  
+
+float computeVarianceCenter(ivec2 pixel, ivec2 size) {
+    float sum = 0.0;
+    float wSum = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = pixel + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+            float w = exp(-float(dx*dx + dy*dy) / 2.0);
+            sum += imageLoad(specVarianceInput, q).r * w;
+            wSum += w;
+        }
+    }
+    return sum / wSum;
+}
+
+float estimateDepthFwidth(float centerDepth, ivec2 pixel, ivec2 size) {
+    float dx = 0.0;
+    float dy = 0.0;
+    if (pixel.x + 1 < size.x) {
+        dx = abs(centerDepth - imageLoad(linearDepthImage, pixel + ivec2(1, 0)).r);
+    }
+    if (pixel.y + 1 < size.y) {
+        dy = abs(centerDepth - imageLoad(linearDepthImage, pixel + ivec2(0, 1)).r);
+    }
+    return max(max(dx, dy), 1e-4);
+}
+
+float luminance(vec3 c) {
+    return c.x; // Y channel in YCoCg
+}
+
+vec3 normalizeSafe(vec3 v) {
+    float len = length(v);
+    return (len > 1e-4) ? (v / len) : vec3(0.0, 0.0, 1.0);
+}
+
+float computeWeight(float depthCenter, float depthP, float phiDepth, vec3 normalCenter, vec3 normalP,
+                    float lumCenter, float lumP, float phiL, float normalPower) {
+    float dotN = dot(normalCenter, normalP);
+    float wNormal = pow(max(0.0, dotN), normalPower);
+    float wZ = abs(depthCenter - depthP) / max(phiDepth, 1e-4);
+    
+    // --- NRD STYLE: IGNORE LUMA WEIGHTS IN FLAT/DARK AREAS ---
+    float wL = abs(lumCenter - lumP) / max(phiL, 1e-4);
+    if (dotN > 0.99 && (lumCenter + lumP) < 0.1) wL = 0.0; 
+    
+    return exp(-max(wL, 0.0) - max(wZ, 0.0)) * wNormal;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(specInputImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec3 centerColor = imageLoad(specInputImage, pixel).rgb;
+    float centerDepth = imageLoad(linearDepthImage, pixel).r;
+    vec4 normalRoughness = imageLoad(normalRoughnessImage, pixel);
+    vec3 centerNormal = normalRoughness.xyz;
+    float roughness = normalRoughness.w * normalRoughness.w;
+    float varianceCenter = imageLoad(specVarianceInput, pixel).r;
+    float stableVar = computeVarianceCenter(pixel, size);
+
+    // --- OUTLIER REMOVAL (Improved) ---
+    {
+        vec3 sumNeighbors = vec3(0.0);
+        float count = 0.0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                if (dx == 0 && dy == 0) continue; // Exclude center from mean
+                ivec2 q = pixel + ivec2(dx, dy);
+                if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+                sumNeighbors += imageLoad(specInputImage, q).rgb; count += 1.0;
+            }
+        }
+        
+        if (count > 0.0) {
+            vec3 neighborhoodMean = sumNeighbors / count;
+            // Tighter threshold: 5x mean + bias to avoid clamping dark noise
+            if (luminance(centerColor) > luminance(neighborhoodMean) * 5.0 + 0.1) {
+                centerColor = neighborhoodMean;
+                // Clamp variance to prevent this pixel from influencing neighbors too much in next steps
+                varianceCenter = min(varianceCenter, 0.1); 
+            }
+        }
+    }
+
+    if (centerDepth >= (INF_DISTANCE * 0.5)) {
+        imageStore(specOutputImage, pixel, vec4(centerColor, 1.0));
+        imageStore(specVarianceOutput, pixel, vec4(varianceCenter, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    float centerLum = luminance(centerColor);
+    vec3 nCenter = normalizeSafe(centerNormal);
+    
+    // --- ADAPTIVE WEIGHTS ---
+    float fwidthZ = estimateDepthFwidth(centerDepth, pixel, size);
+    float phiDepth = max(fwidthZ * float(STEP_SIZE) * 5.0, centerDepth * 0.01 + 0.01);
+    
+    // Distant pixels need much more blurring because they represent larger world areas
+    float distanceScaling = 1.0 + clamp(centerDepth / 20.0, 0.0, 5.0);
+    
+    // phiL is driven by the square root of stable variance (Standard Deviation)
+    float phiL = kPhiColor * sqrt(max(stableVar, 1e-6)) + 0.01;
+    phiL *= distanceScaling; // Increase color tolerance in the distance
+    
+    // Relax weights in dark, high-variance, or DISTANT areas
+    float relaxation = smoothstep(0.1, 0.0, centerLum) + smoothstep(0.1, 0.5, stableVar);
+    phiL *= (1.0 + relaxation * 8.0);
+    float normalPower = mix(kPhiNormal, 8.0, clamp(relaxation, 0.0, 1.0));
+    // Further relax normal power in the distance
+    normalPower /= distanceScaling;
+
+    float sumW = 1.0;
+    vec3 sumC = centerColor;
+    float sumVarW2 = varianceCenter;
+
+    const float kernel[5] = float[5](1.0, 2.0, 3.0, 2.0, 1.0);
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 q = pixel + ivec2(dx * STEP_SIZE, dy * STEP_SIZE);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+            
+            vec3 c = imageLoad(specInputImage, q).rgb;
+            float d = imageLoad(linearDepthImage, q).r;
+            vec3 n = normalizeSafe(imageLoad(normalRoughnessImage, q).xyz);
+            float varNeighbor = imageLoad(specVarianceInput, q).r;
+            
+            float w = computeWeight(centerDepth, d, phiDepth * length(vec2(dx, dy)), nCenter, n, centerLum, luminance(c), phiL, normalPower);
+            float wK = w * (kernel[abs(dx)] * kernel[abs(dy)] / 81.0);
+            
+            sumC += c * wK;
+            sumW += wK;
+            sumVarW2 += varNeighbor * (wK * wK);
+        }
+    }
+
+    vec3 outColor = sumC / max(sumW, 1e-4);
+    float outVar = sumVarW2 / max(sumW * sumW, 1e-4);
+
+    imageStore(specOutputImage, pixel, vec4(outColor, 1.0));
+    imageStore(specVarianceOutput, pixel, vec4(outVar, 0.0, 0.0, 0.0));
+}

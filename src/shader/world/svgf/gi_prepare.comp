@@ -1,0 +1,81 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Use Samplers but access via texelFetch for best performance and compatibility
+layout(set = 0, binding = 0) uniform sampler2D giRadianceSampler;
+layout(set = 0, binding = 11) uniform sampler2D diffuseAlbedoSampler;
+
+// Output: demodulated radiance and initial moments
+layout(set = 0, binding = 22, rgba16f) uniform writeonly image2D demodulatedGiImage;
+layout(set = 0, binding = 19, rg32f) uniform writeonly image2D giMomentsOut;
+
+layout(push_constant) uniform PushConstants {
+    ivec2 size;
+    float fireflyK;  // Firefly clamp threshold
+} pc;
+
+const float eps = 1e-6;
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 safeDiv(vec3 a, vec3 b) {
+    return a / max(b, vec3(1e-4));
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.size.x || p.y >= pc.size.y) return;
+
+    // --- High performance texelFetch ---
+    vec3 C = texelFetch(giRadianceSampler, p, 0).rgb;
+    vec3 A = texelFetch(diffuseAlbedoSampler, p, 0).rgb;
+
+    // Demodulate
+    vec3 L = safeDiv(C, A);
+
+    // ---- Firefly clamp (3x3 neighborhood) ----
+    float sum = 0.0;
+    float sum2 = 0.0;
+    int cnt = 0;
+
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = p + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= pc.size.x || q.y >= pc.size.y) continue;
+            
+            vec3 Cq = texelFetch(giRadianceSampler, q, 0).rgb;
+            vec3 Aq = texelFetch(diffuseAlbedoSampler, q, 0).rgb;
+            float y = luminance(safeDiv(Cq, Aq));
+            sum += y;
+            sum2 += y * y;
+            cnt++;
+        }
+    }
+
+    float mean = sum / max(float(cnt), 1.0);
+    float var = max(sum2 / max(float(cnt), 1.0) - mean * mean, 0.0);
+    float stdv = sqrt(var);
+
+    float y0 = luminance(L);
+    float yMax = mean + pc.fireflyK * stdv;
+    float yMin = max(0.0, mean - pc.fireflyK * stdv);
+
+    if (y0 > yMax && y0 > eps) {
+        L *= (yMax / y0);
+        y0 = yMax;
+    } else if (y0 < yMin * 0.1 && mean > eps) {
+        L = mix(L, vec3(mean), 0.5);
+        y0 = luminance(L);
+    }
+
+    if (any(isnan(L))) L = vec3(0.0);
+
+    imageStore(demodulatedGiImage, p, vec4(max(L, vec3(0.0)), 1.0));
+    imageStore(giMomentsOut, p, vec4(y0, y0 * y0, 0.0, 0.0));
+}

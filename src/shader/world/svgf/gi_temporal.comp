@@ -1,0 +1,204 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Current frame inputs (demodulated)
+layout(set = 0, binding = 22, rgba16f) uniform readonly image2D demodulatedGiImage;
+layout(set = 0, binding = 19, rg32f) uniform readonly image2D giMomentsIn;
+layout(set = 0, binding = 1, rg16f) uniform readonly image2D motionVectorImage;
+layout(set = 0, binding = 2, r16f) uniform readonly image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalRoughnessImage;
+
+// History (previous frame, demodulated)
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D giHistoryPrev;
+layout(set = 0, binding = 18, rg32f) uniform readonly image2D giMomentsPrev;
+layout(set = 0, binding = 12, r16f) uniform readonly image2D giHistoryLengthPrev;
+layout(set = 0, binding = 5, r16f) uniform readonly image2D giDepthPrev;
+layout(set = 0, binding = 6, rgba16f) uniform readonly image2D giNormalPrev;
+
+// Output (current frame accumulated, demodulated)
+layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D giHistoryOut;
+layout(set = 0, binding = 19, rg32f) uniform writeonly image2D giMomentsOut;
+layout(set = 0, binding = 13, r16f) uniform writeonly image2D giHistoryLengthOut;
+
+layout(set = 0, binding = 10) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+
+layout(set = 0, binding = 23) uniform LastWorldUniform {
+    WorldUBO lastWorldUBO;
+};
+
+layout(push_constant) uniform PushConstants {
+    ivec2 size;
+    float normalThresh;  // Normal dot threshold, typically 0.5
+    uint maxHistory;     // Max history length, typically 32
+    int padding;
+} pc;
+
+bool inBounds(ivec2 p) {
+    return (p.x >= 0 && p.y >= 0 && p.x < pc.size.x && p.y < pc.size.y);
+}
+
+bool inBounds(vec2 p) {
+    return (p.x >= 0.0 && p.y >= 0.0 && p.x < float(pc.size.x) && p.y < float(pc.size.y));
+}
+
+vec3 neighborhoodClamp(ivec2 p, vec3 histColor) {
+    vec3 mn = vec3(1e30);
+    vec3 mx = vec3(-1e30);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = p + ivec2(dx, dy);
+            if (!inBounds(q)) continue;
+            vec3 c = imageLoad(demodulatedGiImage, q).rgb;
+            mn = min(mn, c);
+            mx = max(mx, c);
+        }
+    }
+    return clamp(histColor, mn, mx);
+}
+
+bool bilinearHistoryRadiance(vec2 prevPix, out vec3 outC) {
+    vec2 p0f = floor(prevPix);
+    ivec2 p00 = ivec2(p0f);
+    ivec2 p10 = p00 + ivec2(1, 0);
+    ivec2 p01 = p00 + ivec2(0, 1);
+    ivec2 p11 = p00 + ivec2(1, 1);
+
+    if (!inBounds(p00) || !inBounds(p10) || !inBounds(p01) || !inBounds(p11)) return false;
+
+    vec2 f = prevPix - p0f;
+
+    vec3 c00 = imageLoad(giHistoryPrev, p00).rgb;
+    vec3 c10 = imageLoad(giHistoryPrev, p10).rgb;
+    vec3 c01 = imageLoad(giHistoryPrev, p01).rgb;
+    vec3 c11 = imageLoad(giHistoryPrev, p11).rgb;
+
+    vec3 cx0 = mix(c00, c10, f.x);
+    vec3 cx1 = mix(c01, c11, f.x);
+    outC = mix(cx0, cx1, f.y);
+    return true;
+}
+
+bool bilinearHistoryMoments(vec2 prevPix, out vec2 outM) {
+    vec2 p0f = floor(prevPix);
+    ivec2 p00 = ivec2(p0f);
+    ivec2 p10 = p00 + ivec2(1, 0);
+    ivec2 p01 = p00 + ivec2(0, 1);
+    ivec2 p11 = p00 + ivec2(1, 1);
+
+    if (!inBounds(p00) || !inBounds(p10) || !inBounds(p01) || !inBounds(p11)) return false;
+
+    vec2 f = prevPix - p0f;
+
+    vec2 m00 = imageLoad(giMomentsPrev, p00).rg;
+    vec2 m10 = imageLoad(giMomentsPrev, p10).rg;
+    vec2 m01 = imageLoad(giMomentsPrev, p01).rg;
+    vec2 m11 = imageLoad(giMomentsPrev, p11).rg;
+
+    vec2 mx0 = mix(m00, m10, f.x);
+    vec2 mx1 = mix(m01, m11, f.x);
+    outM = mix(mx0, mx1, f.y);
+    return true;
+}
+
+// 7x7 search around reprojected pixel to reduce false disocclusion
+bool findBestPrevPixel(ivec2 currPix, ivec2 prevCenterPix, out ivec2 bestPix) {
+    bestPix = prevCenterPix;
+
+    if (pc.normalThresh <= 0.0) { 
+        return inBounds(prevCenterPix); 
+    }
+
+    vec3 nCur = imageLoad(normalRoughnessImage, currPix).rgb;
+    //float dCur = imageLoad(linearDepthImage, currPix).r;
+
+    bool any = false;
+    float bestScore = 1e30;
+
+    for (int dy = -3; dy <= 3; ++dy) {
+        for (int dx = -3; dx <= 3; ++dx) {
+            ivec2 q = prevCenterPix + ivec2(dx, dy);
+            if (!inBounds(q)) continue;
+
+            vec3 nPre = imageLoad(giNormalPrev, q).rgb;
+            //float dPre = imageLoad(giDepthPrev, q).r;
+
+            // Check Depth Consistency (10% relative tolerance + small epsilon)
+            //float dDiff = abs(dCur - dPre);
+            //if (dDiff > (0.1 * dCur + 0.01)) continue;
+
+            float nd = dot(nCur, nPre);
+            float score = 1.0 - nd;
+
+            if (score < bestScore) {
+                bestScore = score;
+                bestPix = q;
+                any = true;
+            }
+        }
+    }
+    return any;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (!inBounds(p)) return;
+
+    vec3 Lc = imageLoad(demodulatedGiImage, p).rgb;
+    vec2 mc = imageLoad(giMomentsIn, p).rg; // (y, y^2)
+
+    // Motion vector reprojection with jitter correction
+    vec2 mv = imageLoad(motionVectorImage, p).xy; // pixels
+    vec2 jitterCurr = worldUBO.cameraJitter;
+    vec2 jitterPrev = lastWorldUBO.cameraJitter;
+    vec2 pPrev = vec2(p) + jitterCurr + mv - jitterPrev;
+
+    bool valid = inBounds(pPrev);
+
+    vec3 Lh = Lc;
+    vec2 mh = mc;
+    float hh = 1.0;
+
+    if (valid) {
+        ivec2 pPrevI = ivec2(pPrev);
+        ivec2 pPrevBest = pPrevI;
+        if (!findBestPrevPixel(p, pPrevI, pPrevBest)) {
+            valid = false;
+        } else {
+            pPrevI = pPrevBest;
+        }
+
+        vec3 histL;
+        vec2 histM;
+        if (!inBounds(pPrevI) || !bilinearHistoryRadiance(pPrev, histL) || !bilinearHistoryMoments(pPrev, histM)) {
+            valid = false;
+        } else {
+            if (valid) {
+                Lh = neighborhoodClamp(p, histL);
+                mh = histM;
+                hh = imageLoad(giHistoryLengthPrev, pPrevI).r;
+                hh = min(hh + 1.0, float(pc.maxHistory));
+            }
+        }
+    }
+
+    // Alpha policy: adaptive based on history length
+    float a = 1.0 / max(float(hh), 1.0);  // Prevent division by zero
+    if (!valid) a = 1.0;
+
+    vec3 Lacc = mix(Lh, Lc, a);
+    vec2 macc = mix(mh, mc, a);
+
+    // NaN protection
+    if (any(isnan(Lacc)) || any(isinf(Lacc))) Lacc = vec3(0.0);
+    if (any(isnan(macc)) || any(isinf(macc))) macc = vec2(0.0);
+
+    imageStore(giHistoryOut, p, vec4(Lacc, 1.0));
+    imageStore(giMomentsOut, p, vec4(macc, 0.0, 0.0));
+    imageStore(giHistoryLengthOut, p, vec4(hh, 0.0, 0.0, 0.0));
+}

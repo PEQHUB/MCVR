@@ -1,0 +1,100 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+// NRD integration
+#define NRD_GLSL 1
+#include "../../../extern/nrd/Shaders/Include/NRD.hlsli"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Bindings
+layout(set = 0, binding = 0, rg16f) uniform readonly image2D inMotionVector;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D inNormalRoughness;
+layout(set = 0, binding = 2, r16f) uniform readonly image2D inLinearDepth;
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D inDiffuseIndirectRadiance;
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D inSpecularRadiance;
+
+// Outputs
+layout(set = 0, binding = 5, rg16f) uniform image2D outNrdMotionVector;
+layout(set = 0, binding = 6, rgba16f) uniform image2D outNrdNormalRoughness;
+layout(set = 0, binding = 7, rgba16f) uniform image2D outNrdDiffuseRadiance;
+layout(set = 0, binding = 8, rgba16f) uniform image2D outNrdSpecularRadiance;
+
+layout(set = 0, binding = 9, rgba8) uniform readonly image2D inDiffuseAlbedo;
+layout(set = 0, binding = 10, rgba8) uniform readonly image2D inSpecularAlbedo;
+
+layout(set = 0, binding = 11, rgba16f) uniform readonly image2D inDiffuseDirectRadiance;
+layout(set = 0, binding = 12, rgba16f) uniform readonly image2D inClearRadiance;
+layout(set = 0, binding = 14, r16f) uniform readonly image2D inDiffuseHitDepth;
+layout(set = 0, binding = 15, r16f) uniform readonly image2D inSpecularHitDepth;
+
+layout(set = 0, binding = 13) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+
+// NRD Hit Distance Parameters
+const vec4 gDiffHitDistParams = vec4(3.0, 0.1, 20.0, -25.0);
+const vec4 gSpecHitDistParams = vec4(3.0, 0.1, 20.0, -25.0);
+
+#define NRD_INF_DEPTH 65504.0
+
+vec3 safeDiv(vec3 a, vec3 b) {
+    return a / max(b, vec3(0.01));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outNrdMotionVector);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    float linearDepth = imageLoad(inLinearDepth, pixel).r;
+    
+    bool isTrueSky = isinf(linearDepth) || linearDepth > 65500.0;
+    if (!isTrueSky) linearDepth = min(linearDepth, 50000.0);
+
+    if (linearDepth >= NRD_INF_DEPTH * 0.9) {
+        imageStore(outNrdMotionVector, pixel, vec4(0.0));
+        imageStore(outNrdNormalRoughness, pixel, vec4(0.0, 1.0, 0.0, 1.0));
+        imageStore(outNrdDiffuseRadiance, pixel, vec4(0.0));
+        imageStore(outNrdSpecularRadiance, pixel, vec4(0.0));
+        return;
+    }
+
+    vec2 mv = imageLoad(inMotionVector, pixel).xy;
+
+    vec2 nrdMV = mv + worldUBO.cameraJitter;
+    
+    if (any(isnan(nrdMV))) nrdMV = vec2(0.0);
+    imageStore(outNrdMotionVector, pixel, vec4(nrdMV, 0.0, 0.0));
+
+    vec4 nr = imageLoad(inNormalRoughness, pixel);
+    vec3 N = normalize(nr.xyz + vec3(0, 1e-6, 0));
+    float R = nr.w;
+    imageStore(outNrdNormalRoughness, pixel, NRD_FrontEnd_PackNormalAndRoughness(N, R, 0.0));
+
+    vec4 diffData = imageLoad(inDiffuseIndirectRadiance, pixel);
+    vec3 totalDiffuse = diffData.rgb + imageLoad(inDiffuseDirectRadiance, pixel).rgb;
+    float diffHitDist = imageLoad(inDiffuseHitDepth, pixel).r;
+    
+    vec3 diffAlbedo = max(imageLoad(inDiffuseAlbedo, pixel).rgb, vec3(0.05));
+    vec3 demodDiffuse = safeDiv(totalDiffuse, diffAlbedo);
+    float safeDepth = linearDepth;
+    float normDiffHitDist = REBLUR_FrontEnd_GetNormHitDist(max(diffHitDist, 0.1), safeDepth, gDiffHitDistParams, 1.0);
+    imageStore(outNrdDiffuseRadiance, pixel, REBLUR_FrontEnd_PackRadianceAndNormHitDist(demodDiffuse, normDiffHitDist, true));
+
+    vec4 specData = imageLoad(inSpecularRadiance, pixel);
+    vec3 specRadiance = specData.rgb;
+    float specHitDist = imageLoad(inSpecularHitDepth, pixel).r;
+    specHitDist = NRD_FrontEnd_TrimHitDistance(specHitDist, 1e-3);
+
+    vec3 specAlbedo = max(imageLoad(inSpecularAlbedo, pixel).rgb, vec3(0.05));
+    vec3 demodSpecular = specRadiance / specAlbedo;
+    
+    float normSpecHitDist = 0.0;
+    if (specHitDist > 0.0) {
+        normSpecHitDist = REBLUR_FrontEnd_GetNormHitDist(specHitDist, safeDepth, gSpecHitDistParams, R);
+    }
+    imageStore(outNrdSpecularRadiance, pixel, REBLUR_FrontEnd_PackRadianceAndNormHitDist(demodSpecular, normSpecHitDist, true));
+}

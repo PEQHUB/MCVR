@@ -1,0 +1,102 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Atrous step 1: stepSize = 1
+layout(set = 0, binding = 0) uniform sampler2D giInputSampler;
+layout(set = 0, binding = 1, rgba16f) uniform image2D giOutputImage;
+layout(set = 0, binding = 2) uniform sampler2D linearDepthSampler;
+layout(set = 0, binding = 3) uniform sampler2D normalRoughnessSampler;
+layout(set = 0, binding = 4) uniform sampler2D giVarianceInputSampler;
+layout(set = 0, binding = 6, r16f) uniform image2D giVarianceOutput;
+
+const int STEP_SIZE = 1;
+
+layout(push_constant) uniform PushConstants {
+    ivec2 size;
+    float phiDepth;   
+    float phiNormal;  
+    float phiLuma;    
+} pc;
+
+const float EPS = 1e-6;
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+float saturate(float x) { return clamp(x, 0.0, 1.0); }
+
+float computeWeight(float depthCenter, float depthP, float phiDepth,
+                    vec3 normalCenter, vec3 normalP, float phiNormal,
+                    float lumCenter, float lumP, float phiIllum) {
+    float wN = pow(saturate(dot(normalCenter, normalP)), phiNormal);
+    float wZ = (phiDepth == 0.0) ? 0.0 : abs(depthCenter - depthP) / phiDepth;
+    float wL = abs(lumCenter - lumP) / max(phiIllum, EPS);
+    return exp(-max(wL, 0.0) - max(wZ, 0.0)) * wN;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.size.x || p.y >= pc.size.y) return;
+
+    // --- 1. Fetch center data ---
+    vec3 c0 = texelFetch(giInputSampler, p, 0).rgb;
+    float v0 = texelFetch(giVarianceInputSampler, p, 0).x;
+    float z0 = texelFetch(linearDepthSampler, p, 0).x;
+
+    if (z0 <= 0.0 || z0 >= INF_DISTANCE) {
+        imageStore(giOutputImage, p, vec4(c0, 1.0));
+        imageStore(giVarianceOutput, p, vec4(v0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    vec3 n0 = texelFetch(normalRoughnessSampler, p, 0).rgb;
+    float lum0 = luminance(c0);
+
+    const float kw[3] = float[3](1.0, 2.0 / 3.0, 1.0 / 6.0);
+    float phiIllum = pc.phiLuma * sqrt(max(v0, 0.0) + EPS);
+    float phiDepthBase = pc.phiDepth * float(STEP_SIZE);
+
+    float sumW = 1.0;
+    vec3 sumC = c0;
+    float sumVar = v0; 
+
+    // --- 2. 5x5 Atrous Kernel ---
+    for (int yy = -2; yy <= 2; ++yy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            if (dx == 0 && yy == 0) continue;
+
+            ivec2 q = p + ivec2(dx * STEP_SIZE, yy * STEP_SIZE);
+            if (q.x < 0 || q.y < 0 || q.x >= pc.size.x || q.y >= pc.size.y) continue;
+
+            vec3 cq = texelFetch(giInputSampler, q, 0).rgb;
+            if (any(isnan(cq)) || any(isinf(cq)) || dot(cq, cq) > 1e6) continue; // Firefly rejection
+
+            float vq = texelFetch(giVarianceInputSampler, q, 0).x;
+            float zq = texelFetch(linearDepthSampler, q, 0).x;
+            vec3 nq = texelFetch(normalRoughnessSampler, q, 0).rgb;
+
+            float kernel = kw[abs(dx)] * kw[abs(yy)];
+            float phiDepthLocal = phiDepthBase * max(length(vec2(dx, yy)), 1.0);
+
+            float wEdge = computeWeight(z0, zq, phiDepthLocal, n0, nq, pc.phiNormal, lum0, luminance(cq), phiIllum);
+            float w = kernel * wEdge;
+
+            sumW += w;
+            sumC += w * cq;
+            sumVar += w * w * vq;
+        }
+    }
+
+    sumW = max(sumW, EPS);
+    vec3 outC = sumC / sumW;
+    float outVar = sumVar / (sumW * sumW);
+
+    if (any(isnan(outC))) outC = c0;
+    imageStore(giOutputImage, p, vec4(max(outC, vec3(0.0)), 1.0));
+    imageStore(giVarianceOutput, p, vec4(max(outVar, 0.0), 0.0, 0.0, 0.0));
+}

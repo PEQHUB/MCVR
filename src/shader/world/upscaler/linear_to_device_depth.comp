@@ -1,0 +1,43 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, r16f) uniform readonly image2D linearDepth;
+layout(set = 0, binding = 1, r32f) uniform writeonly image2D deviceDepth;
+layout(set = 0, binding = 2, rg16f) uniform readonly image2D motionVectorIn;
+layout(set = 0, binding = 3, rg16f) uniform writeonly image2D motionVectorOut;
+
+layout(push_constant) uniform DepthParams {
+    float nearPlane;
+    float farPlane;
+    uint width;
+    uint height;
+    vec2 jitter;
+} params;
+
+void main() {
+    uvec2 coord = gl_GlobalInvocationID.xy;
+    if (coord.x >= params.width || coord.y >= params.height) {
+        return;
+    }
+
+    float linearDepthValue = imageLoad(linearDepth, ivec2(coord)).r;
+    
+    float near = params.nearPlane;
+    float far = params.farPlane;
+    
+    if (linearDepthValue >= far * 0.99) {
+        imageStore(deviceDepth, ivec2(coord), vec4(1.0));
+        // Sky/very far: avoid unstable reprojection
+        imageStore(motionVectorOut, ivec2(coord), vec4(0.0));
+        return;
+    }
+    
+    float deviceDepthValue = (far / (far - near)) * (1.0 - near / linearDepthValue); 
+    
+    imageStore(deviceDepth, ivec2(coord), vec4(deviceDepthValue));
+
+    vec2 mv = imageLoad(motionVectorIn, ivec2(coord)).xy;
+    mv += params.jitter;
+    imageStore(motionVectorOut, ivec2(coord), vec4(mv, 0.0, 0.0));
+}

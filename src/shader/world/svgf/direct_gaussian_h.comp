@@ -1,0 +1,74 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D directInputImage;
+layout(set = 0, binding = 1, rgba16f) uniform image2D directOutputImage;
+layout(set = 0, binding = 2, r32f) uniform image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+
+vec3 normalizeSafe(vec3 v) {
+    float len = length(v);
+    return (len > 1e-4) ? (v / len) : vec3(0.0, 0.0, 1.0);
+}
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(directInputImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec4 center = imageLoad(directInputImage, pixel);
+    vec3 centerRgb = center.rgb;
+    float centerA = center.a;
+    float centerDepth = imageLoad(linearDepthImage, pixel).r;
+    vec3 centerNormal = normalizeSafe(imageLoad(normalRoughnessImage, pixel).xyz);
+
+    if (centerDepth >= (INF_DISTANCE * 0.5)) {
+        imageStore(directOutputImage, pixel, center);
+        return;
+    }
+
+    const int R = 4;
+    float sigma = 2.5;
+    float phiDepth = 1.2;
+    float phiNormal = 1.4;
+    float phiLum = 1.2;
+
+    float sumW = 0.0;
+    vec3 sumC = vec3(0.0);
+    float sumA = 0.0;
+    float centerLum = luminance(centerRgb);
+
+    for (int dx = -R; dx <= R; ++dx) {
+        ivec2 q = pixel + ivec2(dx, 0);
+        if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+        vec4 c = imageLoad(directInputImage, q);
+        float d = imageLoad(linearDepthImage, q).r;
+        vec3 n = normalizeSafe(imageLoad(normalRoughnessImage, q).xyz);
+        float lum = luminance(c.rgb);
+
+        float depthDiff = abs(centerDepth - d) / max(abs(centerDepth), 1e-3);
+        float normalDiff = 1.0 - max(0.0, dot(centerNormal, n));
+        float lumDiff = abs(centerLum - lum);
+
+        float w = exp(-(float(dx * dx)) / (2.0 * sigma * sigma));
+        w *= exp(-depthDiff / phiDepth);
+        w *= exp(-normalDiff / phiNormal);
+        w *= exp(-lumDiff / phiLum);
+
+        sumW += w;
+        sumC += c.rgb * w;
+        sumA += c.a * w;
+    }
+
+    vec3 outRgb = sumC / max(sumW, 1e-4);
+    float outA = sumA / max(sumW, 1e-4);
+    imageStore(directOutputImage, pixel, vec4(outRgb, outA));
+}

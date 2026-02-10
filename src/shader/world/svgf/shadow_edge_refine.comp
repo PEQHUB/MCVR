@@ -1,0 +1,172 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D shadowInputImage;   // R: visibility, G: hitDist, B: NoL
+layout(set = 0, binding = 1, rgba16f) uniform image2D shadowOutputImage;
+layout(set = 0, binding = 2, r32f) uniform image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+
+vec3 normalizeSafe(vec3 v) {
+    float len = length(v);
+    return (len > 1e-4) ? (v / len) : vec3(0.0, 0.0, 1.0);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(shadowInputImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec4 center = imageLoad(shadowInputImage, pixel);
+    float centerVis = center.x;
+    float centerHit = center.y;
+    float centerNoL = clamp(center.z, 0.0, 1.0);
+    float centerA = center.w;
+    
+    
+    float centerDepth = imageLoad(linearDepthImage, pixel).r;
+    vec3 centerNormal = normalizeSafe(imageLoad(normalRoughnessImage, pixel).xyz);
+
+    if (centerVis < 0.0 || centerDepth >= (INF_DISTANCE * 0.5)) {
+        imageStore(shadowOutputImage, pixel, vec4(centerVis, centerHit, centerNoL, centerA));
+        return;
+    }
+    if (centerA < 0.2) {
+        imageStore(shadowOutputImage, pixel, vec4(centerVis, centerHit, centerNoL, centerA));
+        return;
+    }
+
+    // Edge + noise detection (3x3)
+    float minV = 1.0;
+    float maxV = 0.0;
+    float sumV = 0.0;
+    float sumV2 = 0.0;
+    float countV = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = pixel + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+            float v = imageLoad(shadowInputImage, q).r;
+            if (v < 0.0) continue;
+            minV = min(minV, v);
+            maxV = max(maxV, v);
+            sumV += v;
+            sumV2 += v * v;
+            countV += 1.0;
+        }
+    }
+    float edge = (countV > 0.0) ? (maxV - minV) : 0.0;
+    float meanV = (countV > 0.0) ? (sumV / countV) : centerVis;
+    float varianceV = max(0.0, (countV > 0.0 ? (sumV2 / countV) : 0.0) - meanV * meanV);
+
+    float edgeBoost = smoothstep(0.08, 0.35, edge);
+    float noiseBoost = smoothstep(0.005, 0.04, varianceV);
+
+    // Penumbra proxy
+    float lightSize = 1.5;
+    float penumbra = (centerHit / max(centerDepth, 1e-3)) * lightSize;
+    penumbra *= mix(0.6, 1.4, 1.0 - centerNoL);
+    float penumbraFactor = clamp(penumbra * 0.25, 0.0, 1.0);
+
+    if (edgeBoost < 0.15 && noiseBoost < 0.08 && penumbraFactor < 0.25) {
+        imageStore(shadowOutputImage, pixel, vec4(centerVis, centerHit, centerNoL, 0.0));
+        return;
+    }
+
+    float softness = smoothstep(0.0, 10.0, centerHit);
+    float edgeFactor = mix(1.0, 2.0, max(edgeBoost, noiseBoost));
+    float phiShadow = mix(0.30, 0.65, softness) * edgeFactor * mix(1.0, 2.0, penumbraFactor);
+    float phiDepth = mix(0.9, 2.2, softness) * edgeFactor * mix(1.0, 1.8, penumbraFactor);
+    float phiNormal = mix(1.1, 2.4, softness) * edgeFactor * mix(1.0, 1.8, penumbraFactor);
+    float phiNoL = mix(0.25, 0.50, softness) * edgeFactor * mix(1.0, 2.0, penumbraFactor);
+    float sigma = mix(1.2, 2.8, softness) * mix(1.0, 1.6, max(edgeBoost, noiseBoost)) * mix(1.0, 2.5, penumbraFactor);
+
+    int radius = (max(edgeBoost, noiseBoost) > 0.25) ? 2 : 1;
+
+    float sumW = 1.0;
+    float sumVis = centerVis;
+    float sumHit = centerHit;
+    float sumNoL = centerNoL;
+
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            if (abs(dx) > radius || abs(dy) > radius) continue;
+            ivec2 q = pixel + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+
+            vec4 vhdn = imageLoad(shadowInputImage, q);
+            float v = vhdn.x;
+            if (v < 0.0) continue;
+
+            float d = imageLoad(linearDepthImage, q).r;
+            vec3 n = normalizeSafe(imageLoad(normalRoughnessImage, q).xyz);
+
+            float depthDiff = abs(centerDepth - d) / max(abs(centerDepth), 1e-3);
+            float normalDiff = 1.0 - max(0.0, dot(centerNormal, n));
+            float shadowDiff = abs(centerVis - v);
+            float hitDiff = abs(centerHit - vhdn.y) / max(centerHit, 1.0);
+            float nolDiff = abs(centerNoL - vhdn.z);
+
+            float relax = smoothstep(0.10, 0.50, penumbraFactor);
+            float wDepth = exp(-depthDiff / phiDepth);
+            float wNormal = exp(-normalDiff / phiNormal);
+            wDepth = mix(wDepth, 1.0, relax);
+            wNormal = mix(wNormal, 1.0, relax);
+
+            float w = wDepth
+                    * wNormal
+                    * exp(-shadowDiff / phiShadow)
+                    * exp(-hitDiff / 3.0)
+                    * exp(-nolDiff / phiNoL);
+
+            float dist2 = float(dx * dx + dy * dy);
+            w *= exp(-dist2 / (2.0 * sigma * sigma));
+
+            sumVis += v * w;
+            sumHit += vhdn.y * w;
+            sumNoL += vhdn.z * w;
+            sumW += w;
+        }
+    }
+
+    float outVis = sumVis / max(sumW, 1e-4);
+    float outHit = sumHit / max(sumW, 1e-4);
+    float outNoL = clamp(sumNoL / max(sumW, 1e-4), 0.0, 1.0);
+
+    // Robust mean/median clamp for dirty edges
+    float meanMix = (0.55 * noiseBoost + 0.40 * edgeBoost) * mix(1.0, 2.0, penumbraFactor);
+    meanMix = clamp(meanMix, 0.0, 0.85);
+    outVis = mix(outVis, meanV, meanMix);
+
+    float vals[9];
+    int idx = 0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = pixel + ivec2(dx, dy);
+            float v = centerVis;
+            if (q.x >= 0 && q.y >= 0 && q.x < size.x && q.y < size.y) {
+                float sv = imageLoad(shadowInputImage, q).r;
+                if (sv >= 0.0) v = sv;
+            }
+            vals[idx++] = v;
+        }
+    }
+    for (int i = 0; i < 9; ++i) {
+        for (int j = i + 1; j < 9; ++j) {
+            if (vals[j] < vals[i]) {
+                float tmp = vals[i];
+                vals[i] = vals[j];
+                vals[j] = tmp;
+            }
+        }
+    }
+    float medianV = vals[4];
+    float medianMix = smoothstep(0.08, 0.45, max(edgeBoost, noiseBoost)) * 0.75 * mix(1.0, 2.0, penumbraFactor);
+    outVis = mix(outVis, medianV, medianMix);
+
+    imageStore(shadowOutputImage, pixel, vec4(outVis, outHit, outNoL, centerA));
+}

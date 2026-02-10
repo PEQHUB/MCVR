@@ -1,0 +1,191 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// --- Bindings ---
+layout(set = 0, binding = 0, rgba16f) uniform image2D specRadianceImage;
+layout(set = 0, binding = 1, rg16f) uniform image2D motionVectorImage;
+layout(set = 0, binding = 2, r16f) uniform image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+
+layout(set = 0, binding = 4, rgba16f) uniform image2D specHistoryPrev;
+layout(set = 0, binding = 5, r16f) uniform image2D specDepthPrev;
+layout(set = 0, binding = 6, rgba16f) uniform image2D specNormalPrev;
+
+layout(set = 0, binding = 7, rgba16f) uniform image2D specHistoryOut;
+layout(set = 0, binding = 8, r16f) uniform image2D specDepthOut;
+layout(set = 0, binding = 9, rgba16f) uniform image2D specNormalOut;
+
+layout(set = 0, binding = 10) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+
+layout(set = 0, binding = 11) uniform LastWorldUniform {
+    WorldUBO lastWorldUBO;
+};
+
+layout(set = 0, binding = 12, r16f) uniform image2D specHistoryLengthPrev;
+layout(set = 0, binding = 13, r16f) uniform image2D specHistoryLengthOut;
+layout(set = 0, binding = 14, rg32f) uniform image2D specMomentsPrev;
+layout(set = 0, binding = 15, rg32f) uniform image2D specMomentsOut;
+
+const float gAlpha = 0.02;         // Increased from 0.01 for slightly faster response
+const float gMomentsAlpha = 0.1; 
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 RGBToYCoCg(vec3 rgb) {
+    float Y = dot(rgb, vec3(0.25, 0.5, 0.25));
+    float Co = dot(rgb, vec3(0.5, 0.0, -0.5));
+    float Cg = dot(rgb, vec3(-0.25, 0.5, -0.25));
+    return vec3(Y, Co, Cg);
+}
+
+float estimateCurvature(ivec2 pixel, ivec2 size) {
+    vec3 centerNormal = imageLoad(normalRoughnessImage, pixel).xyz;
+    vec3 normalDx = vec3(0.0), normalDy = vec3(0.0);
+    if (pixel.x + 1 < size.x) normalDx = imageLoad(normalRoughnessImage, pixel + ivec2(1, 0)).xyz - centerNormal;
+    if (pixel.y + 1 < size.y) normalDy = imageLoad(normalRoughnessImage, pixel + ivec2(0, 1)).xyz - centerNormal;
+    return sqrt(max(dot(normalDx, normalDx), dot(normalDy, normalDy)));
+}
+
+vec2 virtualPointReprejection(ivec2 pixel, ivec2 size, float surfaceDepth, float rayLength) {
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+    vec4 viewRay = worldUBO.cameraProjMatInv * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+    viewRay.xyz /= viewRay.w;
+    vec3 viewPos = normalize(viewRay.xyz) * surfaceDepth;
+    vec3 worldSurfacePos = (worldUBO.cameraEffectedViewMatInv * vec4(viewPos, 1.0)).xyz;
+    vec3 cameraPos = vec3(worldUBO.cameraEffectedViewMatInv[3]);
+    vec3 cameraRay = normalize(worldSurfacePos - cameraPos);
+    
+    // Improved virtual hit point calculation
+    vec3 virtualHitPoint = cameraPos + cameraRay * (length(worldSurfacePos - cameraPos) + rayLength);
+    vec4 prevClip = (lastWorldUBO.cameraProjMat * lastWorldUBO.cameraEffectedViewMat) * vec4(virtualHitPoint, 1.0);
+    return (prevClip.xy / prevClip.w * 0.5 + 0.5) * vec2(size);
+}
+
+// Relaxed validation specifically for Specular
+bool isReprjValid(ivec2 coord, float Z, float Zprev, float fwidthZ, vec3 normal, vec3 normalPrev, ivec2 size, float roughness) {
+    if (coord.x < 0 || coord.y < 0 || coord.x >= size.x || coord.y >= size.y) return false;
+    
+    // Much larger depth tolerance for specular reflections
+    float depthThreshold = mix(10.0, 20.0, roughness); 
+    if (abs(Zprev - Z) / (fwidthZ + 1e-4) > depthThreshold) return false;
+    
+    // Normal threshold also relaxed based on roughness
+    float normalThreshold = mix(0.7, 0.3, roughness);
+    if (dot(normal, normalPrev) < normalThreshold) return false;
+    return true;
+}
+
+bool sampleHistoryData(vec2 posPrev, ivec2 size, float currDepth, vec3 currNormal, float roughness, out vec3 prevSpec, out vec2 prevMoments) {
+    ivec2 iposPrev = ivec2(floor(posPrev));
+    vec2 fracPos = fract(posPrev);
+    float fwidthZ = abs(currDepth) * 0.05 + 1e-3;
+    ivec2 offsets[4] = {ivec2(0,0), ivec2(1,0), ivec2(0,1), ivec2(1,1)};
+    float weights[4] = {(1-fracPos.x)*(1-fracPos.y), fracPos.x*(1-fracPos.y), (1-fracPos.x)*fracPos.y, fracPos.x*fracPos.y};
+    vec3 accumSpec = vec3(0); vec2 accumMoments = vec2(0);
+    float sumW = 0.0;
+    for (int i=0; i<4; ++i) {
+        ivec2 loc = iposPrev + offsets[i];
+        float dPrev = imageLoad(specDepthPrev, loc).r;
+        vec3 nPrev = imageLoad(specNormalPrev, loc).xyz;
+        if (isReprjValid(loc, currDepth, dPrev, fwidthZ, currNormal, nPrev, size, roughness)) {
+            float w = weights[i];
+            accumSpec += imageLoad(specHistoryPrev, loc).rgb * w;
+            accumMoments += imageLoad(specMomentsPrev, loc).rg * w;
+            sumW += w;
+        }
+    }
+    if (sumW > 0.01) {
+        prevSpec = accumSpec / sumW; prevMoments = accumMoments / sumW; return true;
+    }
+    return false;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(specRadianceImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec4 specData = imageLoad(specRadianceImage, pixel);
+    vec3 rawCurrSpec = RGBToYCoCg(specData.rgb);
+    float currDepth = imageLoad(linearDepthImage, pixel).r;
+    vec4 normalRoughness = imageLoad(normalRoughnessImage, pixel);
+    vec3 currNormal = normalRoughness.xyz;
+    float roughness = normalRoughness.w * normalRoughness.w;
+    vec2 motion = imageLoad(motionVectorImage, pixel).xy;
+
+    // --- Neighborhood Stats ---
+    vec3 m1 = vec3(0), m2 = vec3(0);
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = clamp(pixel + ivec2(dx, dy), ivec2(0), size - 1);
+            vec3 c = RGBToYCoCg(imageLoad(specRadianceImage, q).rgb);
+            m1 += c; m2 += c * c;
+        }
+    }
+    m1 /= 9.0; m2 /= 9.0;
+    vec3 localStddev = sqrt(max(vec3(0.0), m2 - m1 * m1));
+    
+    // --- 1. Dual-Path Reprojection ---
+    vec2 posSurface = vec2(pixel) + 0.5 + motion * vec2(size);
+    vec2 posVirtual = virtualPointReprejection(pixel, size, currDepth, specData.a);
+    
+    vec3 specS, specV; vec2 momS, momV;
+    bool validS = sampleHistoryData(posSurface, size, currDepth, currNormal, roughness, specS, momS);
+    bool validV = sampleHistoryData(posVirtual, size, currDepth, currNormal, roughness, specV, momV);
+
+    // Bias towards Virtual Path for smooth surfaces (low roughness)
+    float mixFactor = clamp(estimateCurvature(pixel, size) * 10.0 + roughness * 2.0, 0.0, 1.0);
+    if (specData.a < 0.1 || specData.a > 1000.0) mixFactor = 1.0;
+
+    vec3 prevSpec = vec3(0); vec2 prevMoments = vec2(0); bool valid = false;
+    if (validV && validS) {
+        prevSpec = mix(specV, specS, mixFactor);
+        prevMoments = mix(momV, momS, mixFactor);
+        valid = true;
+    } else if (validV) {
+        prevSpec = specV; prevMoments = momV; valid = true;
+    } else if (validS) {
+        prevSpec = specS; prevMoments = momS; valid = true;
+    }
+
+    // --- 2. History Length ---
+    float historyLength = 0.0;
+    if (valid) {
+        ivec2 iposPrev = ivec2(floor(posSurface));
+        historyLength = imageLoad(specHistoryLengthPrev, iposPrev).r;
+        historyLength = min(64.0, historyLength + 1.0);
+    } else {
+        historyLength = 1.0;
+    }
+
+    // --- 3. Variance-Based Clamping (Standard SVGF/NRD tactic) ---
+    vec3 clampedCurrSpec = rawCurrSpec;
+    if (valid) {
+        // Use a wide 4-sigma clamp to preserve history but kill outliers
+        float stddevScale = 4.0;
+        vec3 mn = m1 - localStddev * stddevScale;
+        vec3 mx = m1 + localStddev * stddevScale;
+        prevSpec = clamp(prevSpec, mn, mx);
+    }
+
+    float alpha = valid ? max(gAlpha, 1.0 / float(historyLength)) : 1.0;
+    vec3 outSpec = mix(prevSpec, rawCurrSpec, alpha);
+    
+    vec2 outSpecMoments = mix(prevMoments, vec2(outSpec.x, outSpec.x*outSpec.x), max(gMomentsAlpha, alpha));
+
+    if (any(isnan(outSpec)) || any(isinf(outSpec))) outSpec = rawCurrSpec;
+
+    imageStore(specHistoryOut, pixel, vec4(outSpec, 1.0));
+    imageStore(specMomentsOut, pixel, vec4(outSpecMoments, 0.0, 0.0));
+    imageStore(specHistoryLengthOut, pixel, vec4(historyLength, 0.0, 0.0, 0.0));
+    imageStore(specDepthOut, pixel, vec4(currDepth, 0, 0, 0));
+    imageStore(specNormalOut, pixel, vec4(currNormal, 0));
+}

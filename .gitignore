@@ -1,0 +1,84 @@
+###### VSCode ######
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+!.vscode/*.natvis
+
+# Local History for Visual Studio Code
+.history/
+
+# Built Visual Studio Code Extensions
+*.vsix
+
+###### CMake ######
+CMakeSettings.json
+CMakeLists.txt.user
+CMakeCache.txt
+CMakeFiles
+CMakeScripts
+Testing
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps
+CMakeUserPresets.json
+.cache
+build*
+
+###### C++ ######
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+###### Python ######
+__pycache__
+
+###### Project ######
+output/*
+bin/*
+lib/*
+!src/core/gentool/template/builder*
+!nvsdk*.lib
+!nvngx*.dll
+!libnvsdk_ngx.a
+
+###### MSVC ######
+.vs
+bin/*
+
+###### CLion ######
+.idea
+cmake-build*

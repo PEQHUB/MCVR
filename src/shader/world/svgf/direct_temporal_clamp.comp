@@ -1,0 +1,79 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Using Samplers + texelFetch for optimized data access
+layout(set = 0, binding = 0) uniform sampler2D directInputSampler;
+layout(set = 0, binding = 1, rgba16f) uniform image2D directOutputImage;
+layout(set = 0, binding = 2) uniform sampler2D linearDepthSampler;
+layout(set = 0, binding = 3) uniform sampler2D normalRoughnessSampler;
+layout(set = 0, binding = 4) uniform sampler2D shadowHistorySampler;
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(directOutputImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec4 center = texelFetch(directInputSampler, pixel, 0);
+    vec3 centerRgb = center.rgb;
+    float centerA = center.a;
+    float centerDepth = texelFetch(linearDepthSampler, pixel, 0).r;
+
+    if (centerDepth >= (INF_DISTANCE * 0.5)) {
+        imageStore(directOutputImage, pixel, center);
+        return;
+    }
+
+    // Only clamp near shadows to avoid washing clean areas
+    float shadowVis = texelFetch(shadowHistorySampler, pixel, 0).r;
+    if (shadowVis < 0.0) shadowVis = 1.0;
+    if (shadowVis > 0.95) {
+        imageStore(directOutputImage, pixel, center);
+        return;
+    }
+
+    // 17x17 luminance clamp using texelFetch
+    float sum = 0.0;
+    float sum2 = 0.0;
+    float count = 0.0;
+    for (int dy = -8; dy <= 8; ++dy) {
+        for (int dx = -8; dx <= 8; ++dx) {
+            ivec2 q = pixel + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+            
+            float d = texelFetch(linearDepthSampler, q, 0).r;
+            if (d >= (INF_DISTANCE * 0.5)) continue;
+            
+            vec3 c = texelFetch(directInputSampler, q, 0).rgb;
+            float l = luminance(c);
+            sum += l;
+            sum2 += l * l;
+            count += 1.0;
+        }
+    }
+
+    float mean = (count > 0.0) ? (sum / count) : luminance(centerRgb);
+    float variance = max(0.0, (count > 0.0 ? (sum2 / count) : 0.0) - mean * mean);
+    float stddev = sqrt(variance);
+
+    float k = 0.5;
+    float minL = mean - k * stddev;
+    float maxL = mean + k * stddev;
+
+    float lCenter = luminance(centerRgb);
+    float lClamped = clamp(lCenter, minL, maxL);
+
+    float meanPull = smoothstep(0.001, 0.02, variance);
+    float lTarget = mix(lClamped, mean, 0.4 * meanPull);
+    vec3 outRgb = (lCenter > 1e-4) ? (centerRgb * (lTarget / lCenter)) : centerRgb;
+
+    if (any(isnan(outRgb))) outRgb = centerRgb;
+    imageStore(directOutputImage, pixel, vec4(max(outRgb, vec3(0.0)), centerA));
+}

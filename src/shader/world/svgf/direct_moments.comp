@@ -1,0 +1,66 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// DIRECT LIGHTING MOMENTS
+layout(set = 0, binding = 0, rgba16f) uniform image2D directHistoryImage;
+layout(set = 0, binding = 1, rg16f) uniform image2D directMomentsImage;
+layout(set = 0, binding = 2, r16f) uniform image2D directVarianceImage;
+layout(set = 0, binding = 3, rg16f) uniform image2D directMomentsPrev;
+layout(set = 0, binding = 4, r16f) uniform image2D giHistoryLength; 
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(directHistoryImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    // 1. Compute Spatial Moments (3x3)
+    float sumL = 0.0;
+    float sumL2 = 0.0;
+    float count = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = pixel + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+            vec3 val = imageLoad(directHistoryImage, q).rgb;
+            float L = dot(val, vec3(0.2126, 0.7152, 0.0722));
+            sumL += L;
+            sumL2 += L * L;
+            count += 1.0;
+        }
+    }
+    float m1 = sumL / max(count, 1.0);
+    float m2 = sumL2 / max(count, 1.0);
+
+    // 2. Temporal accumulation
+    float h = imageLoad(giHistoryLength, pixel).r;
+    if (h > 1.1) {
+        vec2 prev = imageLoad(directMomentsPrev, pixel).rg;
+        float alpha = clamp(1.0 / h, 0.02, 0.2);
+        m1 = mix(prev.x, m1, alpha);
+        m2 = mix(prev.y, m2, alpha);
+    }
+
+    // 3. Variance Smoothing (The key to stop boiling)
+    float varRaw = max(m2 - m1 * m1, 0.0);
+    
+    // Simple 3x3 variance blur to stabilize Atrous radius
+    float sumVar = 0.0;
+    float sumW = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = pixel + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+            vec2 mq = imageLoad(directMomentsPrev, q).rg;
+            sumVar += max(mq.y - mq.x * mq.x, 0.0);
+            sumW += 1.0;
+        }
+    }
+    float variance = mix(varRaw, sumVar / max(sumW, 1.0), 0.5);
+
+    imageStore(directMomentsImage, pixel, vec4(m1, m2, 0.0, 0.0));
+    imageStore(directVarianceImage, pixel, vec4(max(variance, 0.0001), 0.0, 0.0, 0.0));
+}

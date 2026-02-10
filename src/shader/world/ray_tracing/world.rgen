@@ -1,0 +1,551 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+#include "../util/labpbr.glsl"
+#include "../util/random.glsl"
+#include "../util/ray_cone.glsl"
+#include "../util/ray_payloads.glsl"
+#include "../util/util.glsl"
+#include "common/shared.hpp"
+
+layout(set = 0, binding = 2) uniform samplerCube skyFull;
+
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
+
+layout(set = 1, binding = 1) readonly buffer BLASOffsets {
+    uint offsets[];
+}
+blasOffsets;
+
+layout(set = 1, binding = 2) readonly buffer VertexBufferAddr {
+    uint64_t addrs[];
+}
+vertexBufferAddrs;
+
+layout(set = 1, binding = 3) readonly buffer IndexBufferAddr {
+    uint64_t addrs[];
+}
+indexBufferAddrs;
+
+layout(set = 1, binding = 4) readonly buffer LastVertexBufferAddr {
+    uint64_t addrs[];
+}
+lastVertexBufferAddrs;
+
+layout(set = 1, binding = 5) readonly buffer LastIndexBufferAddr {
+    uint64_t addrs[];
+}
+lastIndexBufferAddrs;
+
+layout(set = 1, binding = 6) readonly buffer LastObjToWorldMat {
+    mat4 mat[];
+}
+lastObjToWorldMats;
+
+layout(set = 2, binding = 0) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+
+layout(set = 2, binding = 1) uniform LastWorldUniform {
+    WorldUBO lastWorldUBO;
+};
+
+layout(set = 2, binding = 2) uniform SkyUniform {
+    SkyUBO skyUBO;
+};
+
+layout(set = 2, binding = 3) uniform LightMapUniform {
+    LightMapUBO lightMapUBO;
+};
+
+layout(set = 3, binding = 0, rgba16f) uniform image2D outputImage;
+layout(set = 3, binding = 1, rgba8) uniform image2D diffuseAlbedoImage;
+layout(set = 3, binding = 2, rgba8) uniform image2D specularAlbedoImage;
+layout(set = 3, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+layout(set = 3, binding = 4, rg16f) uniform image2D motionVectorImage;
+layout(set = 3, binding = 5, r16f) uniform image2D linearDepthImage;
+layout(set = 3, binding = 6, r16f) uniform image2D specularHitDepthImage;
+layout(set = 3, binding = 7, r16f) uniform image2D firstHitDepthImage;
+layout(set = 3, binding = 8, rgba16f) uniform image2D firstHitDiffuseDirectLightImage;
+layout(set = 3, binding = 9, rgba16f) uniform image2D firstHitDiffuseIndirectLightImage;
+layout(set = 3, binding = 10, rgba16f) uniform image2D firstHitSpecularImage;
+layout(set = 3, binding = 11, rgba16f) uniform image2D firstHitClearImage;
+layout(set = 3, binding = 12, rgba16f) uniform image2D firstHitBaseEmissionImage;
+layout(set = 3, binding = 13, r16f) uniform image2D directLightDepthImage;
+
+layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer VertexBuffer {
+    PBRTriangle vertices[];
+}
+vertexBuffer;
+
+layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer IndexBuffer {
+    uint indices[];
+}
+indexBuffer;
+
+layout(push_constant) uniform PushConstant {
+    int numRayBounces;
+}
+pc;
+
+layout(location = 0) rayPayloadEXT PrimaryRay mainRay;
+
+#define NUM_PSR_PER_RAY 2
+
+vec3 applyFog(vec3 radiance, float t, float fogStart, float dBase, float dFog, vec3 fogRadiance) {
+    float opticalDepth = 0.0;
+
+    if (t <= fogStart) {
+        opticalDepth = t * dBase;
+    } else {
+        float distOutside = fogStart;
+        float distInside = t - fogStart;
+        opticalDepth = (distOutside * dBase) + (distInside * dFog);
+    }
+
+    float transmittance = exp(-opticalDepth);
+
+    return mix(fogRadiance, radiance, transmittance);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+    vec2 pixelCenter = pixel + 0.5;
+    vec2 unjitteredPixelCenter = pixelCenter;
+    pixelCenter += worldUBO.cameraJitter;
+
+    vec2 resolution = vec2(gl_LaunchSizeEXT.xy);
+    float fovY = fovYFromProj(worldUBO.cameraProjMat);
+    float fovX = fovXFromProj(worldUBO.cameraProjMat);
+
+    vec2 ndc = pixelCenter / resolution * 2.0 - 1.0;
+
+    vec4 nearPoint = vec4(ndc, 0.0, 1.0);
+
+    vec4 viewNear = worldUBO.cameraProjMatInv * nearPoint;
+    viewNear /= viewNear.w; 
+
+    vec3 origin = vec3(worldUBO.cameraEffectedViewMatInv *
+                       vec4(0, 0, 0, 1)); // even though camera-centered, view mat contains still small shifts
+    const vec3 eyePos = origin;
+    vec3 direction = normalize(vec3(worldUBO.cameraEffectedViewMatInv * vec4(viewNear.xyz, 0.0)));
+    const vec3 orgDirection = direction;
+
+    const uint rayFlags = gl_RayFlagsCullBackFacingTrianglesEXT;
+    float surfaceDepth = 0.0;
+    float psrHitDepth = 0.0;
+    bool psrHitSky = false;
+    vec3 psrHitPosition;
+
+    LabPBRMat firstHitMat;
+    bool hasSecondHit = false;
+    LabPBRMat secondHitMat;
+    float distFirstToSecond = 0.0;
+    bool isFirstHitNoisy = false;
+    bool isFirstHitDiffuse = false;
+    uint firstLobeType = 0;
+    vec3 firstHitEmission = vec3(0.0);
+    vec3 firstHitDirectRadiance = vec3(0.0);
+    vec3 firstHitIndirectRadiance = vec3(0.0);
+    vec3 firstHitBaseEmission = vec3(0.0);
+
+    mainRay.seed = worldUBO.seed;
+    for (int isHand = 0; isHand <= 1; isHand++) {
+        // Result of trace
+        bool hitSky = false;
+        bool isPsr = false;
+        mat4 psrMirror = mat4(1.0);
+        float T = 0.0;
+        bool surfaceDepthSampled = false;
+
+        //====================================================================================================================
+        // STEP 1 - Find first non-mirror primary hit.
+        // The first non-mirror hit surface is used as 'Primary Surface Replacement'.
+        // Collect G-Buffer hit information.
+        //====================================================================================================================
+        int psrDepth = 0;
+        mainRay.origin = origin;
+        mainRay.direction = direction;
+        mainRay.radiance = vec3(0.0);
+        mainRay.throughput = vec3(1.0);
+        mainRay.seed = xxhash32(uvec3(gl_LaunchIDEXT.x, gl_LaunchIDEXT.y, mainRay.seed));
+        mainRay.coneWidth = 0;
+        mainRay.coneSpread = coneSpreadFromFov(fovY, fovX, resolution);
+        mainRay.insideBoat = 0;
+        do {
+            mainRay.index = psrDepth;
+            mainRay.hitT = 0;
+            mainRay.directLightRadiance = vec3(0.0);
+            mainRay.stop = 0;
+            mainRay.cont = 0;
+
+            float len;
+            uint mask;
+            uint missId;
+            if (isHand == 0) {
+                missId = 0;
+                if (psrDepth == 0) {
+                    len = 1000;
+                    if (worldUBO.isFirstPerson > 0) {
+                        mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    } else {
+                        mask =
+                            WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    }
+                } else if (psrDepth <= 1) {
+                    len = 1000;
+                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                } else {
+                    len = 384;
+                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | BOAT_WATER_MASK;
+                }
+            } else {
+                if (psrDepth == 0) {
+                    len = 10;
+                    mask = HAND_MASK;
+                    missId = 1;
+                } else if (psrDepth <= 1) {
+                    len = 384;
+                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    missId = 0;
+                } else {
+                    len = 384;
+                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | BOAT_WATER_MASK;
+                    missId = 0;
+                }
+            }
+
+            traceRayEXT(topLevelAS,        // topLevel
+                        rayFlags,          // rayFlags
+                        mask,              // cullMask
+                        1,                 // sbtRecordOffset
+                        1,                 // sbtRecordStride
+                        missId,            // missIndex
+                        mainRay.origin,    // offset
+                        0.001,             // Tmin
+                        mainRay.direction, // direction
+                        len,               // Tmax
+                        0                  // mainRay
+            );
+
+            if (!surfaceDepthSampled) {
+                if (isHand == 0) {
+                    surfaceDepth = mainRay.hitT;
+                } else {
+                    if (mainRay.hitT != INF_DISTANCE) surfaceDepth = mainRay.hitT;
+                }
+                surfaceDepthSampled = true;
+            }
+
+            if (mainRay.hitT != INF_DISTANCE) { T += mainRay.hitT; }
+
+            // first hit depth
+            float firstHitLinearDepth = INF_DISTANCE;
+            if (psrDepth == 0 && mainRay.hitT != INF_DISTANCE) {
+                vec3 hitPos = eyePos + orgDirection * T;
+                hitPos -= worldUBO.cameraViewMatInv[3].xyz;
+                firstHitLinearDepth = -(mat3(worldUBO.cameraEffectedViewMat) * hitPos).z;
+            }
+            if (isHand == 0) {
+                if (psrDepth == 0) {
+                    imageStore(firstHitDepthImage, pixel, vec4(firstHitLinearDepth));
+                }
+            } else {
+                if (psrDepth == 0 && mainRay.hitT != INF_DISTANCE) {
+                    imageStore(firstHitDepthImage, pixel, vec4(firstHitLinearDepth));
+                }
+            }
+
+            ++psrDepth;
+
+            hitSky = (mainRay.hitT == INF_DISTANCE);
+            if (hitSky) { break; }
+
+            if (mainRay.cont > 0) continue;
+
+            // Did we hit anything other than a mirror?
+            // If so, stop PSR
+            // TODO: currently no PSR
+            if (true) { break; }
+            // if (mainRay.roughness >= 0.01) { break; }
+
+            // special stop
+            if (mainRay.stop > 0) { break; }
+
+            // At least one mirror hit
+            isPsr = true;
+            psrMirror *= buildMirrorMatrix4(mainRay.normal, mainRay.worldPos);
+        } while (psrDepth < NUM_PSR_PER_RAY);
+
+        imageStore(directLightDepthImage, pixel, vec4(mainRay.directLightHitT));
+
+        vec3 virtualOrigin = eyePos + orgDirection * T;
+        // viewZ is the 'Z' of the world hit position in camera space
+        float viewDepth = -(worldUBO.cameraEffectedViewMat * vec4(virtualOrigin, 1.0)).z;
+
+        // get camera pos and delta
+        dvec3 currCameraPos = worldUBO.cameraPos.xyz;
+        dvec3 lastCameraPos = lastWorldUBO.cameraPos.xyz;
+        vec3 cameraDelta = vec3(currCameraPos - lastCameraPos);
+        mat4 prevRelativeMVP = lastWorldUBO.cameraProjMat * lastWorldUBO.cameraEffectedViewMat;
+
+        // Early out when hitting sky (even via mirrors)
+        if (hitSky) {
+            // either:
+            // 1. not for hand, can be directly or reflected towards sky
+            // 2. for hand, must be reflected towards sky
+            if (isHand == 0 || (isHand == 1 && psrDepth > 1)) {
+                imageStore(outputImage, pixel, vec4(mainRay.radiance, 1.0));
+                imageStore(diffuseAlbedoImage, pixel, vec4(reinhardMax(mainRay.radiance), 0));
+                imageStore(specularAlbedoImage, pixel, vec4(0));
+                imageStore(normalRoughnessImage, pixel, vec4(0));
+                // imageStore(dlssSpecHitDistance, pixel, vec4(0.0));
+
+                vec4 motionOrigin;
+                if (!isPsr) {
+                    // This is the case when we hit the skybox directly.
+                    // Treat it like a point at infinity along the view vector
+                    imageStore(linearDepthImage, pixel, vec4(INF_DISTANCE));
+                    // motion origin is point at infinity along view vector
+                    motionOrigin = vec4(orgDirection, 0.0);
+                } else {
+                    // Here we hit the sky through a reflection on the primary surface
+                    // Pretend the sky is "texture mapped" onto the mirror and moves with it.
+                    imageStore(linearDepthImage, pixel, vec4(viewDepth));
+                    vec3 virtualRelativeOrigin = origin + orgDirection * T;
+                    vec3 originRelativeToPrevCam = virtualRelativeOrigin + cameraDelta;
+                    motionOrigin = vec4(originRelativeToPrevCam, 1.0);
+                }
+
+                vec2 motionVec = computeCameraMotionVector(prevRelativeMVP, pixelCenter, motionOrigin);
+                imageStore(motionVectorImage, pixel, vec4(motionVec, vec2(0.0)));
+
+                mainRay.intermediateRadiance = mainRay.radiance;
+                psrHitSky = true;
+                psrHitDepth = 0.0;
+            } else {
+                mainRay.radiance = mainRay.intermediateRadiance;
+            }
+            continue;
+        } else {
+            psrHitSky = false;
+            psrHitDepth = T;
+        }
+
+        LabPBRMat mat = convertLabPBRMaterial(mainRay.albedoValue, mainRay.specularValue, mainRay.normalValue);
+        firstHitMat = mat;
+
+        // BaseColor/Metalness Buffer. DLSS only needs the base color ("Diffuse Albedo")
+        imageStore(diffuseAlbedoImage, pixel,
+                   vec4(mainRay.albedoValue.rgb * mainRay.albedoValue.a, firstHitMat.metallic));
+
+        imageStore(specularAlbedoImage, pixel, vec4(firstHitMat.f0, 0.0));
+
+        // Normal/Roughness buffer
+        {
+            // Transform surface normal from "virtual world normal" to world normal through a series of mirror-matrix.
+            // In case of NOT hitting any mirror, 'psrMirror' is just the identity matrix
+            vec3 worldNormal = (psrMirror * vec4(mainRay.normal, 0.0)).xyz;
+
+            vec4 normalRoughness = vec4(worldNormal, firstHitMat.roughness);
+            imageStore(normalRoughnessImage, pixel, normalRoughness);
+        }
+
+        // ViewZ buffer
+        imageStore(linearDepthImage, pixel, vec4(viewDepth));
+
+        // Motion Vector Buffer
+        {
+            vec3 virtualRelativeOrigin = origin + orgDirection * T;
+            vec3 originRelativeToPrevCam = virtualRelativeOrigin + cameraDelta;
+
+            uint instanceID = mainRay.instanceIndex;
+            uint geometryID = mainRay.geometryIndex;
+
+            uint blasOffset = blasOffsets.offsets[instanceID];
+
+            uint64_t lastIndexBufferAddr = lastIndexBufferAddrs.addrs[blasOffset + geometryID];
+            uint64_t lastVertexBufferAddr = lastVertexBufferAddrs.addrs[blasOffset + geometryID];
+            if (lastIndexBufferAddr > 0 && lastVertexBufferAddr > 0) {
+                IndexBuffer indexBuffer = IndexBuffer(lastIndexBufferAddr);
+                uint indexBaseID = 3 * mainRay.primitiveIndex;
+                uint i0 = indexBuffer.indices[indexBaseID];
+                uint i1 = indexBuffer.indices[indexBaseID + 1];
+                uint i2 = indexBuffer.indices[indexBaseID + 2];
+
+                VertexBuffer vertexBuffer = VertexBuffer(lastVertexBufferAddr);
+                PBRTriangle v0 = vertexBuffer.vertices[i0];
+                PBRTriangle v1 = vertexBuffer.vertices[i1];
+                PBRTriangle v2 = vertexBuffer.vertices[i2];
+
+                vec3 baryCoords = mainRay.baryCoords;
+                vec3 prevLocalPos = baryCoords.x * v0.pos + baryCoords.y * v1.pos + baryCoords.z * v2.pos;
+
+                mat4 lastModelMat = lastObjToWorldMats.mat[instanceID];
+                vec3 lastModelRotLocal = mat3(lastModelMat) * prevLocalPos;
+                vec3 lastModelRelToCam = lastModelMat[3].xyz;
+                vec3 simpleRelPos = lastModelRotLocal + lastModelRelToCam;
+
+                if (isPsr) {
+                    vec3 prevWorldPos = simpleRelPos - cameraDelta;
+                    // 这里逻辑很复杂，记录一下
+                    // 通过镜面看到的物体：
+                    // 对上一帧 world pos 应用和当前帧 PSR 相同的一串镜面变换，
+                    // 得到上一帧的“虚拟世界位置”（注意在世界坐标系里做反射）
+                    vec3 prevVirtualWorldPos = (psrMirror * vec4(prevWorldPos, 1.0)).xyz;
+
+                    // 仍然保持“以相机为中心”：把上一帧虚拟位置转成“以前一帧相机为原点”的坐标
+                    originRelativeToPrevCam = prevVirtualWorldPos + cameraDelta;
+                } else {
+                    // 非镜面：直接使用上一帧 world pos，以以前一帧相机为原点
+                    originRelativeToPrevCam = simpleRelPos;
+                }
+            }
+            vec2 motionVec =
+                computeCameraMotionVector(prevRelativeMVP, pixelCenter, vec4(originRelativeToPrevCam, 1.0));
+            imageStore(motionVectorImage, pixel, vec4(motionVec, 0.0, 0.0));
+        }
+
+        // sightly make the first non-mirror hit brighter
+        if (psrDepth == 1) {
+            mainRay.radiance += 0.03 * mainRay.albedoValue.rgb * mainRay.albedoValue.a * mainRay.throughput;
+        }
+
+        psrHitPosition = mainRay.origin;
+
+        firstLobeType = mainRay.lobeType;
+        isFirstHitNoisy = mainRay.noisy > 0;
+        if (isFirstHitNoisy) {
+            firstHitEmission = 16 * mainRay.albedoValue.rgb * firstHitMat.emission;
+            if (mainRay.lobeType == 0 || mainRay.lobeType == 2) { // Diffuse OR Refraction
+                isFirstHitDiffuse = true;
+                firstHitDirectRadiance = mainRay.directLightRadiance;
+            } else {
+                isFirstHitDiffuse = false;
+            }
+        }
+
+        //====================================================================================================================
+        // STEP 2 - Get the indirect contribution at non-mirror hit position
+        //====================================================================================================================
+        for (int b = psrDepth; b < pc.numRayBounces; b++) {
+            if (mainRay.stop > 0) break;
+
+            mainRay.index = b;
+
+            uint mask;
+            uint len;
+            if (b == 0) {
+                len = 1000;
+                if (worldUBO.isFirstPerson > 0) {
+                    mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+                } else {
+                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+                }
+            } else if (b <= 1) {
+                len = 1000;
+                mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+            } else {
+                len = 384;
+                mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK;
+            }
+            traceRayEXT(topLevelAS, rayFlags, mask, // mask
+                        1,                          // sbtRecordOffset
+                        1,                          // sbtRecordStride
+                        0,                          // missIndex
+                        mainRay.origin, 0.001, mainRay.direction, len, 0);
+
+            if (b == psrDepth) {
+                distFirstToSecond = mainRay.hitT;
+                if (mainRay.hitT != INF_DISTANCE) {
+                    hasSecondHit = true;
+                    secondHitMat =
+                        convertLabPBRMaterial(mainRay.albedoValue, mainRay.specularValue, mainRay.normalValue);
+                }
+            }
+
+            // Russian roulette for path termination (skip for first few bounces)
+            if (b > 2) {
+                float maxComponent = max(mainRay.throughput.r, max(mainRay.throughput.g, mainRay.throughput.b));
+                float rrProbability = min(maxComponent, 0.9);
+                if (rand(mainRay.seed) > rrProbability) { break; }
+                mainRay.throughput /= rrProbability;
+            }
+        }
+
+        if (isFirstHitNoisy) {
+            if (isFirstHitDiffuse) { // Diffuse
+                firstHitIndirectRadiance = mainRay.radiance - firstHitDirectRadiance;
+            }
+        }
+
+        if (isHand == 0) { mainRay.intermediateRadiance = mainRay.radiance; }
+    }
+
+    if (isnan(mainRay.radiance.r) || isinf(mainRay.radiance.r)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
+    if (isnan(mainRay.radiance.g) || isinf(mainRay.radiance.g)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
+    if (isnan(mainRay.radiance.b) || isinf(mainRay.radiance.b)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
+
+    float densityAir = 0.0000;
+    float densityFog = 2.0 / (worldUBO.fogEnd - worldUBO.fogStart);
+    if (skyUBO.cameraSubmersionType == 1) { // underwater
+        // vec3 waterColor = vec3(0.4, 0.7, 0.9);
+        vec3 waterColor = vec3(0.0, 0.48, 0.65);
+        mainRay.radiance *= waterColor;
+
+        if (surfaceDepth == INF_DISTANCE) surfaceDepth = 0;
+        mainRay.radiance =
+            applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog, waterColor * 0.01);
+    } else {
+        if (worldUBO.skyType == 0) { // None
+            mainRay.radiance = applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog,
+                                        worldUBO.fogColor.rgb);
+        } else if (worldUBO.skyType == 1) { // Normal
+            if (!psrHitSky) {
+                vec3 eyeToPSRHitPosition = psrHitPosition - eyePos;
+                eyeToPSRHitPosition.y = 0;
+                float len = length(eyeToPSRHitPosition);
+
+                vec3 sunDir = normalize(skyUBO.sunDirection);
+                vec3 rayDir = orgDirection;
+                float progress = skyUBO.rainGradient;
+                vec3 rainyRadiance = mix(vec3(0.04, 0.05, 0.1), vec3(0.1), smoothstep(-0.3, 0.3, sunDir.y));
+                vec3 sunnyRadiance = texture(skyFull, rayDir).rgb;
+                vec3 fogRadiance = mix(sunnyRadiance, rainyRadiance, progress);
+
+                mainRay.radiance =
+                    applyFog(mainRay.radiance, len, worldUBO.fogStart, densityAir, densityFog, fogRadiance);
+            }
+        } else if (worldUBO.skyType == 2) { // End
+            mainRay.radiance = applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog,
+                                        worldUBO.fogColor.rgb);
+        }
+    }
+
+    if (!psrHitSky && isFirstHitNoisy) {
+        if (isFirstHitDiffuse) {
+            imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(firstHitDirectRadiance, 1.0));
+            imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(firstHitIndirectRadiance, 1.0));
+            imageStore(firstHitSpecularImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitClearImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        } else {
+            imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitSpecularImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+            imageStore(firstHitClearImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        }
+    } else {
+        imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitSpecularImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitClearImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+    }
+    imageStore(firstHitBaseEmissionImage, ivec2(pixel), vec4(firstHitEmission, 1.0));
+    float specHitDepth = hasSecondHit ? distFirstToSecond : (isFirstHitNoisy && !isFirstHitDiffuse ? 1000.0 : 0.0);
+    imageStore(specularHitDepthImage, ivec2(pixel), vec4(specHitDepth, vec3(1.0)));
+    imageStore(outputImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+}

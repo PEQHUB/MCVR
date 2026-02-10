@@ -1,0 +1,118 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Bindings:
+// 0: color (history out)
+// 1: moments (history out)
+// 2: length (history out)
+// 3: variance out
+// 4: normal roughness
+// 5: depth
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D specHistoryIn;
+layout(set = 0, binding = 1, rg32f) uniform image2D specMomentsIn;
+layout(set = 0, binding = 2, r16f) uniform image2D specHistoryLength;
+layout(set = 0, binding = 3, r16f) uniform image2D specVarianceOut;
+layout(set = 0, binding = 4, rgba16f) uniform image2D normalRoughnessImage;
+layout(set = 0, binding = 5, r32f) uniform image2D linearDepthImage;
+
+// Specular uses tighter parameters
+const float kPhiColor = 8.0;  // Tighter than diffuse
+const float kPhiNormal = 128.0;  // Balanced for specular denoising
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(specHistoryIn);
+    if (pixel.x >= size.x || pixel.y >= size.y) {
+        return;
+    }
+
+    float historyLen = imageLoad(specHistoryLength, pixel).r;
+    vec4 normalRoughness = imageLoad(normalRoughnessImage, pixel);
+    float roughness = normalRoughness.w * normalRoughness.w;
+
+    // Valid history check (roughness-dependent threshold)
+    // Lowered from 6.0/4.0 to 3.0/2.0 for faster temporal variance convergence
+    float historyThreshold = mix(3.0, 2.0, roughness);
+
+    if (historyLen < historyThreshold) {
+        // Not enough temporal history: Compute Spatial Variance
+        vec4 centerMoments = vec4(0.0);
+        float sumW = 0.0;
+
+        vec3 centerVal = imageLoad(specHistoryIn, pixel).rgb;
+        float centerLum = luminance(centerVal);
+        float centerDepth = imageLoad(linearDepthImage, pixel).r;
+        vec3 centerNormal = normalRoughness.xyz;
+
+        // Depth-dependent sigma
+        float dx = (pixel.x + 1 < size.x) ? abs(centerDepth - imageLoad(linearDepthImage, pixel + ivec2(1, 0)).r) : 0.0;
+        float dy = (pixel.y + 1 < size.y) ? abs(centerDepth - imageLoad(linearDepthImage, pixel + ivec2(0, 1)).r) : 0.0;
+        float fwidthZ = max(max(dx, dy), 1e-4);
+
+        float phiDepth = fwidthZ * 2.0;  // Tighter for specular
+
+        // Roughness-dependent radius (smooth = smaller kernel)
+        int radius = int(mix(2.0, 3.0, roughness));
+
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                ivec2 q = pixel + ivec2(dx, dy);
+                if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+
+                vec3 val = imageLoad(specHistoryIn, q).rgb;
+                vec2 mom = imageLoad(specMomentsIn, q).rg;
+                float lum = luminance(val);
+                float depth = imageLoad(linearDepthImage, q).r;
+                vec3 normal = imageLoad(normalRoughnessImage, q).xyz;
+
+                // Weights
+                float wZ = abs(centerDepth - depth) / phiDepth;
+                float wN = pow(max(0.0, dot(centerNormal, normal)), kPhiNormal);
+                float wL = abs(centerLum - lum) / kPhiColor;
+
+                float w = exp(-wZ) * wN * exp(-wL);
+
+                sumW += w;
+                centerMoments += vec4(mom * w, 0.0, 0.0);
+            }
+        }
+
+        sumW = max(sumW, 1e-6);
+        vec2 spatialMoments = centerMoments.xy / sumW;
+
+        // Compute variance from spatial moments
+        float variance = max(0.0, spatialMoments.y - spatialMoments.x * spatialMoments.x);
+
+        // Boost variance for rough surfaces to force stronger blurring
+        // Smooth (0.0): 0.001 (Sharp) -> Rough (1.0): 0.1 (Blurry)
+        float minVariance = mix(0.001, 0.1, roughness); 
+        variance = max(variance, minVariance);
+
+        // Boost variance for early frames (increased from 2.0 to 4.0)
+        variance *= 4.0 / max(historyLen, 1.0);
+
+        imageStore(specVarianceOut, pixel, vec4(variance, 0.0, 0.0, 0.0));
+    } else {
+        // Enough history: Use Temporal Variance
+        vec2 m = imageLoad(specMomentsIn, pixel).rg;
+        float variance = max(0.0, m.y - m.x * m.x);
+        
+        // Add minimum variance (boosted for rough surfaces)
+        float minVariance = mix(0.001, 0.05, roughness);
+        variance = max(variance, minVariance);
+        
+        // Global variance boost to combat fireflies
+        variance *= 2.0;
+
+        imageStore(specVarianceOut, pixel, vec4(variance, 0.0, 0.0, 0.0));
+    }
+}

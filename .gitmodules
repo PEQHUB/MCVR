@@ -1,0 +1,27 @@
+[submodule "extern/glfw"]
+	path = extern/glfw
+	url = https://github.com/glfw/glfw.git
+[submodule "extern/volk"]
+	path = extern/volk
+	url = https://github.com/zeux/volk.git
+[submodule "extern/vma"]
+	path = extern/vma
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+[submodule "extern/glm"]
+	path = extern/glm
+	url = https://github.com/g-truc/glm.git
+[submodule "extern/vulkan_headers"]
+	path = extern/vulkan_headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers.git
+[submodule "extern/stb"]
+	path = extern/stb
+	url = https://github.com/nothings/stb.git
+[submodule "extern/DLSS"]
+	path = extern/DLSS
+	url = https://github.com/Ljiong201108/DLSS.git
+[submodule "extern/nrd"]
+	path = extern/nrd
+	url = https://github.com/NVIDIAGameWorks/RayTracingDenoiser.git
+[submodule "extern/FidelityFX-SDK"]
+	path = extern/FidelityFX-SDK
+	url = https://github.com/Interstellarss/FidelityFX-SDK.git

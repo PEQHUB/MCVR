@@ -1,0 +1,131 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D giInputImage;
+layout(set = 0, binding = 1, rgba16f) uniform image2D giOutputImage;
+layout(set = 0, binding = 2, r32f) uniform image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+layout(set = 0, binding = 4, r16f) uniform image2D giVarianceInput;
+layout(set = 0, binding = 5, rgba16f) uniform image2D diffuseAlbedoImage;
+layout(set = 0, binding = 6, r16f) uniform image2D giVarianceOutput;
+
+const int STEP_SIZE = 2;
+
+layout(push_constant) uniform PushConstants {
+    float phiColor;
+} pushConstants;
+#define kPhiColor pushConstants.phiColor
+
+const float kPhiNormal = 128.0;  // Aligned with reference implementation
+
+float computeVarianceCenter(ivec2 pixel, ivec2 size) {
+    const float kernel[2][2] = float[2][2](float[2](0.25, 0.125), float[2](0.125, 0.0625));
+    float sum = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = pixel + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) {
+                continue;
+            }
+            float k = kernel[abs(dx)][abs(dy)];
+            sum += imageLoad(giVarianceInput, q).r * k;
+        }
+    }
+    return sum;
+}
+
+float estimateDepthFwidth(float centerDepth, ivec2 pixel, ivec2 size) {
+    float dx = 0.0;
+    float dy = 0.0;
+    if (pixel.x + 1 < size.x) {
+        dx = abs(centerDepth - imageLoad(linearDepthImage, pixel + ivec2(1, 0)).r);
+    }
+    if (pixel.y + 1 < size.y) {
+        dy = abs(centerDepth - imageLoad(linearDepthImage, pixel + ivec2(0, 1)).r);
+    }
+    return max(max(dx, dy), 1e-4);
+}
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 normalizeSafe(vec3 v) {
+    float len = length(v);
+    return (len > 1e-4) ? (v / len) : vec3(0.0, 0.0, 1.0);
+}
+
+float computeWeight(float depthCenter, float depthP, float phiDepth, vec3 normalCenter, vec3 normalP, float phiNormal,
+                    float lumCenter, float lumP, float phiColor) {
+    float wNormal = 1.0;
+    float wZ = abs(depthCenter - depthP) / max(phiDepth, 1e-4);
+    float wL = abs(lumCenter - lumP) / max(phiColor, 1e-4);
+    return exp(-max(wL, 0.0) - max(wZ, 0.0)) * wNormal;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(giInputImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) {
+        return;
+    }
+
+    vec3 centerColor = imageLoad(giInputImage, pixel).rgb;
+    float centerDepth = imageLoad(linearDepthImage, pixel).r;
+    vec3 centerNormal = imageLoad(normalRoughnessImage, pixel).xyz;
+    float varianceCenter = imageLoad(giVarianceInput, pixel).r;
+    float varianceForPhi = computeVarianceCenter(pixel, size);
+
+    if (centerDepth >= (INF_DISTANCE * 0.5)) {
+        imageStore(giOutputImage, pixel, vec4(centerColor, 1.0));
+        imageStore(giVarianceOutput, pixel, vec4(varianceCenter, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    float centerLum = luminance(centerColor);
+    vec3 nCenter = normalizeSafe(centerNormal);
+    float fwidthZ = estimateDepthFwidth(centerDepth, pixel, size);
+    // DIRECT LIGHTING: 50x looser depth edge-stopping for aggressive shadow filtering
+    float phiDepth = max(fwidthZ, 1e-4) * float(STEP_SIZE) * 10.0;
+    // DIRECT LIGHTING: Very high minimum phiL (10.0) for strong baseline filtering
+    float phiL = max(kPhiColor * sqrt(max(varianceForPhi, 0.0)), 1.0);
+
+    float sumW = 1.0;
+    vec3 sumC = centerColor;
+    float sumVarW2 = varianceCenter;
+
+    // Normalized kernel (1D sum = 9, 2D normalization factor = 9*9 = 81)
+    const float kernel[5] = float[5](1.0, 2.0, 3.0, 2.0, 1.0);
+    const float kernelNorm = 9.0;  // 1D normalization
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            if (dx == 0 && dy == 0) {
+                continue;
+            }
+            ivec2 q = pixel + ivec2(dx * STEP_SIZE, dy * STEP_SIZE);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) {
+                continue;
+            }
+            vec3 c = imageLoad(giInputImage, q).rgb;
+            float d = imageLoad(linearDepthImage, q).r;
+            vec3 n = normalizeSafe(imageLoad(normalRoughnessImage, q).xyz);
+            float lum = luminance(c);
+            float varNeighbor = imageLoad(giVarianceInput, q).r;
+            float w = computeWeight(centerDepth, d, phiDepth * length(vec2(dx, dy)), nCenter, n, kPhiNormal,
+                                    centerLum, lum, phiL);
+            float wK = w * (kernel[abs(dx)] * kernel[abs(dy)] / (kernelNorm * kernelNorm));
+            sumC += c * wK;
+            sumW += wK;
+            sumVarW2 += varNeighbor * (wK * wK);
+        }
+    }
+
+    vec3 outColor = sumC / max(sumW, 1e-4);
+    float outVar = sumVarW2 / max(sumW * sumW, 1e-4);
+    imageStore(giOutputImage, pixel, vec4(outColor, 1.0));
+    imageStore(giVarianceOutput, pixel, vec4(outVar, 0.0, 0.0, 0.0));
+}

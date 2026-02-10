@@ -1,0 +1,191 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D iImage0;
+layout(set = 0, binding = 1, rgba16f) uniform image2D oImage;
+layout(set = 0, binding = 2) uniform sampler2D iHistory;
+layout(set = 0, binding = 3) uniform sampler2D iMotionVector;
+layout(set = 0, binding = 4) uniform sampler2D iDepth;
+layout(set = 0, binding = 5, r32f) uniform image2D iHistoryDepth;
+layout(set = 0, binding = 6, rgba16f) uniform image2D oHistory;
+layout(set = 0, binding = 7, r32f) uniform image2D oHistoryDepth;
+
+layout(push_constant) uniform TAAConstants {
+    vec4 params; // x: alpha, y: depthThreshold, z: depthScale, w: useHistory
+    vec2 jitterOffset;
+};
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+vec3 RGBToYCoCg(vec3 rgb) {
+    float Y = dot(rgb, vec3(0.25, 0.5, 0.25));
+    float Co = dot(rgb, vec3(0.5, 0.0, -0.5));
+    float Cg = dot(rgb, vec3(-0.25, 0.5, -0.25));
+    return vec3(Y, Co, Cg);
+}
+
+vec3 YCoCgToRGB(vec3 ycocg) {
+    float Y = ycocg.x;
+    float Co = ycocg.y;
+    float Cg = ycocg.z;
+    float R = Y + Co - Cg;
+    float G = Y + Cg;
+    float B = Y - Co - Cg;
+    return vec3(R, G, B);
+}
+
+vec3 tonemap(vec3 x) {
+    float l = max(max(x.r, x.g), x.b);
+    return x / (1.0 + l);
+}
+
+vec3 invert_tonemap(vec3 x) {
+    float l = max(max(x.r, x.g), x.b);
+    return x / max(1.0 - l, 0.0001);
+}
+
+vec3 clipToBox(vec3 history, vec3 boxCenter, vec3 boxExtent, float softness) {
+    vec3 offset = history - boxCenter;
+    vec3 safeExtent = max(boxExtent, vec3(0.0001));
+    vec3 normalized = offset / safeExtent;
+    float dist = length(normalized);
+
+    if (dist > 1.0) {
+        vec3 clamped = boxCenter + normalize(offset) * safeExtent;
+        return mix(clamped, history, softness);
+    }
+    return history;
+}
+
+vec2 getDilatedMotion(ivec2 coord, ivec2 size) {
+    float closestDepth = 100000.0;
+    vec2 bestMotion = vec2(0.0);
+
+    for(int y=-1; y<=1; ++y) {
+        for(int x=-1; x<=1; ++x) {
+            ivec2 p = coord + ivec2(x, y);
+            if(p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y) continue;
+
+            float d = texelFetch(iDepth, p, 0).r;
+            if(d < closestDepth) {
+                closestDepth = d;
+                bestMotion = texelFetch(iMotionVector, p, 0).xy;
+            }
+        }
+    }
+    return bestMotion;
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(oImage);
+    if (coord.x >= size.x || coord.y >= size.y) return;
+
+    vec4 centerRGBA = imageLoad(iImage0, coord);
+    vec3 center = centerRGBA.rgb;
+    float centerAlpha = centerRGBA.a;
+
+    vec3 centerTM = tonemap(center);
+    vec3 centerYCoCg = RGBToYCoCg(centerTM);
+
+    vec3 m1 = vec3(0.0);
+    vec3 m2 = vec3(0.0);
+    vec3 minC = vec3(1e10);
+    vec3 maxC = vec3(-1e10);
+
+    for (int iy = -1; iy <= 1; ++iy) {
+        for (int ix = -1; ix <= 1; ++ix) {
+            ivec2 offsetCoord = clamp(coord + ivec2(ix, iy), ivec2(0), size - 1);
+            vec3 color = imageLoad(iImage0, offsetCoord).rgb;
+            vec3 colorTM = tonemap(color);
+            vec3 ycocg = RGBToYCoCg(colorTM);
+            m1 += ycocg;
+            m2 += ycocg * ycocg;
+            minC = min(minC, ycocg);
+            maxC = max(maxC, ycocg);
+        }
+    }
+
+    m1 /= 9.0;
+    m2 /= 9.0;
+    vec3 sigma = sqrt(max(m2 - m1 * m1, vec3(0.0)));
+
+    vec2 pixelCenter = vec2(coord) + vec2(0.5);
+    vec2 motion = getDilatedMotion(coord, size);
+    float motionLength = length(motion);
+
+    float velocityFactor = motionLength * (3840.0 / float(size.x));
+    
+    float boxScaleT = clamp(velocityFactor / 30.0, 0.0, 1.0);
+    float boxScale = mix(0.75, 1.5, boxScaleT);
+
+    vec3 boxCenter = m1;
+    vec3 boxExtent = sigma * boxScale;
+
+    vec3 minColor = max(m1 - sigma * boxScale, minC);
+    vec3 maxColor = min(m1 + sigma * boxScale, maxC);
+
+    float baseAlpha = params.x;
+    float useHistory = params.w;
+
+    vec2 prevPos = pixelCenter + motion + jitterOffset;
+
+    float dynamicAlpha = mix(baseAlpha, 0.08, smoothstep(0.5, 15.0, velocityFactor));
+
+    float currDepth = texelFetch(iDepth, coord, 0).x;
+    bool historyValid = useHistory > 0.5;
+
+    if (historyValid) {
+        if (prevPos.x < 0.5 || prevPos.y < 0.5 ||
+            prevPos.x >= float(size.x) - 0.5 || prevPos.y >= float(size.y) - 0.5) {
+            historyValid = false;
+        }
+    }
+
+    if (historyValid) {
+        ivec2 prevCoord = ivec2(prevPos);
+        float prevDepth = imageLoad(iHistoryDepth, prevCoord).x;
+        float depthThreshold = currDepth * params.z + params.y;
+        // Relax threshold when moving fast
+        depthThreshold *= (1.0 + velocityFactor * 0.5);
+        if (abs(currDepth - prevDepth) > depthThreshold) {
+            historyValid = false;
+        }
+    }
+
+    vec3 result = center;
+    float resultAlpha = centerAlpha;
+
+    vec2 prevUV = prevPos / vec2(size);
+    vec4 oldRGBA = textureLod(iHistory, prevUV, 0);
+    vec3 old = oldRGBA.rgb;
+    float oldAlpha = oldRGBA.a;
+
+    bool hasHistory = (old.r + old.g + old.b) > 0.0001;
+
+    if (hasHistory) {
+        vec3 oldTM = tonemap(old);
+        vec3 oldYCoCg = RGBToYCoCg(oldTM);
+
+        float softness = boxScaleT * 0.15;
+        vec3 oldClipped = clipToBox(oldYCoCg, boxCenter, boxExtent, softness);
+
+        // Hard AABB clamp as final safeguard
+        oldClipped = clamp(oldClipped, minColor, maxColor);
+
+        vec3 oldClippedRGB = YCoCgToRGB(oldClipped);
+
+        float finalAlpha = historyValid ? dynamicAlpha : max(dynamicAlpha, 0.1);
+
+        vec3 resultTM = mix(oldClippedRGB, centerTM, finalAlpha);
+        result = invert_tonemap(resultTM);
+
+        resultAlpha = mix(oldAlpha, centerAlpha, finalAlpha);
+    }
+
+    imageStore(oImage, coord, vec4(result, resultAlpha));
+    imageStore(oHistory, coord, vec4(result, resultAlpha));
+    imageStore(oHistoryDepth, coord, vec4(currDepth, 0.0, 0.0, 0.0));
+}

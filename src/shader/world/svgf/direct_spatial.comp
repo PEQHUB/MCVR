@@ -1,0 +1,115 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D directInputImage;   // temporal direct (historyWrite)
+layout(set = 0, binding = 1, rgba16f) uniform image2D directOutputImage;  // spatially filtered
+layout(set = 0, binding = 2, r32f) uniform image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+layout(set = 0, binding = 4, rgba16f) uniform image2D shadowHistoryImage;   // filtered shadow vis/hit/NoL
+layout(set = 0, binding = 5, rgba16f) uniform image2D directCurrentImage;  // current frame direct (raw)
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(directInputImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec3 centerDirect = imageLoad(directInputImage, pixel).rgb;
+    float centerDepth = imageLoad(linearDepthImage, pixel).r;
+    vec3 centerNormal = imageLoad(normalRoughnessImage, pixel).xyz;
+    vec3 shadowData = imageLoad(shadowHistoryImage, pixel).rgb;
+    float shadowVis = shadowData.x;
+    float hitDist = shadowData.y;
+    float centerNoL = clamp(shadowData.z, 0.0, 1.0);
+    float shadowEdge = 0.0;
+
+    if (centerDepth >= (INF_DISTANCE * 0.5) || shadowVis < 0.0) {
+        imageStore(directOutputImage, pixel, vec4(centerDirect, 1.0));
+        return;
+    }
+
+    if (shadowVis >= 0.0) {
+        float minV = 1.0;
+        float maxV = 0.0;
+        bool anyV = false;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec2 q = pixel + ivec2(dx, dy);
+                if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+                float v = imageLoad(shadowHistoryImage, q).r;
+                if (v < 0.0) continue;
+                minV = min(minV, v);
+                maxV = max(maxV, v);
+                anyV = true;
+            }
+        }
+        if (anyV) shadowEdge = maxV - minV;
+    }
+
+    float shadowStrength = (shadowVis < 0.5) ? smoothstep(0.0, 10.0, hitDist) : 0.0;
+    float edgeBoost = smoothstep(0.2, 0.6, shadowEdge);
+    float phiShadow = mix(0.35, 0.25, edgeBoost);
+    float phiDepth = mix(0.7, 1.5, shadowStrength) * mix(1.0, 1.3, edgeBoost);
+    float phiNormal = mix(1.0, 1.6, shadowStrength) * mix(1.0, 1.3, edgeBoost);
+    float phiLuminance = mix(1.8, 3.0, shadowStrength) * mix(1.0, 1.6, edgeBoost);
+    float phiNoL = mix(0.20, 0.35, shadowStrength) * mix(1.0, 1.4, edgeBoost);
+    float sigma = mix(2.8, 5.0, shadowStrength) * mix(1.0, 2.0, edgeBoost);
+
+    float centerLum = luminance(centerDirect);
+
+    vec3 sumC = centerDirect;
+    float sumW = 1.0;
+
+    int radius = (edgeBoost > 0.1) ? 4 : 3;
+    for (int dy = -3; dy <= 3; ++dy) {
+        for (int dx = -3; dx <= 3; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            if (abs(dx) > radius || abs(dy) > radius) continue;
+            ivec2 q = pixel + ivec2(dx, dy);
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+
+            vec3 c = imageLoad(directCurrentImage, q).rgb;
+            float d = imageLoad(linearDepthImage, q).r;
+            vec3 n = imageLoad(normalRoughnessImage, q).xyz;
+            float lum = luminance(c);
+
+            vec3 sh = imageLoad(shadowHistoryImage, q).rgb;
+            float v = sh.x >= 0.0 ? sh.x : shadowVis;
+            float nL = clamp(sh.z, 0.0, 1.0);
+
+            float depthDiff = abs(centerDepth - d) / max(abs(centerDepth), 1e-3);
+            float normalDiff = 1.0 - max(0.0, dot(centerNormal, n));
+            float lumDiff = abs(centerLum - lum);
+
+            float spatialDist = float(dx * dx + dy * dy);
+            float wSpatial = exp(-spatialDist / (2.0 * sigma * sigma));
+
+            float wDepth = exp(-depthDiff / phiDepth);
+            float wNormal = exp(-normalDiff / phiNormal);
+            float wLum = exp(-lumDiff / phiLuminance);
+            float wShadow = 1.0;
+            if (shadowVis < 0.6) {
+                float shadowDiff = abs(shadowVis - v);
+                wShadow = exp(-shadowDiff / phiShadow);
+                if (shadowVis < 0.5 && v > 0.7) wShadow *= 0.1;
+                if (shadowVis > 0.5 && v < 0.3) wShadow *= 0.1;
+            }
+            float nolDiff = abs(centerNoL - nL);
+            float wNoL = exp(-nolDiff / phiNoL);
+
+            float w = wDepth * wNormal * wLum * wShadow * wNoL * wSpatial;
+            sumC += c * w;
+            sumW += w;
+        }
+    }
+
+    vec3 outC = sumC / max(sumW, 1e-6);
+    imageStore(directOutputImage, pixel, vec4(outC, 1.0));
+}

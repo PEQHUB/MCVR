@@ -1,0 +1,64 @@
+#version 460
+#define NUM_BINS 256
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+layout(set = 0, binding = 0) uniform sampler2D uHdr;
+
+layout(std430, set = 0, binding = 1) buffer HistogramBuffer {
+    uint bins[NUM_BINS];
+}
+histData;
+
+layout(push_constant) uniform PushB {
+    float log2Min;     
+    float log2Max;     
+    float epsilon;     
+    float lowPercent;  
+    float highPercent; 
+    float middleGrey;  
+    float dt;          
+    float speedUp;     
+    float speedDown;   
+    float minExposure; 
+    float maxExposure; 
+}
+pc;
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+shared uint sHist[NUM_BINS];
+
+void main() {
+    uint lid = gl_LocalInvocationIndex; // 0 .. (local_size_x*local_size_y - 1)
+    uint lsize = gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z;
+
+    for (uint i = lid; i < NUM_BINS; i += lsize) { sHist[i] = 0u; }
+
+    barrier();
+
+    ivec2 size = textureSize(uHdr, 0);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+
+    bool inside = (p.x >= 0) && (p.y >= 0) && (p.x < size.x) && (p.y < size.y);
+
+    if (inside) {
+        vec3 hdr = texelFetch(uHdr, p, 0).rgb;
+
+        float lum = dot(hdr, LUMA);
+        float logLum = log2(max(lum, pc.epsilon));
+
+        float denom = (pc.log2Max - pc.log2Min);
+        float t = (denom != 0.0) ? (logLum - pc.log2Min) / denom : 0.0;
+        t = clamp(t, 0.0, 1.0);
+
+        uint bin = uint(t * float(NUM_BINS - 1));
+        atomicAdd(sHist[bin], 1u);
+    }
+
+    barrier();
+
+    for (uint i = lid; i < NUM_BINS; i += lsize) {
+        uint v = sHist[i];
+        if (v != 0u) { atomicAdd(histData.bins[i], v); }
+    }
+}

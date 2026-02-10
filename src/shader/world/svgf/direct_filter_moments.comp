@@ -1,0 +1,105 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Bindings match C++:
+// 0: color (history out)
+// 1: moments (history out)
+// 2: length (history out)
+// 3: variance out
+// 4: normal
+// 5: depth
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D giHistoryIn;
+layout(set = 0, binding = 1, rg32f) uniform image2D giMomentsIn;
+layout(set = 0, binding = 2, r16f) uniform image2D giHistoryLength;
+layout(set = 0, binding = 3, r16f) uniform image2D giVarianceOut;
+layout(set = 0, binding = 4, rgba16f) uniform image2D normalRoughnessImage;
+layout(set = 0, binding = 5, r32f) uniform image2D linearDepthImage;
+
+// Constants from reference
+const float kPhiColor = 10.0;
+const float kPhiNormal = 128.0;
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(giHistoryIn);
+    if (pixel.x >= size.x || pixel.y >= size.y) {
+        return;
+    }
+
+    float historyLen = imageLoad(giHistoryLength, pixel).r;
+    
+    // Valid history check ( >= 4.0 implies enough temporal samples)
+    if (historyLen < 4.0) {
+        // Not enough temporal history: Compute Spatial Variance
+        // Logic: 7x7 bilateral filter to estimate mean and variance spatially
+        
+        vec4 centerMoments = vec4(0.0); // We will compute spatial moments
+        float sumW = 0.0;
+        
+        vec3 centerVal = imageLoad(giHistoryIn, pixel).rgb;
+        float centerLum = luminance(centerVal);
+        float centerDepth = imageLoad(linearDepthImage, pixel).r;
+        vec3 centerNormal = imageLoad(normalRoughnessImage, pixel).xyz;
+        
+        // Depth-dependent sigma
+        float dx = (pixel.x + 1 < size.x) ? abs(centerDepth - imageLoad(linearDepthImage, pixel + ivec2(1, 0)).r) : 0.0;
+        float dy = (pixel.y + 1 < size.y) ? abs(centerDepth - imageLoad(linearDepthImage, pixel + ivec2(0, 1)).r) : 0.0;
+        float fwidthZ = max(max(dx, dy), 1e-4);
+        
+        float phiDepth = fwidthZ * 3.0;
+
+        const int radius = 3;
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                ivec2 q = pixel + ivec2(dx, dy);
+                if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+                
+                vec3 val = imageLoad(giHistoryIn, q).rgb;
+                vec2 mom = imageLoad(giMomentsIn, q).rg;
+                float lum = luminance(val);
+                float depth = imageLoad(linearDepthImage, q).r;
+                vec3 normal = imageLoad(normalRoughnessImage, q).xyz;
+                
+                // Weights
+                float wZ = abs(centerDepth - depth) / phiDepth;
+                float wN = pow(max(0.0, dot(centerNormal, normal)), kPhiNormal);
+                float wL = abs(centerLum - lum) / kPhiColor;
+                
+                float w = exp(-wZ) * wN * exp(-wL); // Gaussian approximation
+                
+                sumW += w;
+                // Accumulate moments: weighted average of (L, L^2)
+                centerMoments += vec4(mom * w, 0.0, 0.0);
+            }
+        }
+        
+        sumW = max(sumW, 1e-6);
+        vec2 spatialMoments = centerMoments.xy / sumW;
+        
+        // Compute variance from spatial moments
+        float variance = max(0.0, spatialMoments.y - spatialMoments.x * spatialMoments.x);
+        
+        // Boost variance for early frames
+        variance *= 4.0 / max(historyLen, 1.0);
+        
+        imageStore(giVarianceOut, pixel, vec4(variance, 0.0, 0.0, 0.0));
+        
+        // We do NOT update color/moments here, the reference shader calculates OUT color/moments.
+        // But our pipeline structure assumes color/moments were already written by Reproject pass.
+        // We only write Variance.
+    } else {
+        // Enough history: Use Temporal Variance
+        vec2 m = imageLoad(giMomentsIn, pixel).rg;
+        float variance = max(0.0, m.y - m.x * m.x);
+        imageStore(giVarianceOut, pixel, vec4(variance, 0.0, 0.0, 0.0));
+    }
+}

@@ -1,0 +1,101 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// --- Bindings ---
+layout(set = 0, binding = 0, rgba16f) uniform image2D directRadianceImage;
+layout(set = 0, binding = 1, rg16f) uniform image2D motionVectorImage;
+layout(set = 0, binding = 2, r16f) uniform image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+
+layout(set = 0, binding = 4, rgba16f) uniform image2D directHistoryPrev;
+layout(set = 0, binding = 5, r16f) uniform image2D directDepthPrev;
+layout(set = 0, binding = 6, rgba16f) uniform image2D directNormalPrev;
+
+layout(set = 0, binding = 7, rgba16f) uniform image2D directHistoryOut;
+layout(set = 0, binding = 8, r16f) uniform image2D directDepthOut;
+layout(set = 0, binding = 9, rgba16f) uniform image2D directNormalOut;
+
+layout(set = 0, binding = 10) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+
+layout(set = 0, binding = 11, rgba8) uniform readonly image2D diffuseAlbedoImage; // Added for Demodulation
+layout(set = 0, binding = 12, r16ui) uniform uimage2D directHistoryLengthPrev;
+layout(set = 0, binding = 13, r16ui) uniform uimage2D directHistoryLengthOut;
+layout(set = 0, binding = 14, rg32f) uniform image2D directMomentsPrev;
+layout(set = 0, binding = 15, rg32f) uniform image2D directMomentsOut;
+
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 neighborhoodClamp(ivec2 pixel, vec3 centerColor, ivec2 size) {
+    vec3 mn = centerColor, mx = centerColor;
+    vec3 albedo = max(imageLoad(diffuseAlbedoImage, pixel).rgb, vec3(0.01));
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 q = clamp(pixel + ivec2(dx, dy), ivec2(0), size - 1);
+            vec3 c = imageLoad(directRadianceImage, q).rgb / max(imageLoad(diffuseAlbedoImage, q).rgb, vec3(0.01));
+            mn = min(mn, c); mx = max(mx, c);
+        }
+    }
+    return clamp(centerColor, mn, mx);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(directRadianceImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    // 1. Load & Demodulate (Signal = Radiance / Albedo)
+    vec3 albedo = max(imageLoad(diffuseAlbedoImage, pixel).rgb, vec3(0.01));
+    vec3 currDirect = imageLoad(directRadianceImage, pixel).rgb / albedo;
+    
+    vec2 motion = imageLoad(motionVectorImage, pixel).xy;
+    float currDepth = imageLoad(linearDepthImage, pixel).r;
+    vec3 currNormal = normalize(imageLoad(normalRoughnessImage, pixel).xyz);
+
+    // 2. Reproject
+    vec2 prevPixelF = vec2(pixel) + motion;
+    ivec2 prevPixel = ivec2(round(prevPixelF));
+    bool valid = (prevPixel.x >= 0 && prevPixel.y >= 0 && prevPixel.x < size.x && prevPixel.y < size.y);
+
+    vec3 outDirect = currDirect;
+    vec2 outMoments = vec2(0.0);
+    uint historyLength = 0;
+
+    if (valid) {
+        vec3 prevDirect = imageLoad(directHistoryPrev, prevPixel).rgb; // Already demodulated in prev frame
+        float prevDepth = imageLoad(directDepthPrev, prevPixel).r;
+        vec3 prevNormal = imageLoad(directNormalPrev, prevPixel).xyz;
+        vec2 prevMoments = imageLoad(directMomentsPrev, prevPixel).rg;
+        uint prevLength = imageLoad(directHistoryLengthPrev, prevPixel).r;
+
+        if (abs(currDepth - prevDepth) / max(currDepth, 0.01) < 0.1 && dot(currNormal, normalize(prevNormal)) > 0.9) {
+            prevDirect = neighborhoodClamp(pixel, prevDirect, size);
+            float alpha = 0.1; // Slower for direct light
+            outDirect = mix(prevDirect, currDirect, alpha);
+            float currLum = luminance(outDirect);
+            outMoments = mix(prevMoments, vec2(currLum, currLum * currLum), alpha);
+            historyLength = min(prevLength + 1, 64);
+        } else {
+            float currLum = luminance(currDirect);
+            outMoments = vec2(currLum, currLum * currLum);
+            historyLength = 1;
+        }
+    } else {
+        float currLum = luminance(currDirect);
+        outMoments = vec2(currLum, currLum * currLum);
+        historyLength = 1;
+    }
+
+    imageStore(directHistoryOut, pixel, vec4(outDirect, 1.0));
+    imageStore(directDepthOut, pixel, vec4(currDepth, 0.0, 0.0, 0.0));
+    imageStore(directNormalOut, pixel, vec4(currNormal, 0.0));
+    imageStore(directHistoryLengthOut, pixel, uvec4(historyLength, 0, 0, 0));
+    imageStore(directMomentsOut, pixel, vec4(outMoments, 0.0, 0.0));
+}

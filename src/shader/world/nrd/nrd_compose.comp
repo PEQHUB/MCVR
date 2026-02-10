@@ -1,0 +1,54 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common/shared.hpp"
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D outImage;
+layout(set = 0, binding = 1) uniform sampler2D inDirectLighting;
+layout(set = 0, binding = 2) uniform sampler2D inDenoisedDiffuse;
+layout(set = 0, binding = 3) uniform sampler2D inDenoisedSpecular;
+layout(set = 0, binding = 4) uniform sampler2D inDiffuseAlbedo;
+layout(set = 0, binding = 5) uniform sampler2D inNormalRoughness;
+layout(set = 0, binding = 6) uniform sampler2D inLinearDepth;
+layout(set = 0, binding = 7) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+layout(set = 0, binding = 8) uniform sampler2D inSpecularAlbedo;
+layout(set = 0, binding = 9) uniform sampler2D inClearRadiance;
+layout(set = 0, binding = 10) uniform sampler2D inBaseEmission;
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+vec3 nrdDecode(vec3 YCoCg) {
+    float t = YCoCg.x - YCoCg.z;
+    return max(vec3(t + YCoCg.y, YCoCg.x + YCoCg.z, t - YCoCg.y), 0.0);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) return;
+
+    vec3 diffData = texelFetch(inDenoisedDiffuse, pixel, 0).rgb;
+    vec3 specData = texelFetch(inDenoisedSpecular, pixel, 0).rgb;
+
+    vec3 combinedDiffuseRadiance = nrdDecode(diffData);
+    vec3 specRadiance = nrdDecode(specData);
+
+    vec3 diffAlbedo = max(texelFetch(inDiffuseAlbedo, pixel, 0).rgb, 0.05);
+    vec3 specAlbedo = max(texelFetch(inSpecularAlbedo, pixel, 0).rgb, 0.05);
+
+    vec4 clear = texelFetch(inClearRadiance, pixel, 0);
+    vec3 emission = texelFetch(inBaseEmission, pixel, 0).rgb;
+
+    vec3 diffuseTerm = combinedDiffuseRadiance * diffAlbedo;
+    vec3 specularTerm = specRadiance * specAlbedo;
+
+    vec3 result;
+    if (clear.a > 0) {
+        result = clear.rgb;
+    } else {
+        result = diffuseTerm + specularTerm + emission;
+    }
+
+    imageStore(outImage, pixel, vec4(max(result, 0.0), 1.0));
+}
