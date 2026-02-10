@@ -236,7 +236,8 @@ void main() {
 
     // shadow ray for direct lighting
     vec3 lightDir = normalize(skyUBO.sunDirection);
-    float kappa = 3000;
+    // Softer sun sampling for hand = wider penumbras (500 vs 3000)
+    float kappa = (mainRay.isHand > 0) ? 500.0 : 3000.0;
     if (lightDir.y < 0) { lightDir = -lightDir; }
     vec3 sampledLightDir = SampleVMF(mainRay.seed, lightDir, kappa);
     vec3 shadowRayOrigin = worldPos + (dot(sampledLightDir, normal) > 0.0 ? normal : -normal) * 0.001;
@@ -252,7 +253,7 @@ void main() {
         shadowRay.insideBoat = mainRay.insideBoat;
 
         traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT,
-                    WORLD_MASK | PLAYER_MASK | CLOUD_MASK, // masks
+                    WORLD_MASK | CLOUD_MASK, // masks — exclude PLAYER_MASK to prevent player body self-shadowing
                     0,                                     // sbtRecordOffset
                     0,                                     // sbtRecordStride
                     2,                                     // missIndex
@@ -264,6 +265,17 @@ void main() {
         float progress = skyUBO.rainGradient;
         vec3 lightRadiance = lightContribution * mainRay.throughput * lightBRDF;
         vec3 finalLightRadiance = mix(lightRadiance, vec3(0.0), progress);
+
+        // Hand shadow smoothing: apply ambient floor with smooth falloff
+        // Prevents harsh black transitions on hand geometry in shadow
+        if (mainRay.isHand > 0) {
+            float shadowLum = dot(finalLightRadiance, vec3(0.2126, 0.7152, 0.0722));
+            float ambientFloor = 0.08 * dot(mainRay.throughput, vec3(0.2126, 0.7152, 0.0722));
+            float blend = smoothstep(0.0, ambientFloor * 2.0, shadowLum);
+            vec3 handAmbient = ambientFloor * tint * mainRay.throughput;
+            finalLightRadiance = mix(handAmbient, finalLightRadiance, blend);
+        }
+
         mainRay.radiance += finalLightRadiance;
         mainRay.directLightRadiance = finalLightRadiance;
 

@@ -49,6 +49,7 @@ struct PrimaryRay {
     T_FLOAT coneWidth;
     T_FLOAT coneSpread;
     T_UINT insideBoat;
+    T_UINT isHand;
 
     // out, updated by the latest ray tracing
     T_UINT instanceIndex;

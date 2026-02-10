@@ -18,8 +18,8 @@ struct ToneMappingModuleContext;
 struct ToneMappingModuleExposureData {
     float exposure;
     float avgLogLum;
-    float padding0;
-    float padding1;
+    float tonemapMode;  // 0.0 = PBR Neutral, 1.0 = Reinhard Extended
+    float Lwhite;       // White point for Reinhard Extended (default 4.0)
 };
 
 struct ToneMappingModulePushConstant {
@@ -34,6 +34,8 @@ struct ToneMappingModulePushConstant {
     float speedDown;   // 变暗适应速度（1/秒），例如 1.0
     float minExposure; // 可选 clamp，例如 0.0001
     float maxExposure; // 可选 clamp，例如 10000.0
+    float tonemapMode; // 0.0 = PBR Neutral, 1.0 = Reinhard Extended
+    float Lwhite;      // White point for Reinhard Extended (default 4.0)
 };
 
 class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingModule> {
@@ -99,9 +101,12 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
     std::shared_ptr<vk::GraphicsPipeline> pipeline_;
     std::vector<std::shared_ptr<vk::Sampler>> samplers_;
 
-    float middleGrey_ = 0.18;
-    float speedUp_ = 3.0;
-    float speedDown_ = 3.0;
+    float middleGrey_ = 0.18f;
+    float speedUp_ = 5.0f;
+    float speedDown_ = 1.5f;
+    float maxExposure_ = 2.0f;
+    float tonemapMode_ = 1.0f;  // default: Reinhard Extended
+    float Lwhite_ = 4.0f;
 
     // output
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> ldrImages_;

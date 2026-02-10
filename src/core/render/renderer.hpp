@@ -15,8 +15,9 @@ struct Options {
     uint32_t maxFps = 1e6;
     uint32_t inactivityFpsLimit = 1e6;
     bool vsync = true;
-    uint32_t dlssMode = 1;
-    uint32_t upscalerType = 1;
+    uint32_t upscalerMode = 2;       // Quality preset: 0=Performance, 1=Balanced, 2=Quality, 3=Native/DLAA, 4=Custom
+    uint32_t upscalerResOverride = 100; // Resolution override percentage (33-100%)
+    uint32_t upscalerType = 1;       // 0=Off, 1=FSR3, 2=DLSS SR
     uint32_t upscalerQuality = 0;
     uint32_t denoiserMode = 1;
     uint32_t rayBounces = 4;
@@ -25,6 +26,9 @@ struct Options {
 
     uint32_t chunkBuildingBatchSize = 2;
     uint32_t chunkBuildingTotalBatches = 4;
+    uint32_t tonemappingMode = 1; // 0 = PBR Neutral, 1 = Reinhard Extended
+    float maxExposure = 2.0f;
+    uint32_t upscalerPreset = 5; // DLSS: Preset E (latest transformer). Generic for future upscalers.
 };
 
 class Renderer : public Singleton<Renderer> {

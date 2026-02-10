@@ -19,8 +19,10 @@ layout(push_constant) uniform PushB {
     float dt;          
     float speedUp;     
     float speedDown;   
-    float minExposure; 
-    float maxExposure; 
+    float minExposure;
+    float maxExposure;
+    float tonemapMode;
+    float Lwhite;
 }
 pc;
 

@@ -54,6 +54,26 @@ void ToneMappingModule::setAttributes(int attributeCount, std::vector<std::strin
             speedUp_ = std::stof(attributeKVs[2 * i + 1]);
         } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.exposure_down_speed") {
             speedDown_ = std::stof(attributeKVs[2 * i + 1]);
+        } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.tonemap_mode") {
+            if (attributeKVs[2 * i + 1] == "pbr_neutral") {
+                tonemapMode_ = 0.0f;
+            } else if (attributeKVs[2 * i + 1] == "reinhard_extended") {
+                tonemapMode_ = 1.0f;
+            } else if (attributeKVs[2 * i + 1] == "aces") {
+                tonemapMode_ = 2.0f;
+            } else if (attributeKVs[2 * i + 1] == "agx") {
+                tonemapMode_ = 3.0f;
+            } else if (attributeKVs[2 * i + 1] == "lottes") {
+                tonemapMode_ = 4.0f;
+            } else if (attributeKVs[2 * i + 1] == "frostbite") {
+                tonemapMode_ = 5.0f;
+            } else if (attributeKVs[2 * i + 1] == "uncharted2") {
+                tonemapMode_ = 6.0f;
+            }
+        } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.lwhite") {
+            Lwhite_ = std::stof(attributeKVs[2 * i + 1]);
+        } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.max_exposure") {
+            maxExposure_ = std::stof(attributeKVs[2 * i + 1]);
         }
     }
 }
@@ -395,7 +415,9 @@ void ToneMappingModuleContext::render() {
     pc.speedUp = module->speedUp_;
     pc.speedDown = module->speedDown_;
     pc.minExposure = 1e-4f;
-    pc.maxExposure = 2.0f;
+    pc.maxExposure = Renderer::options.maxExposure;
+    pc.tonemapMode = static_cast<float>(Renderer::options.tonemappingMode);
+    pc.Lwhite = module->Lwhite_;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ToneMappingModulePushConstant), &pc);

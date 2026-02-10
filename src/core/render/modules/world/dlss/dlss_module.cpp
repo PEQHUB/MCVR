@@ -74,87 +74,57 @@ bool DLSSModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLo
 
     if (images.size() != inputImageNum) return false;
 
-    NgxContext::QuerySizeInfo querySizeInfo{};
-    querySizeInfo.outputSize.width = outputWidth_;
-    querySizeInfo.outputSize.height = outputHeight_;
-    querySizeInfo.quality = mode_;
-    ngxContext_->querySupportedDlssInputSizes(querySizeInfo, supportedSizes_);
+    // Apply runtime quality override from Java settings BEFORE querying sizes
+    switch (Renderer::options.upscalerMode) {
+        case 0: mode_ = NVSDK_NGX_PerfQuality_Value_MaxPerf; break;
+        case 1: mode_ = NVSDK_NGX_PerfQuality_Value_Balanced; break;
+        case 2: mode_ = NVSDK_NGX_PerfQuality_Value_MaxQuality; break;
+        case 3: mode_ = NVSDK_NGX_PerfQuality_Value_DLAA; break;
+        case 4: mode_ = NVSDK_NGX_PerfQuality_Value_Balanced; break; // Custom: use Balanced as NGX base
+    }
+
+    if (Renderer::options.upscalerMode == 4) {
+        // Custom mode: use resolution override percentage instead of NGX presets
+        float scale = static_cast<float>(Renderer::options.upscalerResOverride) / 100.0f;
+        inputWidth_ = std::max(1u, static_cast<uint32_t>(outputWidth_ * scale));
+        inputHeight_ = std::max(1u, static_cast<uint32_t>(outputHeight_ * scale));
+    } else {
+        // Preset mode: query NGX for optimal input sizes
+        NgxContext::QuerySizeInfo querySizeInfo{};
+        querySizeInfo.outputSize.width = outputWidth_;
+        querySizeInfo.outputSize.height = outputHeight_;
+        querySizeInfo.quality = mode_;
+        ngxContext_->querySupportedDlssInputSizes(querySizeInfo, supportedSizes_);
 #ifdef DEBUG
-    std::cout << "DLSS sizes:" << std::endl;
-    std::cout << "\tminSize: [" << supportedSizes_.minSize.width << ", " << supportedSizes_.minSize.height << "]"
-              << std::endl;
-    std::cout << "\tmaxSize: [" << supportedSizes_.maxSize.width << ", " << supportedSizes_.maxSize.height << "]"
-              << std::endl;
-    std::cout << "\toptimalSize: [" << supportedSizes_.optimalSize.width << ", " << supportedSizes_.optimalSize.height
-              << "]" << std::endl;
+        std::cout << "DLSS sizes:" << std::endl;
+        std::cout << "\tminSize: [" << supportedSizes_.minSize.width << ", " << supportedSizes_.minSize.height << "]"
+                  << std::endl;
+        std::cout << "\tmaxSize: [" << supportedSizes_.maxSize.width << ", " << supportedSizes_.maxSize.height << "]"
+                  << std::endl;
+        std::cout << "\toptimalSize: [" << supportedSizes_.optimalSize.width << ", " << supportedSizes_.optimalSize.height
+                  << "]" << std::endl;
 #endif
-
-    inputWidth_ = supportedSizes_.optimalSize.width;
-    inputHeight_ = supportedSizes_.optimalSize.height;
-
-    if (images[0] == nullptr) {
-        hdrImages_[frameIndex] = images[0] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, inputWidth_, inputHeight_, 1, formats[0],
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    } else {
-        if (images[0]->width() != inputWidth_ || images[0]->height() != inputHeight_) return false;
+        inputWidth_ = supportedSizes_.optimalSize.width;
+        inputHeight_ = supportedSizes_.optimalSize.height;
     }
 
-    if (images[1] == nullptr) {
-        diffuseAlbedoImages_[frameIndex] = images[1] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, inputWidth_, inputHeight_, 1, formats[1],
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    } else {
-        if (images[1]->width() != inputWidth_ || images[1]->height() != inputHeight_) return false;
-    }
+    // For each input image: create if null, or recreate if size doesn't match (e.g. after DLSS quality change)
+    auto createOrResize = [&](int idx) {
+        if (images[idx] == nullptr || images[idx]->width() != inputWidth_ || images[idx]->height() != inputHeight_) {
+            images[idx] = vk::DeviceLocalImage::create(
+                framework->device(), framework->vma(), false, inputWidth_, inputHeight_, 1, formats[idx],
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        }
+    };
 
-    if (images[2] == nullptr) {
-        specularAlbedoImages_[frameIndex] = images[2] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, inputWidth_, inputHeight_, 1, formats[2],
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    } else {
-        if (images[2]->width() != inputWidth_ || images[2]->height() != inputHeight_) return false;
-    }
-
-    if (images[3] == nullptr) {
-        normalRoughnessImages_[frameIndex] = images[3] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, inputWidth_, inputHeight_, 1, formats[3],
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    } else {
-        if (images[3]->width() != inputWidth_ || images[3]->height() != inputHeight_) return false;
-    }
-
-    if (images[4] == nullptr) {
-        motionVectorImages_[frameIndex] = images[4] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, inputWidth_, inputHeight_, 1, formats[4],
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    } else {
-        if (images[4]->width() != inputWidth_ || images[4]->height() != inputHeight_) return false;
-    }
-
-    if (images[5] == nullptr) {
-        linearDepthImages_[frameIndex] = images[5] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, inputWidth_, inputHeight_, 1, formats[5],
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    } else {
-        if (images[5]->width() != inputWidth_ || images[5]->height() != inputHeight_) return false;
-    }
-
-    if (images[6] == nullptr) {
-        specularHitDepthImages_[frameIndex] = images[6] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, inputWidth_, inputHeight_, 1, formats[6],
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    } else {
-        if (images[6]->width() != inputWidth_ || images[6]->height() != inputHeight_) return false;
-    }
-
-    if (images[7] == nullptr) {
-        firstHitDepthImages_[frameIndex] = images[7] = vk::DeviceLocalImage::create(
-            framework->device(), framework->vma(), false, inputWidth_, inputHeight_, 1, formats[7],
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    } else {
-        if (images[7]->width() != inputWidth_ || images[7]->height() != inputHeight_) return false;
-    }
+    createOrResize(0); hdrImages_[frameIndex] = images[0];
+    createOrResize(1); diffuseAlbedoImages_[frameIndex] = images[1];
+    createOrResize(2); specularAlbedoImages_[frameIndex] = images[2];
+    createOrResize(3); normalRoughnessImages_[frameIndex] = images[3];
+    createOrResize(4); motionVectorImages_[frameIndex] = images[4];
+    createOrResize(5); linearDepthImages_[frameIndex] = images[5];
+    createOrResize(6); specularHitDepthImages_[frameIndex] = images[6];
+    createOrResize(7); firstHitDepthImages_[frameIndex] = images[7];
 
     return true;
 }
@@ -198,19 +168,30 @@ void DLSSModule::setAttributes(int attributeCount, std::vector<std::string> &att
             }
         }
     }
+
+    // Runtime override from Java settings (takes priority over pipeline YAML)
+    switch (Renderer::options.upscalerMode) {
+        case 0: mode_ = NVSDK_NGX_PerfQuality_Value_MaxPerf; break;
+        case 1: mode_ = NVSDK_NGX_PerfQuality_Value_Balanced; break;
+        case 2: mode_ = NVSDK_NGX_PerfQuality_Value_MaxQuality; break;
+        case 3: mode_ = NVSDK_NGX_PerfQuality_Value_DLAA; break;
+        case 4: mode_ = NVSDK_NGX_PerfQuality_Value_Balanced; break; // Custom: use Balanced as NGX base
+    }
 }
 
 void DLSSModule::build() {
-    // ngxContext_ must not be nullptr
+    if (ngxContext_ == nullptr) return;
 
     auto framework = framework_.lock();
     auto worldPipeline = worldPipeline_.lock();
+    if (!framework || !worldPipeline) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     NgxContext::DlssRRInitInfo dlssRRInitInfo{};
     dlssRRInitInfo.inputSize = {inputWidth_, inputHeight_};
     dlssRRInitInfo.outputSize = {outputWidth_, outputHeight_};
     dlssRRInitInfo.quality = mode_;
+    dlssRRInitInfo.preset = static_cast<NVSDK_NGX_RayReconstruction_Hint_Render_Preset>(Renderer::options.upscalerPreset);
     ngxContext_->initDlssRR(dlssRRInitInfo, framework->mainCommandPool(), dlss_);
 
     contexts_.resize(size);
@@ -230,7 +211,7 @@ void DLSSModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
                              int index) {}
 
 void DLSSModule::preClose() {
-    dlss_->deinit();
+    if (dlss_) dlss_->deinit();
 }
 
 DLSSModuleContext::DLSSModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,

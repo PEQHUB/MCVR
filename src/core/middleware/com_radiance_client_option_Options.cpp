@@ -41,3 +41,37 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkBui
     Renderer::options.chunkBuildingTotalBatches = chunkBuildingTotalBatches;
     if (write) Renderer::instance().world()->chunks()->resetScheduler();
 }
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTonemappingMode(
+    JNIEnv *, jclass, jint mode, jboolean write) {
+    Renderer::options.tonemappingMode = mode;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRayBounces(
+    JNIEnv *, jclass, jint bounces, jboolean write) {
+    Renderer::options.rayBounces = bounces;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssQuality(
+    JNIEnv *, jclass, jint quality, jboolean write) {
+    Renderer::options.upscalerMode = quality;
+    if (write) Renderer::options.needRecreate = true;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssResOverride(
+    JNIEnv *, jclass, jint resOverride, jboolean write) {
+    Renderer::options.upscalerResOverride = resOverride;
+    if (write) Renderer::options.needRecreate = true;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMaxExposure(
+    JNIEnv *, jclass, jint maxExposure, jboolean write) {
+    Renderer::options.maxExposure = static_cast<float>(maxExposure);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssPreset(
+    JNIEnv *, jclass, jint preset, jboolean write) {
+    // Clamp to valid DLSS RR preset range (A=0 through G=6)
+    Renderer::options.upscalerPreset = static_cast<uint32_t>(std::clamp(preset, 0, 6));
+    if (write) Renderer::options.needRecreate = true;
+}
