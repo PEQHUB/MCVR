@@ -226,7 +226,7 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
     if (dielectricPr > 0.0 && reflect) {
         float F = DielectricFresnel(VDotH, 1.0 / mat.ior);
 
-        float a = max(mat.roughness, 1e-4); // labPBR roughness is already linear (GGX alpha)
+        float a = mat.roughness * mat.roughness; // Isotropic
         float D = GTR2Aniso(localH.z, localH.x, localH.y, a, a);
         float G1 = SmithGAniso(abs(localV.z), localV.x, localV.y, a, a);
         float G2 = G1 * SmithGAniso(abs(localL.z), localL.x, localL.y, a, a);
@@ -242,7 +242,7 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
     if (metalPr > 0.0 && reflect) {
         vec3 FMetal = mix(mat.albedo, vec3(1.0), SchlickWeight(VDotH));
 
-        float a = max(mat.roughness, 1e-4); // labPBR roughness is already linear (GGX alpha)
+        float a = mat.roughness * mat.roughness;
         float D = GTR2Aniso(localH.z, localH.x, localH.y, a, a);
         float G1 = SmithGAniso(abs(localV.z), localV.x, localV.y, a, a);
         float G2 = G1 * SmithGAniso(abs(localL.z), localL.x, localL.y, a, a);
@@ -257,7 +257,7 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
     // Glass / Specular BSDF
     if (glassPr > 0.0) {
         float F = DielectricFresnel(VDotH, eta);
-        float a = max(mat.roughness, 1e-4); // labPBR roughness is already linear (GGX alpha)
+        float a = mat.roughness * mat.roughness;
         float D = GTR2Aniso(localH.z, localH.x, localH.y, a, a);
         float G1 = SmithGAniso(abs(localV.z), localV.x, localV.y, a, a);
         float G2 = G1 * SmithGAniso(abs(localL.z), localL.x, localL.y, a, a);
@@ -321,13 +321,13 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
         localL = CosineSampleHemisphere(r1, r2);
     } else if (r3 < cdf2) {                      // Dielectric + Metallic Reflection
         lobeType = 1;
-        float a = max(mat.roughness, 1e-4); // labPBR roughness is already linear (GGX alpha)
+        float a = mat.roughness * mat.roughness; // Isotropic
         vec3 localH = SampleGGXVNDF(localV, a, a, r1, r2);
         if (localH.z < 0.0) localH = -localH;
         localL = normalize(reflect(-localV, localH));
     } else {                                     // Glass
         lobeType = 2;
-        float a = max(mat.roughness, 1e-4); // labPBR roughness is already linear (GGX alpha)
+        float a = mat.roughness * mat.roughness; // Isotropic
         vec3 localH = SampleGGXVNDF(localV, a, a, r1, r2);
         if (localH.z < 0.0) localH = -localH;
 
