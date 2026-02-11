@@ -106,9 +106,7 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
         sharedImages_[frameIndex][0] = vk::DeviceLocalImage::create(
             framework->device(), framework->vma(), false, extent.width, extent.height, 1, blueprint->imageFormats_[0],
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-#ifdef USE_AMD
                 | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-#endif
         );
     }
 
@@ -497,26 +495,25 @@ void PipelineContext::fuseWorld() {
 
     uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
-    // TODO: add to command buffer
-    VkImageBlit imageBlit{};
-    imageBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBlit.srcSubresource.mipLevel = 0;
-    imageBlit.srcSubresource.baseArrayLayer = 0;
-    imageBlit.srcSubresource.layerCount = 1;
-    imageBlit.srcOffsets[0] = {0, 0, 0};
-    imageBlit.srcOffsets[1] = {static_cast<int>(worldPipelineContext->outputImage->width()),
-                               static_cast<int>(worldPipelineContext->outputImage->height()), 1};
-    imageBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBlit.dstSubresource.mipLevel = 0;
-    imageBlit.dstSubresource.baseArrayLayer = 0;
-    imageBlit.dstSubresource.layerCount = 1;
-    imageBlit.dstOffsets[0] = {0, 0, 0};
-    imageBlit.dstOffsets[1] = {static_cast<int>(uiModuleContext->overlayDrawColorImage->width()),
-                               static_cast<int>(uiModuleContext->overlayDrawColorImage->height()), 1};
+    // Raw copy (no sRGB conversion) — world output is UNORM with gamma baked in,
+    // overlay is SRGB. vkCmdCopyImage preserves raw bytes without re-encoding.
+    VkImageCopy imageCopy{};
+    imageCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    imageCopy.srcSubresource.mipLevel = 0;
+    imageCopy.srcSubresource.baseArrayLayer = 0;
+    imageCopy.srcSubresource.layerCount = 1;
+    imageCopy.srcOffset = {0, 0, 0};
+    imageCopy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    imageCopy.dstSubresource.mipLevel = 0;
+    imageCopy.dstSubresource.baseArrayLayer = 0;
+    imageCopy.dstSubresource.layerCount = 1;
+    imageCopy.dstOffset = {0, 0, 0};
+    imageCopy.extent = {worldPipelineContext->outputImage->width(),
+                        worldPipelineContext->outputImage->height(), 1};
 
-    vkCmdBlitImage(overlayCommandBuffer->vkCommandBuffer(), worldPipelineContext->outputImage->vkImage(),
+    vkCmdCopyImage(overlayCommandBuffer->vkCommandBuffer(), worldPipelineContext->outputImage->vkImage(),
                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, uiModuleContext->overlayDrawColorImage->vkImage(),
-                   uiModuleContext->overlayDrawColorImage->imageLayout(), 1, &imageBlit, VK_FILTER_LINEAR);
+                   uiModuleContext->overlayDrawColorImage->imageLayout(), 1, &imageCopy);
 
     overlayCommandBuffer->barriersBufferImage(
         {}, {

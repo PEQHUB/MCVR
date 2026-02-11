@@ -18,10 +18,14 @@ layout(location = 1) in vec4 vertexColor;
 
 layout(location = 0) out vec4 fragColor;
 
+vec3 srgbToLinear(vec3 c) { return pow(c, vec3(2.2)); }
+
 void main() {
     OverlayUBO ubo = ubos[drawId];
 
-    vec4 color = texture(textures[nonuniformEXT(ubo.texIndices[0])], texCoord0) * vertexColor * ubo.colorModulator;
+    vec4 texColor = texture(textures[nonuniformEXT(ubo.texIndices[0])], texCoord0);
+    vec4 color = texColor * vec4(srgbToLinear(vertexColor.rgb), vertexColor.a)
+                          * vec4(srgbToLinear(ubo.colorModulator.rgb), ubo.colorModulator.a);
     if (color.a < 0.1) { discard; }
     fragColor = color;
 }

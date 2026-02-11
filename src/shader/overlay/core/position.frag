@@ -14,8 +14,11 @@ layout(push_constant) uniform Push {
 
 layout(location = 0) out vec4 fragColor;
 
+vec3 srgbToLinear(vec3 c) { return pow(c, vec3(2.2)); }
+
 void main() {
     OverlayUBO ubo = ubos[drawId];
 
-    fragColor = ubo.colorModulator;
+    vec4 cm = ubo.colorModulator;
+    fragColor = vec4(srgbToLinear(cm.rgb), cm.a);
 }
