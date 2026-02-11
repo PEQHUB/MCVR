@@ -23,6 +23,7 @@ layout(push_constant) uniform PushB {
     float maxExposure;
     float tonemapMode;
     float Lwhite;
+    float exposureCompensation;
 }
 pc;
 

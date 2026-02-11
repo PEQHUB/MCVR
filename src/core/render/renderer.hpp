@@ -27,7 +27,11 @@ struct Options {
     uint32_t chunkBuildingBatchSize = 2;
     uint32_t chunkBuildingTotalBatches = 4;
     uint32_t tonemappingMode = 1; // 0 = PBR Neutral, 1 = Reinhard Extended
+    float minExposure = 0.0001f;       // Minimum exposure clamp
     float maxExposure = 2.0f;
+    float exposureCompensation = 0.0f; // EV offset (-3 to +3)
+    float middleGrey = 0.18f;          // Middle grey point (0.01 to 0.50)
+    float Lwhite = 4.0f;               // White point for Reinhard Extended
     uint32_t upscalerPreset = 5; // DLSS: Preset E (latest transformer). Generic for future upscalers.
 };
 

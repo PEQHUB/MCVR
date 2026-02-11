@@ -64,9 +64,29 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssResO
     if (write) Renderer::options.needRecreate = true;
 }
 
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMinExposure(
+    JNIEnv *, jclass, jfloat minExposure, jboolean write) {
+    Renderer::options.minExposure = minExposure;
+}
+
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMaxExposure(
     JNIEnv *, jclass, jint maxExposure, jboolean write) {
     Renderer::options.maxExposure = static_cast<float>(maxExposure);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureCompensation(
+    JNIEnv *, jclass, jfloat ec, jboolean write) {
+    Renderer::options.exposureCompensation = ec;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMiddleGrey(
+    JNIEnv *, jclass, jfloat mg, jboolean write) {
+    Renderer::options.middleGrey = mg;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetLwhite(
+    JNIEnv *, jclass, jfloat lw, jboolean write) {
+    Renderer::options.Lwhite = lw;
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssPreset(

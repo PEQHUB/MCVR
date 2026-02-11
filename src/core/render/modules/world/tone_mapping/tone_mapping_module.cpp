@@ -69,11 +69,15 @@ void ToneMappingModule::setAttributes(int attributeCount, std::vector<std::strin
                 tonemapMode_ = 5.0f;
             } else if (attributeKVs[2 * i + 1] == "uncharted2") {
                 tonemapMode_ = 6.0f;
+            } else if (attributeKVs[2 * i + 1] == "gt") {
+                tonemapMode_ = 7.0f;
             }
         } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.lwhite") {
             Lwhite_ = std::stof(attributeKVs[2 * i + 1]);
         } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.max_exposure") {
             maxExposure_ = std::stof(attributeKVs[2 * i + 1]);
+        } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.exposure_compensation") {
+            Renderer::options.exposureCompensation = std::stof(attributeKVs[2 * i + 1]);
         }
     }
 }
@@ -410,14 +414,15 @@ void ToneMappingModuleContext::render() {
     pc.epsilon = 1e-6f;
     pc.lowPercent = 0.005f;
     pc.highPercent = 0.99f;
-    pc.middleGrey = module->middleGrey_;
+    pc.middleGrey = Renderer::options.middleGrey;
     pc.dt = elapsedTime.count();
     pc.speedUp = module->speedUp_;
     pc.speedDown = module->speedDown_;
-    pc.minExposure = 1e-4f;
+    pc.minExposure = Renderer::options.minExposure;
     pc.maxExposure = Renderer::options.maxExposure;
     pc.tonemapMode = static_cast<float>(Renderer::options.tonemappingMode);
-    pc.Lwhite = module->Lwhite_;
+    pc.Lwhite = Renderer::options.Lwhite;
+    pc.exposureCompensation = Renderer::options.exposureCompensation;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ToneMappingModulePushConstant), &pc);

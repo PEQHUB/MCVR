@@ -18,8 +18,9 @@ struct ToneMappingModuleContext;
 struct ToneMappingModuleExposureData {
     float exposure;
     float avgLogLum;
-    float tonemapMode;  // 0.0 = PBR Neutral, 1.0 = Reinhard Extended
-    float Lwhite;       // White point for Reinhard Extended (default 4.0)
+    float tonemapMode;           // 0.0 = PBR Neutral, 1.0 = Reinhard Extended, etc.
+    float Lwhite;                // White point for Reinhard Extended (default 4.0)
+    float exposureCompensation;  // EV offset applied after auto-exposure
 };
 
 struct ToneMappingModulePushConstant {
@@ -32,10 +33,11 @@ struct ToneMappingModulePushConstant {
     float dt;          // 本帧 delta time（秒）
     float speedUp;     // 变亮适应速度（1/秒），例如 3.0
     float speedDown;   // 变暗适应速度（1/秒），例如 1.0
-    float minExposure; // 可选 clamp，例如 0.0001
-    float maxExposure; // 可选 clamp，例如 10000.0
-    float tonemapMode; // 0.0 = PBR Neutral, 1.0 = Reinhard Extended
-    float Lwhite;      // White point for Reinhard Extended (default 4.0)
+    float minExposure;          // clamp, e.g. 0.0001
+    float maxExposure;          // clamp, e.g. 10000.0
+    float tonemapMode;          // 0.0 = PBR Neutral, 1.0 = Reinhard Extended, etc.
+    float Lwhite;               // White point for Reinhard Extended (default 4.0)
+    float exposureCompensation; // EV offset applied after auto-exposure
 };
 
 class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingModule> {

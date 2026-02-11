@@ -11,6 +11,7 @@ layout(set = 0, binding = 2) buffer ExposureBuffer {
     float avgLogLum;
     float tonemapMode;
     float Lwhite;
+    float exposureCompensation;
 }
 expData;
 
@@ -28,6 +29,7 @@ layout(push_constant) uniform PushConstant {
     float maxExposure;
     float tonemapMode;
     float Lwhite;
+    float exposureCompensation;
 }
 pc;
 
@@ -87,7 +89,10 @@ void main() {
     float adapted = mix(prev, targetExposure, clamp(k, 0.0, 1.0));
 
     expData.avgLogLum = avgLogLum;
-    expData.exposure = clamp(adapted, pc.minExposure, pc.maxExposure);
+    // Apply EV compensation: multiply by 2^EV
+    float compensated = adapted * exp2(pc.exposureCompensation);
+    expData.exposure = clamp(compensated, pc.minExposure, pc.maxExposure);
     expData.tonemapMode = pc.tonemapMode;
     expData.Lwhite = pc.Lwhite;
+    expData.exposureCompensation = pc.exposureCompensation;
 }

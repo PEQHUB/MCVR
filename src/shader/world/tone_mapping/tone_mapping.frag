@@ -11,6 +11,7 @@ layout(set = 0, binding = 2) readonly buffer ExposureBuffer {
     float avgLogLum;
     float tonemapMode;
     float Lwhite;
+    float exposureCompensation;
 }
 gExposure;
 
@@ -123,9 +124,6 @@ vec3 AgXToneMap(vec3 color) {
 
     // Inverse transform
     color = agxTransformInv * color;
-
-    // Apply sRGB EOTF (gamma 2.2) for display-referred output
-    color = pow(max(color, vec3(0.0)), vec3(2.2));
 
     return color;
 }
@@ -290,6 +288,44 @@ vec3 Uncharted2ToneMap(vec3 color) {
 }
 
 // ============================================================================
+// Mode 7: Gran Turismo Tonemapper (Uchimura 2017, Polyphony Digital)
+// Hajime Uchimura, "HDR Theory and Practice", CEDEC 2017
+// Three-segment piecewise curve: toe (power) + linear + shoulder (exponential)
+// ============================================================================
+float GTTonemapChannel(float x) {
+    const float P = 1.0;    // Max brightness
+    const float a = 1.0;    // Contrast (linear slope)
+    const float m = 0.22;   // Linear section start
+    const float l = 0.4;    // Linear section length
+    const float c = 1.33;   // Black tightness (toe curvature)
+    const float b = 0.0;    // Pedestal (black lift)
+
+    float l0 = ((P - m) * l) / a;
+    float S0 = m + l0;
+    float S1 = m + a * l0;
+    float C2 = (a * P) / (P - S1);
+    float CP = -C2 / P;
+
+    float w0 = 1.0 - smoothstep(0.0, m, x);
+    float w2 = step(m + l0, x);
+    float w1 = 1.0 - w0 - w2;
+
+    float T = m * pow(x / m, c) + b;
+    float L = m + a * (x - m);
+    float S = P - (P - S1) * exp(CP * (x - S0));
+
+    return T * w0 + L * w1 + S * w2;
+}
+
+vec3 GTToneMap(vec3 color) {
+    return vec3(
+        GTTonemapChannel(color.r),
+        GTTonemapChannel(color.g),
+        GTTonemapChannel(color.b)
+    );
+}
+
+// ============================================================================
 // sRGB OETF (IEC 61966-2-1)
 // ============================================================================
 vec3 linearToSRGB(vec3 c) {
@@ -304,18 +340,24 @@ void main() {
 
     vec3 mapped;
     int mode = int(gExposure.tonemapMode + 0.5);
+    bool isDisplayReferred = false; // true if tonemapper outputs sRGB-like (skip linearToSRGB)
 
     if (mode == 0)       mapped = PBRNeutralToneMap(expColor);
     else if (mode == 1)  mapped = ReinhardExtendedToneMap(expColor, gExposure.Lwhite);
     else if (mode == 2)  mapped = ACESToneMap(expColor);
-    else if (mode == 3)  mapped = AgXToneMap(expColor);
+    else if (mode == 3) { mapped = AgXToneMap(expColor); isDisplayReferred = true; }
     else if (mode == 4)  mapped = LottesToneMap(expColor);
     else if (mode == 5)  mapped = FrostbiteToneMap(expColor);
     else if (mode == 6)  mapped = Uncharted2ToneMap(expColor);
+    else if (mode == 7)  mapped = GTToneMap(expColor);
     else                 mapped = ReinhardExtendedToneMap(expColor, gExposure.Lwhite);
 
     mapped = clamp(mapped, 0.0, 1.0);
-    mapped = linearToSRGB(mapped);
+
+    // AgX outputs display-referred (sRGB gamma baked in), others output scene-linear
+    if (!isDisplayReferred) {
+        mapped = linearToSRGB(mapped);
+    }
 
     fragColor = vec4(mapped, 1.0);
 }
