@@ -252,8 +252,13 @@ void main() {
         shadowRay.hitT = INF_DISTANCE;
         shadowRay.insideBoat = mainRay.insideBoat;
 
+        uint shadowMask = WORLD_MASK | CLOUD_MASK;
+        if (mainRay.isHand == 0) {
+            shadowMask |= PLAYER_MASK;  // world surfaces see player shadows; hand does not (prevents self-shadowing)
+        }
+
         traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT,
-                    WORLD_MASK | CLOUD_MASK, // masks — exclude PLAYER_MASK to prevent player body self-shadowing
+                    shadowMask,
                     0,                                     // sbtRecordOffset
                     0,                                     // sbtRecordStride
                     2,                                     // missIndex
