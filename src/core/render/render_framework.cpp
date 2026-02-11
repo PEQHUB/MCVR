@@ -84,27 +84,26 @@ void FrameworkContext::fuseFinal() {
     pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
-    // TODO: add to command buffer
-    VkImageBlit imageBlit{};
-    imageBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBlit.srcSubresource.mipLevel = 0;
-    imageBlit.srcSubresource.baseArrayLayer = 0;
-    imageBlit.srcSubresource.layerCount = 1;
-    imageBlit.srcOffsets[0] = {0, 0, 0};
-    imageBlit.srcOffsets[1] = {static_cast<int>(pipelineContext->uiModuleContext->overlayDrawColorImage->width()),
-                               static_cast<int>(pipelineContext->uiModuleContext->overlayDrawColorImage->height()), 1};
-    imageBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBlit.dstSubresource.mipLevel = 0;
-    imageBlit.dstSubresource.baseArrayLayer = 0;
-    imageBlit.dstSubresource.layerCount = 1;
-    imageBlit.dstOffsets[0] = {0, 0, 0};
-    imageBlit.dstOffsets[1] = {static_cast<int>(swapchainImage->width()), static_cast<int>(swapchainImage->height()),
-                               1};
+    // Raw copy (no sRGB conversion) — overlay is SRGB, swapchain is UNORM.
+    // vkCmdCopyImage treats both as raw bytes, preserving gamma-encoded values.
+    VkImageCopy imageCopy{};
+    imageCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    imageCopy.srcSubresource.mipLevel = 0;
+    imageCopy.srcSubresource.baseArrayLayer = 0;
+    imageCopy.srcSubresource.layerCount = 1;
+    imageCopy.srcOffset = {0, 0, 0};
+    imageCopy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    imageCopy.dstSubresource.mipLevel = 0;
+    imageCopy.dstSubresource.baseArrayLayer = 0;
+    imageCopy.dstSubresource.layerCount = 1;
+    imageCopy.dstOffset = {0, 0, 0};
+    imageCopy.extent = {pipelineContext->uiModuleContext->overlayDrawColorImage->width(),
+                        pipelineContext->uiModuleContext->overlayDrawColorImage->height(), 1};
 
-    vkCmdBlitImage(fuseCommandBuffer->vkCommandBuffer(),
+    vkCmdCopyImage(fuseCommandBuffer->vkCommandBuffer(),
                    pipelineContext->uiModuleContext->overlayDrawColorImage->vkImage(),
                    pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(), swapchainImage->vkImage(),
-                   swapchainImage->imageLayout(), 1, &imageBlit, VK_FILTER_LINEAR);
+                   swapchainImage->imageLayout(), 1, &imageCopy);
 
     fuseCommandBuffer->barriersBufferImage(
         {}, {{

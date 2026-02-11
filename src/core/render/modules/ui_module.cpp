@@ -117,9 +117,7 @@ void UIModule::initOverlayDrawImages() {
             framework->device(), framework->vma(), false, framework->swapchain()->vkExtent().width,
             framework->swapchain()->vkExtent().height, 1, VK_FORMAT_R8G8B8A8_SRGB,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-#ifdef USE_AMD
                 | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-#endif
         );
         overlayDrawDepthStencilImages_[i] = vk::DeviceLocalImage::create(
             framework->device(), framework->vma(), false, framework->swapchain()->vkExtent().width,
