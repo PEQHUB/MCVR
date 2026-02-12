@@ -29,6 +29,9 @@ class Swapchain : public SharedObject<Swapchain> {
     std::vector<std::shared_ptr<SwapchainImage>> &swapchainImages();
     uint32_t imageCount();
 
+    /// Returns true if the swapchain is currently using HDR10 (A2B10G10R10 + ST.2084)
+    bool isHDR() const { return hdrActive_; }
+
   private:
     std::shared_ptr<PhysicalDevice> physicalDevice_;
     std::shared_ptr<Device> device_;
@@ -41,6 +44,7 @@ class Swapchain : public SharedObject<Swapchain> {
     VkExtent2D maxExtent_;
     VkExtent2D minExtent_;
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
+    bool hdrActive_ = false;  // true when HDR10 format was successfully selected
 
     std::vector<std::shared_ptr<SwapchainImage>> swapchainImages_;
 };

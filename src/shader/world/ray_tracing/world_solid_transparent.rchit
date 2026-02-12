@@ -226,7 +226,7 @@ void main() {
         calculateNormal(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, mat.normal, viewDir);
 
     // add glowing radiance
-    float factor = mainRay.index == 0 ? 1.0 : 16.0;
+    float factor = mainRay.index == 0 ? 1.0 : 16.0 * skyUBO.hdrRadianceScale;
     vec3 emissionRadiance = factor * tint * mat.emission * mainRay.throughput;
     emissionRadiance += tint * albedoEmission * mainRay.throughput;
     mainRay.radiance += emissionRadiance;

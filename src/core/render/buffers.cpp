@@ -380,6 +380,16 @@ void Buffers::setAndUploadSkyUniformBuffer(vk::Data::SkyUBO &ubo) {
     ubo.sunRadiance = glm::vec3(16);
     ubo.moonRadiance = glm::vec3(0.4, 0.5, 1);
 
+    // HDR radiance scale: amplifies scene lighting when HDR is active
+    // SDR: 1.0 (no change), HDR: peak/paperWhite ratio for headroom
+    float hdrRadianceScale = 1.0f;
+    if (Renderer::options.hdrEnabled) {
+        hdrRadianceScale = Renderer::options.hdrPeakNits / Renderer::options.hdrPaperWhiteNits;
+        ubo.sunRadiance *= hdrRadianceScale;
+        ubo.moonRadiance *= hdrRadianceScale;
+    }
+    ubo.hdrRadianceScale = hdrRadianceScale;
+
     if (skyUniformBuffer_[context->frameIndex] == nullptr) {
         skyUniformBuffer_[context->frameIndex] =
             vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::SkyUBO),

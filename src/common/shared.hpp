@@ -264,7 +264,7 @@ namespace Data {
         T_UINT moonPhase;
 
         T_FLOAT rainGradient;
-        T_FLOAT pad0;
+        T_FLOAT hdrRadianceScale;
         T_FLOAT pad1;
         T_FLOAT pad2;
 

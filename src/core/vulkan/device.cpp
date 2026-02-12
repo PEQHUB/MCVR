@@ -33,7 +33,9 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                                                    VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME,
                                                    VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
                                                    VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME,
-                                                   VK_KHR_MAINTENANCE_5_EXTENSION_NAME};
+                                                   VK_KHR_MAINTENANCE_5_EXTENSION_NAME,
+                                                   // HDR10: enables vkSetHdrMetadataEXT for SMPTE ST.2086 mastering display metadata
+                                                   VK_EXT_HDR_METADATA_EXTENSION_NAME};
 
     std::vector<VkExtensionProperties> dlssExtensions;
     NVSDK_NGX_Result dlssResult =
