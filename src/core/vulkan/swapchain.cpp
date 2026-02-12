@@ -33,9 +33,14 @@ VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &av
         return {VK_FORMAT_R8G8B8A8_UNORM, VK_COLORSPACE_SRGB_NONLINEAR_KHR};
     }
 
-    // Or go with the standard format - if available
+    // Prefer R8G8B8A8_UNORM (Windows/NVIDIA default)
     for (const auto &availableSurfaceFormat : availableFormats) {
         if (availableSurfaceFormat.format == VK_FORMAT_R8G8B8A8_UNORM) { return availableSurfaceFormat; }
+    }
+
+    // Accept B8G8R8A8_UNORM (Linux/AMD/Intel common default)
+    for (const auto &availableSurfaceFormat : availableFormats) {
+        if (availableSurfaceFormat.format == VK_FORMAT_B8G8R8A8_UNORM) { return availableSurfaceFormat; }
     }
 
     // Or fall back to the first available one

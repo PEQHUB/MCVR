@@ -151,26 +151,53 @@ void FrameworkContext::fuseFinal() {
         pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
-        // SDR: overlay is SRGB, swapchain is UNORM — both R8G8B8A8.
-        // vkCmdCopyImage treats both as raw bytes, preserving gamma-encoded values.
-        VkImageCopy imageCopy{};
-        imageCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        imageCopy.srcSubresource.mipLevel = 0;
-        imageCopy.srcSubresource.baseArrayLayer = 0;
-        imageCopy.srcSubresource.layerCount = 1;
-        imageCopy.srcOffset = {0, 0, 0};
-        imageCopy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        imageCopy.dstSubresource.mipLevel = 0;
-        imageCopy.dstSubresource.baseArrayLayer = 0;
-        imageCopy.dstSubresource.layerCount = 1;
-        imageCopy.dstOffset = {0, 0, 0};
-        imageCopy.extent = {pipelineContext->uiModuleContext->overlayDrawColorImage->width(),
-                            pipelineContext->uiModuleContext->overlayDrawColorImage->height(), 1};
+#if !defined(_WIN32)
+        // Linux: swapchain may be B8G8R8A8 instead of R8G8B8A8. Use vkCmdBlitImage
+        // for automatic channel swizzle when formats differ.
+        VkFormat swapFormat = swapchainImage->vkFormat();
+        bool needBlit = (swapFormat != VK_FORMAT_R8G8B8A8_UNORM &&
+                         swapFormat != VK_FORMAT_R8G8B8A8_SRGB);
 
-        vkCmdCopyImage(fuseCommandBuffer->vkCommandBuffer(),
-                       pipelineContext->uiModuleContext->overlayDrawColorImage->vkImage(),
-                       pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(), swapchainImage->vkImage(),
-                       swapchainImage->imageLayout(), 1, &imageCopy);
+        if (needBlit) {
+            VkImageBlit blit{};
+            blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blit.srcOffsets[0] = {0, 0, 0};
+            blit.srcOffsets[1] = {(int32_t)pipelineContext->uiModuleContext->overlayDrawColorImage->width(),
+                                  (int32_t)pipelineContext->uiModuleContext->overlayDrawColorImage->height(), 1};
+            blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blit.dstOffsets[0] = {0, 0, 0};
+            blit.dstOffsets[1] = {(int32_t)swapchainImage->width(),
+                                  (int32_t)swapchainImage->height(), 1};
+
+            vkCmdBlitImage(fuseCommandBuffer->vkCommandBuffer(),
+                           pipelineContext->uiModuleContext->overlayDrawColorImage->vkImage(),
+                           pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(),
+                           swapchainImage->vkImage(),
+                           swapchainImage->imageLayout(),
+                           1, &blit, VK_FILTER_NEAREST);
+        } else
+#endif
+        {
+            // Windows: always R8G8B8A8 — raw byte copy preserves gamma-encoded values.
+            VkImageCopy imageCopy{};
+            imageCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            imageCopy.srcSubresource.mipLevel = 0;
+            imageCopy.srcSubresource.baseArrayLayer = 0;
+            imageCopy.srcSubresource.layerCount = 1;
+            imageCopy.srcOffset = {0, 0, 0};
+            imageCopy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            imageCopy.dstSubresource.mipLevel = 0;
+            imageCopy.dstSubresource.baseArrayLayer = 0;
+            imageCopy.dstSubresource.layerCount = 1;
+            imageCopy.dstOffset = {0, 0, 0};
+            imageCopy.extent = {pipelineContext->uiModuleContext->overlayDrawColorImage->width(),
+                                pipelineContext->uiModuleContext->overlayDrawColorImage->height(), 1};
+
+            vkCmdCopyImage(fuseCommandBuffer->vkCommandBuffer(),
+                           pipelineContext->uiModuleContext->overlayDrawColorImage->vkImage(),
+                           pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(), swapchainImage->vkImage(),
+                           swapchainImage->imageLayout(), 1, &imageCopy);
+        }
 
         fuseCommandBuffer->barriersBufferImage(
             {}, {{
