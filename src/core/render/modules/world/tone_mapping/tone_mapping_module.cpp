@@ -408,9 +408,11 @@ void ToneMappingModuleContext::render() {
     std::chrono::duration<double> elapsedTime = currentTimePoint - module->lastTimePoint_;
     module->lastTimePoint_ = currentTimePoint;
 
+    bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
+
     ToneMappingModulePushConstant pc{};
     pc.log2Min = -12.0f;
-    pc.log2Max = Renderer::options.hdrEnabled ? +8.0f : +4.0f;
+    pc.log2Max = hdrActive ? +8.0f : +4.0f;
     pc.epsilon = 1e-6f;
     pc.lowPercent = 0.005f;
     pc.highPercent = 0.99f;
@@ -420,11 +422,13 @@ void ToneMappingModuleContext::render() {
     pc.speedDown = module->speedDown_;
     pc.minExposure = Renderer::options.minExposure;
     pc.maxExposure = Renderer::options.maxExposure;
-    pc.tonemapMode = static_cast<float>(Renderer::options.tonemappingMode);
+    float effectiveTonemapMode =
+        hdrActive ? 2.0f : static_cast<float>(Renderer::options.tonemappingMode);
+    pc.tonemapMode = effectiveTonemapMode;
     pc.Lwhite = Renderer::options.Lwhite;
     pc.exposureCompensation = Renderer::options.exposureCompensation;
     // HDR10 fields
-    pc.hdrEnabled = Renderer::options.hdrEnabled ? 1.0f : 0.0f;
+    pc.hdrEnabled = hdrActive ? 1.0f : 0.0f;
     pc.peakNits = Renderer::options.hdrPeakNits;
     pc.paperWhiteNits = Renderer::options.hdrPaperWhiteNits;
     pc.saturation = Renderer::options.saturation;

@@ -69,4 +69,6 @@ void main() {
 
     float linearDepth = -(mat4(mat3(worldUBO.cameraEffectedViewMat)) * vec4(pos, 1.0)).z;
     gl_FragDepth = clamp(linearDepth / 1000.0, 0.0, 1.0);
+
+    fragColor.a = 1.0;
 }

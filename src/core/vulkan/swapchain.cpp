@@ -26,19 +26,33 @@ vk::Swapchain::Swapchain(std::shared_ptr<PhysicalDevice> physicalDevice,
     reconstruct();
 }
 
-// SDR surface format selection (existing logic, untouched)
+// SDR surface format selection
 VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &availableFormats) {
     // We can either choose any format
     if (availableFormats.size() == 1 && availableFormats[0].format == VK_FORMAT_UNDEFINED) {
         return {VK_FORMAT_R8G8B8A8_UNORM, VK_COLORSPACE_SRGB_NONLINEAR_KHR};
     }
 
-    // Prefer R8G8B8A8_UNORM (Windows/NVIDIA default)
+    // Prefer SDR sRGB colorspace first to avoid washed-out output.
+    for (const auto &availableSurfaceFormat : availableFormats) {
+        if (availableSurfaceFormat.format == VK_FORMAT_R8G8B8A8_UNORM
+            && availableSurfaceFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            return availableSurfaceFormat;
+        }
+    }
+
+    for (const auto &availableSurfaceFormat : availableFormats) {
+        if (availableSurfaceFormat.format == VK_FORMAT_B8G8R8A8_UNORM
+            && availableSurfaceFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            return availableSurfaceFormat;
+        }
+    }
+
+    // Fallback to same formats with any colorspace.
     for (const auto &availableSurfaceFormat : availableFormats) {
         if (availableSurfaceFormat.format == VK_FORMAT_R8G8B8A8_UNORM) { return availableSurfaceFormat; }
     }
 
-    // Accept B8G8R8A8_UNORM (Linux/AMD/Intel common default)
     for (const auto &availableSurfaceFormat : availableFormats) {
         if (availableSurfaceFormat.format == VK_FORMAT_B8G8R8A8_UNORM) { return availableSurfaceFormat; }
     }
@@ -156,6 +170,10 @@ void vk::Swapchain::reconstruct() {
     } else {
         surfaceFormat_ = chooseSurfaceFormat(surfaceFormats);
     }
+
+    swapchainCout() << "Selected surface format=" << surfaceFormat_.format
+                    << " colorSpace=" << surfaceFormat_.colorSpace
+                    << " hdrActive=" << (hdrActive_ ? 1 : 0) << std::endl;
 
     // Find supported present modes
     uint32_t presentModeCount;
@@ -303,4 +321,35 @@ std::vector<std::shared_ptr<vk::SwapchainImage>> &vk::Swapchain::swapchainImages
 
 uint32_t vk::Swapchain::imageCount() {
     return imageCount_;
+}
+
+bool vk::Swapchain::isHDRSupported() const {
+    uint32_t formatCount = 0;
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_->vkPhysicalDevice(), window_->vkSurface(),
+                                             &formatCount, nullptr) != VK_SUCCESS
+        || formatCount == 0) {
+        return false;
+    }
+
+    std::vector<VkSurfaceFormatKHR> surfaceFormats(formatCount);
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_->vkPhysicalDevice(), window_->vkSurface(),
+                                             &formatCount, surfaceFormats.data()) != VK_SUCCESS) {
+        return false;
+    }
+
+    for (const auto &fmt : surfaceFormats) {
+        if (fmt.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32
+            && fmt.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+            return true;
+        }
+    }
+
+    for (const auto &fmt : surfaceFormats) {
+        if (fmt.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32
+            && fmt.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+            return true;
+        }
+    }
+
+    return false;
 }

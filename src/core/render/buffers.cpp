@@ -382,8 +382,9 @@ void Buffers::setAndUploadSkyUniformBuffer(vk::Data::SkyUBO &ubo) {
 
     // HDR radiance scale: amplifies scene lighting when HDR is active
     // SDR: 1.0 (no change), HDR: peak/paperWhite ratio for headroom
+    bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
     float hdrRadianceScale = 1.0f;
-    if (Renderer::options.hdrEnabled) {
+    if (hdrActive) {
         hdrRadianceScale = Renderer::options.hdrPeakNits / Renderer::options.hdrPaperWhiteNits;
         ubo.sunRadiance *= hdrRadianceScale;
         ubo.moonRadiance *= hdrRadianceScale;
