@@ -26,6 +26,7 @@ vk::Swapchain::Swapchain(std::shared_ptr<PhysicalDevice> physicalDevice,
     reconstruct();
 }
 
+// SDR surface format selection (existing logic, untouched)
 VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &availableFormats) {
     // We can either choose any format
     if (availableFormats.size() == 1 && availableFormats[0].format == VK_FORMAT_UNDEFINED) {
@@ -39,6 +40,31 @@ VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &av
 
     // Or fall back to the first available one
     return availableFormats[0];
+}
+
+// HDR10 surface format selection — returns {format, found} pair
+// Only called when Renderer::options.hdrEnabled is true
+std::pair<VkSurfaceFormatKHR, bool> chooseHDRSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &availableFormats) {
+    // Look for A2B10G10R10_UNORM_PACK32 + HDR10_ST2084
+    for (const auto &fmt : availableFormats) {
+        if (fmt.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
+            fmt.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+            swapchainCout() << "HDR10 format found: A2B10G10R10_UNORM + HDR10_ST2084" << std::endl;
+            return {fmt, true};
+        }
+    }
+
+    // Fallback: try A2R10G10B10 variant (some drivers report this instead)
+    for (const auto &fmt : availableFormats) {
+        if (fmt.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32 &&
+            fmt.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+            swapchainCout() << "HDR10 format found: A2R10G10B10_UNORM + HDR10_ST2084" << std::endl;
+            return {fmt, true};
+        }
+    }
+
+    swapchainCerr() << "HDR10 format not available, falling back to SDR" << std::endl;
+    return {{}, false};
 }
 
 VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR &surfaceCapabilities, uint32_t width, uint32_t height) {
@@ -112,7 +138,19 @@ void vk::Swapchain::reconstruct() {
                         << " ColorSpace: " << surfaceFormats[i].colorSpace << std::endl;
     }
 #endif
-    surfaceFormat_ = chooseSurfaceFormat(surfaceFormats);
+    // HDR10 format selection (when enabled and supported), else SDR (existing path)
+    hdrActive_ = false;
+    if (Renderer::options.hdrEnabled) {
+        auto [hdrFormat, found] = chooseHDRSurfaceFormat(surfaceFormats);
+        if (found) {
+            surfaceFormat_ = hdrFormat;
+            hdrActive_ = true;
+        } else {
+            surfaceFormat_ = chooseSurfaceFormat(surfaceFormats);
+        }
+    } else {
+        surfaceFormat_ = chooseSurfaceFormat(surfaceFormats);
+    }
 
     // Find supported present modes
     uint32_t presentModeCount;
@@ -176,6 +214,25 @@ void vk::Swapchain::reconstruct() {
     }
 
     if (oldSwapchain != VK_NULL_HANDLE) { vkDestroySwapchainKHR(device_->vkDevice(), oldSwapchain, nullptr); }
+
+    // Set HDR metadata when HDR10 is active (SMPTE ST.2086 mastering display + CTA 861.3 content light)
+    if (hdrActive_ && vkSetHdrMetadataEXT) {
+        VkHdrMetadataEXT hdrMetadata = {};
+        hdrMetadata.sType = VK_STRUCTURE_TYPE_HDR_METADATA_EXT;
+        // BT.2020 display primaries
+        hdrMetadata.displayPrimaryRed   = {0.708f, 0.292f};
+        hdrMetadata.displayPrimaryGreen = {0.170f, 0.797f};
+        hdrMetadata.displayPrimaryBlue  = {0.131f, 0.046f};
+        hdrMetadata.whitePoint          = {0.3127f, 0.3290f};  // D65
+        hdrMetadata.maxLuminance        = Renderer::options.hdrPeakNits;
+        hdrMetadata.minLuminance        = 0.0001f;
+        hdrMetadata.maxContentLightLevel     = static_cast<float>(Renderer::options.hdrPeakNits);
+        hdrMetadata.maxFrameAverageLightLevel = 200.0f;
+
+        vkSetHdrMetadataEXT(device_->vkDevice(), 1, &swapchain_, &hdrMetadata);
+        swapchainCout() << "HDR metadata set: peak=" << Renderer::options.hdrPeakNits
+                        << " nits, paper white=" << Renderer::options.hdrPaperWhiteNits << " nits" << std::endl;
+    }
 
     // Store the images used by the swap chain
     // Note: these are the images that swap chain image indices refer to

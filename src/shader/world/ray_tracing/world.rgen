@@ -413,7 +413,8 @@ void main() {
 
         // sightly make the first non-mirror hit brighter
         if (psrDepth == 1) {
-            float ambientFactor = (isHand > 0) ? 0.12 : 0.03;
+            // Remove artificial ambient light for pitch black shadows
+            float ambientFactor = 0.0;
             mainRay.radiance += ambientFactor * mainRay.albedoValue.rgb * mainRay.albedoValue.a * mainRay.throughput;
         }
 
@@ -422,7 +423,8 @@ void main() {
         firstLobeType = mainRay.lobeType;
         isFirstHitNoisy = mainRay.noisy > 0;
         if (isFirstHitNoisy) {
-            firstHitEmission = 16 * mainRay.albedoValue.rgb * firstHitMat.emission;
+            // Boost emission intensity to 50.0 for visible glow in HDR
+            firstHitEmission = 50.0 * mainRay.albedoValue.rgb * firstHitMat.emission;
             if (mainRay.lobeType == 0 || mainRay.lobeType == 2) { // Diffuse OR Refraction
                 isFirstHitDiffuse = true;
                 firstHitDirectRadiance = mainRay.directLightRadiance;

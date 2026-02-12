@@ -12,6 +12,11 @@ layout(set = 0, binding = 2) buffer ExposureBuffer {
     float tonemapMode;
     float Lwhite;
     float exposureCompensation;
+    // HDR10 fields (appended — SDR path ignores these)
+    float hdrEnabled;
+    float peakNits;
+    float paperWhiteNits;
+    float saturation;
 }
 expData;
 
@@ -30,6 +35,11 @@ layout(push_constant) uniform PushConstant {
     float tonemapMode;
     float Lwhite;
     float exposureCompensation;
+    // HDR10 fields
+    float hdrEnabled;
+    float peakNits;
+    float paperWhiteNits;
+    float saturation;
 }
 pc;
 
@@ -95,4 +105,9 @@ void main() {
     expData.tonemapMode = pc.tonemapMode;
     expData.Lwhite = pc.Lwhite;
     expData.exposureCompensation = pc.exposureCompensation;
+    // Pass through HDR10 settings to fragment shader
+    expData.hdrEnabled = pc.hdrEnabled;
+    expData.peakNits = pc.peakNits;
+    expData.paperWhiteNits = pc.paperWhiteNits;
+    expData.saturation = pc.saturation;
 }

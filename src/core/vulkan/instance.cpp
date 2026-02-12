@@ -89,6 +89,10 @@ vk::Instance::Instance() {
     // repeated for dlss, but make sure
     extStorage.insert(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 
+    // HDR10 support: enables HDR color spaces like VK_COLOR_SPACE_HDR10_ST2084_EXT
+    // in vkGetPhysicalDeviceSurfaceFormatsKHR results
+    extStorage.insert(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+
     // if (ENABLE_DEBUGGING) { push_ext(VK_EXT_DEBUG_REPORT_EXTENSION_NAME); }
 
     // Check for extensions

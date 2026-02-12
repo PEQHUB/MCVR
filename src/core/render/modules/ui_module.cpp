@@ -499,7 +499,13 @@ UIModuleContext::UIModuleContext(std::shared_ptr<FrameworkContext> context, std:
     overlayDepthBiasSlopeFactor = {0.0, 0.0, 0.0};
     overlayLineWidth = 1.0;
 
-    overlayClearColors = {1.0, 1.0, 1.0, 1.0};
+    // HDR: transparent black so composite shader's alpha test works correctly.
+    // SDR: opaque white (original behavior — world is copied underneath).
+    if (Renderer::options.hdrEnabled) {
+        overlayClearColors = {0.0f, 0.0f, 0.0f, 0.0f};
+    } else {
+        overlayClearColors = {1.0f, 1.0f, 1.0f, 1.0f};
+    }
     overlayClearDepth = 1.0;
     overlayClearStencil = 0xffffffff;
 }
@@ -975,6 +981,16 @@ void UIModuleContext::setOverlayClearColor(float red, float green, float blue, f
     auto framework = context->framework.lock();
 
     if (!framework->isRunning()) return;
+
+    // In HDR mode, force fully transparent overlay to prevent tinted compositing
+    // Java-side may set opaque clear colors that interfere with HDR alpha blending
+    if (Renderer::options.hdrEnabled) {
+        overlayClearColors[0] = 0.0f;
+        overlayClearColors[1] = 0.0f;
+        overlayClearColors[2] = 0.0f;
+        overlayClearColors[3] = 0.0f;
+        return;
+    }
 
     overlayClearColors[0] = red;
     overlayClearColors[1] = green;

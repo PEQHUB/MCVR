@@ -25,6 +25,7 @@ class WorldModule;
 class WorldModuleContext;
 class UIModule;
 class UIModuleContext;
+class HdrCompositePass;
 
 class WorldPipeline;
 struct WorldPipelineContext;
@@ -109,6 +110,7 @@ class Pipeline : public SharedObject<Pipeline> {
 
     std::shared_ptr<UIModule> uiModule();
     std::shared_ptr<WorldPipeline> worldPipeline();
+    std::shared_ptr<HdrCompositePass> hdrCompositePass();
 
     std::shared_ptr<WorldPipelineBlueprint> worldPipelineBlueprint();
 
@@ -119,6 +121,7 @@ class Pipeline : public SharedObject<Pipeline> {
 
     std::shared_ptr<UIModule> uiModule_;
     std::shared_ptr<WorldPipeline> worldPipeline_;
+    std::shared_ptr<HdrCompositePass> hdrCompositePass_;  // HDR UI composite (only when HDR active)
 
     std::shared_ptr<WorldPipelineBlueprint> worldPipelineBlueprint_;
 

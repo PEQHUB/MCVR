@@ -32,7 +32,14 @@ struct Options {
     float exposureCompensation = 0.0f; // EV offset (-3 to +3)
     float middleGrey = 0.18f;          // Middle grey point (0.01 to 0.50)
     float Lwhite = 4.0f;               // White point for Reinhard Extended
+    float saturation = 1.0f;           // Saturation/Vibrance boost (0.0 to 2.0)
     uint32_t upscalerPreset = 5; // DLSS: Preset E (latest transformer). Generic for future upscalers.
+
+    // HDR10 output settings (default: disabled, pure SDR)
+    bool hdrEnabled = false;
+    float hdrPeakNits = 1000.0f;          // Display peak brightness (400–10000 nits)
+    float hdrPaperWhiteNits = 203.0f;     // ITU-R BT.2408 reference white
+    float hdrUiBrightnessNits = 100.0f;   // UI brightness in HDR mode (50–300 nits)
 };
 
 class Renderer : public Singleton<Renderer> {

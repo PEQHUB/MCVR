@@ -95,3 +95,37 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssPres
     Renderer::options.upscalerPreset = static_cast<uint32_t>(std::clamp(preset, 0, 6));
     if (write) Renderer::options.needRecreate = true;
 }
+
+// --- HDR10 Output ---
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.hdrEnabled = enabled;
+    // Toggling HDR requires swapchain recreation (format + color space change)
+    if (write) Renderer::options.needRecreate = true;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrPeakNits(
+    JNIEnv *, jclass, jint nits, jboolean write) {
+    Renderer::options.hdrPeakNits = static_cast<float>(nits);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrPaperWhiteNits(
+    JNIEnv *, jclass, jint nits, jboolean write) {
+    Renderer::options.hdrPaperWhiteNits = static_cast<float>(nits);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrUiBrightnessNits(
+    JNIEnv *, jclass, jint nits, jboolean write) {
+    Renderer::options.hdrUiBrightnessNits = static_cast<float>(nits);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSaturation(
+    JNIEnv *, jclass, jfloat saturation, jboolean write) {
+    Renderer::options.saturation = saturation;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeRebuildChunks(
+    JNIEnv *, jclass) {
+    Renderer::instance().world()->chunks()->resetScheduler();
+}

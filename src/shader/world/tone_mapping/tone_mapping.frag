@@ -12,6 +12,11 @@ layout(set = 0, binding = 2) readonly buffer ExposureBuffer {
     float tonemapMode;
     float Lwhite;
     float exposureCompensation;
+    // HDR10 fields (appended — SDR path ignores these)
+    float hdrEnabled;       // 0.0 = SDR, 1.0 = HDR10
+    float peakNits;         // Display peak brightness (e.g. 1000.0)
+    float paperWhiteNits;   // ITU-R BT.2408 reference white (e.g. 203.0)
+    float saturation;       // Saturation boost (1.0 = neutral)
 }
 gExposure;
 
@@ -326,6 +331,96 @@ vec3 GTToneMap(vec3 color) {
 }
 
 // ============================================================================
+// HDR Mode 0: Hermite Spline Reinhard (BT.2390-aligned)
+// Luminance-based Reinhard with cubic Hermite spline knee for smooth
+// highlight rolloff. Preserves chrominance ratios.
+// References: BT.2390-7, Reinhard et al. 2002
+// ============================================================================
+vec3 HermiteSplineReinhardToneMap(vec3 color, float Lw) {
+    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722); // BT.709
+    float L = dot(color, LUMA);
+    if (L < 1e-6) return color;
+
+    // Basic Reinhard with white point
+    float Lw2 = Lw * Lw;
+    float Lr = L * (1.0 + L / Lw2) / (1.0 + L);
+
+    // Hermite spline knee: smooth transition in highlight region
+    // Knee region: [kneeStart, kneeEnd] gets smooth cubic interpolation
+    float kneeStart = 0.5 * Lw;
+    float kneeEnd = Lw;
+
+    if (L > kneeStart && L < kneeEnd) {
+        float t = (L - kneeStart) / (kneeEnd - kneeStart);
+        float t2 = t * t;
+        float t3 = t2 * t;
+
+        // Hermite basis functions
+        float h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+        float h10 = t3 - 2.0 * t2 + t;
+        float h01 = -2.0 * t3 + 3.0 * t2;
+        float h11 = t3 - t2;
+
+        // Endpoint values from Reinhard formula
+        float p0 = kneeStart * (1.0 + kneeStart / Lw2) / (1.0 + kneeStart);
+        float p1 = kneeEnd * (1.0 + kneeEnd / Lw2) / (1.0 + kneeEnd);
+
+        // Tangents: derivative of Reinhard at endpoints, scaled by interval width
+        float span = kneeEnd - kneeStart;
+        float m0 = (1.0 + 2.0 * kneeStart / Lw2) / ((1.0 + kneeStart) * (1.0 + kneeStart)) * span;
+        float m1 = (1.0 + 2.0 * kneeEnd / Lw2) / ((1.0 + kneeEnd) * (1.0 + kneeEnd)) * span;
+
+        Lr = h00 * p0 + h10 * m0 + h01 * p1 + h11 * m1;
+    }
+
+    return color * (Lr / L);
+}
+
+// ============================================================================
+// HDR Mode 2: BT.2390 EETF (ITU-R BT.2390-7)
+// Electrical-Electrical Transfer Function for HDR display adaptation.
+// Maps scene luminance to display luminance using Hermite spline knee.
+// Input: exposed linear RGB. Output: linear RGB scaled for HDR headroom.
+// ============================================================================
+vec3 BT2390EETF(vec3 color, float maxLum) {
+    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722); // BT.709
+    float L = dot(color, LUMA);
+    if (L < 1e-6) return color;
+
+    // Normalize luminance to [0, maxLum] range
+    float Ln = min(L / maxLum, 1.0);
+
+    // BT.2390 knee parameters
+    // ks = knee start point (normalized), typically 1.5*maxLum - 0.5 mapped to [0,1]
+    float ks = max(1.5 * maxLum - 0.5, 0.0) / maxLum;
+    ks = clamp(ks, 0.0, 0.99);
+
+    float b = Ln; // Default: passthrough below knee
+
+    if (Ln >= ks) {
+        // Hermite spline compression above knee
+        float t = (Ln - ks) / (1.0 - ks);
+        float t2 = t * t;
+        float t3 = t2 * t;
+
+        // Spline from (ks, ks) to (1.0, 1.0) with controlled tangents
+        float p0 = ks;
+        float p1 = 1.0;
+        float m0 = 1.0 * (1.0 - ks);  // tangent matches linear below knee
+        float m1 = 0.0;                 // zero tangent at peak (soft rolloff)
+
+        b = (2.0 * t3 - 3.0 * t2 + 1.0) * p0
+          + (t3 - 2.0 * t2 + t) * m0
+          + (-2.0 * t3 + 3.0 * t2) * p1
+          + (t3 - t2) * m1;
+    }
+
+    // Scale back and apply ratio to preserve chrominance
+    float Lout = b * maxLum;
+    return color * (Lout / L);
+}
+
+// ============================================================================
 // sRGB OETF (IEC 61966-2-1)
 // ============================================================================
 vec3 linearToSRGB(vec3 c) {
@@ -334,30 +429,149 @@ vec3 linearToSRGB(vec3 c) {
     return mix(lo, hi, step(vec3(0.0031308), c));
 }
 
+// ============================================================================
+// HDR10 Output Support (ST.2084 PQ + BT.2020)
+// ============================================================================
+
+// BT.709 → BT.2020 color matrix (ITU-R BT.2087-0, column-major for GLSL)
+const mat3 BT709_TO_BT2020 = mat3(
+    0.6274, 0.0691, 0.0164,
+    0.3293, 0.9195, 0.0880,
+    0.0433, 0.0113, 0.8956
+);
+
+// Dedicated PQ OETF for HDR10 output — input is normalized [0,1] where 1.0 = 10000 nits
+// (Different from the existing PQ_OETF which is used for ICtCp with /100 normalization)
+vec3 PQ_OETF_HDR10(vec3 L) {
+    const float m1 = 0.1593017578125;    // 2610 / 16384
+    const float m2 = 78.84375;            // 2523 / 32 * 128
+    const float c1 = 0.8359375;           // 3424 / 4096
+    const float c2 = 18.8515625;          // 2413 / 128
+    const float c3 = 18.6875;             // 2392 / 128
+
+    vec3 Lm1 = pow(max(L, vec3(0.0)), vec3(m1));
+    return pow((c1 + c2 * Lm1) / (1.0 + c3 * Lm1), vec3(m2));
+}
+
+// Wang hash: fast integer hash for spatial dithering (self-contained, no buffers needed)
+uint wangHash(uint seed) {
+    seed = (seed ^ 61u) ^ (seed >> 16u);
+    seed *= 9u;
+    seed = seed ^ (seed >> 4u);
+    seed *= 0x27d4eb2du;
+    seed = seed ^ (seed >> 15u);
+    return seed;
+}
+
 void main() {
     vec3 hdr = texture(HDR, texCoord).rgb;
     vec3 expColor = hdr * gExposure.exposure;
 
-    vec3 mapped;
-    int mode = int(gExposure.tonemapMode + 0.5);
-    bool isDisplayReferred = false; // true if tonemapper outputs sRGB-like (skip linearToSRGB)
+    // HDR detection used by both saturation and tonemapping
+    bool isHDR = gExposure.hdrEnabled > 0.5;
 
-    if (mode == 0)       mapped = PBRNeutralToneMap(expColor);
-    else if (mode == 1)  mapped = ReinhardExtendedToneMap(expColor, gExposure.Lwhite);
-    else if (mode == 2)  mapped = ACESToneMap(expColor);
-    else if (mode == 3) { mapped = AgXToneMap(expColor); isDisplayReferred = true; }
-    else if (mode == 4)  mapped = LottesToneMap(expColor);
-    else if (mode == 5)  mapped = FrostbiteToneMap(expColor);
-    else if (mode == 6)  mapped = Uncharted2ToneMap(expColor);
-    else if (mode == 7)  mapped = GTToneMap(expColor);
-    else                 mapped = ReinhardExtendedToneMap(expColor, gExposure.Lwhite);
-
-    mapped = clamp(mapped, 0.0, 1.0);
-
-    // AgX outputs display-referred (sRGB gamma baked in), others output scene-linear
-    if (!isDisplayReferred) {
-        mapped = pow(mapped, vec3(1.0 / 2.2));
+    // Apply Saturation/Vibrance boost (HDR-only, controlled by slider)
+    if (isHDR && gExposure.saturation != 1.0) {
+        const vec3 lumaWeight = vec3(0.2126, 0.7152, 0.0722);
+        float luma = dot(expColor, lumaWeight);
+        expColor = mix(vec3(luma), expColor, gExposure.saturation);
     }
 
-    fragColor = vec4(mapped, 1.0);
+    vec3 mapped;
+    int mode = int(gExposure.tonemapMode + 0.5);
+    bool isDisplayReferred = false;
+
+    float paperWhite = gExposure.paperWhiteNits;
+    float peak = gExposure.peakNits;
+
+    // HDR headroom: highlights can be this many times brighter than paper white
+    float hdrHeadroom = isHDR ? (peak / paperWhite) : 1.0;
+
+    // Reinhard Extended in HDR: widen Lwhite so output exceeds 1.0 for highlights
+    float effectiveLwhite = isHDR ? max(gExposure.Lwhite, hdrHeadroom) : gExposure.Lwhite;
+
+    if (isHDR) {
+        // HDR mode: 4 HDR-capable operators only
+        // 0 = Hermite Spline Reinhard, 1 = Reinhard Extended, 2 = BT.2390 EETF, 3 = Frostbite
+        if (mode == 0)       mapped = HermiteSplineReinhardToneMap(expColor, effectiveLwhite);
+        else if (mode == 1)  mapped = ReinhardExtendedToneMap(expColor, effectiveLwhite);
+        else if (mode == 2)  mapped = BT2390EETF(expColor, hdrHeadroom);
+        else if (mode == 3)  mapped = FrostbiteToneMap(expColor);
+        else                 mapped = HermiteSplineReinhardToneMap(expColor, effectiveLwhite);
+    } else {
+        // SDR mode: all 8 original operators unchanged
+        if (mode == 0)       mapped = PBRNeutralToneMap(expColor);
+        else if (mode == 1)  mapped = ReinhardExtendedToneMap(expColor, effectiveLwhite);
+        else if (mode == 2)  mapped = ACESToneMap(expColor);
+        else if (mode == 3) { mapped = AgXToneMap(expColor); isDisplayReferred = true; }
+        else if (mode == 4)  mapped = LottesToneMap(expColor);
+        else if (mode == 5)  mapped = FrostbiteToneMap(expColor);
+        else if (mode == 6)  mapped = Uncharted2ToneMap(expColor);
+        else if (mode == 7)  mapped = GTToneMap(expColor);
+        else                 mapped = ReinhardExtendedToneMap(expColor, effectiveLwhite);
+    }
+
+    if (isHDR) {
+        // ═══════════ HDR10 output path ═══════════
+        mapped = max(mapped, vec3(0.0));
+
+        if (isDisplayReferred) {
+            mapped = pow(mapped, vec3(2.2));  // AgX: undo baked sRGB gamma → linear
+        }
+
+        // Per-mode nit scaling with HDR headroom
+        vec3 nits;
+        if (mode == 0) {
+            // Hermite Spline Reinhard: wider Lwhite → output naturally exceeds 1.0
+            nits = mapped * paperWhite;
+        } else if (mode == 1) {
+            // Reinhard Extended: wider Lwhite → output naturally exceeds 1.0
+            nits = mapped * paperWhite;
+        } else if (mode == 2) {
+            // BT.2390 EETF: output already scaled relative to headroom
+            nits = mapped * paperWhite;
+        } else if (mode == 3) {
+            // Frostbite: soft compression, scale by headroom to fill HDR range
+            nits = mapped * paperWhite * hdrHeadroom;
+            nits = min(nits, vec3(peak));
+        } else {
+            // Fallback: scale by paperWhite
+            nits = mapped * paperWhite;
+        }
+
+        // Clamp to display peak
+        nits = clamp(nits, vec3(0.0), vec3(peak));
+
+        // BT.709 → BT.2020 gamut conversion (in linear light)
+        vec3 bt2020 = max(BT709_TO_BT2020 * nits, vec3(0.0));
+
+        // PQ encode: normalize to [0,1] where 1.0 = 10000 nits
+        vec3 pq = PQ_OETF_HDR10(bt2020 / 10000.0);
+
+        // ── Anti-banding dither (in PQ space = perceptually uniform) ──
+        // Wang hash per-pixel: spatial variation. Temporal accumulation upstream
+        // (TAA/SVGF jitter) provides frame-to-frame smoothing automatically.
+        uint px = uint(gl_FragCoord.x);
+        uint py = uint(gl_FragCoord.y);
+        uint seed = px + py * 8192u;
+        // 3 independent dither values (one per channel) to decorrelate RGB
+        float d0 = float(wangHash(seed))       / 4294967296.0 - 0.5;
+        float d1 = float(wangHash(seed + 1u))  / 4294967296.0 - 0.5;
+        float d2 = float(wangHash(seed + 2u))  / 4294967296.0 - 0.5;
+        // 10-bit step size in [0,1] PQ range = 1/1024
+        pq += vec3(d0, d1, d2) * (1.0 / 1024.0);
+        pq = clamp(pq, 0.0, 1.0);
+
+        fragColor = vec4(pq, 1.0);
+    } else {
+        // ═══════════ SDR output path (UNCHANGED — no dithering, no headroom) ═══════════
+        mapped = clamp(mapped, 0.0, 1.0);
+
+        // AgX outputs display-referred (sRGB gamma baked in), others output scene-linear
+        if (!isDisplayReferred) {
+            mapped = pow(mapped, vec3(1.0 / 2.2));
+        }
+
+        fragColor = vec4(mapped, 1.0);
+    }
 }

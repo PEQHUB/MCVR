@@ -4,6 +4,7 @@
 #include "core/render/buffers.hpp"
 #include "core/render/chunks.hpp"
 #include "core/render/entities.hpp"
+#include "core/render/hdr_composite_pass.hpp"
 #include "core/render/modules/ui_module.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/renderer.hpp"
@@ -53,94 +54,161 @@ void FrameworkContext::fuseFinal() {
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
     auto pipelineContext = f->pipeline_->acquirePipelineContext(shared_from_this());
 
-    fuseCommandBuffer->barriersBufferImage(
-        {}, {
-                {
-                    .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                    .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                    .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                    .oldLayout = pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(),
-                    .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    .srcQueueFamilyIndex = mainQueueIndex,
-                    .dstQueueFamilyIndex = mainQueueIndex,
-                    .image = pipelineContext->uiModuleContext->overlayDrawColorImage,
-                    .subresourceRange = vk::wholeColorSubresourceRange,
-                },
-                {
-                    .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                    .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                    .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                    .oldLayout = swapchainImage->imageLayout(),
-                    .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    .srcQueueFamilyIndex = mainQueueIndex,
-                    .dstQueueFamilyIndex = mainQueueIndex,
-                    .image = swapchainImage,
-                    .subresourceRange = vk::wholeColorSubresourceRange,
-                },
-            });
+    bool useHdrComposite = Renderer::options.hdrEnabled && swapchain->isHDR()
+        && f->pipeline_->hdrCompositePass()
+        && pipelineContext->worldPipelineContext
+        && pipelineContext->worldPipelineContext->outputImage;
 
-    pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    if (useHdrComposite) {
+        // ═══════════ HDR path: composite shader ═══════════
+        // HdrCompositePass::record() handles ALL image transitions internally:
+        //   world output  → SHADER_READ_ONLY_OPTIMAL → rest layout
+        //   overlay       → SHADER_READ_ONLY_OPTIMAL → rest layout
+        //   swapchain     → COLOR_ATTACHMENT_OPTIMAL  → PRESENT_SRC_KHR
+        f->pipeline_->hdrCompositePass()->record(
+            fuseCommandBuffer,
+            frameIndex,
+            Renderer::options.hdrUiBrightnessNits,
+            pipelineContext->worldPipelineContext->outputImage,
+            pipelineContext->uiModuleContext->overlayDrawColorImage,
+            swapchainImage,
+            mainQueueIndex);
 
-    // Raw copy (no sRGB conversion) — overlay is SRGB, swapchain is UNORM.
-    // vkCmdCopyImage treats both as raw bytes, preserving gamma-encoded values.
-    VkImageCopy imageCopy{};
-    imageCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageCopy.srcSubresource.mipLevel = 0;
-    imageCopy.srcSubresource.baseArrayLayer = 0;
-    imageCopy.srcSubresource.layerCount = 1;
-    imageCopy.srcOffset = {0, 0, 0};
-    imageCopy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageCopy.dstSubresource.mipLevel = 0;
-    imageCopy.dstSubresource.baseArrayLayer = 0;
-    imageCopy.dstSubresource.layerCount = 1;
-    imageCopy.dstOffset = {0, 0, 0};
-    imageCopy.extent = {pipelineContext->uiModuleContext->overlayDrawColorImage->width(),
-                        pipelineContext->uiModuleContext->overlayDrawColorImage->height(), 1};
-
-    vkCmdCopyImage(fuseCommandBuffer->vkCommandBuffer(),
-                   pipelineContext->uiModuleContext->overlayDrawColorImage->vkImage(),
-                   pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(), swapchainImage->vkImage(),
-                   swapchainImage->imageLayout(), 1, &imageCopy);
-
-    fuseCommandBuffer->barriersBufferImage(
-        {}, {{
-                 .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .oldLayout = pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(),
+    } else if (Renderer::options.hdrEnabled && swapchain->isHDR()) {
+        // ═══════════ HDR fallback: no world yet (title/loading screen) ═══════════
+        // World pipeline not built yet. Just transition swapchain to PRESENT_SRC_KHR.
+        // The overlay has UI on transparent black — can't vkCmdCopyImage (format mismatch).
+        // Present whatever the swapchain contains (black/undefined — acceptable for loading).
+        fuseCommandBuffer->barriersBufferImage(
+            {}, {
+                    {
+                        .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .oldLayout = pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(),
 #ifdef USE_AMD
-                 .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                        .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #else
-                 .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
 #endif
-                 .srcQueueFamilyIndex = mainQueueIndex,
-                 .dstQueueFamilyIndex = mainQueueIndex,
-                 .image = pipelineContext->uiModuleContext->overlayDrawColorImage,
-                 .subresourceRange = vk::wholeColorSubresourceRange,
-             },
-             {
-                 .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                 .oldLayout = swapchainImage->imageLayout(),
-                 .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                 .srcQueueFamilyIndex = mainQueueIndex,
-                 .dstQueueFamilyIndex = mainQueueIndex,
-                 .image = swapchainImage,
-                 .subresourceRange = vk::wholeColorSubresourceRange,
-             }});
+                        .srcQueueFamilyIndex = mainQueueIndex,
+                        .dstQueueFamilyIndex = mainQueueIndex,
+                        .image = pipelineContext->uiModuleContext->overlayDrawColorImage,
+                        .subresourceRange = vk::wholeColorSubresourceRange,
+                    },
+                    {
+                        .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+                        .dstAccessMask = 0,
+                        .oldLayout = swapchainImage->imageLayout(),
+                        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                        .srcQueueFamilyIndex = mainQueueIndex,
+                        .dstQueueFamilyIndex = mainQueueIndex,
+                        .image = swapchainImage,
+                        .subresourceRange = vk::wholeColorSubresourceRange,
+                    },
+                });
 
 #ifdef USE_AMD
-    pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
-    pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 #endif
-    swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    } else {
+        // ═══════════ SDR path (UNCHANGED) ═══════════
+        fuseCommandBuffer->barriersBufferImage(
+            {}, {
+                    {
+                        .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .oldLayout = pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(),
+                        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        .srcQueueFamilyIndex = mainQueueIndex,
+                        .dstQueueFamilyIndex = mainQueueIndex,
+                        .image = pipelineContext->uiModuleContext->overlayDrawColorImage,
+                        .subresourceRange = vk::wholeColorSubresourceRange,
+                    },
+                    {
+                        .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .oldLayout = swapchainImage->imageLayout(),
+                        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        .srcQueueFamilyIndex = mainQueueIndex,
+                        .dstQueueFamilyIndex = mainQueueIndex,
+                        .image = swapchainImage,
+                        .subresourceRange = vk::wholeColorSubresourceRange,
+                    },
+                });
+
+        pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+        // SDR: overlay is SRGB, swapchain is UNORM — both R8G8B8A8.
+        // vkCmdCopyImage treats both as raw bytes, preserving gamma-encoded values.
+        VkImageCopy imageCopy{};
+        imageCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        imageCopy.srcSubresource.mipLevel = 0;
+        imageCopy.srcSubresource.baseArrayLayer = 0;
+        imageCopy.srcSubresource.layerCount = 1;
+        imageCopy.srcOffset = {0, 0, 0};
+        imageCopy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        imageCopy.dstSubresource.mipLevel = 0;
+        imageCopy.dstSubresource.baseArrayLayer = 0;
+        imageCopy.dstSubresource.layerCount = 1;
+        imageCopy.dstOffset = {0, 0, 0};
+        imageCopy.extent = {pipelineContext->uiModuleContext->overlayDrawColorImage->width(),
+                            pipelineContext->uiModuleContext->overlayDrawColorImage->height(), 1};
+
+        vkCmdCopyImage(fuseCommandBuffer->vkCommandBuffer(),
+                       pipelineContext->uiModuleContext->overlayDrawColorImage->vkImage(),
+                       pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(), swapchainImage->vkImage(),
+                       swapchainImage->imageLayout(), 1, &imageCopy);
+
+        fuseCommandBuffer->barriersBufferImage(
+            {}, {{
+                     .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .oldLayout = pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(),
+#ifdef USE_AMD
+                     .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+#else
+                     .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+#endif
+                     .srcQueueFamilyIndex = mainQueueIndex,
+                     .dstQueueFamilyIndex = mainQueueIndex,
+                     .image = pipelineContext->uiModuleContext->overlayDrawColorImage,
+                     .subresourceRange = vk::wholeColorSubresourceRange,
+                 },
+                 {
+                     .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .oldLayout = swapchainImage->imageLayout(),
+                     .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                     .srcQueueFamilyIndex = mainQueueIndex,
+                     .dstQueueFamilyIndex = mainQueueIndex,
+                     .image = swapchainImage,
+                     .subresourceRange = vk::wholeColorSubresourceRange,
+                 }});
+
+#ifdef USE_AMD
+        pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+#else
+        pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+#endif
+        swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    }
 }
 
 Framework::Framework() {}
