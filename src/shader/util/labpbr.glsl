@@ -59,11 +59,7 @@ LabPBRMat convertLabPBRMaterial(vec4 texAlbedo, vec4 texSpecular, vec4 texNormal
         mat.ior = (1.0 + sqrtF0) / max(1.0 - sqrtF0, EPS);
 
         if (texAlbedo.a < 1.0 - EPS) { mat.transmission = 1.0; }
-    } else if (metalIdx > 254) {
-        mat.metallic = 1.0;
-        mat.albedo = texAlbedo.rgb;
-        mat.f0 = texAlbedo.rgb;
-    } else {
+    } else if (metalIdx <= 237) {
         vec3 n = vec3(1.0);
         vec3 k = vec3(0.0);
 
@@ -96,12 +92,16 @@ LabPBRMat convertLabPBRMaterial(vec4 texAlbedo, vec4 texSpecular, vec4 texNormal
         mat.metallic = 1.0;
         mat.f0 = CalculateF0(n, k);
         mat.albedo = mat.f0;
+    } else {
+        mat.metallic = 1.0;
+        mat.albedo = texAlbedo.rgb;
+        mat.f0 = texAlbedo.rgb;
     }
 
     mat.normal.xy = texNormal.xy * 2.0 - 1.0;
     mat.normal.z = sqrt(1.0 - dot(mat.normal.xy, mat.normal.xy));
 
-    mat.ao = texNormal.x;
+    mat.ao = texNormal.z;
     mat.height = texNormal.w;
 
     return mat;
