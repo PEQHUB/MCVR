@@ -26,9 +26,8 @@ vec3 CalculateF0(vec3 n, vec3 k) {
 LabPBRMat convertLabPBRMaterial(vec4 texAlbedo, vec4 texSpecular, vec4 texNormal) {
     LabPBRMat mat;
 
-    mat.roughness = pow(1.0 - texSpecular.r, 2.0);
     // LabPBR: A value of 255 (100%) results in a very smooth material (e.g. polished granite)
-    mat.roughness = mix(0.01, 1.0, mat.roughness);
+    mat.roughness = pow(1.0 - texSpecular.r, 2.0);
 
     float sssOffset = 65.0 / 255.0;
     mat.subSurface = texSpecular.b < sssOffset ? 0.0 : (texSpecular.b - sssOffset) / (1.0 - sssOffset);
