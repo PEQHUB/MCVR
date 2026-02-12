@@ -491,13 +491,7 @@ void main() {
     float effectiveLwhite = isHDR ? max(gExposure.Lwhite, hdrHeadroom) : gExposure.Lwhite;
 
     if (isHDR) {
-        // HDR mode: 4 HDR-capable operators only
-        // 0 = Hermite Spline Reinhard, 1 = Reinhard Extended, 2 = BT.2390 EETF, 3 = Frostbite
-        if (mode == 0)       mapped = HermiteSplineReinhardToneMap(expColor, effectiveLwhite);
-        else if (mode == 1)  mapped = ReinhardExtendedToneMap(expColor, effectiveLwhite);
-        else if (mode == 2)  mapped = BT2390EETF(expColor, hdrHeadroom);
-        else if (mode == 3)  mapped = FrostbiteToneMap(expColor);
-        else                 mapped = HermiteSplineReinhardToneMap(expColor, effectiveLwhite);
+        mapped = BT2390EETF(expColor, hdrHeadroom);
     } else {
         // SDR mode: all 8 original operators unchanged
         if (mode == 0)       mapped = PBRNeutralToneMap(expColor);
@@ -519,25 +513,7 @@ void main() {
             mapped = pow(mapped, vec3(2.2));  // AgX: undo baked sRGB gamma → linear
         }
 
-        // Per-mode nit scaling with HDR headroom
-        vec3 nits;
-        if (mode == 0) {
-            // Hermite Spline Reinhard: wider Lwhite → output naturally exceeds 1.0
-            nits = mapped * paperWhite;
-        } else if (mode == 1) {
-            // Reinhard Extended: wider Lwhite → output naturally exceeds 1.0
-            nits = mapped * paperWhite;
-        } else if (mode == 2) {
-            // BT.2390 EETF: output already scaled relative to headroom
-            nits = mapped * paperWhite;
-        } else if (mode == 3) {
-            // Frostbite: soft compression, scale by headroom to fill HDR range
-            nits = mapped * paperWhite * hdrHeadroom;
-            nits = min(nits, vec3(peak));
-        } else {
-            // Fallback: scale by paperWhite
-            nits = mapped * paperWhite;
-        }
+        vec3 nits = mapped * paperWhite;
 
         // Clamp to display peak
         nits = clamp(nits, vec3(0.0), vec3(peak));

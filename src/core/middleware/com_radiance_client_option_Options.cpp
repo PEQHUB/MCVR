@@ -125,6 +125,37 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSaturati
     Renderer::options.saturation = saturation;
 }
 
+JNIEXPORT jboolean JNICALL Java_com_radiance_client_option_Options_nativeIsHdrActive(
+    JNIEnv *, jclass) {
+    auto *renderer = Renderer::try_instance();
+    if (renderer == nullptr) {
+        return JNI_FALSE;
+    }
+
+    auto framework = renderer->framework();
+    if (framework == nullptr || framework->swapchain() == nullptr) {
+        return JNI_FALSE;
+    }
+
+    bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
+    return hdrActive ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL Java_com_radiance_client_option_Options_nativeIsHdrSupported(
+    JNIEnv *, jclass) {
+    auto *renderer = Renderer::try_instance();
+    if (renderer == nullptr) {
+        return JNI_FALSE;
+    }
+
+    auto framework = renderer->framework();
+    if (framework == nullptr || framework->swapchain() == nullptr) {
+        return JNI_FALSE;
+    }
+
+    return framework->swapchain()->isHDRSupported() ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeRebuildChunks(
     JNIEnv *, jclass) {
     Renderer::instance().world()->chunks()->resetScheduler();

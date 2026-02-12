@@ -27,8 +27,15 @@ void main() {
     if (worldUBO.skyType != 1) { discard; }
 
     float progress = skyUBO.rainGradient;
+    float rainAttenuation = 1.0 - progress;
+
     vec4 color = colorLayer;
-    color.a *= 1.0 - progress;
+    float visibility = clamp(color.a * rainAttenuation, 0.0, 1.0);
+
+    color.rgb *= rainAttenuation;
+    color.rgb = max(color.rgb, vec3(0.10 * visibility));
+    color.rgb *= 1.40;
+    color.a = visibility;
 
     fragColor = color;
 

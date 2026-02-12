@@ -32,6 +32,9 @@ class Swapchain : public SharedObject<Swapchain> {
     /// Returns true if the swapchain is currently using HDR10 (A2B10G10R10 + ST.2084)
     bool isHDR() const { return hdrActive_; }
 
+    /// Returns true if the current surface supports HDR10 swapchain formats.
+    bool isHDRSupported() const;
+
   private:
     std::shared_ptr<PhysicalDevice> physicalDevice_;
     std::shared_ptr<Device> device_;

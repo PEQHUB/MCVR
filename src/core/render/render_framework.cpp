@@ -151,9 +151,9 @@ void FrameworkContext::fuseFinal() {
         pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
-#if !defined(_WIN32)
-        // Linux: swapchain may be B8G8R8A8 instead of R8G8B8A8. Use vkCmdBlitImage
-        // for automatic channel swizzle when formats differ.
+        // Cross-platform: swapchain may be B8G8R8A8 (or other non-RGBA8 layouts)
+        // while overlay is R8G8B8A8_SRGB. Use vkCmdBlitImage whenever formats are
+        // not directly RGBA-compatible to avoid channel/alpha mismatches.
         VkFormat swapFormat = swapchainImage->vkFormat();
         bool needBlit = (swapFormat != VK_FORMAT_R8G8B8A8_UNORM &&
                          swapFormat != VK_FORMAT_R8G8B8A8_SRGB);
@@ -175,10 +175,8 @@ void FrameworkContext::fuseFinal() {
                            swapchainImage->vkImage(),
                            swapchainImage->imageLayout(),
                            1, &blit, VK_FILTER_NEAREST);
-        } else
-#endif
-        {
-            // Windows: always R8G8B8A8 — raw byte copy preserves gamma-encoded values.
+        } else {
+            // RGBA-compatible swapchain: raw byte copy preserves gamma-encoded values.
             VkImageCopy imageCopy{};
             imageCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             imageCopy.srcSubresource.mipLevel = 0;

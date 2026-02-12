@@ -559,6 +559,17 @@ void PostRenderModule::initPipeline() {
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
     };
 
+    VkPipelineColorBlendAttachmentState starColorBlendAttachmentState{
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT,
+    };
+
     worldPostVertShader_ = vk::Shader::create(device, (shaderPath / "world/post_render/world_post_vert.spv").string());
     worldPostFragShader_ = vk::Shader::create(device, (shaderPath / "world/post_render/world_post_frag.spv").string());
 
@@ -589,15 +600,15 @@ void PostRenderModule::initPipeline() {
                                              },
                                      },
                              })
-                             .defineDepthStencilState({
-                                 .depthTestEnable = VK_TRUE,
-                                 .depthWriteEnable = VK_TRUE,
-                                 .depthCompareOp = VK_COMPARE_OP_LESS,
-                                 .depthBoundsTestEnable = VK_FALSE,
-                                 .stencilTestEnable = VK_FALSE,
-                                 .minDepthBounds = 0.0,
-                                 .maxDepthBounds = 1.0,
-                             })
+                                       .defineDepthStencilState({
+                                           .depthTestEnable = VK_TRUE,
+                                           .depthWriteEnable = VK_FALSE,
+                                           .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+                                           .depthBoundsTestEnable = VK_FALSE,
+                                           .stencilTestEnable = VK_FALSE,
+                                           .minDepthBounds = 0.0,
+                                           .maxDepthBounds = 1.0,
+                                       })
                              .defineRasterizationState(VkPipelineRasterizationStateCreateInfo{
                                  .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
                                  .depthClampEnable = VK_FALSE,
@@ -610,12 +621,12 @@ void PostRenderModule::initPipeline() {
                                  .depthBiasClamp = 0.0f,
                                  .depthBiasSlopeFactor = 0.0f,
                                  .lineWidth = 1.0f,
-                             })
-                             .beginColorBlendAttachmentState()
-                             .defineColorBlendAttachmentState(postColorBlendAttachmentState)
-                             .endColorBlendAttachmentState()
-                             .definePipelineLayout(descriptorTables_[0])
-                             .build(device);
+                                       })
+                                       .beginColorBlendAttachmentState()
+                                       .defineColorBlendAttachmentState(starColorBlendAttachmentState)
+                                       .endColorBlendAttachmentState()
+                                       .definePipelineLayout(descriptorTables_[0])
+                                       .build(device);
 
     worldPostStarFieldVertShader_ =
         vk::Shader::create(device, (shaderPath / "world/post_render/world_post_star_vert.spv").string());

@@ -395,14 +395,12 @@ void Pipeline::buildWorldPipelineBlueprint(WorldPipelineBuildParams *params) {
 }
 
 void Pipeline::recreate(std::shared_ptr<Framework> framework) {
-    auto &gc = framework->gc();
-
-    gc.collect(uiModule_);
+    uiModule_.reset();
     uiModule_ = UIModule::create(framework);
 
     if (worldPipeline_ != nullptr)
         for (auto &module : worldPipeline_->worldModules()) { module->preClose(); }
-    gc.collect(worldPipeline_);
+    worldPipeline_.reset();
     worldPipeline_ =
         worldPipelineBlueprint_ == nullptr ? nullptr : WorldPipeline::create(framework, shared_from_this());
 
@@ -417,12 +415,11 @@ void Pipeline::recreate(std::shared_ptr<Framework> framework) {
     } else {
         // SDR mode: destroy if it existed from a previous HDR session
         if (hdrCompositePass_) {
-            gc.collect(hdrCompositePass_);
             hdrCompositePass_ = nullptr;
         }
     }
 
-    gc.collect(contexts_);
+    contexts_.reset();
     contexts_ = std::make_shared<std::vector<std::shared_ptr<PipelineContext>>>();
 
     uint32_t size = framework->swapchain()->imageCount();

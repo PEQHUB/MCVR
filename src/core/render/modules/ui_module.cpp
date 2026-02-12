@@ -499,9 +499,11 @@ UIModuleContext::UIModuleContext(std::shared_ptr<FrameworkContext> context, std:
     overlayDepthBiasSlopeFactor = {0.0, 0.0, 0.0};
     overlayLineWidth = 1.0;
 
+    bool hdrActive = Renderer::options.hdrEnabled && context->swapchain->isHDR();
+
     // HDR: transparent black so composite shader's alpha test works correctly.
     // SDR: opaque white (original behavior — world is copied underneath).
-    if (Renderer::options.hdrEnabled) {
+    if (hdrActive) {
         overlayClearColors = {0.0f, 0.0f, 0.0f, 0.0f};
     } else {
         overlayClearColors = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -748,10 +750,14 @@ void UIModuleContext::setOverlayBlendFuncSeparate(int srcColorBlendFactor,
 
     if (!framework->isRunning()) return;
 
+    bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
+
     overlayColorBlendEquation.srcColorBlendFactor = static_cast<VkBlendFactor>(srcColorBlendFactor);
-    overlayColorBlendEquation.srcAlphaBlendFactor = static_cast<VkBlendFactor>(srcAlphaBlendFactor);
+    overlayColorBlendEquation.srcAlphaBlendFactor =
+        hdrActive ? static_cast<VkBlendFactor>(srcAlphaBlendFactor) : VK_BLEND_FACTOR_ZERO;
     overlayColorBlendEquation.dstColorBlendFactor = static_cast<VkBlendFactor>(dstColorBlendFactor);
-    overlayColorBlendEquation.dstAlphaBlendFactor = static_cast<VkBlendFactor>(dstAlphaBlendFactor);
+    overlayColorBlendEquation.dstAlphaBlendFactor =
+        hdrActive ? static_cast<VkBlendFactor>(dstAlphaBlendFactor) : VK_BLEND_FACTOR_ONE;
     vkCmdSetColorBlendEquationEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayColorBlendEquation);
 }
 
@@ -772,7 +778,8 @@ void UIModuleContext::setOverlayColorWriteMask(int colorWriteMask) {
 
     if (!framework->isRunning()) return;
 
-    overlayColorWriteMask = colorWriteMask;
+    bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
+    overlayColorWriteMask = hdrActive ? colorWriteMask : (colorWriteMask & ~VK_COLOR_COMPONENT_A_BIT);
     vkCmdSetColorWriteMaskEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayColorWriteMask);
 }
 
@@ -982,9 +989,10 @@ void UIModuleContext::setOverlayClearColor(float red, float green, float blue, f
 
     if (!framework->isRunning()) return;
 
-    // In HDR mode, force fully transparent overlay to prevent tinted compositing
-    // Java-side may set opaque clear colors that interfere with HDR alpha blending
-    if (Renderer::options.hdrEnabled) {
+    bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
+
+    // In HDR mode, force fully transparent overlay to prevent tinted compositing.
+    if (hdrActive) {
         overlayClearColors[0] = 0.0f;
         overlayClearColors[1] = 0.0f;
         overlayClearColors[2] = 0.0f;
@@ -995,7 +1003,7 @@ void UIModuleContext::setOverlayClearColor(float red, float green, float blue, f
     overlayClearColors[0] = red;
     overlayClearColors[1] = green;
     overlayClearColors[2] = blue;
-    overlayClearColors[3] = alpha;
+    overlayClearColors[3] = 1.0f;
 }
 
 void UIModuleContext::setOverlayClearDepth(double depth) {
@@ -1167,10 +1175,18 @@ void UIModuleContext::clearOverlayEntireColorAttachment() {
     VkClearAttachment clearAttachment{};
     clearAttachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     clearAttachment.colorAttachment = 0;
-    clearAttachment.clearValue.color.float32[0] = overlayClearColors[0];
-    clearAttachment.clearValue.color.float32[1] = overlayClearColors[1];
-    clearAttachment.clearValue.color.float32[2] = overlayClearColors[2];
-    clearAttachment.clearValue.color.float32[3] = overlayClearColors[3];
+    bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
+    if (hdrActive) {
+        clearAttachment.clearValue.color.float32[0] = 0.0f;
+        clearAttachment.clearValue.color.float32[1] = 0.0f;
+        clearAttachment.clearValue.color.float32[2] = 0.0f;
+        clearAttachment.clearValue.color.float32[3] = 0.0f;
+    } else {
+        clearAttachment.clearValue.color.float32[0] = overlayClearColors[0];
+        clearAttachment.clearValue.color.float32[1] = overlayClearColors[1];
+        clearAttachment.clearValue.color.float32[2] = overlayClearColors[2];
+        clearAttachment.clearValue.color.float32[3] = 1.0f;
+    }
 
     VkClearRect clearRect{};
     clearRect.rect.offset = {0, 0};
