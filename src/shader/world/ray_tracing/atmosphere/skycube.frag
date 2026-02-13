@@ -106,7 +106,10 @@ vec3 integrateSingleScattering(vec3 ro, vec3 rd, bool isSun) {
         vec3 T_sun = sampleTransmittance(r, muS);
 
         vec3 S = sigmaS_R * pr + (sigmaS_M * (pm));
-        vec3 dL = T_view * (T_sun * (S * (isSun ? skyUBO.sunRadiance : skyUBO.moonRadiance))) * dt;
+        vec3 sourceRadiance = isSun
+            ? (skyUBO.sunRadiance * skyUBO.envCelestial.z)
+            : (skyUBO.moonRadiance * skyUBO.envCelestial.w);
+        vec3 dL = T_view * (T_sun * (S * sourceRadiance)) * dt;
 
         L += dL;
         T_view *= exp(-sigmaT * dt);

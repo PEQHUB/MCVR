@@ -9,6 +9,9 @@
 #include "core/render/textures.hpp"
 #include "core/render/world.hpp"
 
+#include <atomic>
+#include <mutex>
+
 #if defined(_WIN32)
 #    include <windows.h>
 using DYNLIB_HANDLE = HMODULE;
@@ -46,6 +49,17 @@ static void *getproc(DYNLIB_HANDLE h, const char *sym) {
 #else
 #    error "Unsupported platform"
 #endif
+
+namespace {
+std::recursive_mutex g_rendererJniMtx;
+std::atomic<bool> g_rendererShuttingDown{false};
+std::atomic<bool> g_rendererClosed{false};
+
+inline bool rendererUsable() {
+    return !g_rendererShuttingDown.load(std::memory_order_acquire) &&
+           !g_rendererClosed.load(std::memory_order_acquire);
+}
+} // namespace
 
 static DYNLIB_HANDLE bind_handle_from_candidates(JNIEnv *env, jobjectArray jnames) {
     jsize n = env->GetArrayLength(jnames);
@@ -111,6 +125,10 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_initR
                                                                                         jclass,
                                                                                         jobjectArray candidates,
                                                                                         jlong windowHandle) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    g_rendererShuttingDown.store(false, std::memory_order_release);
+    g_rendererClosed.store(false, std::memory_order_release);
+
     DYNLIB_HANDLE h = bind_handle_from_candidates(env, candidates);
     if (!h) {
         std::cerr << "[GLFW-Bind] Could not find already-loaded GLFW via NOLOAD/GetModuleHandle."
@@ -126,23 +144,31 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_initR
 }
 
 JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_maxSupportedTextureSize(JNIEnv *, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable()) return 0;
     auto maxImageSize = Renderer::instance().framework()->physicalDevice()->properties().limits.maxImageDimension2D;
     return maxImageSize;
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_acquireContext(JNIEnv *, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     framework->acquireContext();
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_submitCommand(JNIEnv *, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     framework->submitCommand();
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_present(JNIEnv *, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     framework->present();
@@ -150,6 +176,8 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_prese
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_drawOverlay(
     JNIEnv *, jclass, jint vertexId, jint indexId, jint pipelineType, jint indexCount, jint indexType) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto vertexBuffer = Renderer::instance().buffers()->getBuffer(vertexId);
@@ -162,6 +190,8 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_drawO
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_fuseWorld(JNIEnv *, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -170,6 +200,8 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_fuseW
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_postBlur(JNIEnv *, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto world = Renderer::instance().world();
@@ -180,13 +212,23 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_postB
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_close(JNIEnv *, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (g_rendererClosed.load(std::memory_order_acquire)) return;
+
+    g_rendererShuttingDown.store(true, std::memory_order_release);
     auto framework = Renderer::instance().framework();
-    if (framework == nullptr) return;
+    if (framework == nullptr) {
+        g_rendererClosed.store(true, std::memory_order_release);
+        return;
+    }
     Renderer::instance().close();
+    g_rendererClosed.store(true, std::memory_order_release);
 }
 
 JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_RendererProxy_shouldRenderWorld(JNIEnv *, jclass, jboolean shouldRenderWorld) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable()) return;
     auto world = Renderer::instance().world();
     if (world == nullptr) return;
     world->shouldRender() = shouldRenderWorld;
@@ -194,7 +236,21 @@ Java_com_radiance_client_proxy_vulkan_RendererProxy_shouldRenderWorld(JNIEnv *, 
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_takeScreenshot(
     JNIEnv *, jclass, jboolean withUI, jint width, jint height, jint channel, jlong pointer) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     framework->takeScreenshot(withUI, width, height, channel, reinterpret_cast<void *>(pointer));
+}
+
+JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_takeScreenshotRawHdrPacked(
+    JNIEnv *, jclass, jboolean withUI, jint width, jint height, jlong pointer, jint byteSize) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable()) return static_cast<jint>(VK_FORMAT_UNDEFINED);
+    auto framework = Renderer::instance().framework();
+    if (framework == nullptr) return static_cast<jint>(VK_FORMAT_UNDEFINED);
+
+    VkFormat format = framework->takeScreenshotRawHdrPacked(
+        withUI, width, height, reinterpret_cast<void *>(pointer), byteSize);
+    return static_cast<jint>(format);
 }

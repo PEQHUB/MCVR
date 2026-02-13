@@ -286,6 +286,10 @@ namespace Data {
 
         T_VEC3 moonRadiance;
         T_UINT moonTextureID;
+
+        T_VEC4 envCelestial;
+        T_VEC4 envWaterTintFog;
+        T_VEC4 envSky;
     };
 
     struct TextureMapEntry {
