@@ -46,9 +46,9 @@ void main() {
 
         vec3 T = sampleTransmittance(r, muSun);
 
-        radiance = skyUBO.sunRadiance * T;
+        radiance = (skyUBO.sunRadiance * skyUBO.envCelestial.z) * T;
     } else {
-        radiance = skyUBO.moonRadiance;
+        radiance = skyUBO.moonRadiance * skyUBO.envCelestial.w;
     }
 
     float factor = 1.0;

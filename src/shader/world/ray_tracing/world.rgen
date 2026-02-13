@@ -497,13 +497,13 @@ void main() {
     float densityAir = 0.0000;
     float densityFog = 2.0 / (worldUBO.fogEnd - worldUBO.fogStart);
     if (skyUBO.cameraSubmersionType == 1) { // underwater
-        // vec3 waterColor = vec3(0.4, 0.7, 0.9);
-        vec3 waterColor = vec3(0.0, 0.48, 0.65);
+        vec3 waterColor = skyUBO.envWaterTintFog.rgb;
+        float waterFogStrength = max(0.0, skyUBO.envWaterTintFog.a);
         mainRay.radiance *= waterColor;
 
         if (surfaceDepth == INF_DISTANCE) surfaceDepth = 0;
         mainRay.radiance =
-            applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog, waterColor * 0.01);
+            applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog * waterFogStrength, waterColor * 0.01);
     } else {
         if (worldUBO.skyType == 0) { // None
             mainRay.radiance = applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog,
@@ -516,9 +516,9 @@ void main() {
 
                 vec3 sunDir = normalize(skyUBO.sunDirection);
                 vec3 rayDir = orgDirection;
-                float progress = skyUBO.rainGradient;
+                float progress = clamp(skyUBO.rainGradient * skyUBO.envSky.y, 0.0, 1.0);
                 vec3 rainyRadiance = mix(vec3(0.04, 0.05, 0.1), vec3(0.1), smoothstep(-0.3, 0.3, sunDir.y));
-                vec3 sunnyRadiance = texture(skyFull, rayDir).rgb;
+                vec3 sunnyRadiance = texture(skyFull, rayDir).rgb * skyUBO.envSky.x;
                 vec3 fogRadiance = mix(sunnyRadiance, rainyRadiance, progress);
 
                 mainRay.radiance =

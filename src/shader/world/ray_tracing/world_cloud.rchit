@@ -162,9 +162,10 @@ void main() {
 
     vec3 lightContribution = shadowRay.radiance;
 
-    float progress = skyUBO.rainGradient;
+    float progress = clamp(skyUBO.rainGradient * skyUBO.envSky.y, 0.0, 1.0);
     vec3 lightRadiance = lightContribution * mainRay.throughput * lightBRDF;
     vec3 rainyRadiance = mix(vec3(0.04, 0.05, 0.1) * 0.8, vec3(0.1), smoothstep(-0.3, 0.3, lightDir.y));
+    rainyRadiance *= skyUBO.envSky.x;
     mainRay.radiance += mix(lightRadiance, rainyRadiance, progress);
 
     mainRay.hitT = gl_HitTEXT;

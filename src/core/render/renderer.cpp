@@ -33,15 +33,13 @@ std::shared_ptr<World> Renderer::world() {
 }
 
 void Renderer::close() {
+    if (closed_) return;
+
     if (framework_ != nullptr) framework_->waitDeviceIdle();
 
     if (world_ != nullptr) world_->close();
     if (framework_ != nullptr) framework_->close();
-
-    textures_ = nullptr;
-    buffers_ = nullptr;
-    world_ = nullptr;
-    framework_ = nullptr;
+    closed_ = true;
 
 #ifdef DEBUG
     std::cout << "Renderer closed" << std::endl;

@@ -77,6 +77,7 @@ class Framework : public SharedObject<Framework> {
     bool isRunning();
 
     void takeScreenshot(bool withUI, int width, int height, int channel, void *dstPointer);
+    VkFormat takeScreenshotRawHdrPacked(bool withUI, int width, int height, void *dstPointer, int dstByteSize);
 
     std::recursive_mutex &recreateMtx();
 

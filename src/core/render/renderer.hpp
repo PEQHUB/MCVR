@@ -65,4 +65,5 @@ class Renderer : public Singleton<Renderer> {
     std::shared_ptr<Textures> textures_;
     std::shared_ptr<Buffers> buffers_;
     std::shared_ptr<World> world_;
+    bool closed_ = false;
 };

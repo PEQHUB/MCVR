@@ -510,51 +510,68 @@ void Framework::takeScreenshot(bool withUI, int width, int height, int channel, 
     }
 
     std::shared_ptr<vk::HostVisibleBuffer> dstBuffer;
-    std::shared_ptr<vk::DeviceLocalImage> srcImage;
+    std::shared_ptr<vk::Image> srcImage;
+    std::shared_ptr<vk::DeviceLocalImage> srcDeviceImage;
+    std::shared_ptr<vk::SwapchainImage> srcSwapchainImage;
+
+    auto pipelineContext = pipeline_->acquirePipelineContext(context);
 
     if (withUI) {
-        auto pipelineContext = pipeline_->acquirePipelineContext(context);
-        srcImage = pipelineContext->uiModuleContext->overlayDrawColorImage;
-
-        uint32_t finalImageBufferSize =
-            srcImage->width() * srcImage->height() * srcImage->layer() * vk::formatToByte(srcImage->vkFormat());
-        if (finalImageBufferSize != width * height * channel) return;
-
-        dstBuffer =
-            vk::HostVisibleBuffer::create(vma_, device_, finalImageBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        if (Renderer::options.hdrEnabled && swapchain_->isHDR()) {
+            srcSwapchainImage = context->swapchainImage;
+            srcImage = srcSwapchainImage;
+        } else {
+            srcDeviceImage = pipelineContext->uiModuleContext->overlayDrawColorImage;
+            srcImage = srcDeviceImage;
+        }
     } else {
-        auto pipelineContext = pipeline_->acquirePipelineContext(context);
-        srcImage = pipelineContext->worldPipelineContext->outputImage;
-
-        uint32_t worldImageBufferSize =
-            srcImage->width() * srcImage->height() * srcImage->layer() * vk::formatToByte(srcImage->vkFormat());
-        if (worldImageBufferSize != width * height * channel) return;
-
-        dstBuffer =
-            vk::HostVisibleBuffer::create(vma_, device_, worldImageBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        if (pipelineContext->worldPipelineContext == nullptr ||
+            pipelineContext->worldPipelineContext->outputImage == nullptr) {
+            return;
+        }
+        srcDeviceImage = pipelineContext->worldPipelineContext->outputImage;
+        srcImage = srcDeviceImage;
     }
 
-    VkImageLayout initialLayout = srcImage->imageLayout();
+    if (srcImage == nullptr) return;
+    if (static_cast<uint32_t>(width) != srcImage->width() || static_cast<uint32_t>(height) != srcImage->height()) return;
+
+    auto isRgbaCompatible = [](VkFormat format) {
+        return format == VK_FORMAT_R8G8B8A8_UNORM ||
+               format == VK_FORMAT_R8G8B8A8_SRGB ||
+               format == VK_FORMAT_B8G8R8A8_UNORM ||
+               format == VK_FORMAT_B8G8R8A8_SRGB;
+    };
+
+    bool needFormatConversion = !isRgbaCompatible(srcImage->vkFormat());
+    if (channel != 4) return;
+
+    uint32_t rawBufferSize = srcImage->width() * srcImage->height() * srcImage->layer() * vk::formatToByte(srcImage->vkFormat());
+    dstBuffer = vk::HostVisibleBuffer::create(vma_, device_, rawBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+
+    VkImageLayout initialLayout = srcSwapchainImage ? srcSwapchainImage->imageLayout() : srcDeviceImage->imageLayout();
     auto mainQueueIndex = physicalDevice_->mainQueueIndex();
 
     std::shared_ptr<vk::CommandBuffer> oneTimeBuffer = vk::CommandBuffer::create(device_, mainCommandPool_);
     oneTimeBuffer->begin();
 
     oneTimeBuffer->barriersBufferImage(
-        {},
-        {{
-            .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
-                            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-            .oldLayout = initialLayout,
-            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            .srcQueueFamilyIndex = mainQueueIndex,
-            .dstQueueFamilyIndex = mainQueueIndex,
-            .image = srcImage,
-            .subresourceRange = vk::wholeColorSubresourceRange,
-        }});
+        {}, {{
+                .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .oldLayout = initialLayout,
+                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                .srcQueueFamilyIndex = mainQueueIndex,
+                .dstQueueFamilyIndex = mainQueueIndex,
+                .image = srcImage,
+                .subresourceRange = vk::wholeColorSubresourceRange,
+            }});
+
     VkBufferImageCopy bufferImageCopy{};
     bufferImageCopy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     bufferImageCopy.imageSubresource.mipLevel = 0;
@@ -565,23 +582,25 @@ void Framework::takeScreenshot(bool withUI, int width, int height, int channel, 
     bufferImageCopy.imageExtent.depth = 1;
     vkCmdCopyImageToBuffer(oneTimeBuffer->vkCommandBuffer(), srcImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            dstBuffer->vkBuffer(), 1, &bufferImageCopy);
-    oneTimeBuffer
-        ->barriersBufferImage(
-            {}, {{
-                    .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                    .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-                                    VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
-                                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                    .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                    .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    .newLayout = initialLayout,
-                    .srcQueueFamilyIndex = mainQueueIndex,
-                    .dstQueueFamilyIndex = mainQueueIndex,
-                    .image = srcImage,
-                    .subresourceRange = vk::wholeColorSubresourceRange,
-                }})
-        ->end();
+
+    oneTimeBuffer->barriersBufferImage(
+        {}, {{
+                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                .newLayout = initialLayout,
+                .srcQueueFamilyIndex = mainQueueIndex,
+                .dstQueueFamilyIndex = mainQueueIndex,
+                .image = srcImage,
+                .subresourceRange = vk::wholeColorSubresourceRange,
+            }});
+
+    oneTimeBuffer->end();
 
     VkSubmitInfo vkSubmitInfo = {};
     vkSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -599,7 +618,180 @@ void Framework::takeScreenshot(bool withUI, int width, int height, int channel, 
         exit(EXIT_FAILURE);
     }
 
-    std::memcpy(dstPointer, dstBuffer->mappedPtr(), dstBuffer->size());
+    if (!needFormatConversion) {
+        std::memcpy(dstPointer, dstBuffer->mappedPtr(), width * height * channel);
+        return;
+    }
+
+    auto *srcPixels = reinterpret_cast<const uint32_t *>(dstBuffer->mappedPtr());
+    auto *dstPixels = reinterpret_cast<uint8_t *>(dstPointer);
+    uint32_t pixelCount = static_cast<uint32_t>(width * height);
+    VkFormat format = srcImage->vkFormat();
+
+    if (format == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {
+        for (uint32_t i = 0; i < pixelCount; i++) {
+            uint32_t p = srcPixels[i];
+            uint32_t r10 = (p >> 0) & 0x3FF;
+            uint32_t g10 = (p >> 10) & 0x3FF;
+            uint32_t b10 = (p >> 20) & 0x3FF;
+            uint32_t a2 = (p >> 30) & 0x03;
+
+            dstPixels[i * 4 + 0] = static_cast<uint8_t>((r10 * 255 + 511) / 1023);
+            dstPixels[i * 4 + 1] = static_cast<uint8_t>((g10 * 255 + 511) / 1023);
+            dstPixels[i * 4 + 2] = static_cast<uint8_t>((b10 * 255 + 511) / 1023);
+            dstPixels[i * 4 + 3] = static_cast<uint8_t>(a2 * 85);
+        }
+    } else if (format == VK_FORMAT_A2R10G10B10_UNORM_PACK32) {
+        for (uint32_t i = 0; i < pixelCount; i++) {
+            uint32_t p = srcPixels[i];
+            uint32_t b10 = (p >> 0) & 0x3FF;
+            uint32_t g10 = (p >> 10) & 0x3FF;
+            uint32_t r10 = (p >> 20) & 0x3FF;
+            uint32_t a2 = (p >> 30) & 0x03;
+
+            dstPixels[i * 4 + 0] = static_cast<uint8_t>((r10 * 255 + 511) / 1023);
+            dstPixels[i * 4 + 1] = static_cast<uint8_t>((g10 * 255 + 511) / 1023);
+            dstPixels[i * 4 + 2] = static_cast<uint8_t>((b10 * 255 + 511) / 1023);
+            dstPixels[i * 4 + 3] = static_cast<uint8_t>(a2 * 85);
+        }
+    } else {
+        // Fallback for unsupported packed HDR formats.
+        std::memset(dstPointer, 0, width * height * channel);
+    }
+}
+
+VkFormat Framework::takeScreenshotRawHdrPacked(bool withUI,
+                                               int width,
+                                               int height,
+                                               void *dstPointer,
+                                               int dstByteSize) {
+    if (dstPointer == nullptr || dstByteSize <= 0) return VK_FORMAT_UNDEFINED;
+    if (indexHistory_.empty()) return VK_FORMAT_UNDEFINED;
+
+    uint32_t targetIndex = indexHistory_.front();
+    auto context = contexts_[targetIndex];
+    std::shared_ptr<vk::Fence> fence = context->commandFinishedFence;
+    VkResult result = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+    if (result != VK_SUCCESS) {
+        std::cout << "vkWaitForFences failed with error for screenshot: " << std::dec << result << std::endl;
+        waitDeviceIdle();
+        exit(EXIT_FAILURE);
+    }
+
+    std::shared_ptr<vk::HostVisibleBuffer> dstBuffer;
+    std::shared_ptr<vk::Image> srcImage;
+    std::shared_ptr<vk::DeviceLocalImage> srcDeviceImage;
+    std::shared_ptr<vk::SwapchainImage> srcSwapchainImage;
+
+    auto pipelineContext = pipeline_->acquirePipelineContext(context);
+
+    if (withUI) {
+        if (Renderer::options.hdrEnabled && swapchain_->isHDR()) {
+            srcSwapchainImage = context->swapchainImage;
+            srcImage = srcSwapchainImage;
+        } else {
+            srcDeviceImage = pipelineContext->uiModuleContext->overlayDrawColorImage;
+            srcImage = srcDeviceImage;
+        }
+    } else {
+        if (pipelineContext->worldPipelineContext == nullptr ||
+            pipelineContext->worldPipelineContext->outputImage == nullptr) {
+            return VK_FORMAT_UNDEFINED;
+        }
+        srcDeviceImage = pipelineContext->worldPipelineContext->outputImage;
+        srcImage = srcDeviceImage;
+    }
+
+    if (srcImage == nullptr) return VK_FORMAT_UNDEFINED;
+    if (static_cast<uint32_t>(width) != srcImage->width() || static_cast<uint32_t>(height) != srcImage->height()) {
+        return VK_FORMAT_UNDEFINED;
+    }
+
+    VkFormat format = srcImage->vkFormat();
+    if (format != VK_FORMAT_A2B10G10R10_UNORM_PACK32 && format != VK_FORMAT_A2R10G10B10_UNORM_PACK32) {
+        return VK_FORMAT_UNDEFINED;
+    }
+
+    uint64_t rawBufferSize64 = static_cast<uint64_t>(srcImage->width()) * srcImage->height() * srcImage->layer() *
+                               vk::formatToByte(srcImage->vkFormat());
+    if (rawBufferSize64 > static_cast<uint64_t>(dstByteSize)) {
+        return VK_FORMAT_UNDEFINED;
+    }
+    size_t rawBufferSize = static_cast<size_t>(rawBufferSize64);
+
+    dstBuffer = vk::HostVisibleBuffer::create(vma_, device_, rawBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+
+    VkImageLayout initialLayout = srcSwapchainImage ? srcSwapchainImage->imageLayout() : srcDeviceImage->imageLayout();
+    auto mainQueueIndex = physicalDevice_->mainQueueIndex();
+
+    std::shared_ptr<vk::CommandBuffer> oneTimeBuffer = vk::CommandBuffer::create(device_, mainCommandPool_);
+    oneTimeBuffer->begin();
+
+    oneTimeBuffer->barriersBufferImage(
+        {}, {{
+                .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .oldLayout = initialLayout,
+                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                .srcQueueFamilyIndex = mainQueueIndex,
+                .dstQueueFamilyIndex = mainQueueIndex,
+                .image = srcImage,
+                .subresourceRange = vk::wholeColorSubresourceRange,
+            }});
+
+    VkBufferImageCopy bufferImageCopy{};
+    bufferImageCopy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    bufferImageCopy.imageSubresource.mipLevel = 0;
+    bufferImageCopy.imageSubresource.baseArrayLayer = 0;
+    bufferImageCopy.imageSubresource.layerCount = 1;
+    bufferImageCopy.imageExtent.width = srcImage->width();
+    bufferImageCopy.imageExtent.height = srcImage->height();
+    bufferImageCopy.imageExtent.depth = 1;
+    vkCmdCopyImageToBuffer(oneTimeBuffer->vkCommandBuffer(), srcImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           dstBuffer->vkBuffer(), 1, &bufferImageCopy);
+
+    oneTimeBuffer->barriersBufferImage(
+        {}, {{
+                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                .newLayout = initialLayout,
+                .srcQueueFamilyIndex = mainQueueIndex,
+                .dstQueueFamilyIndex = mainQueueIndex,
+                .image = srcImage,
+                .subresourceRange = vk::wholeColorSubresourceRange,
+            }});
+
+    oneTimeBuffer->end();
+
+    VkSubmitInfo vkSubmitInfo = {};
+    vkSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    vkSubmitInfo.waitSemaphoreCount = 0;
+    vkSubmitInfo.commandBufferCount = 1;
+    vkSubmitInfo.pCommandBuffers = &oneTimeBuffer->vkCommandBuffer();
+    vkSubmitInfo.signalSemaphoreCount = 0;
+    std::shared_ptr<vk::Fence> oneTimeFence = vk::Fence::create(device_);
+
+    vkQueueSubmit(device_->mainVkQueue(), 1, &vkSubmitInfo, oneTimeFence->vkFence());
+    result = vkWaitForFences(device_->vkDevice(), 1, &oneTimeFence->vkFence(), true, UINT64_MAX);
+    if (result != VK_SUCCESS) {
+        std::cout << "vkWaitForFences failed with error for screenshot: " << std::dec << result << std::endl;
+        waitDeviceIdle();
+        exit(EXIT_FAILURE);
+    }
+
+    std::memcpy(dstPointer, dstBuffer->mappedPtr(), rawBufferSize);
+    return format;
 }
 
 std::recursive_mutex &Framework::recreateMtx() {

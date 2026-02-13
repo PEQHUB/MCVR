@@ -71,7 +71,7 @@ vec4 evalSunBillboard(vec3 rd) {
     vec2 p = vec2(dot(rd, right), dot(rd, up));
     vec2 q = p / max(z, 1e-4);
 
-    float tanHalf = tan(0.03); // tan(x), x: half angle from middle to edge
+    float tanHalf = tan(0.03 * max(0.05, skyUBO.envCelestial.x)); // tan(x), x: half angle from middle to edge
 
     vec2 a = abs(q);
     if (a.x > tanHalf || a.y > tanHalf) return vec4(0.0);
@@ -93,7 +93,7 @@ vec4 evalMoonBillboard(vec3 rd) {
     vec2 p = vec2(dot(rd, right), dot(rd, up));
     vec2 q = p / max(z, 1e-4);
 
-    float tanHalf = tan(0.05); // tan(x), x: half angle from middle to edge
+    float tanHalf = tan(0.05 * max(0.05, skyUBO.envCelestial.y)); // tan(x), x: half angle from middle to edge
 
     vec2 a = abs(q);
     if (a.x > tanHalf || a.y > tanHalf) return vec4(0.0);
@@ -130,9 +130,9 @@ void main() {
         vec3 sunDir = normalize(skyUBO.sunDirection);
         vec3 moonDir = normalize(-skyUBO.sunDirection);
 
-        float progress = skyUBO.rainGradient;
+        float progress = clamp(skyUBO.rainGradient * skyUBO.envSky.y, 0.0, 1.0);
         vec3 rainyRadiance = mix(vec3(0.0), vec3(0.1), smoothstep(-0.3, 0.3, sunDir.y));
-        vec3 sunnyRadiance = texture(skyFull, rayDir).rgb;
+        vec3 sunnyRadiance = texture(skyFull, rayDir).rgb * skyUBO.envSky.x;
         mainRay.radiance += mix(sunnyRadiance, rainyRadiance, progress) * mainRay.throughput;
 
         if (worldUBO.skyType == 1) {
@@ -152,7 +152,7 @@ void main() {
                         float mu = clamp(dot(up, sunDir), -1.0, 1.0);
                         r = clamp(r, skyUBO.Rg, skyUBO.Rt);
                         vec3 T = sampleTransmittance(r, mu);
-                        vec3 sunRadiance = (sunSample.rgb * skyUBO.sunRadiance * T * sunSample.a);
+                        vec3 sunRadiance = (sunSample.rgb * skyUBO.sunRadiance * skyUBO.envCelestial.z * T * sunSample.a);
                         mainRay.radiance += mix(sunRadiance, vec3(0.0), progress) * mainRay.throughput;
                     }
                 }
@@ -178,7 +178,7 @@ void main() {
                         r = clamp(r, skyUBO.Rg, skyUBO.Rt);
                         vec3 T = sampleTransmittance(r, mu);
                         // Scale down moon radiance by 95% for subtle physical moon
-                        vec3 moonRadiance = (moonSample.rgb * skyUBO.moonRadiance * T * moonSample.a) * 0.05;
+                        vec3 moonRadiance = (moonSample.rgb * skyUBO.moonRadiance * skyUBO.envCelestial.w * T * moonSample.a) * 0.05;
                         mainRay.radiance += mix(moonRadiance, vec3(nightCompensite), progress) * mainRay.throughput;
                     }
                 } else {
