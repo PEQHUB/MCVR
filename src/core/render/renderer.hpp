@@ -33,6 +33,13 @@ struct Options {
     float middleGrey = 0.18f;          // Middle grey point (0.01 to 0.50)
     float Lwhite = 4.0f;               // White point for Reinhard Extended
     bool legacyExposure = false;       // Use legacy exposure algorithm (keeps legacy failure modes)
+    float exposureUpSpeed = 1.0f;      // Max EV increase rate (EV/s)
+    float exposureDownSpeed = 1.0f;    // Max EV decrease rate (EV/s)
+    float exposureBrightAdaptBoost = 1.0f; // Multiplier applied when stopping down (improved mode)
+    float exposureHighlightProtection = 1.0f; // 0..1, improved mode only
+    float exposureHighlightPercentile = 0.985f; // 0..1, improved mode only
+    float exposureHighlightSmoothingSpeed = 10.0f; // 0..30, 0 disables smoothing
+    float exposureLog2MaxImproved = 14.0f; // Histogram max log2(luminance) for improved mode
     float saturation = 1.3f;           // Saturation/Vibrance boost (0.0 to 2.0)
     uint32_t upscalerPreset = 5; // DLSS: Preset E (latest transformer). Generic for future upscalers.
 

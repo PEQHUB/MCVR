@@ -28,6 +28,7 @@ struct ToneMappingModuleExposureData {
     float paperWhiteNits;        // ITU-R BT.2408 reference white (e.g. 203.0)
     float saturation;            // Saturation boost (1.0 = neutral)
     float sdrTransferFunction;   // 0.0 = Gamma 2.2, 1.0 = sRGB
+    float capExposureSmoothed;   // internal: smoothed highlight cap exposure (improved mode)
 };
 
 struct ToneMappingModulePushConstant {
@@ -40,6 +41,7 @@ struct ToneMappingModulePushConstant {
     float dt;          // 本帧 delta time（秒）
     float speedUp;     // 变亮适应速度（1/秒），例如 3.0
     float speedDown;   // 变暗适应速度（1/秒），例如 1.0
+    float brightAdaptBoost;    // stopping-down boost multiplier (improved mode)
     float minExposure;          // clamp, e.g. 0.0001
     float maxExposure;          // clamp, e.g. 10000.0
     float tonemapMode;          // 0.0 = PBR Neutral, 1.0 = Reinhard Extended, etc.
@@ -48,6 +50,7 @@ struct ToneMappingModulePushConstant {
     float legacyExposure;       // 0.0 = improved, 1.0 = legacy (keeps legacy failure modes)
     float highlightPercent;     // high percentile (e.g. 0.999) for highlight protection
     float highlightProtection;  // 0.0 = off, 1.0 = full
+    float highlightSmoothingSpeed; // smoothing speed for highlight cap (0 disables)
     // HDR fields (appended at end)
     float hdrPipelineEnabled;   // 0.0 = SDR pipeline, 1.0 = HDR pipeline behavior
     float hdr10OutputEnabled;   // 0.0 = SDR output, 1.0 = HDR10 output encoding

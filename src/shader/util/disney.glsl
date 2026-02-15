@@ -118,11 +118,15 @@ vec3 SampleVMF(inout uint seed, vec3 mu, float kappa) {
     float vx = cos(phi);
     float vy = sin(phi);
 
+    // Robust tangent basis. The previous basis construction degenerates for mu ~= (0, +/-1, 0)
+    // (cross products collapse), which caused moon/sun overhead to intermittently produce NaNs.
     vec3 u_basis;
-    if (abs(mu.x) > 0.99) {
-        u_basis = normalize(vec3(mu.y, -mu.x, 0.0));
+    if (abs(mu.y) > 0.99) {
+        // mu is near +/-Y; use Z as the helper axis
+        u_basis = normalize(cross(vec3(0.0, 0.0, 1.0), mu));
     } else {
-        u_basis = normalize(vec3(-mu.z, 0.0, mu.x));
+        // general case; use Y as the helper axis
+        u_basis = normalize(cross(vec3(0.0, 1.0, 0.0), mu));
     }
     vec3 v_basis = normalize(cross(mu, u_basis));
 

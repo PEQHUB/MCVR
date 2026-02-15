@@ -415,14 +415,17 @@ void ToneMappingModuleContext::render() {
 
     ToneMappingModulePushConstant pc{};
     pc.log2Min = -12.0f;
-    pc.log2Max = +8.0f;
+    pc.log2Max = (Renderer::options.legacyExposure) ? +8.0f : Renderer::options.exposureLog2MaxImproved;
     pc.epsilon = 1e-6f;
     pc.lowPercent = 0.005f;
-    pc.highPercent = 0.99f;
+    // In improved mode, include more of the bright tail in the meter so sunlit ground isn't ignored.
+    // Legacy mode keeps the original 99% trim (legacy failure mode).
+    pc.highPercent = (Renderer::options.legacyExposure) ? 0.99f : 0.999f;
     pc.middleGrey = Renderer::options.middleGrey;
     pc.dt = elapsedTime.count();
-    pc.speedUp = module->speedUp_;
-    pc.speedDown = module->speedDown_;
+    pc.speedUp = Renderer::options.exposureUpSpeed;
+    pc.speedDown = Renderer::options.exposureDownSpeed;
+    pc.brightAdaptBoost = Renderer::options.exposureBrightAdaptBoost;
     pc.minExposure = Renderer::options.minExposure;
     pc.maxExposure = Renderer::options.maxExposure;
     pc.tonemapMode = 2.0f;
@@ -430,8 +433,9 @@ void ToneMappingModuleContext::render() {
     pc.exposureCompensation = Renderer::options.exposureCompensation;
     pc.legacyExposure = Renderer::options.legacyExposure ? 1.0f : 0.0f;
     // Improved auto-exposure highlight protection (legacy mode ignores these).
-    pc.highlightPercent = 0.999f;
-    pc.highlightProtection = 1.0f;
+    pc.highlightPercent = Renderer::options.exposureHighlightPercentile;
+    pc.highlightProtection = Renderer::options.exposureHighlightProtection;
+    pc.highlightSmoothingSpeed = Renderer::options.exposureHighlightSmoothingSpeed;
     // HDR fields
     pc.hdrPipelineEnabled = hdrPipelineEnabled ? 1.0f : 0.0f;
     pc.hdr10OutputEnabled = hdr10OutputEnabled ? 1.0f : 0.0f;

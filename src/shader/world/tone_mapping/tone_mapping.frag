@@ -19,6 +19,7 @@ layout(set = 0, binding = 2) readonly buffer ExposureBuffer {
     float paperWhiteNits;   // ITU-R BT.2408 reference white (e.g. 203.0)
     float saturation;       // Saturation boost (1.0 = neutral)
     float sdrTransferFunction; // 0.0 = Gamma 2.2, 1.0 = sRGB
+    float capExposureSmoothed; // internal: kept for layout parity
 }
 gExposure;
 

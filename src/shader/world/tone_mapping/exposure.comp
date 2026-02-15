@@ -19,6 +19,7 @@ layout(set = 0, binding = 2) buffer ExposureBuffer {
     float paperWhiteNits;
     float saturation;
     float sdrTransferFunction;
+    float capExposureSmoothed;
 }
 expData;
 
@@ -32,6 +33,7 @@ layout(push_constant) uniform PushConstant {
     float dt;
     float speedUp;
     float speedDown;
+    float brightAdaptBoost;
     float minExposure;
     float maxExposure;
     float tonemapMode;
@@ -40,6 +42,7 @@ layout(push_constant) uniform PushConstant {
     float legacyExposure;
     float highlightPercent;
     float highlightProtection;
+    float highlightSmoothingSpeed;
     // HDR fields
     float hdrPipelineEnabled;
     float hdr10OutputEnabled;
@@ -100,9 +103,12 @@ void main() {
 
     // Legacy target: expose middle-grey to the trimmed mean.
     float targetExposure = pc.middleGrey / max(avgLum, 1e-6);
+    // Work in compensated exposure space for temporal adaptation.
+    float targetComp = targetExposure * exp2(pc.exposureCompensation);
 
     float highlightMix = 0.0;
-    float capExposure = 3.4e38; // effectively no cap
+    float capExposureRaw = 3.4e38; // effectively no cap
+    float capExposure = 3.4e38;
 
     // Optional highlight protection for improved mode. Legacy mode keeps legacy failure modes.
     if (pc.legacyExposure < 0.5 && pc.highlightProtection > 0.0) {
@@ -113,10 +119,22 @@ void main() {
 
         uint cum2 = 0u;
         uint hiBin = NUM_BINS - 1u;
+        uint cumBeforeHi = 0u;
         for (uint i = 0u; i < NUM_BINS; ++i) {
             cum2 += gHist.bins[i];
-            if (cum2 >= hiCount) { hiBin = i; break; }
+            if (cum2 >= hiCount) {
+                hiBin = i;
+                cumBeforeHi = cum2 - gHist.bins[i];
+                break;
+            }
         }
+
+        // If the highlight tail is extremely small (e.g. sun disc), reduce highlight influence.
+        // Prevents the entire scene from going near-black just to preserve a few pixels.
+        float tailCount = float(total - cumBeforeHi);
+        float tailFrac = tailCount / fTotal;
+        float tailWeight = smoothstep(0.002, 0.02, tailFrac); // 0.2%..2% of pixels
+        highlightMix *= tailWeight;
 
         float tHi = (float(hiBin) + 0.5) / binCountF;
         float hiLogLum = pc.log2Min + tHi * log2Range;
@@ -125,33 +143,53 @@ void main() {
         float paperWhite = max(pc.paperWhiteNits, 1e-6);
         float headroom = max(pc.peakNits / paperWhite, 1.0);
         float highlightTarget = (pc.hdr10OutputEnabled > 0.5) ? headroom : 1.0;
-        capExposure = highlightTarget / max(hiLum, 1e-6);
+        capExposureRaw = highlightTarget / max(hiLum, 1e-6);
 
-        // Apply EV compensation before highlight cap so "looks" can't override safety.
-        float targetComp = targetExposure * exp2(pc.exposureCompensation);
+        // Temporal smoothing for the highlight cap to reduce percentile noise.
+        // Uses log-domain smoothing so it behaves well across many stops.
+        float smoothSpeed = max(pc.highlightSmoothingSpeed, 0.0);
+        if (smoothSpeed > 0.0) {
+            float prevCap = expData.capExposureSmoothed;
+            if (prevCap <= 0.0) prevCap = capExposureRaw;
+
+            float prevLog = log2(max(prevCap, 1e-6));
+            float rawLog = log2(max(capExposureRaw, 1e-6));
+
+            // Keep symmetric smoothing: tightening too fast looks unnatural.
+            float dirSpeed = smoothSpeed;
+            float kCap = 1.0 - exp(-pc.dt * dirSpeed);
+            float smLog = mix(prevLog, rawLog, clamp(kCap, 0.0, 1.0));
+            capExposure = exp2(smLog);
+        } else {
+            capExposure = capExposureRaw;
+        }
+
+        expData.capExposureSmoothed = capExposure;
+
         float capped = min(targetComp, capExposure);
-        float protectedTarget = mix(targetComp, capped, highlightMix);
-
-        // Convert back to uncompensated target for the temporal filter.
-        targetExposure = protectedTarget / exp2(pc.exposureCompensation);
+        targetComp = mix(targetComp, capped, highlightMix);
     }
 
-    float prev = expData.exposure;
-    float speed = (targetExposure > prev) ? pc.speedUp : pc.speedDown;
-    // In improved mode, stop-down (bright adaptation) should be faster.
-    if (pc.legacyExposure < 0.5 && targetExposure < prev) {
-        speed *= 4.0;
+    float prevComp = expData.exposure;
+    if (prevComp <= 0.0) prevComp = targetComp;
+
+    // Natural adaptation: clamp EV change per second.
+    float prevEV = log2(max(prevComp, 1e-6));
+    float targetEV = log2(max(targetComp, 1e-6));
+
+    float upRate = max(pc.speedUp, 0.0);
+    float downRate = max(pc.speedDown, 0.0);
+    if (pc.legacyExposure < 0.5 && targetEV < prevEV) {
+        downRate *= max(pc.brightAdaptBoost, 1.0);
     }
-    float k = 1.0 - exp(-pc.dt * speed);
-    float adapted = mix(prev, targetExposure, clamp(k, 0.0, 1.0));
+
+    float maxUp = upRate * pc.dt;
+    float maxDown = downRate * pc.dt;
+    float delta = clamp(targetEV - prevEV, -maxDown, +maxUp);
+    float adaptedComp = exp2(prevEV + delta);
 
     expData.avgLogLum = avgLogLum;
-    // Apply EV compensation: multiply by 2^EV
-    float compensated = adapted * exp2(pc.exposureCompensation);
-    if (highlightMix > 0.0) {
-        compensated = mix(compensated, min(compensated, capExposure), highlightMix);
-    }
-    expData.exposure = clamp(compensated, pc.minExposure, pc.maxExposure);
+    expData.exposure = clamp(adaptedComp, pc.minExposure, pc.maxExposure);
     expData.tonemapMode = pc.tonemapMode;
     expData.Lwhite = pc.Lwhite;
     expData.exposureCompensation = pc.exposureCompensation;

@@ -19,6 +19,7 @@ layout(push_constant) uniform PushB {
     float dt;          
     float speedUp;     
     float speedDown;   
+    float brightAdaptBoost;
     float minExposure;
     float maxExposure;
     float tonemapMode;
@@ -27,6 +28,7 @@ layout(push_constant) uniform PushB {
     float legacyExposure;
     float highlightPercent;
     float highlightProtection;
+    float highlightSmoothingSpeed;
     // HDR fields (unused by hist shader, but must match push constant layout)
     float hdrPipelineEnabled;
     float hdr10OutputEnabled;

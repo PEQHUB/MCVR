@@ -96,9 +96,44 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetLwhite(
     Renderer::options.Lwhite = lw;
 }
 
-JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetLegacyExposure(
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetLegacyExposure(
     JNIEnv *, jclass, jboolean legacyExposure, jboolean write) {
     Renderer::options.legacyExposure = legacyExposure;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureUpSpeed(
+    JNIEnv *, jclass, jfloat speed, jboolean write) {
+    Renderer::options.exposureUpSpeed = speed;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureDownSpeed(
+    JNIEnv *, jclass, jfloat speed, jboolean write) {
+    Renderer::options.exposureDownSpeed = speed;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureBrightAdaptBoost(
+    JNIEnv *, jclass, jfloat boost, jboolean write) {
+    Renderer::options.exposureBrightAdaptBoost = boost;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureHighlightProtection(
+    JNIEnv *, jclass, jfloat protection, jboolean write) {
+    Renderer::options.exposureHighlightProtection = protection;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureHighlightPercentile(
+    JNIEnv *, jclass, jfloat percentile, jboolean write) {
+    Renderer::options.exposureHighlightPercentile = percentile;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureHighlightSmoothingSpeed(
+    JNIEnv *, jclass, jfloat speed, jboolean write) {
+    Renderer::options.exposureHighlightSmoothingSpeed = speed;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureLog2MaxImproved(
+    JNIEnv *, jclass, jfloat log2Max, jboolean write) {
+    Renderer::options.exposureLog2MaxImproved = log2Max;
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssPreset(

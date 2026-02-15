@@ -100,6 +100,10 @@ layout(location = 0) rayPayloadEXT PrimaryRay mainRay;
 
 #define NUM_PSR_PER_RAY 2
 
+// Disables the vanilla-style render-distance fog band that tends to read as a bright ring
+// (especially at night / when flying above clouds). Underwater fog is kept.
+#define DISABLE_RENDER_DISTANCE_FOG 1
+
 vec3 applyFog(vec3 radiance, float t, float fogStart, float dBase, float dFog, vec3 fogRadiance) {
     float opticalDepth = 0.0;
 
@@ -252,8 +256,8 @@ void main() {
                 }
 
                 CloudSegmentResult seg = integrateCloudSegment(traceOrigin, traceDir, 0.0, tMax, worldUBO, skyUBO,
-                                                             skyFull, mainRay.seed,
-                                                             12, 6);
+                                                              skyFull, mainRay.seed,
+                                                              12, 6);
 
                 vec3 dL = mainRay.radiance - radianceBeforeTrace;
                 mainRay.radiance = radianceBeforeTrace + seg.L * throughputBeforeTrace + dL * seg.T;
@@ -543,7 +547,7 @@ void main() {
     if (isnan(mainRay.radiance.b) || isinf(mainRay.radiance.b)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
 
     float densityAir = 0.0000;
-    float densityFog = 2.0 / (worldUBO.fogEnd - worldUBO.fogStart);
+    float densityFog = 2.0 / max(worldUBO.fogEnd - worldUBO.fogStart, 1e-3);
     if (skyUBO.cameraSubmersionType == 1) { // underwater
         vec3 waterColor = skyUBO.envWaterTintFog.rgb;
         float waterFogStrength = max(0.0, skyUBO.envWaterTintFog.a);
@@ -552,7 +556,7 @@ void main() {
         if (surfaceDepth == INF_DISTANCE) surfaceDepth = 0;
         mainRay.radiance =
             applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog * waterFogStrength, waterColor * 0.01);
-    } else {
+    } else if (DISABLE_RENDER_DISTANCE_FOG == 0) {
         if (worldUBO.skyType == 0) { // None
             mainRay.radiance = applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog,
                                         worldUBO.fogColor.rgb);

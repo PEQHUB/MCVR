@@ -5,6 +5,7 @@
 
 #include "../util/ray_payloads.glsl"
 #include "../util/util.glsl"
+#include "../util/random.glsl"
 #include "common/shared.hpp"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
@@ -77,7 +78,20 @@ vec4 evalSunBillboard(vec3 rd) {
     if (a.x > tanHalf || a.y > tanHalf) return vec4(0.0);
 
     vec2 uv = q / tanHalf * 0.5 + 0.5;
-    return texture(textures[nonuniformEXT(skyUBO.sunTextureID)], uv);
+    vec4 tex = texture(textures[nonuniformEXT(skyUBO.sunTextureID)], uv);
+
+    // Replace texture alpha with analytic disc alpha to reduce visible banding.
+    float r = length(q) / max(tanHalf, 1e-6);
+    float edge = 0.08; // soft edge fraction
+    float aDisc = 1.0 - smoothstep(1.0 - edge, 1.0, r);
+
+    // Dither alpha slightly to break residual quantization.
+    uvec2 pix = uvec2(gl_LaunchIDEXT.xy);
+    uint seed = xxhash32(uvec3(pix, worldUBO.seed));
+    float n = rand(seed) - 0.5;
+    aDisc = clamp(aDisc + n * (1.0 / 255.0), 0.0, 1.0);
+
+    return vec4(tex.rgb, aDisc);
 }
 
 vec4 evalMoonBillboard(vec3 rd) {
@@ -130,10 +144,16 @@ void main() {
         vec3 sunDir = normalize(skyUBO.sunDirection);
         vec3 moonDir = normalize(-skyUBO.sunDirection);
 
+        // Fade sky brightness to black after sunset.
+        // sunDir.y is continuous and avoids hard transitions.
+        // 1.0 above ~+1 deg, 0.0 below ~-6 deg.
+        float daySky = smoothstep(-0.10, 0.02, sunDir.y);
+
         float progress = clamp(skyUBO.rainGradient * skyUBO.envSky.y, 0.0, 1.0);
         vec3 rainyRadiance = mix(vec3(0.0), vec3(0.1), smoothstep(-0.3, 0.3, sunDir.y));
         vec3 sunnyRadiance = texture(skyFull, rayDir).rgb * skyUBO.envSky.x;
-        mainRay.radiance += mix(sunnyRadiance, rainyRadiance, progress) * mainRay.throughput;
+        vec3 skyRadiance = mix(sunnyRadiance, rainyRadiance, progress) * daySky;
+        mainRay.radiance += skyRadiance * mainRay.throughput;
 
         if (worldUBO.skyType == 1) {
             {
@@ -152,7 +172,7 @@ void main() {
                         float mu = clamp(dot(up, sunDir), -1.0, 1.0);
                         r = clamp(r, skyUBO.Rg, skyUBO.Rt);
                         vec3 T = sampleTransmittance(r, mu);
-                        vec3 sunRadiance = (sunSample.rgb * skyUBO.sunRadiance * skyUBO.envCelestial.z * T * sunSample.a);
+                        vec3 sunRadiance = (sunSample.rgb * skyUBO.sunRadiance * skyUBO.envCelestial.z * T * sunSample.a) * daySky;
                         mainRay.radiance += mix(sunRadiance, vec3(0.0), progress) * mainRay.throughput;
                     }
                 }
