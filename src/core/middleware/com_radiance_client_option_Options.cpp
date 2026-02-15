@@ -96,6 +96,11 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetLwhite(
     Renderer::options.Lwhite = lw;
 }
 
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetLegacyExposure(
+    JNIEnv *, jclass, jboolean legacyExposure, jboolean write) {
+    Renderer::options.legacyExposure = legacyExposure;
+}
+
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssPreset(
     JNIEnv *, jclass, jint preset, jboolean write) {
     // Clamp to valid DLSS RR preset range (A=0 through G=6)

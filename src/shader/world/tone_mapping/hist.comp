@@ -24,6 +24,9 @@ layout(push_constant) uniform PushB {
     float tonemapMode;
     float Lwhite;
     float exposureCompensation;
+    float legacyExposure;
+    float highlightPercent;
+    float highlightProtection;
     // HDR fields (unused by hist shader, but must match push constant layout)
     float hdrPipelineEnabled;
     float hdr10OutputEnabled;

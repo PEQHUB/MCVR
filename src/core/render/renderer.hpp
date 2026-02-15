@@ -32,6 +32,7 @@ struct Options {
     float exposureCompensation = 0.0f; // EV offset (-3 to +3)
     float middleGrey = 0.18f;          // Middle grey point (0.01 to 0.50)
     float Lwhite = 4.0f;               // White point for Reinhard Extended
+    bool legacyExposure = false;       // Use legacy exposure algorithm (keeps legacy failure modes)
     float saturation = 1.3f;           // Saturation/Vibrance boost (0.0 to 2.0)
     uint32_t upscalerPreset = 5; // DLSS: Preset E (latest transformer). Generic for future upscalers.
 

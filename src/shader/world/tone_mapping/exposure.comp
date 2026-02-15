@@ -37,6 +37,9 @@ layout(push_constant) uniform PushConstant {
     float tonemapMode;
     float Lwhite;
     float exposureCompensation;
+    float legacyExposure;
+    float highlightPercent;
+    float highlightProtection;
     // HDR fields
     float hdrPipelineEnabled;
     float hdr10OutputEnabled;
@@ -95,16 +98,59 @@ void main() {
     float avgLogLum = (used > 0u) ? float(sumLog / double(used)) : pc.log2Min;
     float avgLum = exp2(avgLogLum);
 
+    // Legacy target: expose middle-grey to the trimmed mean.
     float targetExposure = pc.middleGrey / max(avgLum, 1e-6);
+
+    float highlightMix = 0.0;
+    float capExposure = 3.4e38; // effectively no cap
+
+    // Optional highlight protection for improved mode. Legacy mode keeps legacy failure modes.
+    if (pc.legacyExposure < 0.5 && pc.highlightProtection > 0.0) {
+        highlightMix = clamp(pc.highlightProtection, 0.0, 1.0);
+        // Find log luminance at a high percentile of the histogram CDF.
+        uint hiCount = uint(clamp(pc.highlightPercent, 0.0, 1.0) * fTotal);
+        hiCount = clamp(hiCount, 1u, total);
+
+        uint cum2 = 0u;
+        uint hiBin = NUM_BINS - 1u;
+        for (uint i = 0u; i < NUM_BINS; ++i) {
+            cum2 += gHist.bins[i];
+            if (cum2 >= hiCount) { hiBin = i; break; }
+        }
+
+        float tHi = (float(hiBin) + 0.5) / binCountF;
+        float hiLogLum = pc.log2Min + tHi * log2Range;
+        float hiLum = exp2(hiLogLum);
+
+        float paperWhite = max(pc.paperWhiteNits, 1e-6);
+        float headroom = max(pc.peakNits / paperWhite, 1.0);
+        float highlightTarget = (pc.hdr10OutputEnabled > 0.5) ? headroom : 1.0;
+        capExposure = highlightTarget / max(hiLum, 1e-6);
+
+        // Apply EV compensation before highlight cap so "looks" can't override safety.
+        float targetComp = targetExposure * exp2(pc.exposureCompensation);
+        float capped = min(targetComp, capExposure);
+        float protectedTarget = mix(targetComp, capped, highlightMix);
+
+        // Convert back to uncompensated target for the temporal filter.
+        targetExposure = protectedTarget / exp2(pc.exposureCompensation);
+    }
 
     float prev = expData.exposure;
     float speed = (targetExposure > prev) ? pc.speedUp : pc.speedDown;
+    // In improved mode, stop-down (bright adaptation) should be faster.
+    if (pc.legacyExposure < 0.5 && targetExposure < prev) {
+        speed *= 4.0;
+    }
     float k = 1.0 - exp(-pc.dt * speed);
     float adapted = mix(prev, targetExposure, clamp(k, 0.0, 1.0));
 
     expData.avgLogLum = avgLogLum;
     // Apply EV compensation: multiply by 2^EV
     float compensated = adapted * exp2(pc.exposureCompensation);
+    if (highlightMix > 0.0) {
+        compensated = mix(compensated, min(compensated, capExposure), highlightMix);
+    }
     expData.exposure = clamp(compensated, pc.minExposure, pc.maxExposure);
     expData.tonemapMode = pc.tonemapMode;
     expData.Lwhite = pc.Lwhite;

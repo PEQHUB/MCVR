@@ -428,6 +428,10 @@ void ToneMappingModuleContext::render() {
     pc.tonemapMode = 2.0f;
     pc.Lwhite = Renderer::options.Lwhite;
     pc.exposureCompensation = Renderer::options.exposureCompensation;
+    pc.legacyExposure = Renderer::options.legacyExposure ? 1.0f : 0.0f;
+    // Improved auto-exposure highlight protection (legacy mode ignores these).
+    pc.highlightPercent = 0.999f;
+    pc.highlightProtection = 1.0f;
     // HDR fields
     pc.hdrPipelineEnabled = hdrPipelineEnabled ? 1.0f : 0.0f;
     pc.hdr10OutputEnabled = hdr10OutputEnabled ? 1.0f : 0.0f;

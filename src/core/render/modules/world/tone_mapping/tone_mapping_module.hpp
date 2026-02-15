@@ -45,6 +45,9 @@ struct ToneMappingModulePushConstant {
     float tonemapMode;          // 0.0 = PBR Neutral, 1.0 = Reinhard Extended, etc.
     float Lwhite;               // White point for Reinhard Extended (default 4.0)
     float exposureCompensation; // EV offset applied after auto-exposure
+    float legacyExposure;       // 0.0 = improved, 1.0 = legacy (keeps legacy failure modes)
+    float highlightPercent;     // high percentile (e.g. 0.999) for highlight protection
+    float highlightProtection;  // 0.0 = off, 1.0 = full
     // HDR fields (appended at end)
     float hdrPipelineEnabled;   // 0.0 = SDR pipeline, 1.0 = HDR pipeline behavior
     float hdr10OutputEnabled;   // 0.0 = SDR output, 1.0 = HDR10 output encoding
