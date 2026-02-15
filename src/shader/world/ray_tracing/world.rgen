@@ -12,7 +12,11 @@
 #include "../util/util.glsl"
 #include "common/shared.hpp"
 
+layout(set = 0, binding = 0) uniform sampler2D textures[];
+
 layout(set = 0, binding = 2) uniform samplerCube skyFull;
+
+#include "../util/clouds.glsl"
 
 layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
 
@@ -192,14 +196,14 @@ void main() {
                 if (psrDepth == 0) {
                     len = 1000;
                     if (worldUBO.isFirstPerson > 0) {
-                        mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                        mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | BOAT_WATER_MASK;
                     } else {
                         mask =
-                            WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                            WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | BOAT_WATER_MASK;
                     }
                 } else if (psrDepth <= 1) {
                     len = 1000;
-                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | BOAT_WATER_MASK;
                 } else {
                     len = 384;
                     mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | BOAT_WATER_MASK;
@@ -211,7 +215,7 @@ void main() {
                     missId = 1;
                 } else if (psrDepth <= 1) {
                     len = 384;
-                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | BOAT_WATER_MASK;
                     missId = 0;
                 } else {
                     len = 384;
@@ -219,6 +223,12 @@ void main() {
                     missId = 0;
                 }
             }
+
+            // Preserve ray state; closest-hit shaders will overwrite origin/direction for the next bounce.
+            vec3 traceOrigin = mainRay.origin;
+            vec3 traceDir = mainRay.direction;
+            vec3 radianceBeforeTrace = mainRay.radiance;
+            vec3 throughputBeforeTrace = mainRay.throughput;
 
             traceRayEXT(topLevelAS,        // topLevel
                         rayFlags,          // rayFlags
@@ -232,6 +242,24 @@ void main() {
                         len,               // Tmax
                         0                  // mainRay
             );
+
+            // Volumetric cloud slab integration along the traced segment.
+            // Skip the primary hand trace (HAND_MASK); it is in a different space and should not be clouded.
+            if (!(isHand == 1 && psrDepth == 0)) {
+                float tMax = len;
+                if (mainRay.hitT != INF_DISTANCE) {
+                    tMax = min(mainRay.hitT, len);
+                }
+
+                CloudSegmentResult seg = integrateCloudSegment(traceOrigin, traceDir, 0.0, tMax, worldUBO, skyUBO,
+                                                             skyFull, mainRay.seed,
+                                                             12, 6);
+
+                vec3 dL = mainRay.radiance - radianceBeforeTrace;
+                mainRay.radiance = radianceBeforeTrace + seg.L * throughputBeforeTrace + dL * seg.T;
+                // Preserve the hit shader's throughput update; apply medium transmittance to it.
+                mainRay.throughput *= seg.T;
+            }
 
             if (!surfaceDepthSampled) {
                 if (isHand == 0) {
@@ -446,22 +474,42 @@ void main() {
             if (b == 0) {
                 len = 1000;
                 if (worldUBO.isFirstPerson > 0) {
-                    mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+                    mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK;
                 } else {
-                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK;
                 }
             } else if (b <= 1) {
                 len = 1000;
-                mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+                mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK;
             } else {
                 len = 384;
                 mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK;
             }
+
+            vec3 traceOrigin = mainRay.origin;
+            vec3 traceDir = mainRay.direction;
+            vec3 radianceBeforeTrace = mainRay.radiance;
+            vec3 throughputBeforeTrace = mainRay.throughput;
+
             traceRayEXT(topLevelAS, rayFlags, mask, // mask
                         1,                          // sbtRecordOffset
                         1,                          // sbtRecordStride
                         0,                          // missIndex
                         mainRay.origin, 0.001, mainRay.direction, len, 0);
+
+            {
+                float tMax = float(len);
+                if (mainRay.hitT != INF_DISTANCE) {
+                    tMax = min(mainRay.hitT, float(len));
+                }
+                CloudSegmentResult seg = integrateCloudSegment(traceOrigin, traceDir, 0.0, tMax, worldUBO, skyUBO,
+                                                             skyFull, mainRay.seed,
+                                                             10, 5);
+                vec3 dL = mainRay.radiance - radianceBeforeTrace;
+                mainRay.radiance = radianceBeforeTrace + seg.L * throughputBeforeTrace + dL * seg.T;
+                // Preserve the hit shader's throughput update; apply medium transmittance to it.
+                mainRay.throughput *= seg.T;
+            }
 
             if (b == psrDepth) {
                 distFirstToSecond = mainRay.hitT;

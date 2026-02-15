@@ -290,6 +290,38 @@ namespace Data {
         T_VEC4 envCelestial;
         T_VEC4 envWaterTintFog;
         T_VEC4 envSky;
+
+        // Clouds (procedural volumetric slab)
+        // x: base height (world Y)
+        // y: thickness
+        // z: density scale (extinction multiplier)
+        // w: albedo/brightness scale
+        T_VEC4 envCloud;
+
+        // Volumetric clouds driven by vanilla Fancy CloudCells
+        // cloudTile.x: textures[] index for the 65x65 R8 mask
+        // cloudTile.y: center cell X (j)
+        // cloudTile.z: center cell Z (k)
+        // cloudTile.w: reserved
+        T_IVEC4 cloudTile;
+
+        // cloudWrap.x: intra-cell offset X (vanilla l, in blocks [0, 12))
+        // cloudWrap.y: intra-cell offset Z (vanilla m, in blocks [0, 12))
+        // cloudWrap.z: ticks (vanilla ticks + tickDelta)
+        // cloudWrap.w: reserved
+        T_VEC4 cloudWrap;
+
+        // cloudShape.x: puffiness (edge softness / roundness)
+        // cloudShape.y: detailScale
+        // cloudShape.z: detailStrength
+        // cloudShape.w: anisotropy (HG g)
+        T_VEC4 cloudShape;
+
+        // cloudLighting.x: shadowStrength
+        // cloudLighting.y: ambientStrength
+        // cloudLighting.z: sunOcclusionStrength
+        // cloudLighting.w: noiseAffectsShadows (0=off, 1=on)
+        T_VEC4 cloudLighting;
     };
 
     struct TextureMapEntry {

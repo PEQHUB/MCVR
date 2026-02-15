@@ -14,6 +14,8 @@
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
+#include "../util/clouds.glsl"
+
 layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
 
 layout(set = 1, binding = 1) readonly buffer BLASOffsets {
@@ -252,7 +254,7 @@ void main() {
         shadowRay.hitT = INF_DISTANCE;
         shadowRay.insideBoat = mainRay.insideBoat;
 
-        uint shadowMask = WORLD_MASK | CLOUD_MASK;
+        uint shadowMask = WORLD_MASK;
         if (mainRay.isHand == 0) {
             shadowMask |= PLAYER_MASK;  // world surfaces see player shadows; hand does not (prevents self-shadowing)
         }
@@ -266,6 +268,13 @@ void main() {
 
         // Add direct lighting contribution
         vec3 lightContribution = shadowRay.radiance;
+
+        // Apply cloud shadowing (procedural volumetric slab).
+        // This is evaluated at the shading point so it works for primary and reflected paths.
+        float cloudT = cloudTransmittance(worldPos + sampledLightDir * 0.01, sampledLightDir, 0.0, 1000.0, worldUbo, skyUBO, 0);
+        float shadowStrength = max(skyUBO.cloudLighting.x, 0.0);
+        cloudT = pow(max(cloudT, 1e-6), shadowStrength);
+        lightContribution *= cloudT;
 
         float progress = skyUBO.rainGradient;
         vec3 lightRadiance = lightContribution * mainRay.throughput * lightBRDF;
