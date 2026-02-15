@@ -54,12 +54,12 @@ void FrameworkContext::fuseFinal() {
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
     auto pipelineContext = f->pipeline_->acquirePipelineContext(shared_from_this());
 
-    bool useHdrComposite = Renderer::options.hdrEnabled && swapchain->isHDR()
-        && f->pipeline_->hdrCompositePass()
-        && pipelineContext->worldPipelineContext
+    bool hdrOutputActive = Renderer::options.hdrEnabled && swapchain->isHDR();
+    bool hasWorldOutput = pipelineContext->worldPipelineContext
         && pipelineContext->worldPipelineContext->outputImage;
+    bool canComposite = f->pipeline_->hdrCompositePass() && hasWorldOutput;
 
-    if (useHdrComposite) {
+    if (hdrOutputActive && canComposite) {
         // ═══════════ HDR path: composite shader ═══════════
         // HdrCompositePass::record() handles ALL image transitions internally:
         //   world output  → SHADER_READ_ONLY_OPTIMAL → rest layout
@@ -68,13 +68,27 @@ void FrameworkContext::fuseFinal() {
         f->pipeline_->hdrCompositePass()->record(
             fuseCommandBuffer,
             frameIndex,
+            HdrCompositePass::OutputMode::Hdr10,
             Renderer::options.hdrUiBrightnessNits,
             pipelineContext->worldPipelineContext->outputImage,
             pipelineContext->uiModuleContext->overlayDrawColorImage,
             swapchainImage,
             mainQueueIndex);
 
-    } else if (Renderer::options.hdrEnabled && swapchain->isHDR()) {
+    } else if (!hdrOutputActive && canComposite) {
+        // ═══════════ SDR path: composite shader ═══════════
+        // Output is sRGB-encoded into the UNORM swapchain (SRGB_NONLINEAR colorspace).
+        f->pipeline_->hdrCompositePass()->record(
+            fuseCommandBuffer,
+            frameIndex,
+            HdrCompositePass::OutputMode::Sdr,
+            0.0f,
+            pipelineContext->worldPipelineContext->outputImage,
+            pipelineContext->uiModuleContext->overlayDrawColorImage,
+            swapchainImage,
+            mainQueueIndex);
+
+    } else if (hdrOutputActive) {
         // ═══════════ HDR fallback: no world yet (title/loading screen) ═══════════
         // World pipeline not built yet. Just transition swapchain to PRESENT_SRC_KHR.
         // The overlay has UI on transparent black — can't vkCmdCopyImage (format mismatch).
@@ -119,7 +133,7 @@ void FrameworkContext::fuseFinal() {
         swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     } else {
-        // ═══════════ SDR path (UNCHANGED) ═══════════
+        // ═══════════ SDR fallback: copy overlay → swapchain ═══════════
         fuseCommandBuffer->barriersBufferImage(
             {}, {
                     {
@@ -517,13 +531,10 @@ void Framework::takeScreenshot(bool withUI, int width, int height, int channel, 
     auto pipelineContext = pipeline_->acquirePipelineContext(context);
 
     if (withUI) {
-        if (Renderer::options.hdrEnabled && swapchain_->isHDR()) {
-            srcSwapchainImage = context->swapchainImage;
-            srcImage = srcSwapchainImage;
-        } else {
-            srcDeviceImage = pipelineContext->uiModuleContext->overlayDrawColorImage;
-            srcImage = srcDeviceImage;
-        }
+        // With-UI screenshot should capture the final composited frame.
+        // SDR and HDR now both composite into the swapchain in fuseFinal().
+        srcSwapchainImage = context->swapchainImage;
+        srcImage = srcSwapchainImage;
     } else {
         if (pipelineContext->worldPipelineContext == nullptr ||
             pipelineContext->worldPipelineContext->outputImage == nullptr) {
@@ -536,14 +547,14 @@ void Framework::takeScreenshot(bool withUI, int width, int height, int channel, 
     if (srcImage == nullptr) return;
     if (static_cast<uint32_t>(width) != srcImage->width() || static_cast<uint32_t>(height) != srcImage->height()) return;
 
-    auto isRgbaCompatible = [](VkFormat format) {
+    auto isRawMemcpyOk = [](VkFormat format) {
+        // Only formats that are already RGBA in memory can be memcpy'd.
+        // Swapchain may be BGRA on some platforms.
         return format == VK_FORMAT_R8G8B8A8_UNORM ||
-               format == VK_FORMAT_R8G8B8A8_SRGB ||
-               format == VK_FORMAT_B8G8R8A8_UNORM ||
-               format == VK_FORMAT_B8G8R8A8_SRGB;
+               format == VK_FORMAT_R8G8B8A8_SRGB;
     };
 
-    bool needFormatConversion = !isRgbaCompatible(srcImage->vkFormat());
+    bool needFormatConversion = !isRawMemcpyOk(srcImage->vkFormat());
     if (channel != 4) return;
 
     uint32_t rawBufferSize = srcImage->width() * srcImage->height() * srcImage->layer() * vk::formatToByte(srcImage->vkFormat());
@@ -653,6 +664,19 @@ void Framework::takeScreenshot(bool withUI, int width, int height, int channel, 
             dstPixels[i * 4 + 1] = static_cast<uint8_t>((g10 * 255 + 511) / 1023);
             dstPixels[i * 4 + 2] = static_cast<uint8_t>((b10 * 255 + 511) / 1023);
             dstPixels[i * 4 + 3] = static_cast<uint8_t>(a2 * 85);
+        }
+    } else if (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB) {
+        // Swizzle BGRA → RGBA.
+        for (uint32_t i = 0; i < pixelCount; i++) {
+            uint32_t p = srcPixels[i];
+            uint8_t b = static_cast<uint8_t>((p >> 0) & 0xFF);
+            uint8_t g = static_cast<uint8_t>((p >> 8) & 0xFF);
+            uint8_t r = static_cast<uint8_t>((p >> 16) & 0xFF);
+            uint8_t a = static_cast<uint8_t>((p >> 24) & 0xFF);
+            dstPixels[i * 4 + 0] = r;
+            dstPixels[i * 4 + 1] = g;
+            dstPixels[i * 4 + 2] = b;
+            dstPixels[i * 4 + 3] = a;
         }
     } else {
         // Fallback for unsupported packed HDR formats.

@@ -408,11 +408,14 @@ void ToneMappingModuleContext::render() {
     std::chrono::duration<double> elapsedTime = currentTimePoint - module->lastTimePoint_;
     module->lastTimePoint_ = currentTimePoint;
 
-    bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
+    // HDR pipeline is always enabled for visual parity.
+    // HDR10 output encoding depends on swapchain HDR + user HDR output toggle.
+    bool hdrPipelineEnabled = true;
+    bool hdr10OutputEnabled = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
 
     ToneMappingModulePushConstant pc{};
     pc.log2Min = -12.0f;
-    pc.log2Max = hdrActive ? +8.0f : +4.0f;
+    pc.log2Max = +8.0f;
     pc.epsilon = 1e-6f;
     pc.lowPercent = 0.005f;
     pc.highPercent = 0.99f;
@@ -422,16 +425,16 @@ void ToneMappingModuleContext::render() {
     pc.speedDown = module->speedDown_;
     pc.minExposure = Renderer::options.minExposure;
     pc.maxExposure = Renderer::options.maxExposure;
-    float effectiveTonemapMode =
-        hdrActive ? 2.0f : static_cast<float>(Renderer::options.tonemappingMode);
-    pc.tonemapMode = effectiveTonemapMode;
+    pc.tonemapMode = 2.0f;
     pc.Lwhite = Renderer::options.Lwhite;
     pc.exposureCompensation = Renderer::options.exposureCompensation;
-    // HDR10 fields
-    pc.hdrEnabled = hdrActive ? 1.0f : 0.0f;
+    // HDR fields
+    pc.hdrPipelineEnabled = hdrPipelineEnabled ? 1.0f : 0.0f;
+    pc.hdr10OutputEnabled = hdr10OutputEnabled ? 1.0f : 0.0f;
     pc.peakNits = Renderer::options.hdrPeakNits;
     pc.paperWhiteNits = Renderer::options.hdrPaperWhiteNits;
     pc.saturation = Renderer::options.saturation;
+    pc.sdrTransferFunction = static_cast<float>(Renderer::options.sdrTransferFunction);
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ToneMappingModulePushConstant), &pc);

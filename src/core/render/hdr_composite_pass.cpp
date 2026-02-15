@@ -42,12 +42,14 @@ void HdrCompositePass::recreate(std::shared_ptr<Framework> framework) {
 }
 
 void HdrCompositePass::destroy() {
-    pipeline_.reset();
+    pipelineHdr_.reset();
+    pipelineSdr_.reset();
     framebuffers_.clear();
     renderPass_.reset();
     descriptorTables_.clear();
     sampler_.reset();
-    fragShader_.reset();
+    fragShaderSdr_.reset();
+    fragShaderHdr_.reset();
     vertShader_.reset();
 }
 
@@ -61,9 +63,13 @@ void HdrCompositePass::initShaders() {
         framework->device(),
         (shaderPath / "full_screen_vert.spv").string());
 
-    fragShader_ = vk::Shader::create(
+    fragShaderHdr_ = vk::Shader::create(
         framework->device(),
         (shaderPath / "hdr_ui_composite_frag.spv").string());
+
+    fragShaderSdr_ = vk::Shader::create(
+        framework->device(),
+        (shaderPath / "sdr_ui_composite_frag.spv").string());
 }
 
 // ─── Sampler ───────────────────────────────────────────────────────────────
@@ -172,50 +178,58 @@ void HdrCompositePass::initPipeline() {
     auto framework = framework_.lock();
     auto device = framework->device();
 
-    pipeline_ = vk::GraphicsPipelineBuilder{}
-        .defineRenderPass(renderPass_, 0)
-        .beginShaderStage()
-        .defineShaderStage(vertShader_, VK_SHADER_STAGE_VERTEX_BIT)
-        .defineShaderStage(fragShader_, VK_SHADER_STAGE_FRAGMENT_BIT)
-        .endShaderStage()
-        .defineVertexInputState<void>()
-        .defineViewportScissorState({
-            .viewport = {
-                .x = 0,
-                .y = 0,
-                .width = static_cast<float>(width_),
-                .height = static_cast<float>(height_),
-                .minDepth = 0.0,
-                .maxDepth = 1.0,
-            },
-            .scissor = {
-                .offset = {.x = 0, .y = 0},
-                .extent = {width_, height_},
-            },
-        })
-        .defineDepthStencilState({
-            .depthTestEnable = VK_FALSE,
-            .depthWriteEnable = VK_FALSE,
-            .depthCompareOp = VK_COMPARE_OP_ALWAYS,
-            .depthBoundsTestEnable = VK_FALSE,
-            .stencilTestEnable = VK_FALSE,
-        })
-        .beginColorBlendAttachmentState()
-        .defineDefaultColorBlendAttachmentState()
-        .endColorBlendAttachmentState()
-        .definePipelineLayout(descriptorTables_[0])
-        .build(device);
+    auto makePipeline = [&](std::shared_ptr<vk::Shader> fragShader) {
+        return vk::GraphicsPipelineBuilder{}
+            .defineRenderPass(renderPass_, 0)
+            .beginShaderStage()
+            .defineShaderStage(vertShader_, VK_SHADER_STAGE_VERTEX_BIT)
+            .defineShaderStage(fragShader, VK_SHADER_STAGE_FRAGMENT_BIT)
+            .endShaderStage()
+            .defineVertexInputState<void>()
+            .defineViewportScissorState({
+                .viewport = {
+                    .x = 0,
+                    .y = 0,
+                    .width = static_cast<float>(width_),
+                    .height = static_cast<float>(height_),
+                    .minDepth = 0.0,
+                    .maxDepth = 1.0,
+                },
+                .scissor = {
+                    .offset = {.x = 0, .y = 0},
+                    .extent = {width_, height_},
+                },
+            })
+            .defineDepthStencilState({
+                .depthTestEnable = VK_FALSE,
+                .depthWriteEnable = VK_FALSE,
+                .depthCompareOp = VK_COMPARE_OP_ALWAYS,
+                .depthBoundsTestEnable = VK_FALSE,
+                .stencilTestEnable = VK_FALSE,
+            })
+            .beginColorBlendAttachmentState()
+            .defineDefaultColorBlendAttachmentState()
+            .endColorBlendAttachmentState()
+            .definePipelineLayout(descriptorTables_[0])
+            .build(device);
+    };
+
+    pipelineHdr_ = makePipeline(fragShaderHdr_);
+    pipelineSdr_ = makePipeline(fragShaderSdr_);
 }
 
 // ─── Record composite pass into command buffer ─────────────────────────────
 
 void HdrCompositePass::record(std::shared_ptr<vk::CommandBuffer> cmd,
                               uint32_t frameIndex,
+                              OutputMode mode,
                               float uiBrightnessNits,
                               std::shared_ptr<vk::DeviceLocalImage> worldImage,
                               std::shared_ptr<vk::DeviceLocalImage> overlayImage,
                               std::shared_ptr<vk::SwapchainImage> swapchainImage,
                               uint32_t mainQueueIndex) {
+
+     auto pipeline = (mode == OutputMode::Hdr10) ? pipelineHdr_ : pipelineSdr_;
 
     // ── Bind textures to this frame's descriptor set ──
     auto descriptorTable = descriptorTables_[frameIndex];
@@ -291,7 +305,7 @@ void HdrCompositePass::record(std::shared_ptr<vk::CommandBuffer> cmd,
     });
 
     // ── Draw fullscreen triangle ──
-    cmd->bindGraphicsPipeline(pipeline_)
+    cmd->bindGraphicsPipeline(pipeline)
         ->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS)
         ->draw(3, 1)
         ->endRenderPass();

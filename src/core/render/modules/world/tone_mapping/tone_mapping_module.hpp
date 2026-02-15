@@ -21,11 +21,13 @@ struct ToneMappingModuleExposureData {
     float tonemapMode;           // 0.0 = PBR Neutral, 1.0 = Reinhard Extended, etc.
     float Lwhite;                // White point for Reinhard Extended (default 4.0)
     float exposureCompensation;  // EV offset applied after auto-exposure
-    // HDR10 fields (appended at end — SDR path ignores these)
-    float hdrEnabled;            // 0.0 = SDR, 1.0 = HDR10
+    // HDR fields (appended at end)
+    float hdrPipelineEnabled;    // 0.0 = SDR pipeline, 1.0 = HDR pipeline behavior
+    float hdr10OutputEnabled;    // 0.0 = SDR output, 1.0 = HDR10 output encoding
     float peakNits;              // Display peak brightness (e.g. 1000.0)
     float paperWhiteNits;        // ITU-R BT.2408 reference white (e.g. 203.0)
     float saturation;            // Saturation boost (1.0 = neutral)
+    float sdrTransferFunction;   // 0.0 = Gamma 2.2, 1.0 = sRGB
 };
 
 struct ToneMappingModulePushConstant {
@@ -43,11 +45,13 @@ struct ToneMappingModulePushConstant {
     float tonemapMode;          // 0.0 = PBR Neutral, 1.0 = Reinhard Extended, etc.
     float Lwhite;               // White point for Reinhard Extended (default 4.0)
     float exposureCompensation; // EV offset applied after auto-exposure
-    // HDR10 fields (appended at end)
-    float hdrEnabled;           // 0.0 = SDR, 1.0 = HDR10
+    // HDR fields (appended at end)
+    float hdrPipelineEnabled;   // 0.0 = SDR pipeline, 1.0 = HDR pipeline behavior
+    float hdr10OutputEnabled;   // 0.0 = SDR output, 1.0 = HDR10 output encoding
     float peakNits;             // Display peak brightness
     float paperWhiteNits;       // ITU-R BT.2408 reference white
     float saturation;           // Saturation boost
+    float sdrTransferFunction;  // 0.0 = Gamma 2.2, 1.0 = sRGB
 };
 
 class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingModule> {

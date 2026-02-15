@@ -8,6 +8,8 @@
 #include "core/render/textures.hpp"
 #include "core/render/world.hpp"
 
+#include <algorithm>
+
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMaxFps(JNIEnv *,
                                                                                jclass,
                                                                                jint maxFps,
@@ -45,6 +47,11 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkBui
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTonemappingMode(
     JNIEnv *, jclass, jint mode, jboolean write) {
     Renderer::options.tonemappingMode = mode;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSdrTransferFunction(
+    JNIEnv *, jclass, jint mode, jboolean write) {
+    Renderer::options.sdrTransferFunction = static_cast<uint32_t>(std::clamp(mode, 0, 1));
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRayBounces(

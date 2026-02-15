@@ -380,11 +380,11 @@ void Buffers::setAndUploadSkyUniformBuffer(vk::Data::SkyUBO &ubo) {
     ubo.sunRadiance = glm::vec3(16);
     ubo.moonRadiance = glm::vec3(0.4, 0.5, 1);
 
-    // HDR radiance scale: amplifies scene lighting when HDR is active
-    // SDR: 1.0 (no change), HDR: peak/paperWhite ratio for headroom
-    bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
+    // HDR radiance scale: amplifies scene lighting when HDR pipeline is enabled.
+    // Output encoding (SDR vs HDR10) is handled later by the tone mapper/composite.
+    bool hdrPipelineEnabled = true;
     float hdrRadianceScale = 1.0f;
-    if (hdrActive) {
+    if (hdrPipelineEnabled) {
         hdrRadianceScale = Renderer::options.hdrPeakNits / Renderer::options.hdrPaperWhiteNits;
         ubo.sunRadiance *= hdrRadianceScale;
         ubo.moonRadiance *= hdrRadianceScale;

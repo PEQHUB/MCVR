@@ -750,14 +750,10 @@ void UIModuleContext::setOverlayBlendFuncSeparate(int srcColorBlendFactor,
 
     if (!framework->isRunning()) return;
 
-    bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
-
     overlayColorBlendEquation.srcColorBlendFactor = static_cast<VkBlendFactor>(srcColorBlendFactor);
-    overlayColorBlendEquation.srcAlphaBlendFactor =
-        hdrActive ? static_cast<VkBlendFactor>(srcAlphaBlendFactor) : VK_BLEND_FACTOR_ZERO;
+    overlayColorBlendEquation.srcAlphaBlendFactor = static_cast<VkBlendFactor>(srcAlphaBlendFactor);
     overlayColorBlendEquation.dstColorBlendFactor = static_cast<VkBlendFactor>(dstColorBlendFactor);
-    overlayColorBlendEquation.dstAlphaBlendFactor =
-        hdrActive ? static_cast<VkBlendFactor>(dstAlphaBlendFactor) : VK_BLEND_FACTOR_ONE;
+    overlayColorBlendEquation.dstAlphaBlendFactor = static_cast<VkBlendFactor>(dstAlphaBlendFactor);
     vkCmdSetColorBlendEquationEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayColorBlendEquation);
 }
 
@@ -778,8 +774,9 @@ void UIModuleContext::setOverlayColorWriteMask(int colorWriteMask) {
 
     if (!framework->isRunning()) return;
 
-    bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
-    overlayColorWriteMask = hdrActive ? colorWriteMask : (colorWriteMask & ~VK_COLOR_COMPONENT_A_BIT);
+    // Keep alpha writes enabled in SDR as well.
+    // The final composite pass samples overlay alpha to blend UI over the world.
+    overlayColorWriteMask = colorWriteMask;
     vkCmdSetColorWriteMaskEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayColorWriteMask);
 }
 
@@ -1175,18 +1172,12 @@ void UIModuleContext::clearOverlayEntireColorAttachment() {
     VkClearAttachment clearAttachment{};
     clearAttachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     clearAttachment.colorAttachment = 0;
-    bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
-    if (hdrActive) {
-        clearAttachment.clearValue.color.float32[0] = 0.0f;
-        clearAttachment.clearValue.color.float32[1] = 0.0f;
-        clearAttachment.clearValue.color.float32[2] = 0.0f;
-        clearAttachment.clearValue.color.float32[3] = 0.0f;
-    } else {
-        clearAttachment.clearValue.color.float32[0] = overlayClearColors[0];
-        clearAttachment.clearValue.color.float32[1] = overlayClearColors[1];
-        clearAttachment.clearValue.color.float32[2] = overlayClearColors[2];
-        clearAttachment.clearValue.color.float32[3] = 1.0f;
-    }
+    // Always clear to transparent black.
+    // World (SDR/HDR) is composited later in FrameworkContext::fuseFinal().
+    clearAttachment.clearValue.color.float32[0] = 0.0f;
+    clearAttachment.clearValue.color.float32[1] = 0.0f;
+    clearAttachment.clearValue.color.float32[2] = 0.0f;
+    clearAttachment.clearValue.color.float32[3] = 0.0f;
 
     VkClearRect clearRect{};
     clearRect.rect.offset = {0, 0};

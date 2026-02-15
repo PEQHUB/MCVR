@@ -9,17 +9,23 @@
 
 class Framework;
 
-/// Composites the PQ-encoded HDR world and sRGB UI overlay onto the swapchain.
+/// Composites the rendered world and UI overlay onto the swapchain.
 ///
-/// Only used when HDR10 output is active. The shader decodes PQ, converts UI
-/// from BT.709 to BT.2020 at the user-chosen nit level, alpha-blends in linear
-/// light, re-encodes PQ, and applies anti-banding dither.
+/// HDR10 mode: expects PQ-encoded world + sRGB UI overlay, composites in linear
+/// light, outputs PQ-encoded HDR10 to the HDR swapchain.
 ///
-/// SDR path never touches this class.
+/// SDR mode: expects display-referred SDR world (gamma-encoded in UNORM) + sRGB
+/// UI overlay (with alpha), composites in linear light, outputs sRGB-encoded
+/// values to the SDR swapchain (which is typically UNORM + SRGB_NONLINEAR).
 class HdrCompositePass : public SharedObject<HdrCompositePass> {
   public:
     HdrCompositePass() = default;
     ~HdrCompositePass();
+
+    enum class OutputMode : uint32_t {
+        Sdr = 0,
+        Hdr10 = 1,
+    };
 
     /// Create and initialize all Vulkan resources.
     /// @param framework   The active Framework (device, swapchain, etc.)
@@ -40,13 +46,15 @@ class HdrCompositePass : public SharedObject<HdrCompositePass> {
     ///
     /// @param cmd              The fuse command buffer (already begun)
     /// @param frameIndex       Swapchain image index
-    /// @param uiBrightnessNits UI brightness push constant (50–300)
+    /// @param mode             Composite mode (SDR or HDR10)
+    /// @param uiBrightnessNits UI brightness push constant (HDR only; ignored in SDR)
     /// @param worldImage       Tone-mapped HDR world (PQ-encoded, A2B10G10R10)
     /// @param overlayImage     Minecraft UI overlay (R8G8B8A8_SRGB, transparent background)
     /// @param swapchainImage   Target swapchain image (A2B10G10R10_UNORM)
     /// @param mainQueueIndex   Queue family index for barriers
     void record(std::shared_ptr<vk::CommandBuffer> cmd,
                 uint32_t frameIndex,
+                OutputMode mode,
                 float uiBrightnessNits,
                 std::shared_ptr<vk::DeviceLocalImage> worldImage,
                 std::shared_ptr<vk::DeviceLocalImage> overlayImage,
@@ -65,7 +73,8 @@ class HdrCompositePass : public SharedObject<HdrCompositePass> {
 
     // Shaders
     std::shared_ptr<vk::Shader> vertShader_;
-    std::shared_ptr<vk::Shader> fragShader_;
+    std::shared_ptr<vk::Shader> fragShaderHdr_;
+    std::shared_ptr<vk::Shader> fragShaderSdr_;
 
     // Sampler (nearest — dimensions match, no filtering needed)
     std::shared_ptr<vk::Sampler> sampler_;
@@ -78,7 +87,8 @@ class HdrCompositePass : public SharedObject<HdrCompositePass> {
     std::vector<std::shared_ptr<vk::Framebuffer>> framebuffers_;
 
     // Graphics pipeline
-    std::shared_ptr<vk::GraphicsPipeline> pipeline_;
+    std::shared_ptr<vk::GraphicsPipeline> pipelineHdr_;
+    std::shared_ptr<vk::GraphicsPipeline> pipelineSdr_;
 
     uint32_t width_ = 0;
     uint32_t height_ = 0;

@@ -24,11 +24,13 @@ layout(push_constant) uniform PushB {
     float tonemapMode;
     float Lwhite;
     float exposureCompensation;
-    // HDR10 fields (unused by hist shader, but must match push constant layout)
-    float hdrEnabled;
+    // HDR fields (unused by hist shader, but must match push constant layout)
+    float hdrPipelineEnabled;
+    float hdr10OutputEnabled;
     float peakNits;
     float paperWhiteNits;
     float saturation;
+    float sdrTransferFunction;
 }
 pc;
 

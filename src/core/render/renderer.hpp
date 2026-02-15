@@ -35,6 +35,10 @@ struct Options {
     float saturation = 1.3f;           // Saturation/Vibrance boost (0.0 to 2.0)
     uint32_t upscalerPreset = 5; // DLSS: Preset E (latest transformer). Generic for future upscalers.
 
+    // SDR output transfer function
+    // 0 = Gamma 2.2, 1 = sRGB
+    uint32_t sdrTransferFunction = 1;
+
     // HDR10 output settings (default: disabled, pure SDR)
     bool hdrEnabled = false;
     float hdrPeakNits = 1000.0f;          // Display peak brightness (400–10000 nits)

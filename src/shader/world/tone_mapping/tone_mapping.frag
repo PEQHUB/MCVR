@@ -12,11 +12,13 @@ layout(set = 0, binding = 2) readonly buffer ExposureBuffer {
     float tonemapMode;
     float Lwhite;
     float exposureCompensation;
-    // HDR10 fields (appended — SDR path ignores these)
-    float hdrEnabled;       // 0.0 = SDR, 1.0 = HDR10
+    // HDR fields (appended)
+    float hdrPipelineEnabled;  // 0.0 = SDR pipeline, 1.0 = HDR pipeline behavior
+    float hdr10OutputEnabled;  // 0.0 = SDR output, 1.0 = HDR10 output encoding
     float peakNits;         // Display peak brightness (e.g. 1000.0)
     float paperWhiteNits;   // ITU-R BT.2408 reference white (e.g. 203.0)
     float saturation;       // Saturation boost (1.0 = neutral)
+    float sdrTransferFunction; // 0.0 = Gamma 2.2, 1.0 = sRGB
 }
 gExposure;
 
@@ -467,11 +469,11 @@ void main() {
     vec3 hdr = texture(HDR, texCoord).rgb;
     vec3 expColor = hdr * gExposure.exposure;
 
-    // HDR detection used by both saturation and tonemapping
-    bool isHDR = gExposure.hdrEnabled > 0.5;
+    bool hdrPipeline = gExposure.hdrPipelineEnabled > 0.5;
+    bool hdr10Output = gExposure.hdr10OutputEnabled > 0.5;
 
-    // Apply Saturation/Vibrance boost (HDR-only, controlled by slider)
-    if (isHDR && gExposure.saturation != 1.0) {
+    // Apply Saturation/Vibrance boost (HDR-pipeline only, controlled by slider)
+    if (hdrPipeline && gExposure.saturation != 1.0) {
         const vec3 lumaWeight = vec3(0.2126, 0.7152, 0.0722);
         float luma = dot(expColor, lumaWeight);
         expColor = mix(vec3(luma), expColor, gExposure.saturation);
@@ -485,12 +487,13 @@ void main() {
     float peak = gExposure.peakNits;
 
     // HDR headroom: highlights can be this many times brighter than paper white
-    float hdrHeadroom = isHDR ? (peak / paperWhite) : 1.0;
+    float hdrHeadroom = hdrPipeline ? (peak / paperWhite) : 1.0;
 
     // Reinhard Extended in HDR: widen Lwhite so output exceeds 1.0 for highlights
-    float effectiveLwhite = isHDR ? max(gExposure.Lwhite, hdrHeadroom) : gExposure.Lwhite;
+    float effectiveLwhite = hdrPipeline ? max(gExposure.Lwhite, hdrHeadroom) : gExposure.Lwhite;
 
-    if (isHDR) {
+    if (hdrPipeline) {
+        // HDR pipeline behavior: use BT.2390 rolloff in scene-linear space.
         mapped = BT2390EETF(expColor, hdrHeadroom);
     } else {
         // SDR mode: all 8 original operators unchanged
@@ -505,7 +508,7 @@ void main() {
         else                 mapped = ReinhardExtendedToneMap(expColor, effectiveLwhite);
     }
 
-    if (isHDR) {
+    if (hdr10Output) {
         // ═══════════ HDR10 output path ═══════════
         mapped = max(mapped, vec3(0.0));
 
@@ -540,14 +543,36 @@ void main() {
 
         fragColor = vec4(pq, 1.0);
     } else {
-        // ═══════════ SDR output path (UNCHANGED — no dithering, no headroom) ═══════════
+        // ═══════════ SDR output path ═══════════
+        // Note: When hdrPipeline is enabled but hdr10Output is not, values above 1.0
+        // (i.e., above paper white) cannot be represented in SDR and will clip.
         mapped = clamp(mapped, 0.0, 1.0);
 
-        // AgX outputs display-referred (sRGB gamma baked in), others output scene-linear
-        if (!isDisplayReferred) {
-            mapped = pow(mapped, vec3(1.0 / 2.2));
+        // Encode to sRGB for UNORM output.
+        vec3 encoded;
+        if (isDisplayReferred) {
+            // AgX outputs display-referred (sRGB-like gamma baked in)
+            encoded = mapped;
+        } else {
+            bool useSrgb = gExposure.sdrTransferFunction > 0.5;
+            if (useSrgb) {
+                encoded = linearToSRGB(mapped);
+            } else {
+                encoded = pow(mapped, vec3(1.0 / 2.2));
+            }
         }
 
-        fragColor = vec4(mapped, 1.0);
+        // Anti-banding dither in encoded (post-OETF) space.
+        // 8-bit UNORM step size = 1/255.
+        uint px = uint(gl_FragCoord.x);
+        uint py = uint(gl_FragCoord.y);
+        uint seed = px + py * 8192u;
+        float d0 = float(wangHash(seed))       / 4294967296.0 - 0.5;
+        float d1 = float(wangHash(seed + 1u))  / 4294967296.0 - 0.5;
+        float d2 = float(wangHash(seed + 2u))  / 4294967296.0 - 0.5;
+        encoded += vec3(d0, d1, d2) * (1.0 / 255.0);
+        encoded = clamp(encoded, 0.0, 1.0);
+
+        fragColor = vec4(encoded, 1.0);
     }
 }
