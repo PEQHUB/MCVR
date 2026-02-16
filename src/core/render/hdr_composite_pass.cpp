@@ -30,6 +30,7 @@ void HdrCompositePass::init(std::shared_ptr<Framework> framework) {
 
     initShaders();
     initSampler();
+    initFallbackBlackImage();
     initDescriptorSets();
     initRenderPass();
     initFramebuffers();
@@ -48,6 +49,7 @@ void HdrCompositePass::destroy() {
     renderPass_.reset();
     descriptorTables_.clear();
     sampler_.reset();
+    blackWorldImage_.reset();
     fragShaderSdr_.reset();
     fragShaderHdr_.reset();
     vertShader_.reset();
@@ -218,6 +220,71 @@ void HdrCompositePass::initPipeline() {
     pipelineSdr_ = makePipeline(fragShaderSdr_);
 }
 
+void HdrCompositePass::initFallbackBlackImage() {
+    auto framework = framework_.lock();
+    if (!framework) return;
+
+    // 1x1 black fallback sampled when the world output is unavailable (e.g. title/loading).
+    blackWorldImage_ = vk::DeviceLocalImage::create(
+        framework->device(), framework->vma(), false,
+        1, 1, 1,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+
+    auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
+
+    std::shared_ptr<vk::CommandBuffer> cmd = vk::CommandBuffer::create(framework->device(), framework->mainCommandPool());
+    cmd->begin();
+
+    cmd->barriersBufferImage(
+        {}, {{
+                .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                .srcAccessMask = 0,
+                .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .srcQueueFamilyIndex = mainQueueIndex,
+                .dstQueueFamilyIndex = mainQueueIndex,
+                .image = blackWorldImage_,
+                .subresourceRange = vk::wholeColorSubresourceRange,
+            }});
+    blackWorldImage_->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    VkClearColorValue clear{};
+    clear.float32[0] = 0.0f;
+    clear.float32[1] = 0.0f;
+    clear.float32[2] = 0.0f;
+    clear.float32[3] = 1.0f;
+    VkImageSubresourceRange range{};
+    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.baseMipLevel = 0;
+    range.levelCount = 1;
+    range.baseArrayLayer = 0;
+    range.layerCount = 1;
+    vkCmdClearColorImage(cmd->vkCommandBuffer(), blackWorldImage_->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         &clear, 1, &range);
+
+    cmd->barriersBufferImage(
+        {}, {{
+                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                .srcQueueFamilyIndex = mainQueueIndex,
+                .dstQueueFamilyIndex = mainQueueIndex,
+                .image = blackWorldImage_,
+                .subresourceRange = vk::wholeColorSubresourceRange,
+            }});
+    blackWorldImage_->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    cmd->end();
+    cmd->submitMainQueueIndividual(framework->device());
+    vkQueueWaitIdle(framework->device()->mainVkQueue());
+}
+
 // ─── Record composite pass into command buffer ─────────────────────────────
 
 void HdrCompositePass::record(std::shared_ptr<vk::CommandBuffer> cmd,
@@ -229,7 +296,17 @@ void HdrCompositePass::record(std::shared_ptr<vk::CommandBuffer> cmd,
                               std::shared_ptr<vk::SwapchainImage> swapchainImage,
                               uint32_t mainQueueIndex) {
 
-     auto pipeline = (mode == OutputMode::Hdr10) ? pipelineHdr_ : pipelineSdr_;
+    auto pipeline = (mode == OutputMode::Hdr10) ? pipelineHdr_ : pipelineSdr_;
+
+    if (!overlayImage || !swapchainImage) return;
+
+    if (!worldImage) {
+        worldImage = blackWorldImage_;
+    }
+    if (!worldImage) return;
+
+    VkImageLayout oldWorldLayout = worldImage->imageLayout();
+    VkImageLayout oldOverlayLayout = overlayImage->imageLayout();
 
     // ── Bind textures to this frame's descriptor set ──
     auto descriptorTable = descriptorTables_[frameIndex];
@@ -241,7 +318,10 @@ void HdrCompositePass::record(std::shared_ptr<vk::CommandBuffer> cmd,
         {}, {
             // World output → shader read
             {
-                .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcStageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+                                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                 .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
@@ -254,7 +334,8 @@ void HdrCompositePass::record(std::shared_ptr<vk::CommandBuffer> cmd,
             },
             // Overlay → shader read
             {
-                .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                 .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
@@ -314,16 +395,27 @@ void HdrCompositePass::record(std::shared_ptr<vk::CommandBuffer> cmd,
     swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     // Transition world and overlay images back to usable layouts for next frame.
-#ifdef USE_AMD
+    VkImageLayout restoreWorldLayout = oldWorldLayout;
+    VkImageLayout restoreOverlayLayout = oldOverlayLayout;
+    if (restoreWorldLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        restoreWorldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    if (restoreOverlayLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        restoreOverlayLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+
     cmd->barriersBufferImage(
         {}, {
             {
                 .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                 .srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+                                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                 .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .newLayout = restoreWorldLayout,
                 .srcQueueFamilyIndex = mainQueueIndex,
                 .dstQueueFamilyIndex = mainQueueIndex,
                 .image = worldImage,
@@ -332,47 +424,17 @@ void HdrCompositePass::record(std::shared_ptr<vk::CommandBuffer> cmd,
             {
                 .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                 .srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                 .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .newLayout = restoreOverlayLayout,
                 .srcQueueFamilyIndex = mainQueueIndex,
                 .dstQueueFamilyIndex = mainQueueIndex,
                 .image = overlayImage,
                 .subresourceRange = vk::wholeColorSubresourceRange,
             },
         });
-    worldImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    overlayImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-    cmd->barriersBufferImage(
-        {}, {
-            {
-                .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                .srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                .srcQueueFamilyIndex = mainQueueIndex,
-                .dstQueueFamilyIndex = mainQueueIndex,
-                .image = worldImage,
-                .subresourceRange = vk::wholeColorSubresourceRange,
-            },
-            {
-                .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                .srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                .srcQueueFamilyIndex = mainQueueIndex,
-                .dstQueueFamilyIndex = mainQueueIndex,
-                .image = overlayImage,
-                .subresourceRange = vk::wholeColorSubresourceRange,
-            },
-        });
-    worldImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    overlayImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+    worldImage->imageLayout() = restoreWorldLayout;
+    overlayImage->imageLayout() = restoreOverlayLayout;
 }

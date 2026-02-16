@@ -216,8 +216,28 @@ void vk::Swapchain::reconstruct() {
     createInfo.imageColorSpace = surfaceFormat_.colorSpace;
     createInfo.imageExtent = extent_;
     createInfo.imageArrayLayers = 1;
-    createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                            VK_IMAGE_USAGE_SAMPLED_BIT; // TODO: cancel VK_IMAGE_USAGE_SAMPLED_BIT
+
+    VkImageUsageFlags desiredUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                    VK_IMAGE_USAGE_SAMPLED_BIT;
+    VkImageUsageFlags supportedUsage = surfaceCapabilities.supportedUsageFlags;
+    VkImageUsageFlags imageUsage = desiredUsage & supportedUsage;
+
+    // Color attachment is non-negotiable for the final composite path.
+    if ((imageUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0) {
+        swapchainCerr() << "surface does not support COLOR_ATTACHMENT usage for swapchain" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    if ((desiredUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0 &&
+        (imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0) {
+        swapchainCerr() << "swapchain does not support TRANSFER_SRC; with-UI screenshots will be disabled" << std::endl;
+    }
+
+    transferSrcEnabled_ = (imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+
+    createInfo.imageUsage = imageUsage;
     createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     createInfo.queueFamilyIndexCount = 0;
     createInfo.pQueueFamilyIndices = nullptr;

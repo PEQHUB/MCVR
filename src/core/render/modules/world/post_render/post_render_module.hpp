@@ -66,8 +66,10 @@ class PostRenderModule : public WorldModule, public SharedObject<PostRenderModul
     std::vector<std::shared_ptr<vk::Sampler>> worldPostDepthImageSamplers_;
 
     std::vector<std::shared_ptr<vk::Sampler>> samplers_;
+    std::shared_ptr<vk::Sampler> casSampler_;
 
     std::vector<std::shared_ptr<vk::DescriptorTable>> descriptorTables_;
+    std::vector<std::shared_ptr<vk::DescriptorTable>> casDescriptorTables_;
 
     std::shared_ptr<vk::Shader> worldLightMapVertShader_;
     std::shared_ptr<vk::Shader> worldLightMapFragShader_;
@@ -83,9 +85,11 @@ class PostRenderModule : public WorldModule, public SharedObject<PostRenderModul
 
     std::shared_ptr<vk::Shader> worldPostVertShader_;
     std::shared_ptr<vk::Shader> worldPostFragShader_;
+    std::shared_ptr<vk::Shader> casShader_;
     std::shared_ptr<vk::RenderPass> worldPostRenderPass_;
     std::vector<std::shared_ptr<vk::Framebuffer>> worldPostFramebuffers_;
     std::shared_ptr<vk::GraphicsPipeline> worldPostPipeline_;
+    std::shared_ptr<vk::ComputePipeline> casPipeline_;
 
     // world star field
     std::shared_ptr<vk::DeviceLocalBuffer> starFieldVertexBuffer;

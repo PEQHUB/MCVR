@@ -428,7 +428,7 @@ void ToneMappingModuleContext::render() {
     pc.brightAdaptBoost = Renderer::options.exposureBrightAdaptBoost;
     pc.minExposure = Renderer::options.minExposure;
     pc.maxExposure = Renderer::options.maxExposure;
-    pc.tonemapMode = 2.0f;
+    pc.tonemapMode = static_cast<float>(Renderer::options.tonemappingMode);
     pc.Lwhite = Renderer::options.Lwhite;
     pc.exposureCompensation = Renderer::options.exposureCompensation;
     pc.legacyExposure = Renderer::options.legacyExposure ? 1.0f : 0.0f;
@@ -443,6 +443,8 @@ void ToneMappingModuleContext::render() {
     pc.paperWhiteNits = Renderer::options.hdrPaperWhiteNits;
     pc.saturation = Renderer::options.saturation;
     pc.sdrTransferFunction = static_cast<float>(Renderer::options.sdrTransferFunction);
+    pc.manualExposureEnabled = Renderer::options.manualExposureEnabled ? 1.0f : 0.0f;
+    pc.manualExposure = Renderer::options.manualExposure;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ToneMappingModulePushConstant), &pc);

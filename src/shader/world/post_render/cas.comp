@@ -1,0 +1,58 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#define FFX_GLSL 1
+#define FFX_GPU 1
+#define FFX_HALF 0
+#define FFX_CAS_OPTION_SHARPEN_ONLY 1
+#define FFX_CAS_COLOR_SPACE_CONVERSION 0
+
+#include "ffx_core.h"
+
+layout(set = 0, binding = 0) uniform sampler2D r_input_color;
+layout(set = 0, binding = 1, rgba16) uniform image2D rw_output_color;
+
+layout(push_constant) uniform CasPushConstant {
+    uvec4 const0;
+    uvec4 const1;
+} pc;
+
+FfxUInt32x4 Const0() {
+    return pc.const0;
+}
+
+FfxUInt32x4 Const1() {
+    return pc.const1;
+}
+
+FfxFloat32x3 casLoad(FFX_PARAMETER_IN FfxInt32x2 position) {
+    return texelFetch(r_input_color, position, 0).rgb;
+}
+
+void casInput(FFX_PARAMETER_INOUT FfxFloat32 red, FFX_PARAMETER_INOUT FfxFloat32 green, FFX_PARAMETER_INOUT FfxFloat32 blue) {
+}
+
+void casOutput(FFX_PARAMETER_INOUT FfxFloat32 red, FFX_PARAMETER_INOUT FfxFloat32 green, FFX_PARAMETER_INOUT FfxFloat32 blue) {
+}
+
+void casStoreOutput(FfxInt32x2 iPxPos, FfxFloat32x4 fColor) {
+    imageStore(rw_output_color, iPxPos, fColor);
+}
+
+#ifndef FFX_CAS_THREAD_GROUP_WIDTH
+#define FFX_CAS_THREAD_GROUP_WIDTH 64
+#endif
+#ifndef FFX_CAS_THREAD_GROUP_HEIGHT
+#define FFX_CAS_THREAD_GROUP_HEIGHT 1
+#endif
+#ifndef FFX_CAS_THREAD_GROUP_DEPTH
+#define FFX_CAS_THREAD_GROUP_DEPTH 1
+#endif
+
+#include "cas/ffx_cas_sharpen.h"
+
+layout(local_size_x = FFX_CAS_THREAD_GROUP_WIDTH, local_size_y = FFX_CAS_THREAD_GROUP_HEIGHT, local_size_z = FFX_CAS_THREAD_GROUP_DEPTH) in;
+
+void main() {
+    Sharpen(gl_LocalInvocationID.xyz, gl_WorkGroupID.xyz, gl_GlobalInvocationID.xyz);
+}

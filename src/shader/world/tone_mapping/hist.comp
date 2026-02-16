@@ -36,6 +36,8 @@ layout(push_constant) uniform PushB {
     float paperWhiteNits;
     float saturation;
     float sdrTransferFunction;
+    float manualExposureEnabled;
+    float manualExposure;
 }
 pc;
 

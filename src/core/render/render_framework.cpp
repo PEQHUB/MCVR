@@ -55,9 +55,10 @@ void FrameworkContext::fuseFinal() {
     auto pipelineContext = f->pipeline_->acquirePipelineContext(shared_from_this());
 
     bool hdrOutputActive = Renderer::options.hdrEnabled && swapchain->isHDR();
-    bool hasWorldOutput = pipelineContext->worldPipelineContext
-        && pipelineContext->worldPipelineContext->outputImage;
-    bool canComposite = f->pipeline_->hdrCompositePass() && hasWorldOutput;
+    bool hasWorldOutput = pipelineContext->worldPipelineContext && pipelineContext->worldPipelineContext->outputImage;
+    auto worldOutput = hasWorldOutput ? pipelineContext->worldPipelineContext->outputImage : nullptr;
+    auto overlayOutput = pipelineContext->uiModuleContext ? pipelineContext->uiModuleContext->overlayDrawColorImage : nullptr;
+    bool canComposite = f->pipeline_->hdrCompositePass() && overlayOutput;
 
     if (hdrOutputActive && canComposite) {
         // ═══════════ HDR path: composite shader ═══════════
@@ -70,8 +71,8 @@ void FrameworkContext::fuseFinal() {
             frameIndex,
             HdrCompositePass::OutputMode::Hdr10,
             Renderer::options.hdrUiBrightnessNits,
-            pipelineContext->worldPipelineContext->outputImage,
-            pipelineContext->uiModuleContext->overlayDrawColorImage,
+            worldOutput,
+            overlayOutput,
             swapchainImage,
             mainQueueIndex);
 
@@ -83,57 +84,18 @@ void FrameworkContext::fuseFinal() {
             frameIndex,
             HdrCompositePass::OutputMode::Sdr,
             0.0f,
-            pipelineContext->worldPipelineContext->outputImage,
-            pipelineContext->uiModuleContext->overlayDrawColorImage,
+            worldOutput,
+            overlayOutput,
             swapchainImage,
             mainQueueIndex);
 
-    } else if (hdrOutputActive) {
-        // ═══════════ HDR fallback: no world yet (title/loading screen) ═══════════
-        // World pipeline not built yet. Just transition swapchain to PRESENT_SRC_KHR.
-        // The overlay has UI on transparent black — can't vkCmdCopyImage (format mismatch).
-        // Present whatever the swapchain contains (black/undefined — acceptable for loading).
-        fuseCommandBuffer->barriersBufferImage(
-            {}, {
-                    {
-                        .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .oldLayout = pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(),
-#ifdef USE_AMD
-                        .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
-                        .srcQueueFamilyIndex = mainQueueIndex,
-                        .dstQueueFamilyIndex = mainQueueIndex,
-                        .image = pipelineContext->uiModuleContext->overlayDrawColorImage,
-                        .subresourceRange = vk::wholeColorSubresourceRange,
-                    },
-                    {
-                        .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-                        .dstAccessMask = 0,
-                        .oldLayout = swapchainImage->imageLayout(),
-                        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                        .srcQueueFamilyIndex = mainQueueIndex,
-                        .dstQueueFamilyIndex = mainQueueIndex,
-                        .image = swapchainImage,
-                        .subresourceRange = vk::wholeColorSubresourceRange,
-                    },
-                });
-
-#ifdef USE_AMD
-        pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-        pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
-        swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
     } else {
         // ═══════════ SDR fallback: copy overlay → swapchain ═══════════
+
+        if (!overlayOutput) {
+            return;
+        }
+
         fuseCommandBuffer->barriersBufferImage(
             {}, {
                     {
@@ -141,11 +103,11 @@ void FrameworkContext::fuseFinal() {
                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .oldLayout = pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(),
+                        .oldLayout = overlayOutput->imageLayout(),
                         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                         .srcQueueFamilyIndex = mainQueueIndex,
                         .dstQueueFamilyIndex = mainQueueIndex,
-                        .image = pipelineContext->uiModuleContext->overlayDrawColorImage,
+                        .image = overlayOutput,
                         .subresourceRange = vk::wholeColorSubresourceRange,
                     },
                     {
@@ -162,7 +124,7 @@ void FrameworkContext::fuseFinal() {
                     },
                 });
 
-        pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        overlayOutput->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 
         // Cross-platform: swapchain may be B8G8R8A8 (or other non-RGBA8 layouts)
@@ -176,16 +138,16 @@ void FrameworkContext::fuseFinal() {
             VkImageBlit blit{};
             blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             blit.srcOffsets[0] = {0, 0, 0};
-            blit.srcOffsets[1] = {(int32_t)pipelineContext->uiModuleContext->overlayDrawColorImage->width(),
-                                  (int32_t)pipelineContext->uiModuleContext->overlayDrawColorImage->height(), 1};
+            blit.srcOffsets[1] = {(int32_t)overlayOutput->width(),
+                                  (int32_t)overlayOutput->height(), 1};
             blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
             blit.dstOffsets[0] = {0, 0, 0};
             blit.dstOffsets[1] = {(int32_t)swapchainImage->width(),
                                   (int32_t)swapchainImage->height(), 1};
 
             vkCmdBlitImage(fuseCommandBuffer->vkCommandBuffer(),
-                           pipelineContext->uiModuleContext->overlayDrawColorImage->vkImage(),
-                           pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(),
+                           overlayOutput->vkImage(),
+                           overlayOutput->imageLayout(),
                            swapchainImage->vkImage(),
                            swapchainImage->imageLayout(),
                            1, &blit, VK_FILTER_NEAREST);
@@ -202,12 +164,12 @@ void FrameworkContext::fuseFinal() {
             imageCopy.dstSubresource.baseArrayLayer = 0;
             imageCopy.dstSubresource.layerCount = 1;
             imageCopy.dstOffset = {0, 0, 0};
-            imageCopy.extent = {pipelineContext->uiModuleContext->overlayDrawColorImage->width(),
-                                pipelineContext->uiModuleContext->overlayDrawColorImage->height(), 1};
+            imageCopy.extent = {overlayOutput->width(),
+                                overlayOutput->height(), 1};
 
             vkCmdCopyImage(fuseCommandBuffer->vkCommandBuffer(),
-                           pipelineContext->uiModuleContext->overlayDrawColorImage->vkImage(),
-                           pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(), swapchainImage->vkImage(),
+                           overlayOutput->vkImage(),
+                           overlayOutput->imageLayout(), swapchainImage->vkImage(),
                            swapchainImage->imageLayout(), 1, &imageCopy);
         }
 
@@ -217,7 +179,7 @@ void FrameworkContext::fuseFinal() {
                      .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                     .oldLayout = pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout(),
+                     .oldLayout = overlayOutput->imageLayout(),
 #ifdef USE_AMD
                      .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
 #else
@@ -225,9 +187,9 @@ void FrameworkContext::fuseFinal() {
 #endif
                      .srcQueueFamilyIndex = mainQueueIndex,
                      .dstQueueFamilyIndex = mainQueueIndex,
-                     .image = pipelineContext->uiModuleContext->overlayDrawColorImage,
+                     .image = overlayOutput,
                      .subresourceRange = vk::wholeColorSubresourceRange,
-                 },
+                  },
                  {
                      .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
@@ -242,9 +204,9 @@ void FrameworkContext::fuseFinal() {
                  }});
 
 #ifdef USE_AMD
-        pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        overlayOutput->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
-        pipelineContext->uiModuleContext->overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        overlayOutput->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 #endif
         swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
@@ -530,6 +492,12 @@ void Framework::takeScreenshot(bool withUI, int width, int height, int channel, 
 
     auto pipelineContext = pipeline_->acquirePipelineContext(context);
 
+    if (withUI && !swapchain_->supportsTransferSrc()) {
+        // Swapchain images may not support TRANSFER_SRC on some surfaces.
+        // Fall back to the world output (no UI) rather than issuing an invalid copy.
+        withUI = false;
+    }
+
     if (withUI) {
         // With-UI screenshot should capture the final composited frame.
         // SDR and HDR now both composite into the swapchain in fuseFinal().
@@ -711,6 +679,9 @@ VkFormat Framework::takeScreenshotRawHdrPacked(bool withUI,
 
     if (withUI) {
         if (Renderer::options.hdrEnabled && swapchain_->isHDR()) {
+            if (!swapchain_->supportsTransferSrc()) {
+                return VK_FORMAT_UNDEFINED;
+            }
             srcSwapchainImage = context->swapchainImage;
             srcImage = srcSwapchainImage;
         } else {

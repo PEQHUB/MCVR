@@ -29,6 +29,8 @@ struct ToneMappingModuleExposureData {
     float saturation;            // Saturation boost (1.0 = neutral)
     float sdrTransferFunction;   // 0.0 = Gamma 2.2, 1.0 = sRGB
     float capExposureSmoothed;   // internal: smoothed highlight cap exposure (improved mode)
+    float manualExposureEnabled; // 0.0 = auto exposure, 1.0 = manual exposure
+    float manualExposure;        // direct exposure multiplier when manual is enabled
 };
 
 struct ToneMappingModulePushConstant {
@@ -58,6 +60,8 @@ struct ToneMappingModulePushConstant {
     float paperWhiteNits;       // ITU-R BT.2408 reference white
     float saturation;           // Saturation boost
     float sdrTransferFunction;  // 0.0 = Gamma 2.2, 1.0 = sRGB
+    float manualExposureEnabled; // 0.0 = auto exposure, 1.0 = manual exposure
+    float manualExposure;        // direct exposure multiplier when manual is enabled
 };
 
 class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingModule> {

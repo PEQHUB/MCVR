@@ -32,6 +32,9 @@ class Swapchain : public SharedObject<Swapchain> {
     /// Returns true if the swapchain is currently using HDR10 (A2B10G10R10 + ST.2084)
     bool isHDR() const { return hdrActive_; }
 
+    /// Returns true if the swapchain images were created with TRANSFER_SRC usage.
+    bool supportsTransferSrc() const { return transferSrcEnabled_; }
+
     /// Returns true if the current surface supports HDR10 swapchain formats.
     bool isHDRSupported() const;
 
@@ -48,6 +51,7 @@ class Swapchain : public SharedObject<Swapchain> {
     VkExtent2D minExtent_;
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     bool hdrActive_ = false;  // true when HDR10 format was successfully selected
+    bool transferSrcEnabled_ = false;
 
     std::vector<std::shared_ptr<SwapchainImage>> swapchainImages_;
 };

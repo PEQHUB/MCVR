@@ -86,6 +86,26 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposure
     Renderer::options.exposureCompensation = ec;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetManualExposureEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.manualExposureEnabled = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetManualExposure(
+    JNIEnv *, jclass, jfloat exposure, jboolean write) {
+    Renderer::options.manualExposure = std::max(0.0001f, exposure);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCasEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.casEnabled = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCasSharpness(
+    JNIEnv *, jclass, jfloat sharpness, jboolean write) {
+    Renderer::options.casSharpness = std::clamp(sharpness, 0.0f, 1.0f);
+}
+
 JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMiddleGrey(
     JNIEnv *, jclass, jfloat mg, jboolean write) {
     Renderer::options.middleGrey = mg;

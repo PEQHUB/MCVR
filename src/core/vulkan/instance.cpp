@@ -4,6 +4,7 @@
 
 #include <iostream>
 #include <set>
+#include <unordered_set>
 #include <vector>
 
 #ifndef NDEBUG
@@ -107,6 +108,19 @@ vk::Instance::Instance() {
     std::vector<VkExtensionProperties> availableExtensions(extensionCount);
     vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, availableExtensions.data());
 
+    std::unordered_set<std::string> supportedExtensions;
+    supportedExtensions.reserve(availableExtensions.size());
+    for (const auto &extension : availableExtensions) {
+        supportedExtensions.insert(extension.extensionName);
+    }
+
+    std::unordered_set<std::string> requiredExtensions;
+    requiredExtensions.reserve(static_cast<size_t>(glfwExtensionCount) + 2);
+    for (int i = 0; i < glfwExtensionCount; i++) {
+        requiredExtensions.insert(glfwExtensions[i]);
+    }
+    requiredExtensions.insert(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+
 #ifdef DEBUG
     instanceCout() << "supported extensions:" << std::endl;
     for (const auto &extension : availableExtensions) {
@@ -115,14 +129,25 @@ vk::Instance::Instance() {
 #endif
 
     std::vector<const char *> extensions;
-    for (const auto &extension : extStorage) { extensions.push_back(extension.c_str()); }
+    extensions.reserve(extStorage.size());
+    for (const auto &extension : extStorage) {
+        if (supportedExtensions.find(extension) == supportedExtensions.end()) {
+            if (requiredExtensions.find(extension) != requiredExtensions.end()) {
+                instanceCerr() << "required instance extension not supported: " << extension << std::endl;
+                exit(EXIT_FAILURE);
+            }
+            instanceCerr() << "optional instance extension not supported, skipping: " << extension << std::endl;
+            continue;
+        }
+        extensions.push_back(extension.c_str());
+    }
 
 #ifdef DEBUG
     instanceCout() << "selected extensions:" << std::endl;
     for (const auto &extension : extensions) { instanceCout() << "\t" << extension << std::endl; }
 #endif
 
-    // TODO: chek selected extensions in available ones
+    // Note: instance creation fails if any enabled extension is unsupported.
 
     VkInstanceCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;

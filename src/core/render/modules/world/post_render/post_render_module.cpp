@@ -6,9 +6,42 @@
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
+#include <algorithm>
+#include <cstring>
+#include <glm/gtc/packing.hpp>
 #include <random>
 
 PostRenderModule::PostRenderModule() {}
+
+namespace {
+struct CasPushConstant {
+    uint32_t const0[4];
+    uint32_t const1[4];
+};
+
+static uint32_t casAsUint(float v) {
+    uint32_t u = 0;
+    std::memcpy(&u, &v, sizeof(uint32_t));
+    return u;
+}
+
+static CasPushConstant buildCasConstants(float sharpness, float inputW, float inputH, float outputW, float outputH) {
+    sharpness = std::clamp(sharpness, 0.0f, 1.0f);
+
+    CasPushConstant pc{};
+    pc.const0[0] = casAsUint(inputW / outputW);
+    pc.const0[1] = casAsUint(inputH / outputH);
+    pc.const0[2] = casAsUint(0.5f * inputW / outputW - 0.5f);
+    pc.const0[3] = casAsUint(0.5f * inputH / outputH - 0.5f);
+
+    const float sharp = -1.0f / (8.0f + (5.0f - 8.0f) * sharpness);
+    pc.const1[0] = casAsUint(sharp);
+    pc.const1[1] = glm::packHalf2x16(glm::vec2(sharp, 0.0f));
+    pc.const1[2] = casAsUint(8.0f * inputW / outputW);
+    pc.const1[3] = 0;
+    return pc;
+}
+} // namespace
 
 void PostRenderModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
     WorldModule::init(framework, worldPipeline);
@@ -107,7 +140,10 @@ void PostRenderModule::initDescriptorTables() {
     uint32_t size = framework->swapchain()->imageCount();
 
     descriptorTables_.resize(size);
+    casDescriptorTables_.resize(size);
     samplers_.resize(size);
+    casSampler_ = vk::Sampler::create(framework->device(), VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                                      VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 
     for (int i = 0; i < size; i++) {
         descriptorTables_[i] = vk::DescriptorTableBuilder{}
@@ -169,6 +205,30 @@ void PostRenderModule::initDescriptorTables() {
 
         samplers_[i] = vk::Sampler::create(framework->device(), VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR,
                                            VK_SAMPLER_ADDRESS_MODE_REPEAT);
+
+        casDescriptorTables_[i] = vk::DescriptorTableBuilder{}
+                                     .beginDescriptorLayoutSet()
+                                     .beginDescriptorLayoutSetBinding()
+                                     .defineDescriptorLayoutSetBinding({
+                                         .binding = 0,
+                                         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                         .descriptorCount = 1,
+                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                     })
+                                     .defineDescriptorLayoutSetBinding({
+                                         .binding = 1,
+                                         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                         .descriptorCount = 1,
+                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                     })
+                                     .endDescriptorLayoutSetBinding()
+                                     .endDescriptorLayoutSet()
+                                     .definePushConstant(VkPushConstantRange{
+                                         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                                         .offset = 0,
+                                         .size = sizeof(CasPushConstant),
+                                     })
+                                     .build(framework->device());
     }
 }
 
@@ -572,6 +632,7 @@ void PostRenderModule::initPipeline() {
 
     worldPostVertShader_ = vk::Shader::create(device, (shaderPath / "world/post_render/world_post_vert.spv").string());
     worldPostFragShader_ = vk::Shader::create(device, (shaderPath / "world/post_render/world_post_frag.spv").string());
+    casShader_ = vk::Shader::create(device, (shaderPath / "world/post_render/cas_comp.spv").string());
 
     worldPostPipeline_ = vk::GraphicsPipelineBuilder{}
                              .defineRenderPass(worldPostRenderPass_, 0)
@@ -685,8 +746,13 @@ void PostRenderModule::initPipeline() {
                                       .beginColorBlendAttachmentState()
                                       .defineColorBlendAttachmentState(postColorBlendAttachmentState)
                                       .endColorBlendAttachmentState()
-                                      .definePipelineLayout(descriptorTables_[0])
-                                      .build(device);
+                                       .definePipelineLayout(descriptorTables_[0])
+                                       .build(device);
+
+    casPipeline_ = vk::ComputePipelineBuilder{}
+                       .defineShader(casShader_)
+                       .definePipelineLayout(casDescriptorTables_[0])
+                       .build(device);
 }
 
 PostRenderModuleContext::PostRenderModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
@@ -924,8 +990,75 @@ void PostRenderModuleContext::render() {
         ->endRenderPass();
     worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    // copy input to output
-    {
+    // copy input to output (or apply CAS)
+    if (Renderer::options.casEnabled) {
+        VkPipelineStageFlags2 srcStageLdr = 0;
+        VkAccessFlags2 srcAccessLdr = 0;
+        chooseSrc(ldrImage->imageLayout(),
+                  VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                      VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                  srcStageLdr, srcAccessLdr);
+
+        VkPipelineStageFlags2 srcStagePost = 0;
+        VkAccessFlags2 srcAccessPost = 0;
+        chooseSrc(postRenderedImage->imageLayout(),
+                  VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                  srcStagePost, srcAccessPost);
+
+        worldCommandBuffer->barriersBufferImage(
+            {}, {{
+                     .srcStageMask = srcStageLdr,
+                     .srcAccessMask = srcAccessLdr,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                     .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                     .oldLayout = ldrImage->imageLayout(),
+                     .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     .srcQueueFamilyIndex = mainQueueIndex,
+                     .dstQueueFamilyIndex = mainQueueIndex,
+                     .image = ldrImage,
+                     .subresourceRange = vk::wholeColorSubresourceRange,
+                 },
+                 {
+                     .srcStageMask = srcStagePost,
+                     .srcAccessMask = srcAccessPost,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                     .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+                     .oldLayout = postRenderedImage->imageLayout(),
+                     .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                     .srcQueueFamilyIndex = mainQueueIndex,
+                     .dstQueueFamilyIndex = mainQueueIndex,
+                     .image = postRenderedImage,
+                     .subresourceRange = vk::wholeColorSubresourceRange,
+                 }});
+        ldrImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+        auto casTable = module->casDescriptorTables_[context->frameIndex];
+        casTable->bindSamplerImageForShader(module->casSampler_, ldrImage, 0, 0);
+        casTable->bindImage(postRenderedImage, VK_IMAGE_LAYOUT_GENERAL, 0, 1);
+
+        CasPushConstant casPc = buildCasConstants(
+            Renderer::options.casSharpness,
+            static_cast<float>(ldrImage->width()),
+            static_cast<float>(ldrImage->height()),
+            static_cast<float>(postRenderedImage->width()),
+            static_cast<float>(postRenderedImage->height()));
+
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(),
+                           casTable->vkPipelineLayout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT,
+                           0,
+                           sizeof(CasPushConstant),
+                           &casPc);
+
+        worldCommandBuffer->bindDescriptorTable(casTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+            ->bindComputePipeline(module->casPipeline_);
+        uint32_t groupX = (postRenderedImage->width() + 15) / 16;
+        uint32_t groupY = (postRenderedImage->height() + 15) / 16;
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), groupX, groupY, 1);
+    } else {
         VkPipelineStageFlags2 srcStageLdr = 0;
         VkAccessFlags2 srcAccessLdr = 0;
         chooseSrc(ldrImage->imageLayout(),
@@ -967,28 +1100,27 @@ void PostRenderModuleContext::render() {
                      .image = postRenderedImage,
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  }});
+        ldrImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+        VkImageBlit imageBlit{};
+        imageBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        imageBlit.srcSubresource.mipLevel = 0;
+        imageBlit.srcSubresource.baseArrayLayer = 0;
+        imageBlit.srcSubresource.layerCount = 1;
+        imageBlit.srcOffsets[0] = {0, 0, 0};
+        imageBlit.srcOffsets[1] = {static_cast<int>(ldrImage->width()), static_cast<int>(ldrImage->height()), 1};
+        imageBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        imageBlit.dstSubresource.mipLevel = 0;
+        imageBlit.dstSubresource.baseArrayLayer = 0;
+        imageBlit.dstSubresource.layerCount = 1;
+        imageBlit.dstOffsets[0] = {0, 0, 0};
+        imageBlit.dstOffsets[1] = {static_cast<int>(postRenderedImage->width()),
+                                   static_cast<int>(postRenderedImage->height()), 1};
+
+        vkCmdBlitImage(worldCommandBuffer->vkCommandBuffer(), ldrImage->vkImage(), ldrImage->imageLayout(),
+                       postRenderedImage->vkImage(), postRenderedImage->imageLayout(), 1, &imageBlit, VK_FILTER_LINEAR);
     }
-    ldrImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-
-    // TODO: add to command buffer
-    VkImageBlit imageBlit{};
-    imageBlit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBlit.srcSubresource.mipLevel = 0;
-    imageBlit.srcSubresource.baseArrayLayer = 0;
-    imageBlit.srcSubresource.layerCount = 1;
-    imageBlit.srcOffsets[0] = {0, 0, 0};
-    imageBlit.srcOffsets[1] = {static_cast<int>(ldrImage->width()), static_cast<int>(ldrImage->height()), 1};
-    imageBlit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    imageBlit.dstSubresource.mipLevel = 0;
-    imageBlit.dstSubresource.baseArrayLayer = 0;
-    imageBlit.dstSubresource.layerCount = 1;
-    imageBlit.dstOffsets[0] = {0, 0, 0};
-    imageBlit.dstOffsets[1] = {static_cast<int>(postRenderedImage->width()),
-                               static_cast<int>(postRenderedImage->height()), 1};
-
-    vkCmdBlitImage(worldCommandBuffer->vkCommandBuffer(), ldrImage->vkImage(), ldrImage->imageLayout(),
-                   postRenderedImage->vkImage(), postRenderedImage->imageLayout(), 1, &imageBlit, VK_FILTER_LINEAR);
 
     // post render
     {

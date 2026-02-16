@@ -20,6 +20,8 @@ layout(set = 0, binding = 2) buffer ExposureBuffer {
     float saturation;
     float sdrTransferFunction;
     float capExposureSmoothed;
+    float manualExposureEnabled;
+    float manualExposure;
 }
 expData;
 
@@ -50,6 +52,8 @@ layout(push_constant) uniform PushConstant {
     float paperWhiteNits;
     float saturation;
     float sdrTransferFunction;
+    float manualExposureEnabled;
+    float manualExposure;
 }
 pc;
 
@@ -61,7 +65,11 @@ void main() {
 
     if (total == 0u) {
         expData.avgLogLum = pc.log2Min;
-        expData.exposure = clamp(expData.exposure, pc.minExposure, pc.maxExposure);
+        if (pc.manualExposureEnabled > 0.5) {
+            expData.exposure = clamp(pc.manualExposure, pc.minExposure, pc.maxExposure);
+        } else {
+            expData.exposure = clamp(expData.exposure, pc.minExposure, pc.maxExposure);
+        }
         return;
     }
 
@@ -100,6 +108,23 @@ void main() {
 
     float avgLogLum = (used > 0u) ? float(sumLog / double(used)) : pc.log2Min;
     float avgLum = exp2(avgLogLum);
+
+    if (pc.manualExposureEnabled > 0.5) {
+        expData.avgLogLum = avgLogLum;
+        expData.exposure = clamp(pc.manualExposure, pc.minExposure, pc.maxExposure);
+        expData.tonemapMode = pc.tonemapMode;
+        expData.Lwhite = pc.Lwhite;
+        expData.exposureCompensation = pc.exposureCompensation;
+        expData.hdrPipelineEnabled = pc.hdrPipelineEnabled;
+        expData.hdr10OutputEnabled = pc.hdr10OutputEnabled;
+        expData.peakNits = pc.peakNits;
+        expData.paperWhiteNits = pc.paperWhiteNits;
+        expData.saturation = pc.saturation;
+        expData.sdrTransferFunction = pc.sdrTransferFunction;
+        expData.manualExposureEnabled = pc.manualExposureEnabled;
+        expData.manualExposure = pc.manualExposure;
+        return;
+    }
 
     // Legacy target: expose middle-grey to the trimmed mean.
     float targetExposure = pc.middleGrey / max(avgLum, 1e-6);
@@ -200,4 +225,6 @@ void main() {
     expData.paperWhiteNits = pc.paperWhiteNits;
     expData.saturation = pc.saturation;
     expData.sdrTransferFunction = pc.sdrTransferFunction;
+    expData.manualExposureEnabled = pc.manualExposureEnabled;
+    expData.manualExposure = pc.manualExposure;
 }

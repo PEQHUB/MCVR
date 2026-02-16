@@ -28,7 +28,7 @@ foreach(GLSL_SHADER ${GLSL_SHADERS})
     add_custom_command(
         OUTPUT "${SPIRV_FILE}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${OUTPUT_DIR}"
-        COMMAND ${GLSLVALIDATOR} ${SHADER_FLAGS} -V "${GLSL_SHADER}" -o "${SPIRV_FILE}" --target-env vulkan1.4 -I${PROJECT_SOURCE_DIR}/src -I${CMAKE_CURRENT_SOURCE_DIR}/util
+        COMMAND ${GLSLVALIDATOR} ${SHADER_FLAGS} -V "${GLSL_SHADER}" -o "${SPIRV_FILE}" --target-env vulkan1.4 -I${PROJECT_SOURCE_DIR}/src -I${CMAKE_CURRENT_SOURCE_DIR}/util -I${PROJECT_SOURCE_DIR}/extern/FidelityFX-SDK/sdk/include/FidelityFX/gpu
         DEPENDS "${GLSL_SHADER}" ${GLSL_DEPENDS}
         VERBATIM
         COMMAND_EXPAND_LISTS

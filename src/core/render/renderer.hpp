@@ -30,6 +30,10 @@ struct Options {
     float minExposure = 0.0001f;       // Minimum exposure clamp
     float maxExposure = 2.0f;
     float exposureCompensation = 0.0f; // EV offset (-3 to +3)
+    bool manualExposureEnabled = false;
+    float manualExposure = 1.0f;
+    bool casEnabled = false;
+    float casSharpness = 0.5f;
     float middleGrey = 0.18f;          // Middle grey point (0.01 to 0.50)
     float Lwhite = 4.0f;               // White point for Reinhard Extended
     bool legacyExposure = false;       // Use legacy exposure algorithm (keeps legacy failure modes)
@@ -45,7 +49,7 @@ struct Options {
 
     // SDR output transfer function
     // 0 = Gamma 2.2, 1 = sRGB
-    uint32_t sdrTransferFunction = 1;
+    uint32_t sdrTransferFunction = 0;
 
     // HDR10 output settings (default: disabled, pure SDR)
     bool hdrEnabled = false;

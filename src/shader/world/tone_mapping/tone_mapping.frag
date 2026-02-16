@@ -20,6 +20,8 @@ layout(set = 0, binding = 2) readonly buffer ExposureBuffer {
     float saturation;       // Saturation boost (1.0 = neutral)
     float sdrTransferFunction; // 0.0 = Gamma 2.2, 1.0 = sRGB
     float capExposureSmoothed; // internal: kept for layout parity
+    float manualExposureEnabled; // 0.0 = auto exposure, 1.0 = manual exposure
+    float manualExposure; // direct exposure multiplier when manual is enabled
 }
 gExposure;
 
@@ -456,16 +458,6 @@ vec3 PQ_OETF_HDR10(vec3 L) {
     return pow((c1 + c2 * Lm1) / (1.0 + c3 * Lm1), vec3(m2));
 }
 
-// Wang hash: fast integer hash for spatial dithering (self-contained, no buffers needed)
-uint wangHash(uint seed) {
-    seed = (seed ^ 61u) ^ (seed >> 16u);
-    seed *= 9u;
-    seed = seed ^ (seed >> 4u);
-    seed *= 0x27d4eb2du;
-    seed = seed ^ (seed >> 15u);
-    return seed;
-}
-
 void main() {
     vec3 hdr = texture(HDR, texCoord).rgb;
     vec3 expColor = hdr * gExposure.exposure;
@@ -528,20 +520,6 @@ void main() {
         // PQ encode: normalize to [0,1] where 1.0 = 10000 nits
         vec3 pq = PQ_OETF_HDR10(bt2020 / 10000.0);
 
-        // ── Anti-banding dither (in PQ space = perceptually uniform) ──
-        // Wang hash per-pixel: spatial variation. Temporal accumulation upstream
-        // (TAA/SVGF jitter) provides frame-to-frame smoothing automatically.
-        uint px = uint(gl_FragCoord.x);
-        uint py = uint(gl_FragCoord.y);
-        uint seed = px + py * 8192u;
-        // 3 independent dither values (one per channel) to decorrelate RGB
-        float d0 = float(wangHash(seed))       / 4294967296.0 - 0.5;
-        float d1 = float(wangHash(seed + 1u))  / 4294967296.0 - 0.5;
-        float d2 = float(wangHash(seed + 2u))  / 4294967296.0 - 0.5;
-        // 10-bit step size in [0,1] PQ range = 1/1024
-        pq += vec3(d0, d1, d2) * (1.0 / 1024.0);
-        pq = clamp(pq, 0.0, 1.0);
-
         fragColor = vec4(pq, 1.0);
     } else {
         // ═══════════ SDR output path ═══════════
@@ -562,17 +540,6 @@ void main() {
                 encoded = pow(mapped, vec3(1.0 / 2.2));
             }
         }
-
-        // Anti-banding dither in encoded (post-OETF) space.
-        // 8-bit UNORM step size = 1/255.
-        uint px = uint(gl_FragCoord.x);
-        uint py = uint(gl_FragCoord.y);
-        uint seed = px + py * 8192u;
-        float d0 = float(wangHash(seed))       / 4294967296.0 - 0.5;
-        float d1 = float(wangHash(seed + 1u))  / 4294967296.0 - 0.5;
-        float d2 = float(wangHash(seed + 2u))  / 4294967296.0 - 0.5;
-        encoded += vec3(d0, d1, d2) * (1.0 / 255.0);
-        encoded = clamp(encoded, 0.0, 1.0);
 
         fragColor = vec4(encoded, 1.0);
     }

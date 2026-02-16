@@ -5,7 +5,6 @@
 
 #include "../util/ray_payloads.glsl"
 #include "../util/util.glsl"
-#include "../util/random.glsl"
 #include "common/shared.hpp"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
@@ -77,21 +76,7 @@ vec4 evalSunBillboard(vec3 rd) {
     vec2 a = abs(q);
     if (a.x > tanHalf || a.y > tanHalf) return vec4(0.0);
 
-    vec2 uv = q / tanHalf * 0.5 + 0.5;
-    vec4 tex = texture(textures[nonuniformEXT(skyUBO.sunTextureID)], uv);
-
-    // Replace texture alpha with analytic disc alpha to reduce visible banding.
-    float r = length(q) / max(tanHalf, 1e-6);
-    float edge = 0.08; // soft edge fraction
-    float aDisc = 1.0 - smoothstep(1.0 - edge, 1.0, r);
-
-    // Dither alpha slightly to break residual quantization.
-    uvec2 pix = uvec2(gl_LaunchIDEXT.xy);
-    uint seed = xxhash32(uvec3(pix, worldUBO.seed));
-    float n = rand(seed) - 0.5;
-    aDisc = clamp(aDisc + n * (1.0 / 255.0), 0.0, 1.0);
-
-    return vec4(tex.rgb, aDisc);
+    return vec4(1.0);
 }
 
 vec4 evalMoonBillboard(vec3 rd) {

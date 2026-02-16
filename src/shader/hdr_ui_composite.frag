@@ -46,22 +46,12 @@ const mat3 BT2020_TO_BT709 = mat3(
    -0.0728, -0.0084,  1.1187
 );
 
-// Wang hash: fast integer hash for spatial dithering
-uint wangHash(uint seed) {
-    seed = (seed ^ 61u) ^ (seed >> 16u);
-    seed *= 9u;
-    seed = seed ^ (seed >> 4u);
-    seed *= 0x27d4eb2du;
-    seed = seed ^ (seed >> 15u);
-    return seed;
-}
-
 void main() {
     vec4 uiSample = texture(overlayUI, texCoord);  // sRGB-decoded by sampler (linear BT.709)
     float alpha = uiSample.a;
 
     if (alpha < 0.001) {
-        // No UI pixel — pass world through unchanged (already dithered by tone mapping)
+        // No UI pixel: passthrough world PQ.
         fragColor = vec4(texture(worldHDR, texCoord).rgb, 1.0);
         return;
     }
@@ -87,17 +77,6 @@ void main() {
 
     // PQ encode the final composite
     vec3 pq = PQ_OETF(max(blendedBt2020, vec3(0.0)));
-
-    // Anti-banding dither in PQ space (perceptually uniform)
-    // Offset seed from tone_mapping.frag to decorrelate patterns
-    uint px = uint(gl_FragCoord.x);
-    uint py = uint(gl_FragCoord.y);
-    uint seed = px + py * 8192u + 12345u;
-    float d0 = float(wangHash(seed))       / 4294967296.0 - 0.5;
-    float d1 = float(wangHash(seed + 1u))  / 4294967296.0 - 0.5;
-    float d2 = float(wangHash(seed + 2u))  / 4294967296.0 - 0.5;
-    pq += vec3(d0, d1, d2) * (1.0 / 1024.0);  // 10-bit step size
-    pq = clamp(pq, 0.0, 1.0);
 
     fragColor = vec4(pq, 1.0);
 }

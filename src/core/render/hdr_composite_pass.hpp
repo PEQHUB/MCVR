@@ -48,7 +48,7 @@ class HdrCompositePass : public SharedObject<HdrCompositePass> {
     /// @param frameIndex       Swapchain image index
     /// @param mode             Composite mode (SDR or HDR10)
     /// @param uiBrightnessNits UI brightness push constant (HDR only; ignored in SDR)
-    /// @param worldImage       Tone-mapped HDR world (PQ-encoded, A2B10G10R10)
+    /// @param worldImage       World color image; if null, composites UI over black.
     /// @param overlayImage     Minecraft UI overlay (R8G8B8A8_SRGB, transparent background)
     /// @param swapchainImage   Target swapchain image (A2B10G10R10_UNORM)
     /// @param mainQueueIndex   Queue family index for barriers
@@ -64,6 +64,7 @@ class HdrCompositePass : public SharedObject<HdrCompositePass> {
   private:
     void initShaders();
     void initSampler();
+    void initFallbackBlackImage();
     void initDescriptorSets();
     void initRenderPass();
     void initFramebuffers();
@@ -78,6 +79,9 @@ class HdrCompositePass : public SharedObject<HdrCompositePass> {
 
     // Sampler (nearest — dimensions match, no filtering needed)
     std::shared_ptr<vk::Sampler> sampler_;
+
+    // Fallback 1x1 black image used when no world output exists yet.
+    std::shared_ptr<vk::DeviceLocalImage> blackWorldImage_;
 
     // Descriptor sets — one per swapchain image
     std::vector<std::shared_ptr<vk::DescriptorTable>> descriptorTables_;
