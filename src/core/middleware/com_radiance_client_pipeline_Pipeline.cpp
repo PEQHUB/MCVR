@@ -16,6 +16,10 @@ JNIEXPORT void JNICALL Java_com_radiance_client_pipeline_Pipeline_collectNativeM
     Pipeline::collectWorldModules();
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_pipeline_Pipeline_recollectNativeModules(JNIEnv *, jclass) {
+    Pipeline::recollectWorldModules();
+}
+
 JNIEXPORT jboolean JNICALL Java_com_radiance_client_pipeline_Pipeline_isNativeModuleAvailable(JNIEnv *env,
                                                                                               jclass,
                                                                                               jstring name) {

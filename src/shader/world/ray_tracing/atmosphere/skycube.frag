@@ -83,7 +83,7 @@ vec3 integrateSingleScattering(vec3 ro, vec3 rd, bool isSun) {
     vec3 L = vec3(0.0);
     vec3 T_view = vec3(1.0);
 
-    float cosTheta = dot(normalize(isSun ? skyUBO.sunDirection : -skyUBO.sunDirection), rd);
+    float cosTheta = dot(normalize(isSun ? skyUBO.sunDirection : skyUBO.moonDirection), rd);
     float pr = phaseRayleigh(cosTheta);
     float pm = phaseMieHG(cosTheta, skyUBO.mieG);
 
@@ -102,7 +102,7 @@ vec3 integrateSingleScattering(vec3 ro, vec3 rd, bool isSun) {
         vec3 sigmaT = sigmaS_R + sigmaS_M;
 
         vec3 up = x / r;
-        float muS = dot(up, normalize(isSun ? skyUBO.sunDirection : -skyUBO.sunDirection));
+        float muS = dot(up, normalize(isSun ? skyUBO.sunDirection : skyUBO.moonDirection));
         vec3 T_sun = sampleTransmittance(r, muS);
 
         vec3 S = sigmaS_R * pr + (sigmaS_M * (pm));

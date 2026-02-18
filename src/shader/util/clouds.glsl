@@ -60,11 +60,26 @@ void cloudBorders(SkyUBO skyUBO, ivec2 tc, out float bN, out float bE, out float
 }
 
 float cloudEdgeDistance01(vec2 inCell, float bN, float bE, float bS, float bW) {
+    float dW = inCell.x;
+    float dE = 1.0 - inCell.x;
+    float dN = inCell.y;
+    float dS = 1.0 - inCell.y;
+
     float d = 1e6;
-    if (bW > 0.5) d = min(d, inCell.x);
-    if (bE > 0.5) d = min(d, 1.0 - inCell.x);
-    if (bN > 0.5) d = min(d, inCell.y);
-    if (bS > 0.5) d = min(d, 1.0 - inCell.y);
+    // Axis-aligned edge distances for single exposed borders.
+    if (bW > 0.5) d = min(d, dW);
+    if (bE > 0.5) d = min(d, dE);
+    if (bN > 0.5) d = min(d, dN);
+    if (bS > 0.5) d = min(d, dS);
+
+    // Corner rounding: where two perpendicular borders meet, use Euclidean
+    // distance to the corner point instead of the axis-aligned minimum.
+    // This rounds the puffiness fade at corners instead of leaving a sharp 90° edge.
+    if (bN > 0.5 && bW > 0.5) d = min(d, length(vec2(dW, dN)));
+    if (bN > 0.5 && bE > 0.5) d = min(d, length(vec2(dE, dN)));
+    if (bS > 0.5 && bW > 0.5) d = min(d, length(vec2(dW, dS)));
+    if (bS > 0.5 && bE > 0.5) d = min(d, length(vec2(dE, dS)));
+
     if (d > 1e5) d = 1.0;
     return d;
 }
@@ -229,15 +244,57 @@ float cloudDensityAt(vec3 pCam, WorldUBO worldUBO, SkyUBO skyUBO) {
     vec2 inCell;
     ivec2 tc;
     if (!cloudSampleTileMask(pCam, skyUBO, inCell, tc)) return 0.0;
-    if (cloudOcc01(skyUBO, tc) < 0.5) return 0.0;
 
-    // Optional edge softening (cheap): only near exposed borders.
     float puffiness = clamp(skyUBO.cloudShape.x, 0.0, 2.0);
+    float edgeSoft  = mix(0.0, 0.18, clamp(puffiness, 0.0, 1.0));
+
+    bool occupied = cloudOcc01(skyUBO, tc) > 0.5;
+
+    if (!occupied) {
+        // Concave corner fill: when this empty cell has two adjacent axis-aligned
+        // occupied neighbors that share a corner (forming a 90-degree internal notch),
+        // treat the void as part of the cloud mass by returning density proportional
+        // to how far the sample sits inside the filled corner radius.
+        if (puffiness > 1e-4) {
+            float oN = cloudOcc01(skyUBO, tc + ivec2( 0, -1));
+            float oS = cloudOcc01(skyUBO, tc + ivec2( 0,  1));
+            float oE = cloudOcc01(skyUBO, tc + ivec2( 1,  0));
+            float oW = cloudOcc01(skyUBO, tc + ivec2(-1,  0));
+
+            // Check all four concave corner configurations.
+            // For each, the corner point is the shared corner between the two occupied
+            // neighbors. The distance is measured from the corner towards the cell interior.
+            // NW corner: N and W neighbors occupied → corner at (0,0) of this cell.
+            float cornerDist = 1e6;
+            if (oN > 0.5 && oW > 0.5)
+                cornerDist = min(cornerDist, length(vec2(inCell.x, inCell.y)));
+            // NE corner: N and E neighbors occupied → corner at (1,0).
+            if (oN > 0.5 && oE > 0.5)
+                cornerDist = min(cornerDist, length(vec2(1.0 - inCell.x, inCell.y)));
+            // SW corner: S and W neighbors occupied → corner at (0,1).
+            if (oS > 0.5 && oW > 0.5)
+                cornerDist = min(cornerDist, length(vec2(inCell.x, 1.0 - inCell.y)));
+            // SE corner: S and E neighbors occupied → corner at (1,1).
+            if (oS > 0.5 && oE > 0.5)
+                cornerDist = min(cornerDist, length(vec2(1.0 - inCell.x, 1.0 - inCell.y)));
+
+            if (cornerDist < 1e5) {
+                // The fill radius matches the edge-softening radius so the rounded
+                // corner blends continuously with the adjacent cells' puffiness fade.
+                float fillRadius = edgeSoft * 1.41421356; // diagonal extent of edgeSoft
+                float fade = 1.0 - smoothstep(0.0, fillRadius, cornerDist);
+                if (fade > 1e-3) return fade;
+            }
+        }
+        return 0.0;
+    }
+
+    // Cell is occupied — apply optional edge softening near exposed borders.
     if (puffiness > 1e-4) {
         float bN, bE, bS, bW;
         cloudBorders(skyUBO, tc, bN, bE, bS, bW);
         float edgeDist = cloudEdgeDistance01(inCell, bN, bE, bS, bW);
-        float edgeSoft = mix(0.0, 0.18, clamp(puffiness, 0.0, 1.0));
+
         float fade = smoothstep(0.0, edgeSoft, edgeDist);
         if (fade <= 1e-3) return 0.0;
         return fade;
@@ -250,56 +307,46 @@ float cloudDensityAtVisual(vec3 pCam, WorldUBO worldUBO, SkyUBO skyUBO) {
     float base = cloudDensityAt(pCam, worldUBO, skyUBO);
     if (base <= 0.0) return 0.0;
 
-    // Reinterpret detail strength: 100% = neutral/off; >100% enables noise.
+    // detailStrength = 0 (Fast mode): flat uniform slab, no FBM modulation.
     float detailStrength = clamp(skyUBO.cloudShape.z, 0.0, 3.0);
-    float realism = max(0.0, detailStrength - 1.0);
-    if (realism <= 1e-5) return base;
+    if (detailStrength <= 1e-5) return base;
 
     float detailScale = max(skyUBO.cloudShape.y, 1e-3);
 
+    // World-anchored 3D value FBM. cloudFbm3 (3 octaves) returns ~[0, 0.875].
+    dvec3 pWorld = worldUBO.cameraPos.xyz + dvec3(pCam);
+    vec3 pw = vec3(mod(pWorld, 4096.0));
+
+    // At detailScale=1: base wavelength ~24 blocks. Higher detailScale = finer blobs.
+    vec3 noiseCoord = pw * (detailScale / 24.0);
+    float n = cloudFbm3(noiseCoord);
+
+    // Symmetric deviation around 0.5: denser centers, lighter pockets — no holes.
+    // detailStrength=1.0 → modD in [0.6, 1.4]. detailStrength=2.0 → [0.2, 1.8].
+    float deviation = (n - 0.5) * 2.0;
+    float modD = clamp(1.0 + deviation * 0.4 * detailStrength, 0.2, 1.8);
+
+    // Altitude fade: suppress noise at top/bottom 15% of slab for smooth silhouette.
     float thickness = skyUBO.envCloud.y;
     float baseYRel = skyUBO.envCloud.x - float(worldUBO.cameraPos.y);
     float h = clamp((pCam.y - baseYRel) / max(thickness, 1e-3), 0.0, 1.0);
-    float mid = smoothstep(0.0, 0.2, h) * (1.0 - smoothstep(0.8, 1.0, h));
-    float altFade = mix(0.65, 1.0, mid);
+    float altFade = smoothstep(0.0, 0.15, h) * (1.0 - smoothstep(0.85, 1.0, h));
+    modD = mix(1.0, modD, altFade);
 
-    // World-anchored Worley erosion (2 octaves). Wrapped to avoid float precision issues.
-    dvec3 pWorld = worldUBO.cameraPos.xyz + dvec3(pCam);
-    dvec2 pw = mod(pWorld.xz, 4096.0);
-
-    // Base feature sizes are in blocks. detailScale > 1 increases frequency.
-    dvec2 q0 = (pw / 56.0) * double(detailScale);
-    dvec2 q1 = (pw / 14.0) * double(detailScale) + dvec2(17.0, 5.0);
-    float w0 = cloudWorleyFbm2_d(q0);
-    float w1 = cloudWorleyFbm2_d(q1);
-
-    // Convert to erosion signal (0=dense, 1=fully eroded) and amplify contrast.
-    float w = 0.60 * w0 + 0.40 * w1;
-    float erosion = clamp(1.0 - w, 0.0, 1.0);
-    erosion = smoothstep(0.20, 0.90, erosion);
-    erosion = erosion * erosion;
-    erosion *= altFade;
-
-    // Exponential mapping gives a much more noticeable visual effect than a linear subtract,
-    // without instantly punching holes at moderate values.
-    float amp = 2.2 * realism;
-    float modD = exp(-amp * erosion);
-
-    // Allow stronger breakup, but keep a floor to avoid speckly cutouts.
-    modD = clamp(modD, 0.05, 1.2);
     return base * modD;
 }
 
 
 vec3 cloudMainLightRadiance(SkyUBO skyUBO, out vec3 toLight) {
-    toLight = normalize(skyUBO.sunDirection);
+    vec3 sunDir = normalize(skyUBO.sunDirection);
     vec3 radiance;
 
     // Use moon when sun is below horizon.
-    if (toLight.y > 0.0) {
+    if (sunDir.y > 0.0) {
+        toLight = sunDir;
         radiance = (skyUBO.sunRadiance * skyUBO.envCelestial.z);
     } else {
-        toLight = -toLight;
+        toLight = normalize(skyUBO.moonDirection);
         radiance = (skyUBO.moonRadiance * skyUBO.envCelestial.w) * 0.05;
     }
 
@@ -578,7 +625,9 @@ CloudSegmentResult integrateCloudSegment(vec3 ro, vec3 rd, float tMin, float tMa
     // If any shape/detail modulation is enabled, fall back to stepped integration.
     float puffiness = clamp(skyUBO.cloudShape.x, 0.0, 2.0);
     float detailStrength = clamp(skyUBO.cloudShape.z, 0.0, 3.0);
-    bool analyticMode = (puffiness <= 1e-4) && (detailStrength <= 1.0 + 1e-4);
+    // Analytic (flat slab) only when detailStrength == 0 (Fast mode).
+    // Any non-zero detailStrength (Fancy mode) uses stepped 3D FBM integration.
+    bool analyticMode = (puffiness <= 1e-4) && (detailStrength <= 1e-5);
 
     // DDA traversal through the 12x12 cell grid in local cloud space.
     vec3 p0 = ro + rd * a;

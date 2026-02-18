@@ -95,6 +95,7 @@ class Pipeline : public SharedObject<Pipeline> {
     static std::map<std::string, std::pair<uint32_t, uint32_t>> worldModuleInOutImageNums;
     static std::map<std::string, std::function<void()>> worldModuleStaticPreCloser;
     static void collectWorldModules();
+    static void recollectWorldModules();
 
   public:
     Pipeline();

@@ -26,11 +26,20 @@ bool DLSSModule::initNGXContext() {
     ngxInitInfo.device = framework->device();
     ngxInitInfo.applicationPath = dlssPath.string();
     if (ngxContext_->init(ngxInitInfo) != NVSDK_NGX_Result_Success) {
+        // init() may have partially succeeded (e.g. VULKAN_Init ok but GetCapabilityParameters
+        // failed). NgxContext::init() calls deinit() internally in that case, but call it here
+        // defensively to ensure no NGX process-level state is left behind.
+        ngxContext_->deinit();
         ngxContext_ = nullptr;
         return false;
     }
 
     if (ngxContext_->queryDlssRRAvailable() != NVSDK_NGX_Result_Success) {
+        // init() succeeded (NVSDK_NGX_VULKAN_Init was called and device_ is set).
+        // We MUST call deinit() → NVSDK_NGX_VULKAN_Shutdown1() before clearing ngxContext_,
+        // otherwise the NGX process-level state stays initialized and the next
+        // NVSDK_NGX_VULKAN_Init() call (e.g. after user drops in DLSS DLLs) will fail.
+        ngxContext_->deinit();
         ngxContext_ = nullptr;
         return false;
     }

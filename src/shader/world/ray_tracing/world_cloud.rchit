@@ -133,9 +133,10 @@ void main() {
     vec3 rayOrigin = worldPos;
 
     // shadow ray for direct lighting
-    vec3 lightDir = normalize(skyUBO.sunDirection);
+    vec3 sunDir = normalize(skyUBO.sunDirection);
+    vec3 lightDir = sunDir;
     float kappa = 1000;
-    if (lightDir.y < 0) { lightDir = -lightDir; }
+    if (sunDir.y < 0) { lightDir = normalize(skyUBO.moonDirection); }
     vec3 sampledLightDir = lightDir;
 
     // check if sample is above surface

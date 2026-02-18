@@ -237,10 +237,11 @@ void main() {
     mainRay.coneWidth += gl_HitTEXT * mainRay.coneSpread;
 
     // shadow ray for direct lighting
-    vec3 lightDir = normalize(skyUBO.sunDirection);
+    vec3 sunDir = normalize(skyUBO.sunDirection);
+    vec3 lightDir = sunDir;
     // Softer sun sampling for hand = wider penumbras (500 vs 3000)
     float kappa = (mainRay.isHand > 0) ? 500.0 : 3000.0;
-    if (lightDir.y < 0) { lightDir = -lightDir; }
+    if (sunDir.y < 0) { lightDir = normalize(skyUBO.moonDirection); }
     vec3 sampledLightDir = SampleVMF(mainRay.seed, lightDir, kappa);
     vec3 shadowRayOrigin = worldPos + (dot(sampledLightDir, normal) > 0.0 ? normal : -normal) * 0.001;
 

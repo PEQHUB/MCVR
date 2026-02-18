@@ -80,7 +80,7 @@ vec4 evalSunBillboard(vec3 rd) {
 }
 
 vec4 evalMoonBillboard(vec3 rd) {
-    vec3 moonDir = normalize(-skyUBO.sunDirection);
+    vec3 moonDir = normalize(skyUBO.moonDirection);
     rd = normalize(rd);
 
     float z = dot(rd, moonDir);
@@ -127,7 +127,7 @@ void main() {
 
         vec3 rd = normalize(gl_WorldRayDirectionEXT);
         vec3 sunDir = normalize(skyUBO.sunDirection);
-        vec3 moonDir = normalize(-skyUBO.sunDirection);
+        vec3 moonDir = normalize(skyUBO.moonDirection);
 
         // Fade sky brightness to black after sunset.
         // sunDir.y is continuous and avoids hard transitions.

@@ -362,6 +362,20 @@ void Pipeline::collectWorldModules() {
     // TODO: invoke extension's collection
 }
 
+void Pipeline::recollectWorldModules() {
+    // Shut down any existing NGX context BEFORE re-collecting modules.
+    // NVSDK_NGX_VULKAN_Init() is a process-level call — Shutdown1() must be called
+    // before it can be successfully re-initialized (e.g. after user drops in DLSS DLLs).
+    // Without this, the second call to initNGXContext() fails silently on double-init.
+    DLSSModule::deinitNGXContext();
+
+    // Clear all three maps so re-insertion works correctly, then re-run full collection.
+    worldModuleConstructors.clear();
+    worldModuleInOutImageNums.clear();
+    worldModuleStaticPreCloser.clear();
+    collectWorldModules();
+}
+
 Pipeline::Pipeline() {}
 
 Pipeline::~Pipeline() {

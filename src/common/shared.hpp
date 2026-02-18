@@ -258,6 +258,9 @@ namespace Data {
         T_VEC3 sunDirection;
         T_UINT isSunRisingOrSetting;
 
+        T_VEC3 moonDirection;
+        T_FLOAT moonDirPad;
+
         T_UINT isSkyDark;
         T_UINT hasBlindnessOrDarkness;
         T_UINT cameraSubmersionType;
