@@ -417,10 +417,12 @@ void ToneMappingModuleContext::render() {
     pc.log2Min = -12.0f;
     pc.log2Max = (Renderer::options.legacyExposure) ? +8.0f : Renderer::options.exposureLog2MaxImproved;
     pc.epsilon = 1e-6f;
-    pc.lowPercent = 0.005f;
-    // In improved mode, include more of the bright tail in the meter so sunlit ground isn't ignored.
-    // Legacy mode keeps the original 99% trim (legacy failure mode).
-    pc.highPercent = (Renderer::options.legacyExposure) ? 0.99f : 0.999f;
+    // Industry-standard percentile trim (Unreal 4.25+: 10%/90%).
+    // Excluding the darkest 10% ignores unlit caves/shadows; excluding the brightest 10%
+    // ignores sky, sun disc, and specular highlights so they don't pull the mean up and
+    // cause the meter to underexpose midtones. Legacy mode keeps original (near-no-trim) values.
+    pc.lowPercent = (Renderer::options.legacyExposure) ? 0.005f : 0.10f;
+    pc.highPercent = (Renderer::options.legacyExposure) ? 0.99f : 0.90f;
     pc.middleGrey = Renderer::options.middleGrey;
     pc.dt = elapsedTime.count();
     pc.speedUp = Renderer::options.exposureUpSpeed;

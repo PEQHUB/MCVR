@@ -28,7 +28,7 @@ struct Options {
     uint32_t chunkBuildingTotalBatches = 4;
     uint32_t tonemappingMode = 1; // 0 = PBR Neutral, 1 = Reinhard Extended
     float minExposure = 0.0001f;       // Minimum exposure clamp
-    float maxExposure = 2.0f;
+    float maxExposure = 8.0f;          // ~3 EV boost headroom (was 2.0, too restrictive for dark scenes)
     float exposureCompensation = 0.0f; // EV offset (-3 to +3)
     bool manualExposureEnabled = false;
     float manualExposure = 1.0f;
@@ -41,7 +41,7 @@ struct Options {
     float exposureDownSpeed = 1.0f;    // Max EV decrease rate (EV/s)
     float exposureBrightAdaptBoost = 1.0f; // Multiplier applied when stopping down (improved mode)
     float exposureHighlightProtection = 1.0f; // 0..1, improved mode only
-    float exposureHighlightPercentile = 0.985f; // 0..1, improved mode only
+    float exposureHighlightPercentile = 0.95f; // 0..1, improved mode only (was 0.985, now caps at 95th percentile)
     float exposureHighlightSmoothingSpeed = 10.0f; // 0..30, 0 disables smoothing
     float exposureLog2MaxImproved = 14.0f; // Histogram max log2(luminance) for improved mode
     float saturation = 1.3f;           // Saturation/Vibrance boost (0.0 to 2.0)
