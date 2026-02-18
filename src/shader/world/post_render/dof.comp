@@ -1,0 +1,63 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(set = 0, binding = 0) uniform sampler2D hdrInput;
+layout(set = 0, binding = 1) uniform sampler2D linearDepth;  // R32F: linear view-space depth in world units
+layout(set = 0, binding = 2, rgba16f) uniform image2D hdrOutput;
+
+layout(push_constant) uniform PC {
+    float focalDistance;  // world units — distance to focal plane
+    float aperture;       // circle-of-confusion scale (larger = stronger blur)
+    float maxRadius;      // maximum blur radius in pixels
+    float enabled;        // 0 = pass-through, 1 = DoF active
+} pc;
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size  = imageSize(hdrOutput);
+    if (coord.x >= size.x || coord.y >= size.y) return;
+
+    vec2 uv    = (vec2(coord) + 0.5) / vec2(size);
+    vec3 color = texture(hdrInput, uv).rgb;
+
+    if (pc.enabled < 0.5) {
+        imageStore(hdrOutput, coord, vec4(color, 1.0));
+        return;
+    }
+
+    float depth = max(texture(linearDepth, uv).r, 1e-4);
+
+    // Circle of confusion radius (normalised by image width → pixel radius)
+    float coc    = pc.aperture * abs(depth - pc.focalDistance) / depth;
+    float radius = clamp(coc * float(size.x), 0.0, pc.maxRadius);
+
+    int R = int(ceil(radius));
+    if (R == 0) {
+        imageStore(hdrOutput, coord, vec4(color, 1.0));
+        return;
+    }
+
+    vec3  acc = vec3(0.0);
+    float w   = 0.0;
+
+    for (int dy = -R; dy <= R; dy++) {
+        for (int dx = -R; dx <= R; dx++) {
+            // Circular kernel
+            if (length(vec2(dx, dy)) > radius) continue;
+
+            ivec2 s      = clamp(coord + ivec2(dx, dy), ivec2(0), size - 1);
+            float sDepth = texelFetch(linearDepth, s, 0).r;
+
+            // Reduce contribution of foreground pixels bleeding into background
+            float weight = (sDepth >= depth - 0.1) ? 1.0 : 0.1;
+            acc += texelFetch(hdrInput, s, 0).rgb * weight;
+            w   += weight;
+        }
+    }
+
+    imageStore(hdrOutput, coord, vec4(acc / max(w, 1e-5), 1.0));
+}

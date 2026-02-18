@@ -1,0 +1,51 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(set = 0, binding = 0) uniform sampler2D hdrInput;
+layout(set = 0, binding = 1, rgba16f) uniform image2D hdrOutput;
+
+layout(push_constant) uniform PC {
+    float threshold;  // luminance threshold for bright-pass
+    float strength;   // bloom intensity multiplier
+    float radius;     // blur radius in pixels
+    float enabled;    // 0 = pass-through, 1 = bloom active
+} pc;
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size  = imageSize(hdrOutput);
+    if (coord.x >= size.x || coord.y >= size.y) return;
+
+    vec3 color = texelFetch(hdrInput, coord, 0).rgb;
+
+    if (pc.enabled < 0.5) {
+        imageStore(hdrOutput, coord, vec4(color, 1.0));
+        return;
+    }
+
+    // Bright-pass box blur: accumulate weighted contributions from bright neighbours.
+    // Single-pass approximation; radius is typically 2–8 pixels.
+    const int R = clamp(int(pc.radius), 1, 16);
+    vec3 bloom  = vec3(0.0);
+    float wtSum = 0.0;
+
+    for (int dy = -R; dy <= R; dy++) {
+        for (int dx = -R; dx <= R; dx++) {
+            ivec2 s = clamp(coord + ivec2(dx, dy), ivec2(0), size - 1);
+            vec3  c = texelFetch(hdrInput, s, 0).rgb;
+            // BT.709 luma weight
+            float lum    = dot(c, vec3(0.2126, 0.7152, 0.0722));
+            float contrib = max(0.0, lum - pc.threshold);
+            bloom  += c * contrib;
+            wtSum  += contrib + 1e-5;
+        }
+    }
+
+    bloom = (bloom / wtSum) * pc.strength;
+
+    imageStore(hdrOutput, coord, vec4(color + bloom, 1.0));
+}

@@ -227,3 +227,75 @@ JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeRebuildChun
     JNIEnv *, jclass) {
     Renderer::instance().world()->chunks()->resetScheduler();
 }
+
+// ---------------------------------------------------------------------------
+// Post-processing — Bloom
+// ---------------------------------------------------------------------------
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetBloomEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    Renderer::options.bloomEnabled = static_cast<bool>(enabled);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetBloomThreshold(
+    JNIEnv *, jclass, jfloat threshold, jboolean) {
+    Renderer::options.bloomThreshold = threshold;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetBloomStrength(
+    JNIEnv *, jclass, jfloat strength, jboolean) {
+    Renderer::options.bloomStrength = strength;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetBloomRadius(
+    JNIEnv *, jclass, jfloat radius, jboolean) {
+    Renderer::options.bloomRadius = radius;
+}
+
+// ---------------------------------------------------------------------------
+// Post-processing — Motion Blur
+// ---------------------------------------------------------------------------
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMotionBlurEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    Renderer::options.motionBlurEnabled = static_cast<bool>(enabled);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMotionBlurStrength(
+    JNIEnv *, jclass, jfloat strength, jboolean) {
+    Renderer::options.motionBlurStrength = strength;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMotionBlurSamples(
+    JNIEnv *, jclass, jfloat samples, jboolean) {
+    Renderer::options.motionBlurSamples = samples;
+}
+
+// ---------------------------------------------------------------------------
+// Post-processing — Depth of Field
+// ---------------------------------------------------------------------------
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDofEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    Renderer::options.dofEnabled = static_cast<bool>(enabled);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDofAutoFocus(
+    JNIEnv *, jclass, jboolean autoFocus, jboolean) {
+    Renderer::options.dofAutoFocus = static_cast<bool>(autoFocus);
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDofFocalDistance(
+    JNIEnv *, jclass, jfloat distance, jboolean) {
+    Renderer::options.dofFocalDistance = distance;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDofAperture(
+    JNIEnv *, jclass, jfloat aperture, jboolean) {
+    Renderer::options.dofAperture = aperture;
+}
+
+JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDofMaxRadius(
+    JNIEnv *, jclass, jfloat maxRadius, jboolean) {
+    Renderer::options.dofMaxRadius = maxRadius;
+}

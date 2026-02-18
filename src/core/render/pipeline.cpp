@@ -13,6 +13,9 @@
 #include "core/render/modules/world/svgf/svgf_module.hpp"
 #include "core/render/modules/world/temporal_accumulation/temporal_accumulation_module.hpp"
 #include "core/render/modules/world/tone_mapping/tone_mapping_module.hpp"
+#include "core/render/modules/world/bloom/bloom_module.hpp"
+#include "core/render/modules/world/motion_blur/motion_blur_module.hpp"
+#include "core/render/modules/world/dof/dof_module.hpp"
 
 #include <cstdlib>
 #include <iomanip>
@@ -331,6 +334,30 @@ void Pipeline::collectWorldModules() {
                        }));
     worldModuleInOutImageNums.insert(std::make_pair(
         ToneMappingModule::NAME, std::make_pair(ToneMappingModule::inputImageNum, ToneMappingModule::outputImageNum)));
+
+    worldModuleConstructors.insert(
+        std::make_pair(BloomModule::NAME,
+                       [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+                           return BloomModule::create(framework, worldPipeline);
+                       }));
+    worldModuleInOutImageNums.insert(std::make_pair(
+        BloomModule::NAME, std::make_pair(BloomModule::inputImageNum, BloomModule::outputImageNum)));
+
+    worldModuleConstructors.insert(
+        std::make_pair(MotionBlurModule::NAME,
+                       [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+                           return MotionBlurModule::create(framework, worldPipeline);
+                       }));
+    worldModuleInOutImageNums.insert(std::make_pair(
+        MotionBlurModule::NAME, std::make_pair(MotionBlurModule::inputImageNum, MotionBlurModule::outputImageNum)));
+
+    worldModuleConstructors.insert(
+        std::make_pair(DofModule::NAME,
+                       [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+                           return DofModule::create(framework, worldPipeline);
+                       }));
+    worldModuleInOutImageNums.insert(std::make_pair(
+        DofModule::NAME, std::make_pair(DofModule::inputImageNum, DofModule::outputImageNum)));
 
     bool result = DLSSModule::initNGXContext();
     if (result) {

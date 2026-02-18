@@ -56,6 +56,24 @@ struct Options {
     float hdrPeakNits = 1000.0f;          // Display peak brightness (400–10000 nits)
     float hdrPaperWhiteNits = 203.0f;     // ITU-R BT.2408 reference white
     float hdrUiBrightnessNits = 100.0f;   // UI brightness in HDR mode (50–300 nits)
+
+    // Bloom
+    bool bloomEnabled       = false;
+    float bloomThreshold    = 1.0f;   // Luminance threshold (1.0 = paper white)
+    float bloomStrength     = 0.08f;  // Additive blend intensity
+    float bloomRadius       = 4.0f;   // Box blur radius in pixels (1–16)
+
+    // Motion Blur
+    bool motionBlurEnabled  = false;
+    float motionBlurStrength = 1.0f;  // Velocity scale (1.0 = full velocity)
+    float motionBlurSamples  = 8.0f;  // Sample count along velocity vector (4–16)
+
+    // Depth of Field
+    bool dofEnabled         = false;
+    bool dofAutoFocus       = true;   // Track center-pixel depth each frame
+    float dofFocalDistance  = 16.0f;  // World units (used when autoFocus is off)
+    float dofAperture       = 0.05f;  // CoC scale (larger = more blur)
+    float dofMaxRadius      = 12.0f;  // Max blur kernel radius in pixels
 };
 
 class Renderer : public Singleton<Renderer> {

@@ -1,0 +1,46 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(set = 0, binding = 0) uniform sampler2D hdrInput;
+layout(set = 0, binding = 1) uniform sampler2D motionVectors;  // RG16F: screen-space velocity in UV units/frame
+layout(set = 0, binding = 2, rgba16f) uniform image2D hdrOutput;
+
+layout(push_constant) uniform PC {
+    float strength;  // velocity scale multiplier (1.0 = full motion)
+    float samples;   // number of samples along velocity vector (4–16)
+    float enabled;   // 0 = pass-through, 1 = motion blur active
+} pc;
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size  = imageSize(hdrOutput);
+    if (coord.x >= size.x || coord.y >= size.y) return;
+
+    vec2 uv    = (vec2(coord) + 0.5) / vec2(size);
+    vec3 color = texture(hdrInput, uv).rgb;
+
+    if (pc.enabled < 0.5) {
+        imageStore(hdrOutput, coord, vec4(color, 1.0));
+        return;
+    }
+
+    // Screen-space velocity stored as (dx, dy) in UV-space per frame
+    vec2 velocity = texture(motionVectors, uv).rg * pc.strength;
+
+    int N = max(1, int(pc.samples));
+    vec3 acc = vec3(0.0);
+
+    for (int i = 0; i < N; i++) {
+        // Spread samples symmetrically from -0.5 to +0.5 along the velocity vector
+        float t       = (N > 1) ? (float(i) / float(N - 1) - 0.5) : 0.0;
+        vec2 sampleUV = clamp(uv + velocity * t, vec2(0.0), vec2(1.0));
+        acc += texture(hdrInput, sampleUV).rgb;
+    }
+    acc /= float(N);
+
+    imageStore(hdrOutput, coord, vec4(acc, 1.0));
+}
