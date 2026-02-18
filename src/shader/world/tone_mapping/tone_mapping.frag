@@ -30,141 +30,8 @@ layout(location = 0) in vec2 texCoord;
 layout(location = 0) out vec4 fragColor;
 
 // ============================================================================
-// Mode 0: PBR Neutral Tone Mapping (Khronos PBR Neutral specification)
-// ============================================================================
-vec3 PBRNeutralToneMap(vec3 color) {
-    float startCompression = 0.76;
-    float desaturation = 0.01;
-
-    float x = min(color.r, min(color.g, color.b));
-    float offset = (x < 0.08) ? (x - 6.25 * x * x) : 0.04;
-    color -= offset;
-
-    float peak = max(color.r, max(color.g, color.b));
-    if (peak < startCompression) return color;
-
-    float d = 1.0 - startCompression;
-    float newPeak = 1.0 - d * d / (peak + d - startCompression);
-    color *= newPeak / peak;
-
-    float g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
-    return mix(color, newPeak * vec3(1.0), g);
-}
-
-// ============================================================================
-// Mode 1: Reinhard Extended Tone Mapping (luminance-based)
-// Reinhard et al. 2002, "Photographic Tone Reproduction for Digital Images", eq. 4
-// Lwhite is the smallest luminance that maps to pure white
-// ============================================================================
-vec3 ReinhardExtendedToneMap(vec3 color, float Lw) {
-    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722); // Rec. ITU-R BT.709
-    float L_old = dot(color, LUMA);
-    if (L_old < 1e-6) return color;
-    float Lw2 = Lw * Lw;
-    float L_new = L_old * (1.0 + L_old / Lw2) / (1.0 + L_old);
-    return color * (L_new / L_old);
-}
-
-// ============================================================================
-// Mode 2: ACES Filmic Tone Mapping (Narkowicz 2015)
-// Stephen Hill's fit of the ACES RRT+ODT
-// ============================================================================
-vec3 ACESToneMap(vec3 x) {
-    const float a = 2.51;
-    const float b = 0.03;
-    const float c = 2.43;
-    const float d = 0.59;
-    const float e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-}
-
-// ============================================================================
-// Mode 3: AgX Tone Mapping (Troy Sobotka, Blender 4.x)
-// ============================================================================
-vec3 agxDefaultContrastApprox(vec3 x) {
-    vec3 x2 = x * x;
-    vec3 x4 = x2 * x2;
-    return + 15.5     * x4 * x2
-           - 40.14    * x4 * x
-           + 31.96    * x4
-           - 6.868    * x2 * x
-           + 0.4298   * x2
-           + 0.1191   * x
-           - 0.00232;
-}
-
-// AgX "Punchy" look transform (from Blender 4.x)
-vec3 agxLook(vec3 val) {
-    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
-    float luma = dot(val, lw);
-
-    // Punchy look settings (from Blender)
-    vec3 offset = vec3(0.0);
-    vec3 slope = vec3(1.0);
-    vec3 power = vec3(1.35);
-    float sat = 1.4;
-
-    // ASC CDL
-    val = pow(val * slope + offset, power);
-    return luma + sat * (val - luma);
-}
-
-vec3 AgXToneMap(vec3 color) {
-    // AgX input transform (BT.709 adjusted)
-    const mat3 agxTransform = mat3(
-        0.842479062253094,  0.0423282422610123, 0.0423756549057051,
-        0.0784335999999992, 0.878468636469772,  0.0784336,
-        0.0792237451477643, 0.0791661274605434, 0.879142973793104);
-    // AgX inverse transform
-    const mat3 agxTransformInv = mat3(
-        1.19687900512017,  -0.0528968517574562, -0.0529716355144438,
-       -0.0980208811401368, 1.15190312990417,   -0.0980434501171241,
-       -0.0990297440797205,-0.0989611768448433,  1.15107367264116);
-
-    const float minEv = -12.47393;
-    const float maxEv = 4.026069;
-
-    color = agxTransform * color;
-    color = clamp(log2(color), minEv, maxEv);
-    color = (color - minEv) / (maxEv - minEv);
-    color = agxDefaultContrastApprox(color);
-
-    // Apply punchy look (contrast + saturation)
-    color = agxLook(color);
-
-    // Inverse transform
-    color = agxTransformInv * color;
-
-    return color;
-}
-
-// ============================================================================
-// Mode 4: Lottes Tone Mapping (AMD, GDC 2016)
-// Timothy Lottes, "Advanced Techniques and Optimization of HDR Color Pipelines"
-// ============================================================================
-vec3 LottesToneMap(vec3 x) {
-    const vec3 a      = vec3(1.6);
-    const vec3 d      = vec3(0.977);
-    const vec3 hdrMax = vec3(8.0);
-    const vec3 midIn  = vec3(0.18);
-    const vec3 midOut = vec3(0.267);
-
-    const vec3 b = (-pow(midIn, a) + pow(hdrMax, a) * midOut)
-                 / ((pow(hdrMax, a * d) - pow(midIn, a * d)) * midOut);
-    const vec3 c = (pow(hdrMax, a * d) * pow(midIn, a) - pow(hdrMax, a) * pow(midIn, a * d) * midOut)
-                 / ((pow(hdrMax, a * d) - pow(midIn, a * d)) * midOut);
-
-    return pow(x, a) / (pow(x, a * d) * b + c);
-}
-
-// ============================================================================
-// Mode 5: Frostbite Tone Mapping (EA DICE)
-// "High Dynamic Range Color Grading and Display in Frostbite"
-// Uses ICtCp perceptual color space for adaptive desaturation and hue preservation
-// Port from renodx HLSL implementation to GLSL
-// ============================================================================
-
 // PQ (Perceptual Quantizer) OETF — linear to PQ (ST 2084)
+// ============================================================================
 vec3 PQ_OETF(vec3 L) {
     const float m1 = 0.1593017578125;    // 2610 / 16384
     const float m2 = 78.84375;            // 2523 / 32 * 128
@@ -203,7 +70,10 @@ vec3 bt709ToICtCp(vec3 rgb) {
          2048.0 / 4096.0,  -13613.0 / 4096.0, -17390.0 / 4096.0,
             0.0 / 4096.0,   7003.0 / 4096.0,   -543.0 / 4096.0);
 
-    vec3 lms = bt709_to_lms * max(rgb, vec3(0.0));
+    // No floor here: negative BT.709 values represent valid BT.2020-gamut colors
+    // produced by ICtCp saturation expansion. They are handled by the downstream
+    // BT709_TO_BT2020 matrix in the HDR10 output path.
+    vec3 lms = bt709_to_lms * rgb;
     vec3 lmsPQ = PQ_OETF(lms / 100.0);
     return lms_to_ictcp * lmsPQ;
 }
@@ -227,114 +97,6 @@ vec3 ictcpToBt709(vec3 ictcp) {
     return lms_to_bt709 * lms;
 }
 
-float frostbiteRangeCompress(float x) {
-    return 1.0 - exp(-x);
-}
-
-float frostbiteRangeCompressThreshold(float val, float threshold) {
-    if (val < threshold) {
-        return val;
-    }
-    float range = 1.0 - threshold;
-    return threshold + range * frostbiteRangeCompress((val - threshold) / range);
-}
-
-vec3 FrostbiteToneMap(vec3 col) {
-    const float rolloffStart = 0.25;
-    const float satBoostAmount = 0.3;
-    const float hueCorrectAmount = 0.6;
-
-    // Convert to ICtCp for perceptual operations
-    vec3 ictcp = bt709ToICtCp(col);
-
-    // Adaptive desaturation based on intensity
-    float satAmount = pow(smoothstep(1.0, 0.3, ictcp.x), 1.3);
-    col = ictcpToBt709(ictcp * vec3(1.0, satAmount, satAmount));
-
-    // Hue-preserving range compression
-    float maxCol = max(col.r, max(col.g, col.b));
-    float mappedMax = frostbiteRangeCompressThreshold(maxCol, rolloffStart);
-    vec3 compressedHP = col * (mappedMax / max(maxCol, 1e-6));
-
-    // Per-channel compression
-    vec3 compressedPC = vec3(
-        frostbiteRangeCompressThreshold(col.r, rolloffStart),
-        frostbiteRangeCompressThreshold(col.g, rolloffStart),
-        frostbiteRangeCompressThreshold(col.b, rolloffStart));
-
-    // Blend hue-preserving and per-channel
-    col = mix(compressedPC, compressedHP, hueCorrectAmount);
-
-    // Post-compression saturation boost
-    vec3 ictcpMapped = bt709ToICtCp(col);
-    float postBoost = satBoostAmount * smoothstep(1.0, 0.5, ictcp.x);
-    float lumRatio = ictcpMapped.x / max(ictcp.x, 1e-3);
-    ictcpMapped.yz = mix(ictcpMapped.yz, ictcp.yz * lumRatio, postBoost);
-
-    col = ictcpToBt709(ictcpMapped);
-    return col;
-}
-
-// ============================================================================
-// Mode 6: Uncharted 2 / Hable Tone Mapping (Naughty Dog, GDC 2010)
-// John Hable, "Filmic Tonemapping for Real-time Rendering"
-// ============================================================================
-vec3 Uncharted2Helper(vec3 x) {
-    const float A = 0.15; // Shoulder Strength
-    const float B = 0.50; // Linear Strength
-    const float C = 0.10; // Linear Angle
-    const float D = 0.20; // Toe Strength
-    const float E = 0.02; // Toe Numerator
-    const float F = 0.30; // Toe Denominator
-    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
-}
-
-vec3 Uncharted2ToneMap(vec3 color) {
-    const float W = 11.2; // Linear White Point
-    const float exposureBias = 2.0;
-    vec3 curr = Uncharted2Helper(color * exposureBias);
-    vec3 whiteScale = vec3(1.0) / Uncharted2Helper(vec3(W));
-    return curr * whiteScale;
-}
-
-// ============================================================================
-// Mode 7: Gran Turismo Tonemapper (Uchimura 2017, Polyphony Digital)
-// Hajime Uchimura, "HDR Theory and Practice", CEDEC 2017
-// Three-segment piecewise curve: toe (power) + linear + shoulder (exponential)
-// ============================================================================
-float GTTonemapChannel(float x) {
-    const float P = 1.0;    // Max brightness
-    const float a = 1.0;    // Contrast (linear slope)
-    const float m = 0.22;   // Linear section start
-    const float l = 0.4;    // Linear section length
-    const float c = 1.33;   // Black tightness (toe curvature)
-    const float b = 0.0;    // Pedestal (black lift)
-
-    float l0 = ((P - m) * l) / a;
-    float S0 = m + l0;
-    float S1 = m + a * l0;
-    float C2 = (a * P) / (P - S1);
-    float CP = -C2 / P;
-
-    float w0 = 1.0 - smoothstep(0.0, m, x);
-    float w2 = step(m + l0, x);
-    float w1 = 1.0 - w0 - w2;
-
-    float T = m * pow(x / m, c) + b;
-    float L = m + a * (x - m);
-    float S = P - (P - S1) * exp(CP * (x - S0));
-
-    return T * w0 + L * w1 + S * w2;
-}
-
-vec3 GTToneMap(vec3 color) {
-    return vec3(
-        GTTonemapChannel(color.r),
-        GTTonemapChannel(color.g),
-        GTTonemapChannel(color.b)
-    );
-}
-
 // ============================================================================
 // HDR Mode 0: Hermite Spline Reinhard (BT.2390-aligned)
 // Luminance-based Reinhard with cubic Hermite spline knee for smooth
@@ -342,7 +104,7 @@ vec3 GTToneMap(vec3 color) {
 // References: BT.2390-7, Reinhard et al. 2002
 // ============================================================================
 vec3 HermiteSplineReinhardToneMap(vec3 color, float Lw) {
-    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722); // BT.709
+    const vec3 LUMA = vec3(0.2627, 0.6780, 0.0593); // BT.2020 (ITU-R BT.2020)
     float L = dot(color, LUMA);
     if (L < 1e-6) return color;
 
@@ -388,7 +150,7 @@ vec3 HermiteSplineReinhardToneMap(vec3 color, float Lw) {
 // Input: exposed linear RGB. Output: linear RGB scaled for HDR headroom.
 // ============================================================================
 vec3 BT2390EETF(vec3 color, float maxLum) {
-    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722); // BT.709
+    const vec3 LUMA = vec3(0.2627, 0.6780, 0.0593); // BT.2020 (ITU-R BT.2020)
     float L = dot(color, LUMA);
     if (L < 1e-6) return color;
 
@@ -462,60 +224,38 @@ void main() {
     vec3 hdr = texture(HDR, texCoord).rgb;
     vec3 expColor = hdr * gExposure.exposure;
 
-    bool hdrPipeline = gExposure.hdrPipelineEnabled > 0.5;
     bool hdr10Output = gExposure.hdr10OutputEnabled > 0.5;
 
-    // Apply Saturation/Vibrance boost (HDR-pipeline only, controlled by slider)
-    if (hdrPipeline && gExposure.saturation != 1.0) {
-        const vec3 lumaWeight = vec3(0.2126, 0.7152, 0.0722);
-        float luma = dot(expColor, lumaWeight);
-        expColor = mix(vec3(luma), expColor, gExposure.saturation);
+    // Expand color volume in ICtCp space (perceptually uniform chroma).
+    // Scaling Ct/Cp pushes colors into BT.2020 gamut without hue distortion.
+    // Out-of-BT.709-gamut values produced here are correctly handled by the
+    // downstream BT709_TO_BT2020 matrix in the HDR10 output path.
+    if (gExposure.saturation != 1.0) {
+        vec3 ictcp = bt709ToICtCp(max(expColor, vec3(0.0)));
+        ictcp.yz *= gExposure.saturation;
+        expColor = ictcpToBt709(ictcp);
     }
-
-    vec3 mapped;
-    int mode = int(gExposure.tonemapMode + 0.5);
-    bool isDisplayReferred = false;
 
     float paperWhite = gExposure.paperWhiteNits;
     float peak = gExposure.peakNits;
 
     // HDR headroom: highlights can be this many times brighter than paper white
-    float hdrHeadroom = hdrPipeline ? (peak / paperWhite) : 1.0;
+    float hdrHeadroom = peak / paperWhite;
 
-    // Reinhard Extended in HDR: widen Lwhite so output exceeds 1.0 for highlights
-    float effectiveLwhite = hdrPipeline ? max(gExposure.Lwhite, hdrHeadroom) : gExposure.Lwhite;
-
-    if (hdrPipeline) {
-        // HDR pipeline behavior: use BT.2390 rolloff in scene-linear space.
-        mapped = BT2390EETF(expColor, hdrHeadroom);
-    } else {
-        // SDR mode: all 8 original operators unchanged
-        if (mode == 0)       mapped = PBRNeutralToneMap(expColor);
-        else if (mode == 1)  mapped = ReinhardExtendedToneMap(expColor, effectiveLwhite);
-        else if (mode == 2)  mapped = ACESToneMap(expColor);
-        else if (mode == 3) { mapped = AgXToneMap(expColor); isDisplayReferred = true; }
-        else if (mode == 4)  mapped = LottesToneMap(expColor);
-        else if (mode == 5)  mapped = FrostbiteToneMap(expColor);
-        else if (mode == 6)  mapped = Uncharted2ToneMap(expColor);
-        else if (mode == 7)  mapped = GTToneMap(expColor);
-        else                 mapped = ReinhardExtendedToneMap(expColor, effectiveLwhite);
-    }
+    // BT.2390 EETF tone mapper — maps scene luminance to display luminance
+    vec3 mapped = BT2390EETF(expColor, hdrHeadroom);
 
     if (hdr10Output) {
         // ═══════════ HDR10 output path ═══════════
-        mapped = max(mapped, vec3(0.0));
-
-        if (isDisplayReferred) {
-            mapped = pow(mapped, vec3(2.2));  // AgX: undo baked sRGB gamma → linear
-        }
-
         vec3 nits = mapped * paperWhite;
 
-        // Clamp to display peak
-        nits = clamp(nits, vec3(0.0), vec3(peak));
+        // BT.709 → BT.2020 gamut conversion (in linear light, before peak clamp).
+        // Performing the matrix first allows BT.709-negative-but-BT.2020-valid values
+        // (produced by the ICtCp saturation expansion above) to survive correctly.
+        vec3 bt2020 = BT709_TO_BT2020 * nits;
 
-        // BT.709 → BT.2020 gamut conversion (in linear light)
-        vec3 bt2020 = max(BT709_TO_BT2020 * nits, vec3(0.0));
+        // Clamp to display peak in BT.2020 space
+        bt2020 = clamp(bt2020, vec3(0.0), vec3(peak));
 
         // PQ encode: normalize to [0,1] where 1.0 = 10000 nits
         vec3 pq = PQ_OETF_HDR10(bt2020 / 10000.0);
@@ -523,23 +263,11 @@ void main() {
         fragColor = vec4(pq, 1.0);
     } else {
         // ═══════════ SDR output path ═══════════
-        // Note: When hdrPipeline is enabled but hdr10Output is not, values above 1.0
-        // (i.e., above paper white) cannot be represented in SDR and will clip.
+        // Note: values above 1.0 (above paper white) cannot be represented in SDR and will clip.
         mapped = clamp(mapped, 0.0, 1.0);
 
-        // Encode to sRGB for UNORM output.
-        vec3 encoded;
-        if (isDisplayReferred) {
-            // AgX outputs display-referred (sRGB-like gamma baked in)
-            encoded = mapped;
-        } else {
-            bool useSrgb = gExposure.sdrTransferFunction > 0.5;
-            if (useSrgb) {
-                encoded = linearToSRGB(mapped);
-            } else {
-                encoded = pow(mapped, vec3(1.0 / 2.2));
-            }
-        }
+        bool useSrgb = gExposure.sdrTransferFunction > 0.5;
+        vec3 encoded = useSrgb ? linearToSRGB(mapped) : pow(mapped, vec3(1.0 / 2.2));
 
         fragColor = vec4(encoded, 1.0);
     }
