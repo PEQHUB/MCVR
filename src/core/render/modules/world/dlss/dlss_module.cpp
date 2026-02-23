@@ -246,6 +246,7 @@ void DLSSModuleContext::render() {
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
 
     auto module = dLSSModule.lock();
+    if (!module) return;
 
     {
         worldCommandBuffer->barriersBufferImage(
