@@ -25,3 +25,6 @@
 [submodule "extern/FidelityFX-SDK"]
 	path = extern/FidelityFX-SDK
 	url = https://github.com/Interstellarss/FidelityFX-SDK.git
+[submodule "extern/omm"]
+	path = extern/omm
+	url = https://github.com/NVIDIA-RTX/OMM.git
