@@ -71,6 +71,7 @@ void DLSSModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<Worl
     firstHitDepthImages_.resize(size);
     processedImages_.resize(size);
     upscaledFirstHitDepthImages_.resize(size);
+    upscaled2xImages_.resize(size);
 
     dlss_ = DlssRR::create();
 }
@@ -196,18 +197,35 @@ void DLSSModule::build() {
     if (!framework || !worldPipeline) return;
     uint32_t size = framework->swapchain()->imageCount();
 
+    // Output Scale 2x: DLSS targets 2x, Lanczos downscales to 1x
+    dlssOutputWidth_ = Renderer::options.outputScale2x ? outputWidth_ * 2 : outputWidth_;
+    dlssOutputHeight_ = Renderer::options.outputScale2x ? outputHeight_ * 2 : outputHeight_;
+
     NgxContext::DlssRRInitInfo dlssRRInitInfo{};
     dlssRRInitInfo.inputSize = {inputWidth_, inputHeight_};
-    dlssRRInitInfo.outputSize = {outputWidth_, outputHeight_};
+    dlssRRInitInfo.outputSize = {dlssOutputWidth_, dlssOutputHeight_};
     dlssRRInitInfo.quality = mode_;
     dlssRRInitInfo.preset = static_cast<NVSDK_NGX_RayReconstruction_Hint_Render_Preset>(Renderer::options.upscalerPreset);
     ngxContext_->initDlssRR(dlssRRInitInfo, framework->mainCommandPool(), dlss_);
 
+    if (Renderer::options.outputScale2x) {
+        initLanczosResources();
+    }
+
     contexts_.resize(size);
 
     for (int i = 0; i < size; i++) {
-        contexts_[i] =
-            DLSSModuleContext::create(framework->contexts()[i], worldPipeline->contexts()[i], shared_from_this());
+        auto ctx = DLSSModuleContext::create(framework->contexts()[i], worldPipeline->contexts()[i], shared_from_this());
+
+        // Output Scale 2x: redirect DLSS output to 2x intermediate
+        if (Renderer::options.outputScale2x && upscaled2xImages_[i]) {
+            ctx->processedImage = upscaled2xImages_[i];          // DLSS writes to 2x
+            ctx->finalOutputImage = processedImages_[i];          // Lanczos target (shared 1x)
+        } else {
+            ctx->finalOutputImage = nullptr;
+        }
+
+        contexts_[i] = ctx;
     }
 }
 
@@ -221,6 +239,69 @@ void DLSSModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
 
 void DLSSModule::preClose() {
     if (dlss_) dlss_->deinit();
+
+    // Lanczos resources cleanup
+    lanczosPipeline_.reset();
+    lanczosDescriptorTables_.clear();
+    lanczosSampler_.reset();
+    lanczosShader_.reset();
+    upscaled2xImages_.clear();
+}
+
+void DLSSModule::initLanczosResources() {
+    auto fw = framework_.lock();
+    uint32_t size = fw->swapchain()->imageCount();
+
+    // Create 2x intermediate images for DLSS output
+    for (uint32_t i = 0; i < size; i++) {
+        upscaled2xImages_[i] = vk::DeviceLocalImage::create(
+            fw->device(), fw->vma(), false, dlssOutputWidth_, dlssOutputHeight_, 1,
+            VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    }
+
+    // Load Lanczos compute shader
+    lanczosShader_ = vk::Shader::create(
+        fw->device(),
+        (Renderer::folderPath / "shaders/world/post_render/lanczos_downscale_comp.spv").string());
+
+    // Sampler (texelFetch bypasses it, but needed for combined image sampler binding)
+    lanczosSampler_ = vk::Sampler::create(
+        fw->device(), VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+
+    // Descriptor tables
+    lanczosDescriptorTables_.resize(size);
+    for (uint32_t i = 0; i < size; i++) {
+        lanczosDescriptorTables_[i] = vk::DescriptorTableBuilder{}
+            .beginDescriptorLayoutSet()
+            .beginDescriptorLayoutSetBinding()
+            .defineDescriptorLayoutSetBinding({
+                .binding = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            })
+            .defineDescriptorLayoutSetBinding({
+                .binding = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            })
+            .endDescriptorLayoutSetBinding()
+            .endDescriptorLayoutSet()
+            .definePushConstant(VkPushConstantRange{
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                .offset = 0,
+                .size = sizeof(int32_t) * 4,
+            })
+            .build(fw->device());
+    }
+
+    // Compute pipeline
+    lanczosPipeline_ = vk::ComputePipelineBuilder{}
+        .defineShader(lanczosShader_)
+        .definePipelineLayout(lanczosDescriptorTables_[0])
+        .build(fw->device());
 }
 
 DLSSModuleContext::DLSSModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
@@ -362,6 +443,74 @@ void DLSSModuleContext::render() {
             module->dlss_->denoise(worldCommandBuffer, glm::uvec2{module->inputWidth_, module->inputHeight_}, jitter,
                                    worldUBO->cameraViewMat, worldUBO->cameraProjMat);
         }
+    }
+
+    // Output Scale 2x: Lanczos downscale from 2x intermediate to 1x shared output
+    if (finalOutputImage && module->lanczosPipeline_) {
+        struct LanczosPushConstant {
+            int32_t srcWidth, srcHeight;
+            int32_t dstWidth, dstHeight;
+        };
+
+        // Barrier: 2x output → shader read, 1x final → general (for storage write)
+        worldCommandBuffer->barriersBufferImage(
+            {}, {
+                {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                 .oldLayout = processedImage->imageLayout(),
+                 .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 .srcQueueFamilyIndex = mainQueueIndex,
+                 .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = processedImage,
+                 .subresourceRange = vk::wholeColorSubresourceRange},
+                {.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                 .srcAccessMask = 0,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+                 .oldLayout = finalOutputImage->imageLayout(),
+                 .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                 .srcQueueFamilyIndex = mainQueueIndex,
+                 .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = finalOutputImage,
+                 .subresourceRange = vk::wholeColorSubresourceRange}});
+        processedImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        finalOutputImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+        auto frameIndex = context->frameIndex;
+        auto lanczosTable = module->lanczosDescriptorTables_[frameIndex];
+        lanczosTable->bindSamplerImageForShader(module->lanczosSampler_, processedImage, 0, 0);
+        lanczosTable->bindImage(finalOutputImage, VK_IMAGE_LAYOUT_GENERAL, 0, 1);
+
+        LanczosPushConstant pc{};
+        pc.srcWidth = static_cast<int32_t>(module->dlssOutputWidth_);
+        pc.srcHeight = static_cast<int32_t>(module->dlssOutputHeight_);
+        pc.dstWidth = static_cast<int32_t>(module->outputWidth_);
+        pc.dstHeight = static_cast<int32_t>(module->outputHeight_);
+
+        worldCommandBuffer->bindDescriptorTable(lanczosTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+            ->bindComputePipeline(module->lanczosPipeline_);
+
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), lanczosTable->vkPipelineLayout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(LanczosPushConstant), &pc);
+
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(),
+                      (module->outputWidth_ + 15) / 16, (module->outputHeight_ + 15) / 16, 1);
+
+        // Post-dispatch barrier: Lanczos output visible to downstream
+        worldCommandBuffer->barriersBufferImage(
+            {}, {
+                {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT,
+                 .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                 .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                 .srcQueueFamilyIndex = mainQueueIndex,
+                 .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = finalOutputImage,
+                 .subresourceRange = vk::wholeColorSubresourceRange}});
     }
 
     worldCommandBuffer->barriersBufferImage(

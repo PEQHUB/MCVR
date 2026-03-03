@@ -85,6 +85,16 @@ class UpscalerModule : public WorldModule, public SharedObject<UpscalerModule> {
     std::vector<std::shared_ptr<vk::DescriptorTable>> depthDescriptorTables_;
     std::shared_ptr<vk::ComputePipeline> depthConversionPipeline_;
 
+    // Output Scale 2x: FSR3 targets 2x, Lanczos downscales to 1x output
+    uint32_t fsr3DisplayWidth_ = 0;
+    uint32_t fsr3DisplayHeight_ = 0;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> upscaled2xImages_;
+    std::shared_ptr<vk::Shader> lanczosShader_;
+    std::shared_ptr<vk::Sampler> lanczosSampler_;
+    std::vector<std::shared_ptr<vk::DescriptorTable>> lanczosDescriptorTables_;
+    std::shared_ptr<vk::ComputePipeline> lanczosPipeline_;
+    void initLanczosResources();
+
     // Camera state for reset detection
     glm::vec3 lastCameraPos_ = glm::vec3(0.0f);
     glm::vec3 lastCameraDir_ = glm::vec3(0.0f, 0.0f, -1.0f);
@@ -110,7 +120,8 @@ class UpscalerModuleContext : public WorldModuleContext {
     std::shared_ptr<vk::DeviceLocalImage> inputFirstHitDepthImage;
 
     // Outputs (display resolution)
-    std::shared_ptr<vk::DeviceLocalImage> outputImage;
+    std::shared_ptr<vk::DeviceLocalImage> outputImage;          // FSR3 writes here (2x when outputScale2x, else 1x)
+    std::shared_ptr<vk::DeviceLocalImage> finalOutputImage;     // Lanczos writes here (shared 1x output, only when outputScale2x)
     std::shared_ptr<vk::DeviceLocalImage> upscaledFirstHitDepthImage;
 
     std::shared_ptr<vk::DescriptorTable> depthDescriptorTable;

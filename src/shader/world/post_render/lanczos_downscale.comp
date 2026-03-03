@@ -1,0 +1,68 @@
+#version 450
+
+layout(set = 0, binding = 0) uniform sampler2D r_input;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D rw_output;
+
+layout(push_constant) uniform LanczosPC {
+    ivec2 srcSize;
+    ivec2 dstSize;
+} pc;
+
+const float PI = 3.14159265358979323;
+
+// Lanczos kernel with window size a
+float lanczos(float x, float a) {
+    if (abs(x) < 1e-6) return 1.0;
+    if (abs(x) >= a) return 0.0;
+    float px = PI * x;
+    return (a * sin(px) * sin(px / a)) / (px * px);
+}
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    ivec2 outPos = ivec2(gl_GlobalInvocationID.xy);
+    if (outPos.x >= pc.dstSize.x || outPos.y >= pc.dstSize.y)
+        return;
+
+    // Scale factor (src pixels per dst pixel)
+    vec2 scale = vec2(pc.srcSize) / vec2(pc.dstSize);
+
+    // Map output pixel center to source coordinates
+    vec2 srcCenter = (vec2(outPos) + 0.5) * scale;
+
+    // Lanczos-3: support radius = 3 in normalized coords
+    // For 2x downscale, filter radius in source pixels = 3 * scale = 6
+    float a = 3.0;
+    float filterRadiusX = a * scale.x;
+    float filterRadiusY = a * scale.y;
+
+    // Sample bounds in source pixels
+    int x0 = max(int(floor(srcCenter.x - filterRadiusX)), 0);
+    int x1 = min(int(ceil(srcCenter.x + filterRadiusX)), pc.srcSize.x - 1);
+    int y0 = max(int(floor(srcCenter.y - filterRadiusY)), 0);
+    int y1 = min(int(ceil(srcCenter.y + filterRadiusY)), pc.srcSize.y - 1);
+
+    vec4 color = vec4(0.0);
+    float totalWeight = 0.0;
+
+    for (int sy = y0; sy <= y1; sy++) {
+        // Distance in normalized output-pixel coords
+        float dy = (float(sy) + 0.5 - srcCenter.y) / scale.y;
+        float wy = lanczos(dy, a);
+
+        for (int sx = x0; sx <= x1; sx++) {
+            float dx = (float(sx) + 0.5 - srcCenter.x) / scale.x;
+            float wx = lanczos(dx, a);
+
+            float w = wx * wy;
+            color += texelFetch(r_input, ivec2(sx, sy), 0) * w;
+            totalWeight += w;
+        }
+    }
+
+    if (totalWeight > 0.0)
+        color /= totalWeight;
+
+    imageStore(rw_output, outPos, color);
+}

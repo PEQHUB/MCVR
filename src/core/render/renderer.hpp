@@ -24,6 +24,7 @@ struct Options {
     bool ommEnabled = false; // Opacity Micro Maps (disabled by default until Phase 1 validated)
     uint32_t ommBakerLevel = 4; // OMM baker max subdivision level (1-8)
     bool simplifiedIndirect = false; // Skip detail textures on indirect bounces + simplify shadow AHS
+    bool outputScale2x = false;     // Render world at 2x display resolution, Lanczos 3 downscale
     uint32_t debugMode = 0;
     bool needRecreate = false;
 

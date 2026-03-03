@@ -57,6 +57,7 @@ void FrameworkContext::fuseFinal() {
     bool hdrOutputActive = Renderer::options.hdrEnabled && swapchain->isHDR();
     bool hasWorldOutput = pipelineContext->worldPipelineContext && pipelineContext->worldPipelineContext->outputImage;
     auto worldOutput = hasWorldOutput ? pipelineContext->worldPipelineContext->outputImage : nullptr;
+
     auto overlayOutput = pipelineContext->uiModuleContext ? pipelineContext->uiModuleContext->overlayDrawColorImage : nullptr;
     bool canComposite = f->pipeline_->hdrCompositePass() && overlayOutput;
 

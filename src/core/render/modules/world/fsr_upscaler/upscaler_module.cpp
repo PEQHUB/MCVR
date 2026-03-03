@@ -46,6 +46,7 @@ void UpscalerModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<
     fsrMotionVectorImages_.resize(size);
     inputImages_.resize(size);
     outputImages_.resize(size);
+    upscaled2xImages_.resize(size);
 }
 
 bool UpscalerModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLocalImage>> &images,
@@ -130,6 +131,10 @@ void UpscalerModule::build() {
     auto wp = worldPipeline_.lock();
     uint32_t size = fw->swapchain()->imageCount();
 
+    // Output Scale 2x: FSR3 targets 2x display, Lanczos downscales to 1x
+    fsr3DisplayWidth_ = Renderer::options.outputScale2x ? displayWidth_ * 2 : displayWidth_;
+    fsr3DisplayHeight_ = Renderer::options.outputScale2x ? displayHeight_ * 2 : displayHeight_;
+
     fsr3_ = std::make_shared<mcvr::FSR3Upscaler>();
 
     mcvr::UpscalerConfig config{};
@@ -140,8 +145,8 @@ void UpscalerModule::build() {
     config.graphicsQueueFamily = fw->physicalDevice()->mainQueueIndex();
     config.maxRenderWidth = renderWidth_;
     config.maxRenderHeight = renderHeight_;
-    config.maxDisplayWidth = displayWidth_;
-    config.maxDisplayHeight = displayHeight_;
+    config.maxDisplayWidth = fsr3DisplayWidth_;
+    config.maxDisplayHeight = fsr3DisplayHeight_;
     config.qualityMode = static_cast<mcvr::UpscalerQualityMode>(qualityMode_);
     config.hdr = true;
     config.depthInverted = false;
@@ -163,6 +168,10 @@ void UpscalerModule::build() {
     initImages();
     initPipeline();
 
+    if (Renderer::options.outputScale2x) {
+        initLanczosResources();
+    }
+
     contexts_.resize(size);
     for (uint32_t i = 0; i < size; i++) {
         contexts_[i] =
@@ -173,7 +182,13 @@ void UpscalerModule::build() {
         contexts_[i]->inputMotionVectorImage = inputImages_[i][2];
         contexts_[i]->inputFirstHitDepthImage = inputImages_[i][3];
 
-        contexts_[i]->outputImage = outputImages_[i][0];
+        if (Renderer::options.outputScale2x && upscaled2xImages_[i]) {
+            contexts_[i]->outputImage = upscaled2xImages_[i];       // FSR3 writes to 2x
+            contexts_[i]->finalOutputImage = outputImages_[i][0];    // Lanczos target (shared 1x)
+        } else {
+            contexts_[i]->outputImage = outputImages_[i][0];
+            contexts_[i]->finalOutputImage = nullptr;
+        }
         contexts_[i]->upscaledFirstHitDepthImage = outputImages_[i][1];
 
         contexts_[i]->deviceDepthImage = deviceDepthImages_[i];
@@ -253,6 +268,62 @@ void UpscalerModule::initPipeline() {
                                    .build(fw->device());
 }
 
+void UpscalerModule::initLanczosResources() {
+    auto fw = framework_.lock();
+    uint32_t size = fw->swapchain()->imageCount();
+
+    // Create 2x intermediate images for FSR3 output
+    for (uint32_t i = 0; i < size; i++) {
+        upscaled2xImages_[i] = vk::DeviceLocalImage::create(
+            fw->device(), fw->vma(), false, fsr3DisplayWidth_, fsr3DisplayHeight_, 1,
+            VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    }
+
+    // Load Lanczos compute shader
+    lanczosShader_ = vk::Shader::create(
+        fw->device(),
+        (Renderer::folderPath / "shaders/world/post_render/lanczos_downscale_comp.spv").string());
+
+    // Sampler (texelFetch bypasses it, but needed for combined image sampler binding)
+    lanczosSampler_ = vk::Sampler::create(
+        fw->device(), VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+
+    // Descriptor tables
+    lanczosDescriptorTables_.resize(size);
+    for (uint32_t i = 0; i < size; i++) {
+        lanczosDescriptorTables_[i] = vk::DescriptorTableBuilder{}
+            .beginDescriptorLayoutSet()
+            .beginDescriptorLayoutSetBinding()
+            .defineDescriptorLayoutSetBinding({
+                .binding = 0,
+                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            })
+            .defineDescriptorLayoutSetBinding({
+                .binding = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            })
+            .endDescriptorLayoutSetBinding()
+            .endDescriptorLayoutSet()
+            .definePushConstant(VkPushConstantRange{
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+                .offset = 0,
+                .size = sizeof(int32_t) * 4,
+            })
+            .build(fw->device());
+    }
+
+    // Compute pipeline
+    lanczosPipeline_ = vk::ComputePipelineBuilder{}
+        .defineShader(lanczosShader_)
+        .definePipelineLayout(lanczosDescriptorTables_[0])
+        .build(fw->device());
+}
+
 void UpscalerModule::setAttributes(int attributeCount, std::vector<std::string> &attributeKVs) {
     auto parseBool = [](const std::string &value) {
         if (value == "1" || value == "true" || value == "True" || value == "TRUE") return true;
@@ -298,6 +369,13 @@ void UpscalerModule::preClose() {
         fsr3_.reset();
     }
     initialized_ = false;
+
+    // Lanczos resources cleanup
+    lanczosPipeline_.reset();
+    lanczosDescriptorTables_.clear();
+    lanczosSampler_.reset();
+    lanczosShader_.reset();
+    upscaled2xImages_.clear();
 }
 
 void UpscalerModule::getRenderResolution(uint32_t displayWidth, uint32_t displayHeight, QualityMode mode,
@@ -613,8 +691,8 @@ void UpscalerModuleContext::render() {
     input.outputLayout = VK_IMAGE_LAYOUT_GENERAL;
     input.renderWidth = module->renderWidth_;
     input.renderHeight = module->renderHeight_;
-    input.displayWidth = module->displayWidth_;
-    input.displayHeight = module->displayHeight_;
+    input.displayWidth = module->fsr3DisplayWidth_;
+    input.displayHeight = module->fsr3DisplayHeight_;
     // FSR expects jitter in the camera offset convention (sign may differ from our ray jitter)
     input.jitterOffsetX = -worldUBO->cameraJitter.x;
     input.jitterOffsetY = -worldUBO->cameraJitter.y;
@@ -633,6 +711,74 @@ void UpscalerModuleContext::render() {
 
     module->fsr3_->dispatch(input);
     outputImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+    // Output Scale 2x: Lanczos downscale from 2x intermediate to 1x shared output
+    if (finalOutputImage && module->lanczosPipeline_) {
+        struct LanczosPushConstant {
+            int32_t srcWidth, srcHeight;
+            int32_t dstWidth, dstHeight;
+        };
+
+        // Barrier: 2x output → shader read, 1x final → general (for storage write)
+        worldCommandBuffer->barriersBufferImage(
+            {}, {
+                {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                 .oldLayout = outputImage->imageLayout(),
+                 .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 .srcQueueFamilyIndex = mainQueueIndex,
+                 .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = outputImage,
+                 .subresourceRange = vk::wholeColorSubresourceRange},
+                {.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                 .srcAccessMask = 0,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+                 .oldLayout = finalOutputImage->imageLayout(),
+                 .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                 .srcQueueFamilyIndex = mainQueueIndex,
+                 .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = finalOutputImage,
+                 .subresourceRange = vk::wholeColorSubresourceRange}});
+        outputImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        finalOutputImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+        auto frameIndex = fwContext->frameIndex;
+        auto lanczosTable = module->lanczosDescriptorTables_[frameIndex];
+        lanczosTable->bindSamplerImageForShader(module->lanczosSampler_, outputImage, 0, 0);
+        lanczosTable->bindImage(finalOutputImage, VK_IMAGE_LAYOUT_GENERAL, 0, 1);
+
+        LanczosPushConstant pc{};
+        pc.srcWidth = static_cast<int32_t>(module->fsr3DisplayWidth_);
+        pc.srcHeight = static_cast<int32_t>(module->fsr3DisplayHeight_);
+        pc.dstWidth = static_cast<int32_t>(module->displayWidth_);
+        pc.dstHeight = static_cast<int32_t>(module->displayHeight_);
+
+        worldCommandBuffer->bindDescriptorTable(lanczosTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+            ->bindComputePipeline(module->lanczosPipeline_);
+
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), lanczosTable->vkPipelineLayout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(LanczosPushConstant), &pc);
+
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(),
+                      (module->displayWidth_ + 15) / 16, (module->displayHeight_ + 15) / 16, 1);
+
+        // Post-dispatch barrier: Lanczos output visible to downstream
+        worldCommandBuffer->barriersBufferImage(
+            {}, {
+                {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT,
+                 .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                 .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                 .srcQueueFamilyIndex = mainQueueIndex,
+                 .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = finalOutputImage,
+                 .subresourceRange = vk::wholeColorSubresourceRange}});
+    }
 
     // Blit first hit depth
     worldCommandBuffer->barriersBufferImage(

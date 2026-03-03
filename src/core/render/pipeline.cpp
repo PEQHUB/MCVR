@@ -96,11 +96,13 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
                 UpscalerModule::parseQualityModeValue(value, upscalerMode);
             }
         }
+        // Render resolution is always based on actual display extent (not 2x)
         if (upscalerMode != UpscalerModule::QualityMode::NativeAA) {
             UpscalerModule::getRenderResolution(extent.width, extent.height, upscalerMode, &renderWidth, &renderHeight);
         }
         break;
     }
+
 
     for (int frameIndex = 0; frameIndex < frameNum; frameIndex++) {
         // Keep the primary output at display resolution
