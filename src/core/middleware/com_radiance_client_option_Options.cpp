@@ -272,8 +272,9 @@ static int getDisplayRefreshRate() {
 }
 
 // Shared helper: pushes current reflexEnabled/reflexBoost/vrrMode to Streamline.
-// Called whenever any of the three toggles change.
+// Called whenever any of the three toggles change. No-op on non-Windows platforms.
 static void applyReflexSettings() {
+#ifdef _WIN32
     if (!StreamlineContext::isReflexAvailable()) return;
 
     sl::ReflexMode mode = sl::ReflexMode::eOff;
@@ -301,6 +302,7 @@ static void applyReflexSettings() {
     }
 
     StreamlineContext::setReflexOptions(mode, frameLimitUs);
+#endif
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetReflexEnabled(

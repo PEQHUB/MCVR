@@ -306,7 +306,9 @@ void Framework::acquireContext() {
     // PCL: mark simulation start AFTER blocking sync waits (acquire + fence) complete.
     // Placing it before would inflate simulation time with driver stalls,
     // giving Reflex inaccurate timing data for its sleep calculations.
+#ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::eSimulationStart);
+#endif
 
     currentContext_->uploadCommandBuffer->begin();
     currentContext_->worldCommandBuffer->begin();
@@ -348,7 +350,9 @@ void Framework::submitCommand() {
     if (!running_) return;
 
     // PCL: simulation phase ends, render phase begins
+#ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::eSimulationEnd);
+#endif
 
     Renderer::instance().framework()->safeAcquireCurrentContext(); // ensure context is non nullptr
 
@@ -391,9 +395,13 @@ void Framework::submitCommand() {
     vkResetFences(device_->vkDevice(), 1, &fence->vkFence());
 
     // PCL: bracket the GPU submit
+#ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::eRenderSubmitStart);
+#endif
     vkQueueSubmit(device_->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
+#ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::eRenderSubmitEnd);
+#endif
 }
 
 void Framework::present() {
@@ -409,9 +417,13 @@ void Framework::present() {
     presentInfo.pImageIndices = &currentContext_->frameIndex;
 
     // PCL: bracket the present call
+#ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentStart);
+#endif
     VkResult result = vkQueuePresentKHR(device_->mainVkQueue(), &presentInfo);
+#ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentEnd);
+#endif
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || vk::Window::framebufferResized ||
         Renderer::options.needRecreate || pipeline_->needRecreate) {

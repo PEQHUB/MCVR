@@ -1,5 +1,7 @@
 #include "core/render/streamline_context.hpp"
 
+#ifdef _WIN32
+
 #include <Windows.h>
 #include <filesystem>
 #include <fstream>
@@ -479,3 +481,5 @@ void StreamlineContext::advanceFrame() {
 }
 
 sl::FrameToken *StreamlineContext::getCurrentFrameToken() { return currentFrameToken_; }
+
+#endif // _WIN32

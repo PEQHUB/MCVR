@@ -3,7 +3,9 @@
 #include "core/render/modules/world/dlss/dlss_wrapper.hpp"
 #include "core/render/streamline_context.hpp"
 
+#ifdef _WIN32
 #include <Windows.h>
+#endif
 #include <filesystem>
 #include <iostream>
 #include <set>
@@ -48,7 +50,8 @@ vk::Instance::Instance() {
     GLFW_Init();
 
     // Try to load Streamline interposer for Reflex + future DLSS-G.
-    // Must happen BEFORE any Vulkan calls.
+    // Must happen BEFORE any Vulkan calls. Windows-only (Streamline is not supported on Linux).
+#ifdef _WIN32
     {
         wchar_t modulePath[MAX_PATH];
         HMODULE coreModule = nullptr;
@@ -62,6 +65,7 @@ vk::Instance::Instance() {
         std::filesystem::path pluginDir = std::filesystem::path(modulePath).parent_path();
         StreamlineContext::init(pluginDir.wstring().c_str());
     }
+#endif
 
     // Initialize Vulkan loader (volk).
     // If Streamline is available, route through its interposer for present/acquire hooking.

@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+
 // Include SL headers for type/struct definitions only.
 // We never call the SL_API-declared functions directly — all loaded via GetProcAddress.
 // The inline helpers (slReflexSetOptions etc.) in sl_reflex.h reference slGetFeatureFunction,
@@ -101,3 +103,30 @@ class StreamlineContext {
     static bool loadPCLFunctions();
     static void queryFeatureRequirements();
 };
+
+#else // Linux — Streamline is Windows-only; provide no-op stubs
+
+class StreamlineContext {
+  public:
+    static bool init(const wchar_t *) { return false; }
+    static bool setVulkanInfo(void *, void *, void *, uint32_t, uint32_t, uint32_t, uint32_t) { return false; }
+    static bool onDeviceCreated() { return false; }
+    static void shutdown() {}
+    static bool isAvailable() { return false; }
+    static bool isReflexAvailable() { return false; }
+    static void *getVkGetInstanceProcAddr() { return nullptr; }
+    static void *getVkCreateDevice() { return nullptr; }
+    static void *getVkGetDeviceProcAddr() { return nullptr; }
+    static const std::vector<std::string> &getRequiredInstanceExtensions() {
+        static const std::vector<std::string> empty;
+        return empty;
+    }
+    static const std::vector<std::string> &getRequiredDeviceExtensions() {
+        static const std::vector<std::string> empty;
+        return empty;
+    }
+    static void advanceFrame() {}
+    static bool reflexSleep() { return false; }
+};
+
+#endif // _WIN32
