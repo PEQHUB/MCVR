@@ -99,8 +99,8 @@ void vk::HostVisibleBuffer::uploadToBuffer(void *src) {
 }
 
 void vk::HostVisibleBuffer::uploadToBuffer(void *src, size_t size, size_t offset) {
-    std::memcpy(mappedPtr_, src, size);
-    vmaFlushAllocation(vma_->allocator(), allocation_, 0, size);
+    std::memcpy(static_cast<char *>(mappedPtr_) + offset, src, size);
+    vmaFlushAllocation(vma_->allocator(), allocation_, offset, size);
 }
 
 void vk::HostVisibleBuffer::flush() {

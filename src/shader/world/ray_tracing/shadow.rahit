@@ -51,6 +51,8 @@ indexBuffer;
 layout(push_constant) uniform PushConstant {
     int numRayBounces;
     int flags;
+    int areaLightCount;
+    float shadowSoftness;
 } pc;
 #define SIMPLIFIED_INDIRECT ((pc.flags & 1) != 0)
 #define SIMPLIFY_THIS_RAY (SIMPLIFIED_INDIRECT && shadowRay.bounceIndex > 1)

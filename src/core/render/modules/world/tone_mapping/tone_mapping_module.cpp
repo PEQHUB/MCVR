@@ -4,6 +4,8 @@
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
+#include <cmath>
+
 ToneMappingModule::ToneMappingModule() {}
 
 void ToneMappingModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
@@ -176,6 +178,9 @@ void ToneMappingModule::initBuffers() {
         vk::DeviceLocalBuffer::create(vma, device, sizeof(ToneMappingModuleExposureData),
                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
+    exposureReadback_ = vk::HostVisibleBuffer::create(vma, device, sizeof(float),
+                                                       VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+
     for (int i = 0; i < size; i++) {
         histBuffers_[i] =
             vk::DeviceLocalBuffer::create(vma, device, histSize * sizeof(uint32_t),
@@ -313,6 +318,18 @@ void ToneMappingModuleContext::render() {
 
     auto module = toneMappingModule.lock();
 
+    // Read previous frame's computed exposure from staging buffer (GPU→CPU readback)
+    if (module->exposureReadback_) {
+        float *mapped = static_cast<float *>(module->exposureReadback_->mappedPtr());
+        if (mapped) {
+            float e = *mapped;
+            if (e > 0.0f && !std::isnan(e) && !std::isinf(e)) {
+                module->computedExposure_ = std::fmin(std::fmax(e, 0.001f), 100.0f);
+            }
+        }
+    }
+    Renderer::preExposure = module->computedExposure_;
+
     auto chooseSrc = [](VkImageLayout oldLayout,
                         VkPipelineStageFlags2 fallbackStage,
                         VkAccessFlags2 fallbackAccess,
@@ -447,6 +464,18 @@ void ToneMappingModuleContext::render() {
     pc.sdrTransferFunction = static_cast<float>(Renderer::options.sdrTransferFunction);
     pc.manualExposureEnabled = Renderer::options.manualExposureEnabled ? 1.0f : 0.0f;
     pc.manualExposure = Renderer::options.manualExposure;
+    // PsychoV tonemapper parameters
+    pc.psychoEnabled = Renderer::options.psychoEnabled ? 1.0f : 0.0f;
+    pc.psychoHighlights = Renderer::options.psychoHighlights;
+    pc.psychoShadows = Renderer::options.psychoShadows;
+    pc.psychoContrast = Renderer::options.psychoContrast;
+    pc.psychoPurity = Renderer::options.psychoPurity;
+    pc.psychoBleaching = Renderer::options.psychoBleaching;
+    pc.psychoClipPoint = Renderer::options.psychoClipPoint;
+    pc.psychoHueRestore = Renderer::options.psychoHueRestore;
+    pc.psychoAdaptContrast = Renderer::options.psychoAdaptContrast;
+    pc.psychoWhiteCurve = static_cast<float>(Renderer::options.psychoWhiteCurve);
+    pc.psychoConeExponent = Renderer::options.psychoConeExponent;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ToneMappingModulePushConstant), &pc);
@@ -486,6 +515,13 @@ void ToneMappingModuleContext::render() {
             .buffer = module->exposureData_,
         }},
         {});
+
+    // Copy computed exposure float to staging buffer for CPU readback next frame
+    VkBufferCopy exposureCopy{.srcOffset = 0, .dstOffset = 0, .size = sizeof(float)};
+    vkCmdCopyBuffer(worldCommandBuffer->vkCommandBuffer(),
+                    module->exposureData_->vkBuffer(),
+                    module->exposureReadback_->vkBuffer(),
+                    1, &exposureCopy);
 
     worldCommandBuffer->beginRenderPass({
         .renderPass = module->renderPass_,

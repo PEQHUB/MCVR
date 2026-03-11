@@ -69,6 +69,8 @@ void DLSSModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<Worl
     linearDepthImages_.resize(size);
     specularHitDepthImages_.resize(size);
     firstHitDepthImages_.resize(size);
+    diffuseRayDirHitDistImages_.resize(size);
+    specularRayDirHitDistImages_.resize(size);
     processedImages_.resize(size);
     upscaledFirstHitDepthImages_.resize(size);
     upscaled2xImages_.resize(size);
@@ -135,6 +137,8 @@ bool DLSSModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLo
     createOrResize(5); linearDepthImages_[frameIndex] = images[5];
     createOrResize(6); specularHitDepthImages_[frameIndex] = images[6];
     createOrResize(7); firstHitDepthImages_[frameIndex] = images[7];
+    createOrResize(8); diffuseRayDirHitDistImages_[frameIndex] = images[8];
+    createOrResize(9); specularRayDirHitDistImages_[frameIndex] = images[9];
 
     return true;
 }
@@ -317,6 +321,8 @@ DLSSModuleContext::DLSSModuleContext(std::shared_ptr<FrameworkContext> framework
       linearDepthImage(dlssModule->linearDepthImages_[frameworkContext->frameIndex]),
       specularHitDepthImage(dlssModule->specularHitDepthImages_[frameworkContext->frameIndex]),
       firstHitDepthImage(dlssModule->firstHitDepthImages_[frameworkContext->frameIndex]),
+      diffuseRayDirHitDistImage(dlssModule->diffuseRayDirHitDistImages_[frameworkContext->frameIndex]),
+      specularRayDirHitDistImage(dlssModule->specularRayDirHitDistImages_[frameworkContext->frameIndex]),
       processedImage(dlssModule->processedImages_[frameworkContext->frameIndex]),
       upscaledFirstHitDepthImage(dlssModule->upscaledFirstHitDepthImages_[frameworkContext->frameIndex]) {}
 
@@ -427,6 +433,35 @@ void DLSSModuleContext::render() {
         linearDepthImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
         processedImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
 
+        // DLSS-RR guide buffers: barriers
+        worldCommandBuffer->barriersBufferImage(
+            {}, {{
+                     .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .oldLayout = diffuseRayDirHitDistImage->imageLayout(),
+                     .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                     .srcQueueFamilyIndex = mainQueueIndex,
+                     .dstQueueFamilyIndex = mainQueueIndex,
+                     .image = diffuseRayDirHitDistImage,
+                     .subresourceRange = vk::wholeColorSubresourceRange,
+                 },
+                 {
+                     .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     .oldLayout = specularRayDirHitDistImage->imageLayout(),
+                     .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                     .srcQueueFamilyIndex = mainQueueIndex,
+                     .dstQueueFamilyIndex = mainQueueIndex,
+                     .image = specularRayDirHitDistImage,
+                     .subresourceRange = vk::wholeColorSubresourceRange,
+                 }});
+        diffuseRayDirHitDistImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        specularRayDirHitDistImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
         module->dlss_->setResource(DlssRR::RESOURCE_COLOR_IN, hdrImage);
         module->dlss_->setResource(DlssRR::RESOURCE_COLOR_OUT, processedImage);
         module->dlss_->setResource(DlssRR::RESOURCE_DIFFUSE_ALBEDO, diffuseAlbedoImage);
@@ -435,13 +470,16 @@ void DLSSModuleContext::render() {
         module->dlss_->setResource(DlssRR::RESOURCE_MOTIONVECTOR, motionVectorImage);
         module->dlss_->setResource(DlssRR::RESOURCE_LINEARDEPTH, linearDepthImage);
         module->dlss_->setResource(DlssRR::RESOURCE_SPECULAR_HITDISTANCE, specularHitDepthImage);
+        module->dlss_->setResource(DlssRR::RESOURCE_DIFFUSE_RAY_DIR_HIT_DIST, diffuseRayDirHitDistImage);
+        module->dlss_->setResource(DlssRR::RESOURCE_SPECULAR_RAY_DIR_HIT_DIST, specularRayDirHitDistImage);
 
         auto worldUBOBuffer = Renderer::instance().buffers()->worldUniformBuffer();
         auto worldUBO = static_cast<vk::Data::WorldUBO *>(worldUBOBuffer->mappedPtr());
         if (worldUBO != nullptr) {
             glm::vec2 jitter = worldUBO->cameraJitter;
+            float preExposure = Renderer::preExposure;
             module->dlss_->denoise(worldCommandBuffer, glm::uvec2{module->inputWidth_, module->inputHeight_}, jitter,
-                                   worldUBO->cameraViewMat, worldUBO->cameraProjMat);
+                                   worldUBO->cameraViewMat, worldUBO->cameraProjMat, preExposure);
         }
     }
 

@@ -924,6 +924,13 @@ bool Chunks::isChunkReady(int64_t id) {
     return chunkRenderData->blas != nullptr;
 }
 
+void Chunks::setChunkLights(int64_t id, const std::vector<ChunkLightEntry> &lights) {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    if (id >= 0 && id < static_cast<int64_t>(chunks_.size()) && chunks_[id]) {
+        chunks_[id]->lightSources = lights;
+    }
+}
+
 void Chunks::close() {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     queuedIndex_.clear();

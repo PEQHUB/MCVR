@@ -52,3 +52,24 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
     if (world == nullptr) return;
     world->chunks()->invalidateChunk(index);
 }
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_setChunkLights(JNIEnv *, jclass, jlong chunkIndex, jint lightCount, jlong lightDataPtr) {
+    auto world = Renderer::instance().world();
+    if (world == nullptr) return;
+
+    std::vector<ChunkLightEntry> lights;
+    if (lightCount > 0 && lightDataPtr != 0) {
+        const uint8_t *ptr = reinterpret_cast<const uint8_t *>(lightDataPtr);
+        lights.reserve(lightCount);
+        for (int i = 0; i < lightCount; i++) {
+            ChunkLightEntry entry;
+            entry.worldX = *reinterpret_cast<const float *>(ptr);
+            entry.worldY = *reinterpret_cast<const float *>(ptr + 4);
+            entry.worldZ = *reinterpret_cast<const float *>(ptr + 8);
+            entry.lightTypeId = *reinterpret_cast<const int *>(ptr + 12);
+            lights.push_back(entry);
+            ptr += 16;
+        }
+    }
+    world->chunks()->setChunkLights(chunkIndex, lights);
+}

@@ -374,6 +374,7 @@ NVSDK_NGX_Result DlssRR::denoise(std::shared_ptr<vk::CommandBuffer> cmdBuffer,
                                  glm::vec2 jitter,
                                  const glm::mat4 &modelView,
                                  const glm::mat4 &projection,
+                                 float preExposure,
                                  bool reset) {
     assert(m_dlssdHandle);
 
@@ -388,6 +389,8 @@ NVSDK_NGX_Result DlssRR::denoise(std::shared_ptr<vk::CommandBuffer> cmdBuffer,
     evalParams.pInDiffuseAlbedo = getResource(RESOURCE_DIFFUSE_ALBEDO);
     evalParams.pInSpecularAlbedo = getResource(RESOURCE_SPECULAR_ALBEDO);
     evalParams.pInSpecularHitDistance = getResource(RESOURCE_SPECULAR_HITDISTANCE);
+    evalParams.pInDiffuseRayDirectionHitDistance = getResource(RESOURCE_DIFFUSE_RAY_DIR_HIT_DIST);
+    evalParams.pInSpecularRayDirectionHitDistance = getResource(RESOURCE_SPECULAR_RAY_DIR_HIT_DIST);
     evalParams.pInNormals = getResource(RESOURCE_NORMALROUGHNESS);
     evalParams.pInDepth = getResource(RESOURCE_LINEARDEPTH);
     evalParams.pInMotionVectors = getResource(RESOURCE_MOTIONVECTOR);
@@ -411,6 +414,8 @@ NVSDK_NGX_Result DlssRR::denoise(std::shared_ptr<vk::CommandBuffer> cmdBuffer,
     evalParams.pInViewToClipMatrix = const_cast<float *>(glm::value_ptr(projection));
 
     evalParams.InReset = reset;
+    evalParams.InPreExposure = preExposure;
+    evalParams.InExposureScale = 1.0f / preExposure;  // Undo pre-exposure in DLSS output
 
     NGX_RETURN_ON_FAIL(
         NGX_VULKAN_EVALUATE_DLSSD_EXT(cmdBuffer->vkCommandBuffer(), m_dlssdHandle, m_ngxParams, &evalParams));

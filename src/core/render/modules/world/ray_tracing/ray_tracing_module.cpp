@@ -28,6 +28,8 @@ void RayTracingModule::init(std::shared_ptr<Framework> framework, std::shared_pt
     firstHitClearImages_.resize(size);
     firstHitBaseEmissionImages_.resize(size);
     directLightDepthImages_.resize(size);
+    diffuseRayDirHitDistImages_.resize(size);
+    specularRayDirHitDistImages_.resize(size);
 
     atmosphere_ = Atmosphere::create(framework, shared_from_this());
     worldPrepare_ = WorldPrepare::create(framework, shared_from_this());
@@ -81,6 +83,26 @@ bool RayTracingModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::D
     firstHitClearImages_[frameIndex] = images[11];
     firstHitBaseEmissionImages_[frameIndex] = images[12];
     directLightDepthImages_[frameIndex] = images[13];
+    diffuseRayDirHitDistImages_[frameIndex] = images[14];
+    specularRayDirHitDistImages_[frameIndex] = images[15];
+
+    // Create reservoir images for ReSTIR DI (only once, shared across frames)
+    if (!reservoirImages_[0]) {
+        for (int r = 0; r < 2; r++) {
+            reservoirImages_[r] = vk::DeviceLocalImage::create(
+                framework->device(), framework->vma(), false, width, height, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        }
+    }
+
+    // Create bounce ReSTIR DI reservoir images (per-bounce temporal reuse, bounces 1-3)
+    if (!bounceReservoirImages_[0]) {
+        for (int b = 0; b < 3; b++) {
+            bounceReservoirImages_[b] = vk::DeviceLocalImage::create(
+                framework->device(), framework->vma(), false, width, height, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        }
+    }
 
     return true;
 }
@@ -117,6 +139,8 @@ void RayTracingModule::build() {
     initImages();
     initPipeline();
     initSBT();
+    initSpatialPipeline();
+    initClusterPipeline();
 
     for (int i = 0; i < size; i++) {
         contexts_[i] =
@@ -147,7 +171,20 @@ void RayTracingModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
     }
 }
 
-void RayTracingModule::preClose() {}
+void RayTracingModule::preClose() {
+    auto framework = framework_.lock();
+    if (framework) {
+        VkDevice dev = framework->device()->vkDevice();
+        if (spatialPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, spatialPipeline_, nullptr);
+        if (spatialPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, spatialPipelineLayout_, nullptr);
+        if (spatialDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, spatialDescSetLayout_, nullptr);
+        if (spatialDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, spatialDescPool_, nullptr);
+        if (clusterPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, clusterPipeline_, nullptr);
+        if (clusterPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, clusterPipelineLayout_, nullptr);
+        if (clusterDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, clusterDescSetLayout_, nullptr);
+        if (clusterDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, clusterDescPool_, nullptr);
+    }
+}
 
 void RayTracingModule::initDescriptorTables() {
     auto framework = framework_.lock();
@@ -243,6 +280,18 @@ void RayTracingModule::initDescriptorTables() {
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 8, // binding 8: area light SSBO
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 9, // binding 9: tile light buffer (light clustering)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
                 })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
@@ -381,6 +430,50 @@ void RayTracingModule::initDescriptorTables() {
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_FRAGMENT_BIT,
                 })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 14, // binding 14: reservoirCurrentImage (ReSTIR DI write)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                                  VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 15, // binding 15: reservoirPreviousImage (ReSTIR DI read)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                                  VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 16, // binding 16: diffuseRayDirHitDistImage (DLSS-RR guide)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 17, // binding 17: specularRayDirHitDistImage (DLSS-RR guide)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 18, // binding 18: bounceReservoirImage1 (bounce 1 ReSTIR DI)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 19, // binding 19: bounceReservoirImage2 (bounce 2 ReSTIR DI)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 20, // binding 20: bounceReservoirImage3 (bounce 3 ReSTIR DI)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
+                })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
                 .definePushConstant({
@@ -420,6 +513,14 @@ void RayTracingModule::initImages() {
         rayTracingDescriptorTables_[i]->bindImage(firstHitClearImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 11);
         rayTracingDescriptorTables_[i]->bindImage(firstHitBaseEmissionImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 12);
         rayTracingDescriptorTables_[i]->bindImage(directLightDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 13);
+        rayTracingDescriptorTables_[i]->bindImage(diffuseRayDirHitDistImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 16);
+        rayTracingDescriptorTables_[i]->bindImage(specularRayDirHitDistImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 17);
+
+        // ReSTIR DI reservoir images (initial binding, rebound each frame in render)
+        if (reservoirImages_[0]) {
+            rayTracingDescriptorTables_[i]->bindImage(reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL, 3, 14);
+            rayTracingDescriptorTables_[i]->bindImage(reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL, 3, 15);
+        }
     }
 }
 
@@ -432,6 +533,8 @@ void RayTracingModule::initPipeline() {
     worldRayMissShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_rmiss.spv").string());
     handRayMissShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/hand_rmiss.spv").string());
     shadowRayMissShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/shadow_rmiss.spv").string());
+    pointLightShadowMissShader_ =
+        vk::Shader::create(device, (shaderPath / "world/ray_tracing/point_light_shadow_rmiss.spv").string());
     shadowRayClosestHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/shadow_rchit.spv").string());
     worldSolidTransparentClosestHitShader_ =
@@ -484,6 +587,7 @@ void RayTracingModule::initPipeline() {
             .defineShaderStage(endPortalAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                     // 15
             .defineShaderStage(endGatewayClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)            // 16
             .defineShaderStage(endGatewayAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                    // 17
+            .defineShaderStage(pointLightShadowMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                // 18
             .endShaderStage()
             .beginShaderGroup()
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 0, VK_SHADER_UNUSED_KHR,
@@ -494,6 +598,8 @@ void RayTracingModule::initPipeline() {
                                VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR)
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 3, VK_SHADER_UNUSED_KHR,
                                VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR)
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 18, VK_SHADER_UNUSED_KHR,
+                               VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR) // point light shadow miss
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 10, 11,
                                VK_SHADER_UNUSED_KHR) // shadow
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 4,
@@ -522,8 +628,142 @@ void RayTracingModule::initSBT() {
     sbts_.resize(framework->swapchain()->imageCount());
     for (int i = 0; i < framework->swapchain()->imageCount(); i++) {
         sbts_[i] = vk::SBT::create(framework->physicalDevice(), framework->device(), framework->vma(),
-                                   rayTracingPipeline_, 3, 8);
+                                   rayTracingPipeline_, 4, 8);
     }
+}
+
+void RayTracingModule::initSpatialPipeline() {
+    auto framework = framework_.lock();
+    auto device = framework->device();
+    VkDevice dev = device->vkDevice();
+    uint32_t size = framework->swapchain()->imageCount();
+
+    // Load compute shader
+    std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
+    spatialShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/restir_spatial_comp.spv").string());
+    if (!spatialShader_) {
+        std::cerr << "[ReSTIR] Failed to load restir_spatial_comp.spv" << std::endl;
+        return;
+    }
+
+    // Descriptor set layout: 4 storage images
+    std::vector<VkDescriptorSetLayoutBinding> bindings = {
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+    };
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.bindingCount = (uint32_t)bindings.size();
+    layoutInfo.pBindings = bindings.data();
+    vkCreateDescriptorSetLayout(dev, &layoutInfo, nullptr, &spatialDescSetLayout_);
+
+    // Pipeline layout with push constant (6 int32s = 24 bytes)
+    VkPushConstantRange pushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 24};
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &spatialDescSetLayout_;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+    vkCreatePipelineLayout(dev, &pipelineLayoutInfo, nullptr, &spatialPipelineLayout_);
+
+    // Compute pipeline
+    VkComputePipelineCreateInfo pipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipelineInfo.stage.module = spatialShader_->vkShaderModule();
+    pipelineInfo.stage.pName = "main";
+    pipelineInfo.layout = spatialPipelineLayout_;
+    vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &spatialPipeline_);
+
+    // Descriptor pool
+    VkDescriptorPoolSize poolSizes[] = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4 * size},
+    };
+    VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = size;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = poolSizes;
+    vkCreateDescriptorPool(dev, &poolInfo, nullptr, &spatialDescPool_);
+
+    // Allocate descriptor sets
+    std::vector<VkDescriptorSetLayout> layouts(size, spatialDescSetLayout_);
+    VkDescriptorSetAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocInfo.descriptorPool = spatialDescPool_;
+    allocInfo.descriptorSetCount = size;
+    allocInfo.pSetLayouts = layouts.data();
+    spatialDescSets_.resize(size);
+    vkAllocateDescriptorSets(dev, &allocInfo, spatialDescSets_.data());
+}
+
+void RayTracingModule::initClusterPipeline() {
+    auto framework = framework_.lock();
+    auto device = framework->device();
+    VkDevice dev = device->vkDevice();
+    uint32_t size = framework->swapchain()->imageCount();
+
+    // Load compute shader
+    std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
+    clusterShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/light_clustering_comp.spv").string());
+    if (!clusterShader_) {
+        std::cerr << "[Clustering] Failed to load light_clustering_comp.spv" << std::endl;
+        return;
+    }
+
+    // Descriptor set layout: 2 storage buffers (area lights + tile buffer)
+    std::vector<VkDescriptorSetLayoutBinding> bindings = {
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+    };
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.bindingCount = (uint32_t)bindings.size();
+    layoutInfo.pBindings = bindings.data();
+    vkCreateDescriptorSetLayout(dev, &layoutInfo, nullptr, &clusterDescSetLayout_);
+
+    // Pipeline layout with push constant (width, height, lightCount, maxPerTile, mat4 vpCameraRel)
+    VkPushConstantRange pushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 80}; // 16 bytes ints + 64 bytes mat4
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &clusterDescSetLayout_;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+    vkCreatePipelineLayout(dev, &pipelineLayoutInfo, nullptr, &clusterPipelineLayout_);
+
+    // Compute pipeline
+    VkComputePipelineCreateInfo pipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipelineInfo.stage.module = clusterShader_->vkShaderModule();
+    pipelineInfo.stage.pName = "main";
+    pipelineInfo.layout = clusterPipelineLayout_;
+    vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &clusterPipeline_);
+
+    // Descriptor pool
+    VkDescriptorPoolSize poolSize = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * size};
+    VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = size;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    vkCreateDescriptorPool(dev, &poolInfo, nullptr, &clusterDescPool_);
+
+    // Allocate descriptor sets
+    std::vector<VkDescriptorSetLayout> clusterLayouts(size, clusterDescSetLayout_);
+    VkDescriptorSetAllocateInfo clusterAllocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    clusterAllocInfo.descriptorPool = clusterDescPool_;
+    clusterAllocInfo.descriptorSetCount = size;
+    clusterAllocInfo.pSetLayouts = clusterLayouts.data();
+    clusterDescSets_.resize(size);
+    vkAllocateDescriptorSets(dev, &clusterAllocInfo, clusterDescSets_.data());
+
+    // Create tile light buffer (will be resized per-frame if needed)
+    // Initial size based on common resolution
+    int tilesX = (1920 + TILE_SIZE - 1) / TILE_SIZE;
+    int tilesY = (1080 + TILE_SIZE - 1) / TILE_SIZE;
+    int totalTiles = tilesX * tilesY;
+    size_t bufferSize = totalTiles * (1 + MAX_LIGHTS_PER_TILE) * sizeof(uint32_t);
+    tileLightBuffer_ = vk::DeviceLocalBuffer::create(
+        framework->vma(), device, bufferSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 }
 
 RayTracingModuleContext::RayTracingModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
@@ -549,6 +789,8 @@ RayTracingModuleContext::RayTracingModuleContext(std::shared_ptr<FrameworkContex
       firstHitClearImage(rayTracingModule->firstHitClearImages_[frameworkContext->frameIndex]),
       firstHitBaseEmissionImage(rayTracingModule->firstHitBaseEmissionImages_[frameworkContext->frameIndex]),
       directLightDepthImage(rayTracingModule->directLightDepthImages_[frameworkContext->frameIndex]),
+      diffuseRayDirHitDistImage(rayTracingModule->diffuseRayDirHitDistImages_[frameworkContext->frameIndex]),
+      specularRayDirHitDistImage(rayTracingModule->specularRayDirHitDistImages_[frameworkContext->frameIndex]),
       atmosphereContext(rayTracingModule->atmosphere_->contexts_[frameworkContext->frameIndex]),
       worldPrepareContext(rayTracingModule->worldPrepare_->contexts_[frameworkContext->frameIndex]) {}
 
@@ -580,13 +822,48 @@ void RayTracingModuleContext::render() {
     auto worldBuffer = buffers->worldUniformBuffer();
 
     rayTracingDescriptorTable->bindBuffer(buffers->textureMappingBuffer(), 1, 7);
+    rayTracingDescriptorTable->bindBuffer(worldPrepareContext->areaLightBuffer, 1, 8);
+    if (module->tileLightBuffer_) {
+        rayTracingDescriptorTable->bindBuffer(module->tileLightBuffer_, 1, 9);
+    }
     rayTracingDescriptorTable->bindBuffer(worldBuffer, 2, 0);
     rayTracingDescriptorTable->bindBuffer(buffers->lastWorldUniformBuffer(), 2, 1);
     rayTracingDescriptorTable->bindBuffer(buffers->skyUniformBuffer(), 2, 2);
 
+    // ReSTIR DI: fixed-role reservoir binding
+    // Binding 14 = reservoir[0] (CHS writes temporal output)
+    // Binding 15 = reservoir[1] when spatial enabled (CHS reads spatial output)
+    //            = reservoir[0] when spatial disabled (CHS self-reads temporal, safe per-pixel)
+    if (module->reservoirImages_[0]) {
+        bool spatialEnabled = Renderer::options.restirEnabled && Renderer::options.restirSpatialEnabled && module->spatialPipeline_ != VK_NULL_HANDLE;
+        rayTracingDescriptorTable->bindImage(module->reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL, 3, 14);
+        rayTracingDescriptorTable->bindImage(
+            module->reservoirImages_[spatialEnabled ? 1 : 0], VK_IMAGE_LAYOUT_GENERAL, 3, 15);
+    }
+
+    // Bounce ReSTIR DI: per-bounce reservoir images (bindings 18-20)
+    for (int b = 0; b < 3; b++) {
+        if (module->bounceReservoirImages_[b]) {
+            rayTracingDescriptorTable->bindImage(
+                module->bounceReservoirImages_[b], VK_IMAGE_LAYOUT_GENERAL, 3, 18 + b);
+        }
+    }
+
     RayTracingPushConstant pushConstant{};
     pushConstant.numRayBounces = static_cast<int>(Renderer::options.rayBounces);
-    pushConstant.flags = Renderer::options.simplifiedIndirect ? 1 : 0;
+    pushConstant.flags = (Renderer::options.simplifiedIndirect ? 1 : 0)
+                       | (Renderer::options.areaLightsEnabled ? 2 : 0)
+                       | (Renderer::options.restirEnabled ? 4 : 0)
+                       | (Renderer::options.restirSimplifiedBRDF ? 8 : 0)
+                       | (Renderer::options.restirBounceEnabled ? 16 : 0);
+    pushConstant.areaLightCount = worldPrepareContext->areaLightCount;
+    pushConstant.shadowSoftness = Renderer::options.shadowSoftness;
+    pushConstant.risCandidates = Renderer::options.restirCandidates;
+    pushConstant.temporalMClamp = Renderer::options.restirTemporalMClamp;
+    pushConstant.wClamp = Renderer::options.restirWClamp;
+    // Only apply pre-exposure when DLSS-RR is active (it undoes it via InExposureScale).
+    // When DLSS-RR is off, tone mapper would see double exposure (preExposure × autoExposure).
+    pushConstant.preExposure = (Renderer::options.denoiserMode == 1) ? Renderer::preExposure : 1.0f;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), rayTracingDescriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
@@ -641,11 +918,155 @@ void RayTracingModuleContext::render() {
     addBarrier(firstHitClearImage, VK_IMAGE_LAYOUT_GENERAL);
     addBarrier(firstHitBaseEmissionImage, VK_IMAGE_LAYOUT_GENERAL);
     addBarrier(directLightDepthImage, VK_IMAGE_LAYOUT_GENERAL);
+    addBarrier(diffuseRayDirHitDistImage, VK_IMAGE_LAYOUT_GENERAL);
+    addBarrier(specularRayDirHitDistImage, VK_IMAGE_LAYOUT_GENERAL);
+    addBarrier(module->reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL);
+    addBarrier(module->reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL);
+    for (int b = 0; b < 3; b++) {
+        addBarrier(module->bounceReservoirImages_[b], VK_IMAGE_LAYOUT_GENERAL);
+    }
     addBarrier(atmosphereContext->atmCubeMapImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     if (!barriers.empty()) { worldCommandBuffer->barriersBufferImage({}, barriers); }
 
+    // Light clustering compute pass — DISABLED: contribution-sorted global list replaces tile clustering.
+    // Tile buffer stays allocated (descriptor layout unchanged); CHS reads tileCount=0 → global fallback.
+    if (false && Renderer::options.restirEnabled && Renderer::options.areaLightsEnabled
+        && module->clusterPipeline_ != VK_NULL_HANDLE && module->tileLightBuffer_
+        && worldPrepareContext->areaLightCount > 0) {
+        VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
+        uint32_t frameIdx = context->frameIndex;
+
+        int w = hdrNoisyOutputImage->width();
+        int h = hdrNoisyOutputImage->height();
+        int tilesX = (w + RayTracingModule::TILE_SIZE - 1) / RayTracingModule::TILE_SIZE;
+        int tilesY = (h + RayTracingModule::TILE_SIZE - 1) / RayTracingModule::TILE_SIZE;
+        int totalTiles = tilesX * tilesY;
+
+        // Resize tile buffer if needed
+        size_t requiredSize = totalTiles * (1 + RayTracingModule::MAX_LIGHTS_PER_TILE) * sizeof(uint32_t);
+        if (module->tileLightBuffer_->size() < requiredSize) {
+            module->tileLightBuffer_ = vk::DeviceLocalBuffer::create(
+                framework->vma(), framework->device(), requiredSize,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            rayTracingDescriptorTable->bindBuffer(module->tileLightBuffer_, 1, 9);
+        }
+
+        // Update cluster descriptor set bindings
+        VkDescriptorBufferInfo lightBufInfo = {worldPrepareContext->areaLightBuffer->vkBuffer(), 0, VK_WHOLE_SIZE};
+        VkDescriptorBufferInfo tileBufInfo = {module->tileLightBuffer_->vkBuffer(), 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet writes[2] = {};
+        writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[0].dstSet = module->clusterDescSets_[frameIdx];
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[0].pBufferInfo = &lightBufInfo;
+        writes[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[1].dstSet = module->clusterDescSets_[frameIdx];
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[1].pBufferInfo = &tileBufInfo;
+        vkUpdateDescriptorSets(framework->device()->vkDevice(), 2, writes, 0, nullptr);
+
+        // Compute view-proj matrix for camera-relative positions (rotation only, no translation)
+        auto worldUBO = static_cast<vk::Data::WorldUBO *>(buffers->worldUniformBuffer()->mappedPtr());
+        glm::mat4 viewRot = glm::mat4(glm::mat3(worldUBO->cameraViewMat));
+        glm::mat4 vpCameraRel = worldUBO->cameraProjMat * viewRot;
+
+        struct {
+            int32_t width, height, lightCount, maxPerTile;
+            glm::mat4 vpCameraRel;
+        } clusterPC = {w, h, worldPrepareContext->areaLightCount, RayTracingModule::MAX_LIGHTS_PER_TILE, vpCameraRel};
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->clusterPipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->clusterPipelineLayout_,
+            0, 1, &module->clusterDescSets_[frameIdx], 0, nullptr);
+        vkCmdPushConstants(cmd, module->clusterPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(clusterPC), &clusterPC);
+        vkCmdDispatch(cmd, totalTiles, 1, 1);
+
+        // Barrier: compute writes → RT reads
+        VkMemoryBarrier clusterBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        clusterBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        clusterBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            0, 1, &clusterBarrier, 0, nullptr, 0, nullptr);
+    }
+
     worldCommandBuffer->bindDescriptorTable(rayTracingDescriptorTable, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
         ->bindRTPipeline(module->rayTracingPipeline_)
         ->raytracing(sbt, hdrNoisyOutputImage->width(), hdrNoisyOutputImage->height(), 1);
+
+    // Spatial reuse compute pass (when ReSTIR and spatial reuse are both enabled)
+    if (Renderer::options.restirEnabled && Renderer::options.restirSpatialEnabled && module->spatialPipeline_ != VK_NULL_HANDLE) {
+        VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
+
+        // Barrier: RT shader writes → compute shader reads
+        VkMemoryBarrier spatialBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        spatialBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        spatialBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &spatialBarrier, 0, nullptr, 0, nullptr);
+
+        // Update spatial descriptor set with current frame's images
+        uint32_t frameIdx = context->frameIndex;
+        VkDescriptorSet spatialSet = module->spatialDescSets_[frameIdx];
+
+        auto addSpatialImg = [&](uint32_t binding, const std::shared_ptr<vk::DeviceLocalImage>& img,
+                                 std::vector<VkWriteDescriptorSet>& writes,
+                                 std::vector<std::unique_ptr<VkDescriptorImageInfo>>& infos) {
+            auto info = std::make_unique<VkDescriptorImageInfo>();
+            info->imageView = img->vkImageView(0);
+            info->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            info->sampler = VK_NULL_HANDLE;
+            writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, spatialSet, binding, 0, 1,
+                             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info.get(), nullptr, nullptr});
+            infos.push_back(std::move(info));
+        };
+
+        std::vector<VkWriteDescriptorSet> spatialWrites;
+        std::vector<std::unique_ptr<VkDescriptorImageInfo>> spatialInfos;
+        addSpatialImg(0, module->reservoirImages_[0], spatialWrites, spatialInfos);
+        addSpatialImg(1, module->reservoirImages_[1], spatialWrites, spatialInfos);
+        addSpatialImg(2, normalRoughnessImage, spatialWrites, spatialInfos);
+        addSpatialImg(3, linearDepthImage, spatialWrites, spatialInfos);
+
+        vkUpdateDescriptorSets(framework->device()->vkDevice(),
+            (uint32_t)spatialWrites.size(), spatialWrites.data(), 0, nullptr);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->spatialPipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->spatialPipelineLayout_,
+            0, 1, &spatialSet, 0, nullptr);
+
+        struct { int32_t width, height, spatialTaps, spatialRadius, temporalMClamp, wClamp; } spatialPC = {
+            (int32_t)hdrNoisyOutputImage->width(),
+            (int32_t)hdrNoisyOutputImage->height(),
+            Renderer::options.restirSpatialTaps,
+            Renderer::options.restirSpatialRadius,
+            Renderer::options.restirTemporalMClamp,
+            Renderer::options.restirWClamp
+        };
+        vkCmdPushConstants(cmd, module->spatialPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(spatialPC), &spatialPC);
+
+        vkCmdDispatch(cmd,
+            (hdrNoisyOutputImage->width() + 15) / 16,
+            (hdrNoisyOutputImage->height() + 15) / 16,
+            1);
+
+        // Barrier: compute writes → next stage reads
+        VkMemoryBarrier postSpatialBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        postSpatialBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        postSpatialBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            0, 1, &postSpatialBarrier, 0, nullptr, 0, nullptr);
+    }
 }

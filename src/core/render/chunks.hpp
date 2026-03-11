@@ -134,6 +134,11 @@ struct ChunkRenderData : public SharedObject<ChunkRenderData> {
     std::shared_ptr<std::vector<std::vector<uint32_t>>> indices;
 };
 
+struct ChunkLightEntry {
+    float worldX, worldY, worldZ;
+    int lightTypeId;
+};
+
 struct Chunk1 : public SharedObject<Chunk1> {
     constexpr static float T_HALF = 200; // ms
     constexpr static float T_WEIGHT = 1.0;
@@ -157,6 +162,8 @@ struct Chunk1 : public SharedObject<Chunk1> {
     std::shared_ptr<std::vector<World::GeometryTypes>> geometryTypes;
     std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>> vertices;
     std::shared_ptr<std::vector<std::vector<uint32_t>>> indices;
+
+    std::vector<ChunkLightEntry> lightSources;
 
     float buildFactor(std::chrono::steady_clock::time_point currentTime, glm::vec3 cameraPos);
 
@@ -183,6 +190,7 @@ class Chunks : public SharedObject<Chunks> {
 
     bool isChunkReady(int64_t id);
 
+    void setChunkLights(int64_t id, const std::vector<ChunkLightEntry> &lights);
     void close();
 
     std::recursive_mutex &mutex();

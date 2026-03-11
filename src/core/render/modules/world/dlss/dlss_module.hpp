@@ -20,7 +20,7 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
 
   public:
     constexpr static std::string_view NAME = "render_pipeline.module.dlss.name";
-    constexpr static uint32_t inputImageNum = 8;
+    constexpr static uint32_t inputImageNum = 10;
     constexpr static uint32_t outputImageNum = 2;
 
     static bool initNGXContext();
@@ -60,6 +60,8 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> linearDepthImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> specularHitDepthImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> firstHitDepthImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> diffuseRayDirHitDistImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> specularRayDirHitDistImages_;
 
     // dlss
     std::shared_ptr<DlssRR> dlss_;
@@ -98,6 +100,8 @@ struct DLSSModuleContext : public WorldModuleContext, SharedObject<DLSSModuleCon
     std::shared_ptr<vk::DeviceLocalImage> linearDepthImage;
     std::shared_ptr<vk::DeviceLocalImage> specularHitDepthImage;
     std::shared_ptr<vk::DeviceLocalImage> firstHitDepthImage;
+    std::shared_ptr<vk::DeviceLocalImage> diffuseRayDirHitDistImage;
+    std::shared_ptr<vk::DeviceLocalImage> specularRayDirHitDistImage;
 
     // output
     std::shared_ptr<vk::DeviceLocalImage> processedImage;          // DLSS writes here (2x when outputScale2x, else 1x)

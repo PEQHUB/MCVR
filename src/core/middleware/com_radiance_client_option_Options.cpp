@@ -3,6 +3,7 @@
 #include "core/all_extern.hpp"
 #include "core/render/buffers.hpp"
 #include "core/render/chunks.hpp"
+#include "core/render/lights.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/streamline_context.hpp"
@@ -222,6 +223,42 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.saturation = saturation;
 }
 
+// PsychoV tonemapper setters
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.psychoEnabled = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoHighlights(
+    JNIEnv *, jclass, jfloat v, jboolean write) { Renderer::options.psychoHighlights = v; }
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoShadows(
+    JNIEnv *, jclass, jfloat v, jboolean write) { Renderer::options.psychoShadows = v; }
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoContrast(
+    JNIEnv *, jclass, jfloat v, jboolean write) { Renderer::options.psychoContrast = v; }
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoPurity(
+    JNIEnv *, jclass, jfloat v, jboolean write) { Renderer::options.psychoPurity = v; }
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoBleaching(
+    JNIEnv *, jclass, jfloat v, jboolean write) { Renderer::options.psychoBleaching = v; }
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoClipPoint(
+    JNIEnv *, jclass, jfloat v, jboolean write) { Renderer::options.psychoClipPoint = v; }
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoHueRestore(
+    JNIEnv *, jclass, jfloat v, jboolean write) { Renderer::options.psychoHueRestore = v; }
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoAdaptContrast(
+    JNIEnv *, jclass, jfloat v, jboolean write) { Renderer::options.psychoAdaptContrast = v; }
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoWhiteCurve(
+    JNIEnv *, jclass, jint v, jboolean write) { Renderer::options.psychoWhiteCurve = v; }
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoConeExponent(
+    JNIEnv *, jclass, jfloat v, jboolean write) { Renderer::options.psychoConeExponent = v; }
+
 extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_option_Options_nativeIsHdrActive(
     JNIEnv *, jclass) {
     auto *renderer = Renderer::try_instance();
@@ -337,3 +374,112 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     JNIEnv *, jclass) {
     Renderer::instance().world()->chunks()->resetScheduler();
 }
+
+// --- Area Lights ---
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightsEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.areaLightsEnabled = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.restirEnabled = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightIntensity(
+    JNIEnv *, jclass, jfloat intensity, jboolean write) {
+    Renderer::options.areaLightIntensity = std::clamp(intensity, 0.0f, 5.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightRange(
+    JNIEnv *, jclass, jint range, jboolean write) {
+    Renderer::options.areaLightRange = static_cast<float>(std::clamp(range, 8, 512));
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetShadowSoftness(
+    JNIEnv *, jclass, jfloat softness, jboolean write) {
+    Renderer::options.shadowSoftness = std::clamp(softness, 0.0f, 2.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightBlockIntensity(
+    JNIEnv *, jclass, jint lightTypeId, jfloat intensity) {
+    if (lightTypeId >= 0 && lightTypeId < LIGHT_TYPE_COUNT) {
+        Renderer::options.perBlockIntensity[lightTypeId] = std::max(0.0f, intensity);
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightBlockScale(
+    JNIEnv *, jclass, jint lightTypeId, jfloat scale) {
+    if (lightTypeId >= 0 && lightTypeId < LIGHT_TYPE_COUNT) {
+        Renderer::options.perBlockScale[lightTypeId] = std::max(0.0f, scale);
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightBlockYOffset(
+    JNIEnv *, jclass, jint lightTypeId, jfloat offset) {
+    if (lightTypeId >= 0 && lightTypeId < LIGHT_TYPE_COUNT) {
+        Renderer::options.perBlockYOffset[lightTypeId] = offset;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightBlockColor(
+    JNIEnv *, jclass, jint lightTypeId, jfloat r, jfloat g, jfloat b) {
+    if (lightTypeId >= 0 && lightTypeId < LIGHT_TYPE_COUNT) {
+        Renderer::options.perBlockColorR[lightTypeId] = r;
+        Renderer::options.perBlockColorG[lightTypeId] = g;
+        Renderer::options.perBlockColorB[lightTypeId] = b;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetBlockLightMode(
+    JNIEnv *, jclass, jint lightTypeId, jint mode) {
+    if (lightTypeId >= 0 && lightTypeId < LIGHT_TYPE_COUNT) {
+        Renderer::options.blockLightMode[lightTypeId] = std::clamp(mode, 0, 2);
+    }
+}
+
+// --- ReSTIR Tuning ---
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirCandidates(
+    JNIEnv *, jclass, jint candidates, jboolean write) {
+    Renderer::options.restirCandidates = std::clamp(candidates, 8, 64);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirTemporalMClamp(
+    JNIEnv *, jclass, jint clamp, jboolean write) {
+    Renderer::options.restirTemporalMClamp = std::clamp(clamp, 5, 50);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirWClamp(
+    JNIEnv *, jclass, jint clamp, jboolean write) {
+    Renderer::options.restirWClamp = std::clamp(clamp, 10, 200);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirSpatialTaps(
+    JNIEnv *, jclass, jint taps, jboolean write) {
+    Renderer::options.restirSpatialTaps = std::clamp(taps, 1, 10);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirSpatialRadius(
+    JNIEnv *, jclass, jint radius, jboolean write) {
+    Renderer::options.restirSpatialRadius = std::clamp(radius, 5, 60);
+}
+
+// --- ReSTIR Performance ---
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirSimplifiedBRDF(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.restirSimplifiedBRDF = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirSpatialEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.restirSpatialEnabled = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirBounceEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.restirBounceEnabled = enabled;
+}
+

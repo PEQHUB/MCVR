@@ -1,0 +1,103 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "common/shared.hpp"
+
+layout(binding = 0) readonly buffer AreaLightBuffer {
+    AreaLight lights[];
+} areaLightBuffer;
+
+layout(binding = 1) buffer TileLightBuffer {
+    uint data[];
+} tileLightBuffer;
+
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+    int lightCount;
+    int maxPerTile;
+    mat4 vpCameraRel;  // proj * mat4(mat3(view)) for camera-relative positions
+} pc;
+
+const int TILE_SIZE = 16;
+
+shared uint tileCount;
+
+void main() {
+    uint tileIdx = gl_WorkGroupID.x;
+    uint localIdx = gl_LocalInvocationIndex;
+
+    int tilesX = (pc.width + TILE_SIZE - 1) / TILE_SIZE;
+    int tilesY = (pc.height + TILE_SIZE - 1) / TILE_SIZE;
+    int totalTiles = tilesX * tilesY;
+    if (int(tileIdx) >= totalTiles) return;
+
+    int tileY = int(tileIdx) / tilesX;
+    int tileX = int(tileIdx) - tileY * tilesX;
+
+    // Tile bounds in NDC [-1, 1]
+    float tileMinX = float(tileX * TILE_SIZE) / float(pc.width) * 2.0 - 1.0;
+    float tileMaxX = float((tileX + 1) * TILE_SIZE) / float(pc.width) * 2.0 - 1.0;
+    // Vulkan Y is top-down in NDC
+    float tileMinY = float(tileY * TILE_SIZE) / float(pc.height) * 2.0 - 1.0;
+    float tileMaxY = float((tileY + 1) * TILE_SIZE) / float(pc.height) * 2.0 - 1.0;
+
+    // Initialize shared counter
+    if (localIdx == 0) {
+        tileCount = 0;
+    }
+    barrier();
+
+    int bufferBase = int(tileIdx) * (1 + pc.maxPerTile);
+
+    // Each thread checks a subset of lights
+    for (uint i = localIdx; i < uint(pc.lightCount); i += 256) {
+        AreaLight al = areaLightBuffer.lights[i];
+
+        // Chebyshev (L-inf) distance for cube-shaped range
+        vec3 absPos = abs(al.position);
+        float chebyDist = max(absPos.x, max(absPos.y, absPos.z));
+
+        // Skip lights beyond their radius (small margin for tile boundary overlap)
+        if (chebyDist > al.radius + 16.0) continue;
+
+        // Project light center to clip space
+        vec4 clipPos = pc.vpCameraRel * vec4(al.position, 1.0);
+
+        bool include = false;
+
+        if (clipPos.w <= 0.0) {
+            // Behind camera — include if close enough to affect nearby surfaces
+            if (chebyDist < al.radius) include = true;
+        } else {
+            vec2 ndc = clipPos.xy / clipPos.w;
+            // Projected radius in NDC (approximate)
+            float projRadius = al.radius / max(clipPos.w, 0.01);
+            // Generous margin for off-axis distortion
+            projRadius = max(projRadius, 0.05);
+
+            // Check tile overlap (1-tile margin to prevent seams at tile boundaries)
+            float marginX = float(TILE_SIZE) / float(pc.width) * 2.0;
+            float marginY = float(TILE_SIZE) / float(pc.height) * 2.0;
+            if (ndc.x + projRadius >= tileMinX - marginX && ndc.x - projRadius <= tileMaxX + marginX &&
+                ndc.y + projRadius >= tileMinY - marginY && ndc.y - projRadius <= tileMaxY + marginY) {
+                include = true;
+            }
+        }
+
+        if (include) {
+            uint slot = atomicAdd(tileCount, 1);
+            if (slot < uint(pc.maxPerTile)) {
+                tileLightBuffer.data[bufferBase + 1 + int(slot)] = i;
+            }
+        }
+    }
+    barrier();
+
+    // Write final count
+    if (localIdx == 0) {
+        tileLightBuffer.data[bufferBase] = min(tileCount, uint(pc.maxPerTile));
+    }
+}

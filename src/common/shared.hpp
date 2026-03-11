@@ -365,6 +365,15 @@ namespace Data {
         T_FLOAT brightnessFactor;
         T_FLOAT pad0;
     };
+
+    struct AreaLight {
+        T_VEC3 position;     // camera-relative world position
+        T_FLOAT halfExtent;  // cube half-size (0.5=full block, 0.05=point-like)
+        T_VEC3 color;        // pre-computed emissive RGB
+        T_FLOAT intensity;   // brightness scale
+        T_VEC3 _unused;      // available for future use
+        T_FLOAT radius;      // max range in blocks
+    }; // 48 bytes, std430 aligned (3 x vec4)
 #ifdef __cplusplus
 }; // namespace Data
 #endif

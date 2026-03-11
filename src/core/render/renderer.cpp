@@ -7,6 +7,7 @@
 
 std::filesystem::path Renderer::folderPath{};
 Options Renderer::options{};
+float Renderer::preExposure = 1.0f;
 
 Renderer::Renderer(GLFWwindow *window)
     : framework_(Framework::create(window)),

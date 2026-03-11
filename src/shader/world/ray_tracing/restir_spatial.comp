@@ -1,0 +1,136 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+#include "../util/random.glsl"
+#include "../util/restir.glsl"
+
+layout(binding = 0, rgba32f) uniform readonly  image2D reservoirTemporalImage;
+layout(binding = 1, rgba32f) uniform writeonly image2D reservoirSpatialImage;
+layout(binding = 2, rgba16f) uniform readonly  image2D normalRoughnessImage;
+layout(binding = 3, r16f)    uniform readonly  image2D linearDepthImage;
+
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+    int spatialTaps;
+    int spatialRadius;
+    int temporalMClamp;
+    int wClamp;
+} pc;
+
+const float NORMAL_THRESHOLD = 0.9;
+const float DEPTH_THRESHOLD = 0.1;
+
+// Boiling filter shared memory (256 threads / 32 per warp = 8 subgroups max)
+shared float warpAvgs[8];
+shared uint  warpCounts[8];
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) return;
+
+    // Load center reservoir
+    vec4 centerPacked = imageLoad(reservoirTemporalImage, pixel);
+    Reservoir centerRes = unpackReservoir(centerPacked);
+
+    // Early out: empty reservoir
+    if (centerRes.M <= 0.0) {
+        imageStore(reservoirSpatialImage, pixel, centerPacked);
+        return;
+    }
+
+    vec3 centerNormal = imageLoad(normalRoughnessImage, pixel).xyz;
+    float centerDepth = imageLoad(linearDepthImage, pixel).r;
+
+    // Skip sky pixels
+    if (centerDepth <= 0.0) {
+        imageStore(reservoirSpatialImage, pixel, centerPacked);
+        return;
+    }
+
+    // --- Boiling filter: kill outlier reservoir weights (RTXDI) ---
+    float centerWeight = centerRes.W;
+    bool hasWeight = (centerWeight > 0.0);
+
+    float warpSum = subgroupAdd(centerWeight);
+    uint warpActive = subgroupBallotBitCount(subgroupBallot(hasWeight));
+    float warpAvg = (warpActive > 0u) ? (warpSum / float(warpActive)) : 0.0;
+
+    if (subgroupElect()) {
+        warpAvgs[gl_SubgroupID] = warpAvg;
+        warpCounts[gl_SubgroupID] = warpActive;
+    }
+    barrier();
+
+    float tileSum = 0.0;
+    uint tileCount = 0u;
+    uint numSubgroups = gl_NumSubgroups;
+    for (uint w = 0u; w < numSubgroups; w++) {
+        tileSum += warpAvgs[w] * float(warpCounts[w]);
+        tileCount += warpCounts[w];
+    }
+    float tileAvg = (tileCount > 0u) ? (tileSum / float(tileCount)) : 0.0;
+
+    // Conservative multiplier: 10x average kills only extreme outliers
+    const float BOILING_MULTIPLIER = 10.0;
+    if (tileAvg > 0.0 && centerWeight > tileAvg * BOILING_MULTIPLIER) {
+        centerRes = createReservoir();
+        centerPacked = vec4(0.0);
+    }
+
+    // RNG seed
+    uint seed = xxhash32(uvec3(pixel.x, pixel.y, 0x9E3779B9u));
+
+    // Initialize merged reservoir with center (biased: use stored targetPdf)
+    Reservoir merged = createReservoir();
+    mergeReservoir(merged, centerRes, centerRes.targetPdf, seed);
+
+    // Disocclusion boost: extra spatial taps when no temporal history (RTXDI)
+    int actualTaps = pc.spatialTaps;
+    if (centerRes.M < 2.0) {
+        actualTaps = max(actualTaps, 5);
+    }
+
+    // Spatial neighbor taps
+    for (int i = 0; i < actualTaps; i++) {
+        float angle = rand(seed) * 6.28318530718;
+        float radius = sqrt(rand(seed)) * float(pc.spatialRadius);
+        ivec2 neighborPixel = pixel + ivec2(
+            int(cos(angle) * radius),
+            int(sin(angle) * radius)
+        );
+
+        // Bounds check
+        if (neighborPixel.x < 0 || neighborPixel.x >= pc.width ||
+            neighborPixel.y < 0 || neighborPixel.y >= pc.height) continue;
+
+        // Similarity checks
+        vec3 neighborNormal = imageLoad(normalRoughnessImage, neighborPixel).xyz;
+        float neighborDepth = imageLoad(linearDepthImage, neighborPixel).r;
+
+        if (neighborDepth <= 0.0) continue;
+        if (dot(centerNormal, neighborNormal) < NORMAL_THRESHOLD) continue;
+        if (abs(centerDepth - neighborDepth) / max(centerDepth, 0.001) > DEPTH_THRESHOLD) continue;
+
+        // Load neighbor reservoir
+        vec4 neighborPacked = imageLoad(reservoirTemporalImage, neighborPixel);
+        Reservoir neighborRes = unpackReservoir(neighborPacked);
+        if (neighborRes.M <= 0.0) continue;
+
+        // Clamp neighbor M to prevent over-accumulation
+        neighborRes.M = min(neighborRes.M, float(pc.temporalMClamp));
+
+        // Biased merge: use neighbor's stored targetPdf directly
+        mergeReservoir(merged, neighborRes, neighborRes.targetPdf, seed);
+    }
+
+    finalizeReservoir(merged);
+    merged.W = min(merged.W, float(pc.wClamp));
+    merged.M = min(merged.M, float(pc.temporalMClamp) + float(pc.spatialTaps) * 2.0);
+
+    imageStore(reservoirSpatialImage, pixel, packReservoir(merged));
+}

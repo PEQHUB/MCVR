@@ -31,6 +31,18 @@ struct ToneMappingModuleExposureData {
     float capExposureSmoothed;   // internal: smoothed highlight cap exposure (improved mode)
     float manualExposureEnabled; // 0.0 = auto exposure, 1.0 = manual exposure
     float manualExposure;        // direct exposure multiplier when manual is enabled
+    // PsychoV tonemapper parameters
+    float psychoEnabled;         // 0.0 = BT.2390, 1.0 = PsychoV
+    float psychoHighlights;
+    float psychoShadows;
+    float psychoContrast;
+    float psychoPurity;
+    float psychoBleaching;
+    float psychoClipPoint;
+    float psychoHueRestore;
+    float psychoAdaptContrast;
+    float psychoWhiteCurve;      // 0.0 = Neutwo, 1.0 = Naka-Rushton
+    float psychoConeExponent;
 };
 
 struct ToneMappingModulePushConstant {
@@ -62,6 +74,18 @@ struct ToneMappingModulePushConstant {
     float sdrTransferFunction;  // 0.0 = Gamma 2.2, 1.0 = sRGB
     float manualExposureEnabled; // 0.0 = auto exposure, 1.0 = manual exposure
     float manualExposure;        // direct exposure multiplier when manual is enabled
+    // PsychoV tonemapper parameters
+    float psychoEnabled;
+    float psychoHighlights;
+    float psychoShadows;
+    float psychoContrast;
+    float psychoPurity;
+    float psychoBleaching;
+    float psychoClipPoint;
+    float psychoHueRestore;
+    float psychoAdaptContrast;
+    float psychoWhiteCurve;
+    float psychoConeExponent;
 };
 
 class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingModule> {
@@ -113,6 +137,8 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
 
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> histBuffers_;
     std::shared_ptr<vk::DeviceLocalBuffer> exposureData_;
+    std::shared_ptr<vk::HostVisibleBuffer> exposureReadback_;  // 4-byte staging for GPU→CPU readback
+    float computedExposure_ = 1.0f;                            // CPU-side mirror, 1-frame delayed
 
     std::shared_ptr<vk::Shader> histShader_;
     std::shared_ptr<vk::ComputePipeline> histPipeline_;

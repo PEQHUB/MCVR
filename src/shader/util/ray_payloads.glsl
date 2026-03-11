@@ -68,6 +68,8 @@ struct PrimaryRay {
     T_FLOAT directLightHitT;
     T_UINT stop;
     T_UINT cont;
+    T_FLOAT albedoEmission;
+    T_UINT pixelPacked;
 };
 
 struct ShadowRay {

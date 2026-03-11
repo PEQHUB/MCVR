@@ -51,6 +51,19 @@ layout(set = 1, binding = 6) readonly buffer LastObjToWorldMat {
 }
 lastObjToWorldMats;
 
+layout(set = 1, binding = 8) readonly buffer AreaLightBuffer {
+    AreaLight lights[];
+} areaLightBuffer;
+
+layout(set = 1, binding = 9) readonly buffer TileLightBuffer {
+    uint data[];
+} tileLightBuffer;
+
+const int TILE_SIZE = 16;
+const int MAX_LIGHTS_PER_TILE = 128;
+
+#define AREA_LIGHTS_ON ((pc.flags & 2) != 0)
+
 layout(set = 2, binding = 0) uniform WorldUniform {
     WorldUBO worldUBO;
 };
@@ -81,6 +94,8 @@ layout(set = 3, binding = 10, rgba16f) uniform image2D firstHitSpecularImage;
 layout(set = 3, binding = 11, rgba16f) uniform image2D firstHitClearImage;
 layout(set = 3, binding = 12, rgba16f) uniform image2D firstHitBaseEmissionImage;
 layout(set = 3, binding = 13, r16f) uniform image2D directLightDepthImage;
+layout(set = 3, binding = 16, rgba16f) uniform image2D diffuseRayDirHitDistImage;
+layout(set = 3, binding = 17, rgba16f) uniform image2D specularRayDirHitDistImage;
 
 layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer VertexBuffer {
     PBRTriangle vertices[];
@@ -95,6 +110,12 @@ indexBuffer;
 layout(push_constant) uniform PushConstant {
     int numRayBounces;
     int flags;
+    int areaLightCount;
+    float shadowSoftness;
+    int risCandidates;
+    int temporalMClamp;
+    int wClamp;
+    float preExposure;
 }
 pc;
 
@@ -161,6 +182,12 @@ void main() {
     vec3 firstHitIndirectRadiance = vec3(0.0);
     vec3 firstHitBaseEmission = vec3(0.0);
 
+    // DLSS-RR guide: first-bounce ray direction + hit distance
+    vec3 diffuseRayDir = vec3(0.0);
+    float diffuseHitDist = 0.0;
+    vec3 specularRayDir = vec3(0.0);
+    float specularHitDist = 0.0;
+
     mainRay.seed = worldUBO.seed;
     for (int isHand = 0; isHand <= 1; isHand++) {
         // Result of trace
@@ -185,11 +212,13 @@ void main() {
         mainRay.coneSpread = coneSpreadFromFov(fovY, fovX, resolution);
         mainRay.insideBoat = 0;
         mainRay.isHand = isHand;
+        mainRay.pixelPacked = gl_LaunchIDEXT.x | (gl_LaunchIDEXT.y << 16u);
         do {
             mainRay.index = psrDepth;
             mainRay.hitT = 0;
             mainRay.directLightRadiance = vec3(0.0);
             mainRay.directLightHitT = 0.0;
+            mainRay.albedoEmission = 0.0;
             mainRay.stop = 0;
             mainRay.cont = 0;
 
@@ -242,7 +271,7 @@ void main() {
                         1,                 // sbtRecordStride
                         missId,            // missIndex
                         mainRay.origin,    // offset
-                        0.001,             // Tmin
+                        0.0,               // Tmin (offset_ray in CHS handles self-intersection)
                         mainRay.direction, // direction
                         len,               // Tmax
                         0                  // mainRay
@@ -461,12 +490,23 @@ void main() {
         isFirstHitNoisy = mainRay.noisy > 0;
         if (isFirstHitNoisy) {
             // Boost emission intensity to 50.0 for visible glow in HDR
-            firstHitEmission = 50.0 * mainRay.albedoValue.rgb * firstHitMat.emission;
+            // abs() on albedoEmission: CHS stores the abs value, but safety guard here too
+            float combinedEmission = max(firstHitMat.emission, abs(mainRay.albedoEmission));
+            firstHitEmission = 50.0 * mainRay.albedoValue.rgb * combinedEmission;
             if (mainRay.lobeType == 0 || mainRay.lobeType == 2) { // Diffuse OR Refraction
                 isFirstHitDiffuse = true;
                 firstHitDirectRadiance = mainRay.directLightRadiance;
             } else {
                 isFirstHitDiffuse = false;
+            }
+        }
+
+        // DLSS-RR guide: capture first-bounce ray direction (set by primary CHS)
+        if (isFirstHitNoisy) {
+            if (isFirstHitDiffuse) {
+                diffuseRayDir = mainRay.direction;
+            } else {
+                specularRayDir = mainRay.direction;
             }
         }
 
@@ -505,12 +545,21 @@ void main() {
                         1,                          // sbtRecordOffset
                         1,                          // sbtRecordStride
                         0,                          // missIndex
-                        mainRay.origin, 0.001, mainRay.direction, len, 0);
+                        mainRay.origin, 0.0, mainRay.direction, len, 0);
 
             if (b == psrDepth) {
                 distFirstToSecond = mainRay.hitT;
                 if (mainRay.hitT != INF_DISTANCE) {
                     hasSecondHit = true;
+                }
+                // DLSS-RR guide: capture first-bounce hit distance
+                if (isFirstHitNoisy) {
+                    float clampedHitDist = min(mainRay.hitT, 10000.0);
+                    if (isFirstHitDiffuse) {
+                        diffuseHitDist = clampedHitDist;
+                    } else {
+                        specularHitDist = clampedHitDist;
+                    }
                 }
             }
 
@@ -520,6 +569,12 @@ void main() {
                 float rrProbability = min(maxComponent, 0.9);
                 if (rand(mainRay.seed) > rrProbability) { break; }
                 mainRay.throughput /= rrProbability;
+            }
+
+            // Per-bounce throughput clamp to prevent firefly paths
+            float tMag = max(mainRay.throughput.r, max(mainRay.throughput.g, mainRay.throughput.b));
+            if (tMag > 10.0) {
+                mainRay.throughput *= 10.0 / tMag;
             }
         }
 
@@ -593,5 +648,7 @@ void main() {
     imageStore(firstHitBaseEmissionImage, ivec2(pixel), vec4(firstHitEmission, 1.0));
     float specHitDepth = hasSecondHit ? distFirstToSecond : (isFirstHitNoisy && !isFirstHitDiffuse ? 1000.0 : 0.0);
     imageStore(specularHitDepthImage, ivec2(pixel), vec4(specHitDepth, vec3(1.0)));
-    imageStore(outputImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+    imageStore(diffuseRayDirHitDistImage, ivec2(pixel), vec4(diffuseRayDir, diffuseHitDist));
+    imageStore(specularRayDirHitDistImage, ivec2(pixel), vec4(specularRayDir, specularHitDist));
+    imageStore(outputImage, ivec2(pixel), vec4(mainRay.radiance * pc.preExposure, 1.0));
 }

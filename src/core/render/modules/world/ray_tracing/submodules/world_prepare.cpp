@@ -3,11 +3,14 @@
 #include "core/render/buffers.hpp"
 #include "core/render/chunks.hpp"
 #include "core/render/entities.hpp"
+#include "core/render/lights.hpp"
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/world.hpp"
 
+#include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -91,6 +94,7 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
         lastVertexBufferAddr,
         lastIndexBufferAddr,
         lastObjToWorldMat,
+        areaLightBuffer,
     }};
 
     std::vector<vk::CommandBuffer::BufferMemoryBarrier> uploadPreBufferBarriers, uploadPostBufferBarriers;
@@ -344,6 +348,117 @@ void WorldPrepareContext::render() {
             blasGroupAccu += chunk1->geometryCount + 1; // shadow
 
             blasIndex++;
+        }
+    }
+
+    // Area light gathering: collect from loaded chunks, cull by vertical range + distance
+    // NOTE: No frustum culling — lights behind the camera still contribute via bounced
+    // illumination and removing them causes visible pop-in when rotating the camera.
+    // Vertical culling is safe because deep underground lights are behind solid rock.
+    {
+        constexpr int MAX_AREA_LIGHTS = 512;
+        constexpr float VERTICAL_CULL_BELOW = 48.0f; // skip lights more than N blocks below camera
+        struct LightWithDist {
+            vk::Data::AreaLight light;
+            float dist2;
+            float contribution; // effectiveIntensity / max(dist2, 1.0)
+        };
+        std::vector<LightWithDist> gatheredLights;
+
+        auto &chunk1s = chunks->chunks();
+        for (int i = 0; i < chunk1s.size(); i++) {
+            auto &chunk1 = chunk1s[i];
+            if (chunk1->blas == nullptr) continue;
+            if (chunk1->lightSources.empty()) continue;
+
+            // Chunk-level vertical early out: skip entire chunk if too far below camera
+            float chunkTopY = static_cast<float>(static_cast<double>(chunk1->y) + 16.0 - cameraPos.y);
+            if (-chunkTopY > VERTICAL_CULL_BELOW) continue;
+
+            for (auto &src : chunk1->lightSources) {
+                if (src.lightTypeId < 0 || src.lightTypeId >= LIGHT_TYPE_COUNT) continue;
+                auto &def = LIGHT_DEFS[src.lightTypeId];
+
+                // Camera-relative position
+                float rx = static_cast<float>(static_cast<double>(src.worldX) - cameraPos.x);
+                float ry = static_cast<float>(static_cast<double>(src.worldY) - cameraPos.y);
+                float rz = static_cast<float>(static_cast<double>(src.worldZ) - cameraPos.z);
+
+                // Per-light vertical cull: skip lights too far below camera (sealed caves)
+                if (-ry > VERTICAL_CULL_BELOW) continue;
+
+                float d2 = rx * rx + ry * ry + rz * rz;
+
+                float perBlock = Renderer::options.perBlockIntensity[src.lightTypeId];
+                if (perBlock < 0.001f) continue;  // Skip disabled lights
+
+                // CPU-side distance cull: skip lights beyond their defined radius
+                float effectiveIntensity = def.intensity * Renderer::options.areaLightIntensity * perBlock;
+                float maxRange = Renderer::options.areaLightRange;
+                if (d2 > maxRange * maxRange) continue;
+
+                float contribution = effectiveIntensity / std::max(d2, 1.0f);
+
+                vk::Data::AreaLight al{};
+                auto &opts = Renderer::options;
+                int tid = src.lightTypeId;
+                al.position = glm::vec3(rx, ry + def.yOffset + opts.perBlockYOffset[tid], rz);
+                al.halfExtent = def.halfExtent * opts.perBlockScale[tid];
+                al.color = glm::vec3(
+                    opts.perBlockColorR[tid] >= 0 ? opts.perBlockColorR[tid] : def.color.r,
+                    opts.perBlockColorG[tid] >= 0 ? opts.perBlockColorG[tid] : def.color.g,
+                    opts.perBlockColorB[tid] >= 0 ? opts.perBlockColorB[tid] : def.color.b);
+                al.intensity = effectiveIntensity;
+                al.radius = maxRange;
+
+                // Stable ID for cross-frame light tracking (ReSTIR DI)
+                uint32_t bx = static_cast<uint32_t>(static_cast<int>(src.worldX)) & 0xFFFF;
+                uint32_t by = static_cast<uint32_t>(static_cast<int>(src.worldY)) & 0xFFFF;
+                uint32_t bz = static_cast<uint32_t>(static_cast<int>(src.worldZ)) & 0xFFFF;
+                uint32_t stableId = (bx | (by << 16)) ^ (bz * 2654435761u);
+                std::memcpy(&al._unused.x, &stableId, sizeof(float));
+                al._unused.y = LIGHT_DEFS[src.lightTypeId].flickerStrength;
+
+                gatheredLights.push_back({al, d2, contribution});
+            }
+        }
+
+        // Sort by contribution (brightest/nearest first)
+        std::sort(gatheredLights.begin(), gatheredLights.end(),
+                  [](const LightWithDist &a, const LightWithDist &b) { return a.contribution > b.contribution; });
+
+        // Clamp to max
+        if (gatheredLights.size() > MAX_AREA_LIGHTS) {
+            gatheredLights.resize(MAX_AREA_LIGHTS);
+        }
+
+        // Compute per-light effective radius based on intensity
+        for (auto &lwd : gatheredLights) {
+            float maxR = Renderer::options.areaLightRange;
+            float effectiveRadius = std::min(maxR, std::sqrt(lwd.light.intensity / 0.001f));
+            lwd.light.radius = std::max(effectiveRadius, 4.0f);
+        }
+
+        areaLightCount = static_cast<int>(gatheredLights.size());
+
+        if (areaLightCount > 0) {
+            std::vector<vk::Data::AreaLight> lightData;
+            lightData.reserve(areaLightCount);
+            for (auto &lwd : gatheredLights) {
+                lightData.push_back(lwd.light);
+            }
+
+            areaLightBuffer = vk::DeviceLocalBuffer::create(
+                vma, device, lightData.size() * sizeof(vk::Data::AreaLight),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            areaLightBuffer->uploadToStagingBuffer(lightData.data());
+        } else {
+            // Ensure a valid buffer exists even with 0 lights (for descriptor binding)
+            vk::Data::AreaLight dummy{};
+            areaLightBuffer = vk::DeviceLocalBuffer::create(
+                vma, device, sizeof(vk::Data::AreaLight),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            areaLightBuffer->uploadToStagingBuffer(&dummy);
         }
     }
 

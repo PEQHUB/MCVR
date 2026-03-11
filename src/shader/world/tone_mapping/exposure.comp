@@ -22,6 +22,18 @@ layout(set = 0, binding = 2) buffer ExposureBuffer {
     float capExposureSmoothed;
     float manualExposureEnabled;
     float manualExposure;
+    // PsychoV tonemapper parameters
+    float psychoEnabled;
+    float psychoHighlights;
+    float psychoShadows;
+    float psychoContrast;
+    float psychoPurity;
+    float psychoBleaching;
+    float psychoClipPoint;
+    float psychoHueRestore;
+    float psychoAdaptContrast;
+    float psychoWhiteCurve;
+    float psychoConeExponent;
 }
 expData;
 
@@ -54,6 +66,18 @@ layout(push_constant) uniform PushConstant {
     float sdrTransferFunction;
     float manualExposureEnabled;
     float manualExposure;
+    // PsychoV tonemapper parameters
+    float psychoEnabled;
+    float psychoHighlights;
+    float psychoShadows;
+    float psychoContrast;
+    float psychoPurity;
+    float psychoBleaching;
+    float psychoClipPoint;
+    float psychoHueRestore;
+    float psychoAdaptContrast;
+    float psychoWhiteCurve;
+    float psychoConeExponent;
 }
 pc;
 
@@ -123,6 +147,18 @@ void main() {
         expData.sdrTransferFunction = pc.sdrTransferFunction;
         expData.manualExposureEnabled = pc.manualExposureEnabled;
         expData.manualExposure = pc.manualExposure;
+        // PsychoV pass-through
+        expData.psychoEnabled = pc.psychoEnabled;
+        expData.psychoHighlights = pc.psychoHighlights;
+        expData.psychoShadows = pc.psychoShadows;
+        expData.psychoContrast = pc.psychoContrast;
+        expData.psychoPurity = pc.psychoPurity;
+        expData.psychoBleaching = pc.psychoBleaching;
+        expData.psychoClipPoint = pc.psychoClipPoint;
+        expData.psychoHueRestore = pc.psychoHueRestore;
+        expData.psychoAdaptContrast = pc.psychoAdaptContrast;
+        expData.psychoWhiteCurve = pc.psychoWhiteCurve;
+        expData.psychoConeExponent = pc.psychoConeExponent;
         return;
     }
 
@@ -214,7 +250,8 @@ void main() {
     float adaptedComp = exp2(prevEV + delta);
 
     expData.avgLogLum = avgLogLum;
-    expData.exposure = clamp(adaptedComp, pc.minExposure, pc.maxExposure);
+    float effectiveMaxExposure = min(pc.maxExposure, capExposure);
+    expData.exposure = clamp(adaptedComp, pc.minExposure, effectiveMaxExposure);
     expData.tonemapMode = pc.tonemapMode;
     expData.Lwhite = pc.Lwhite;
     expData.exposureCompensation = pc.exposureCompensation;
@@ -227,4 +264,16 @@ void main() {
     expData.sdrTransferFunction = pc.sdrTransferFunction;
     expData.manualExposureEnabled = pc.manualExposureEnabled;
     expData.manualExposure = pc.manualExposure;
+    // PsychoV pass-through
+    expData.psychoEnabled = pc.psychoEnabled;
+    expData.psychoHighlights = pc.psychoHighlights;
+    expData.psychoShadows = pc.psychoShadows;
+    expData.psychoContrast = pc.psychoContrast;
+    expData.psychoPurity = pc.psychoPurity;
+    expData.psychoBleaching = pc.psychoBleaching;
+    expData.psychoClipPoint = pc.psychoClipPoint;
+    expData.psychoHueRestore = pc.psychoHueRestore;
+    expData.psychoAdaptContrast = pc.psychoAdaptContrast;
+    expData.psychoWhiteCurve = pc.psychoWhiteCurve;
+    expData.psychoConeExponent = pc.psychoConeExponent;
 }

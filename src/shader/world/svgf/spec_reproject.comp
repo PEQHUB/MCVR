@@ -134,7 +134,10 @@ void main() {
     vec3 localStddev = sqrt(max(vec3(0.0), m2 - m1 * m1));
     
     // --- 1. Dual-Path Reprojection ---
-    vec2 posSurface = vec2(pixel) + 0.5 + motion * vec2(size);
+    // motion is in pixel space (prevPixel - currentPixel), add jitter correction
+    vec2 jitterCurr = worldUBO.cameraJitter;
+    vec2 jitterPrev = lastWorldUBO.cameraJitter;
+    vec2 posSurface = vec2(pixel) + jitterCurr + motion - jitterPrev;
     vec2 posVirtual = virtualPointReprejection(pixel, size, currDepth, specData.a);
     
     vec3 specS, specV; vec2 momS, momV;

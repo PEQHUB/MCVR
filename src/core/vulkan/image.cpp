@@ -39,7 +39,7 @@ vk::SwapchainImage::SwapchainImage(
 }
 
 vk::SwapchainImage::~SwapchainImage() {
-    for (int i = 0; i < imageViews_.size(); i++) { vkDestroyImageView(device_->vkDevice(), imageViews_[0], nullptr); }
+    for (int i = 0; i < imageViews_.size(); i++) { vkDestroyImageView(device_->vkDevice(), imageViews_[i], nullptr); }
 }
 
 uint32_t vk::SwapchainImage::width() {

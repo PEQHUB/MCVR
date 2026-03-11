@@ -164,6 +164,8 @@ class DlssRR : public SharedObject<DlssRR> {
         RESOURCE_LINEARDEPTH,
         // Below are optional guide buffers
         RESOURCE_SPECULAR_HITDISTANCE,
+        RESOURCE_DIFFUSE_RAY_DIR_HIT_DIST,
+        RESOURCE_SPECULAR_RAY_DIR_HIT_DIST,
 
         RESOURCE_NUM
     };
@@ -183,6 +185,7 @@ class DlssRR : public SharedObject<DlssRR> {
                              glm::vec2 jitter,
                              const glm::mat4 &modelView,
                              const glm::mat4 &projection,
+                             float preExposure = 1.0f,
                              bool reset = false);
 
   private:

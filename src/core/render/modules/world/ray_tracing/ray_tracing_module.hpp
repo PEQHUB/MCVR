@@ -21,7 +21,14 @@ class WorldPrepareContext;
 
 struct RayTracingPushConstant {
     int numRayBounces;
-    int flags; // bit 0: simplified indirect lighting
+    int flags;           // bit 0: simplified indirect, bit 1: area lights enabled
+                         // bit 2: restir, bit 3: simplified BRDF, bit 4: restir bounce
+    int areaLightCount;  // number of active area lights this frame
+    float shadowSoftness;
+    int risCandidates;   // total RIS candidates per pixel
+    int temporalMClamp;  // temporal reservoir M clamp (used as float in shader)
+    int wClamp;          // importance weight W clamp (used as float in shader)
+    float preExposure;   // pre-exposure multiplier for DLSS-RR normalization
 };
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {
@@ -32,7 +39,7 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
   public:
     constexpr static std::string_view NAME = "render_pipeline.module.ray_tracing.name";
     constexpr static uint32_t inputImageNum = 0;
-    constexpr static uint32_t outputImageNum = 14;
+    constexpr static uint32_t outputImageNum = 16;
 
     RayTracingModule();
 
@@ -61,6 +68,8 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     void initImages();
     void initPipeline();
     void initSBT();
+    void initSpatialPipeline();
+    void initClusterPipeline();
 
   private:
     // input
@@ -72,6 +81,7 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::shared_ptr<vk::Shader> worldRayMissShader_;
     std::shared_ptr<vk::Shader> handRayMissShader_;
     std::shared_ptr<vk::Shader> shadowRayMissShader_;
+    std::shared_ptr<vk::Shader> pointLightShadowMissShader_;
 
     std::shared_ptr<vk::Shader> shadowRayClosestHitShader_;
     std::shared_ptr<vk::Shader> shadowAnyHitShader_;
@@ -126,6 +136,35 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> firstHitClearImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> firstHitBaseEmissionImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightDepthImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> diffuseRayDirHitDistImages_;   // DLSS-RR guide: xyz=dir, w=hitDist
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> specularRayDirHitDistImages_;  // DLSS-RR guide: xyz=dir, w=hitDist
+
+    // ReSTIR DI reservoir images (fixed roles)
+    // [0] = temporal output (CHS writes), [1] = spatial output (compute writes)
+    std::shared_ptr<vk::DeviceLocalImage> reservoirImages_[2];
+
+    // Bounce ReSTIR DI reservoir images (per-bounce temporal reuse)
+    // [0] = bounce 1, [1] = bounce 2, [2] = bounce 3
+    std::shared_ptr<vk::DeviceLocalImage> bounceReservoirImages_[3];
+
+    // Spatial reuse compute pipeline
+    VkPipeline spatialPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout spatialPipelineLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout spatialDescSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool spatialDescPool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> spatialDescSets_;
+    std::shared_ptr<vk::Shader> spatialShader_;
+
+    // Light clustering compute pipeline
+    VkPipeline clusterPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout clusterPipelineLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout clusterDescSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool clusterDescPool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> clusterDescSets_;
+    std::shared_ptr<vk::Shader> clusterShader_;
+    std::shared_ptr<vk::DeviceLocalBuffer> tileLightBuffer_;
+    static constexpr int TILE_SIZE = 16;
+    static constexpr int MAX_LIGHTS_PER_TILE = 512;
 
     // submodules
     std::shared_ptr<Atmosphere> atmosphere_;
@@ -159,6 +198,8 @@ struct RayTracingModuleContext : public WorldModuleContext, SharedObject<RayTrac
     std::shared_ptr<vk::DeviceLocalImage> firstHitClearImage;
     std::shared_ptr<vk::DeviceLocalImage> firstHitBaseEmissionImage;
     std::shared_ptr<vk::DeviceLocalImage> directLightDepthImage;
+    std::shared_ptr<vk::DeviceLocalImage> diffuseRayDirHitDistImage;
+    std::shared_ptr<vk::DeviceLocalImage> specularRayDirHitDistImage;
 
     // submodule
     std::shared_ptr<AtmosphereContext> atmosphereContext;
