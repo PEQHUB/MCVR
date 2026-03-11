@@ -55,7 +55,7 @@ struct Options {
 
     // SDR output transfer function
     // 0 = Gamma 2.2, 1 = sRGB
-    uint32_t sdrTransferFunction = 0;
+    uint32_t sdrTransferFunction = 1;
 
     // PsychoV tonemapper (RenoDX psycho_test11)
     bool psychoEnabled = true;
