@@ -34,6 +34,7 @@ layout(set = 0, binding = 2) readonly buffer ExposureBuffer {
     float psychoAdaptContrast;
     float psychoWhiteCurve;      // 0.0 = Neutwo, 1.0 = Naka-Rushton
     float psychoConeExponent;
+    float bootTimer;             // layout parity (not read by tone mapper)
 }
 gExposure;
 
@@ -67,47 +68,89 @@ vec3 PQ_EOTF(vec3 N) {
     return pow(max(Nm2inv - c1, vec3(0.0)) / (c2 - c3 * Nm2inv), vec3(1.0 / m1));
 }
 
-// BT.709 to ICtCp conversion (using RenoDX/BT.2100 combined matrices)
-// PQ scaling = 100 nits (appropriate for SDR game content)
-vec3 bt709ToICtCp(vec3 rgb) {
-    // Combined BT.709 → BT.2020 → LMS (GLSL column-major)
-    // Source: RenoDX BT709_TO_ICTCP_LMS_MAT, transposed for GLSL
-    const mat3 bt709_to_lms = mat3(
-        0.295764088,  0.156191974,  0.0351022854,
-        0.623072445,  0.727251648,  0.156589955,
-        0.0811667516, 0.116557933,  0.808302998);
-    // LMS (PQ) to ICtCp — BT.2100 spec (GLSL column-major)
-    const mat3 lms_to_ictcp = mat3(
-         2048.0 / 4096.0,   6610.0 / 4096.0,  17933.0 / 4096.0,
-         2048.0 / 4096.0,  -13613.0 / 4096.0, -17390.0 / 4096.0,
-            0.0 / 4096.0,   7003.0 / 4096.0,   -543.0 / 4096.0);
+// ============================================================================
+// Oklab color space (Björn Ottosson, 2020)
+// Perceptually uniform — no luminance-dependent hue shifts like ICtCp/PQ.
+// Uses cube root (similar to CIE L*) instead of PQ, so chroma scaling works
+// uniformly across all luminance levels including bright emissives (lava).
+// ============================================================================
 
-    // No floor here: negative BT.709 values represent valid BT.2020-gamut colors
-    // produced by ICtCp saturation expansion. They are handled by the downstream
-    // BT709_TO_BT2020 matrix in the HDR10 output path.
+// BT.709 linear → Oklab
+vec3 bt709ToOklab(vec3 rgb) {
+    // BT.709 → LMS (Oklab specific, column-major)
+    const mat3 bt709_to_lms = mat3(
+        0.4122214708, 0.2119034982, 0.0883024619,
+        0.5363325363, 0.6806995451, 0.2817188376,
+        0.0514459929, 0.1073969566, 0.6299787005);
+    // LMS^(1/3) → Oklab (column-major)
+    const mat3 lms_to_lab = mat3(
+        0.2104542553,  1.9779984951,  0.0259040371,
+        0.7936177850, -2.4285922050,  0.7827717662,
+       -0.0040720468,  0.4505937099, -0.8086757660);
+
     vec3 lms = bt709_to_lms * rgb;
-    vec3 lmsPQ = PQ_OETF(lms / 100.0);
-    return lms_to_ictcp * lmsPQ;
+    // Cube root (handles negatives via sign preservation)
+    vec3 lms_g = sign(lms) * pow(abs(lms), vec3(1.0 / 3.0));
+    return lms_to_lab * lms_g;
 }
 
-// ICtCp to BT.709 conversion (using RenoDX/BT.2100 combined matrices)
-vec3 ictcpToBt709(vec3 ictcp) {
-    // ICtCp to LMS (PQ) — inverse of BT.2100 LMS→ICtCp (GLSL column-major)
-    const mat3 ictcp_to_lms = mat3(
-        1.0,                1.0,               1.0,
-        0.008609037,       -0.008609037,        0.560031335,
-        0.111029625,       -0.111029625,       -0.320627174);
-    // Combined LMS → BT.2020 → BT.709 (GLSL column-major)
-    // Source: RenoDX ICTCP_LMS_TO_BT709_MAT, transposed for GLSL
+// Oklab → BT.709 linear
+vec3 oklabToBt709(vec3 lab) {
+    // Oklab → LMS^(1/3) (column-major, inverse of lms_to_lab)
+    const mat3 lab_to_lms = mat3(
+        1.0,           1.0,           1.0,
+        0.3963377774, -0.1055613458, -0.0894841775,
+        0.2158037573, -0.0638541728, -1.2914855480);
+    // LMS → BT.709 (column-major, inverse of bt709_to_lms)
     const mat3 lms_to_bt709 = mat3(
-         6.17353248, -1.32403194, -0.0115983877,
-        -5.32089900,  2.56026983, -0.264921456,
-         0.147354885,-0.236238613, 1.27652633);
+         4.0767416621, -1.2684380046, -0.0041960863,
+        -3.3077115913,  2.6097574011, -0.7034186147,
+         0.2309699292, -0.3413193965,  1.7076147010);
 
-    vec3 lmsPQ = ictcp_to_lms * ictcp;
-    vec3 lms = PQ_EOTF(lmsPQ) * 100.0;
+    vec3 lms_g = lab_to_lms * lab;
+    vec3 lms = lms_g * lms_g * lms_g; // cube
     return lms_to_bt709 * lms;
 }
+
+// BT.2020 linear → Oklab (direct combined matrix, no intermediate BT.709)
+vec3 bt2020ToOklab(vec3 rgb) {
+    // BT.2020 → LMS (Oklab): bt709_to_oklab_lms × BT2020_TO_BT709 (column-major)
+    const mat3 bt2020_to_lms = mat3(
+        0.6167557871, 0.2651330639, 0.1001026342,
+        0.3601983994, 0.6358393640, 0.2039065193,
+        0.0230458134, 0.0990275718, 0.6959908464);
+    // LMS^(1/3) → Oklab (same as BT.709 — gamut-independent)
+    const mat3 lms_to_lab = mat3(
+        0.2104542553,  1.9779984951,  0.0259040371,
+        0.7936177850, -2.4285922050,  0.7827717662,
+       -0.0040720468,  0.4505937099, -0.8086757660);
+
+    vec3 lms = bt2020_to_lms * rgb;
+    vec3 lms_g = sign(lms) * pow(abs(lms), vec3(1.0 / 3.0));
+    return lms_to_lab * lms_g;
+}
+
+// Oklab → BT.2020 linear (direct combined matrix, no intermediate BT.709)
+vec3 oklabToBt2020(vec3 lab) {
+    // Oklab → LMS^(1/3) (same as BT.709 — gamut-independent)
+    const mat3 lab_to_lms = mat3(
+        1.0,           1.0,           1.0,
+        0.3963377774, -0.1055613458, -0.0894841775,
+        0.2158037573, -0.0638541728, -1.2914855480);
+    // LMS → BT.2020 (column-major, inverse of bt2020_to_lms)
+    const mat3 lms_to_bt2020 = mat3(
+         2.1399067359, -0.8847358624, -0.0485737581,
+        -1.2463895090,  2.1632309822, -0.4545031427,
+         0.1064827729, -0.2784951194,  1.5030769008);
+
+    vec3 lms_g = lab_to_lms * lab;
+    vec3 lms = lms_g * lms_g * lms_g; // cube
+    return lms_to_bt2020 * lms;
+}
+
+// Luma weight constants
+const vec3 LUMA_BT709  = vec3(0.2126, 0.7152, 0.0722);
+const vec3 LUMA_BT2020 = vec3(0.2627, 0.6780, 0.0593);
 
 // ============================================================================
 // HDR Mode 0: Hermite Spline Reinhard (BT.2390-aligned)
@@ -115,9 +158,8 @@ vec3 ictcpToBt709(vec3 ictcp) {
 // highlight rolloff. Preserves chrominance ratios.
 // References: BT.2390-7, Reinhard et al. 2002
 // ============================================================================
-vec3 HermiteSplineReinhardToneMap(vec3 color, float Lw) {
-    const vec3 LUMA = vec3(0.2627, 0.6780, 0.0593); // BT.2020 (ITU-R BT.2020)
-    float L = dot(color, LUMA);
+vec3 HermiteSplineReinhardToneMap(vec3 color, float Lw, vec3 luma) {
+    float L = dot(color, luma);
     if (L < 1e-6) return color;
 
     // Basic Reinhard with white point
@@ -161,9 +203,8 @@ vec3 HermiteSplineReinhardToneMap(vec3 color, float Lw) {
 // Maps scene luminance to display luminance using Hermite spline knee.
 // Input: exposed linear RGB. Output: linear RGB scaled for HDR headroom.
 // ============================================================================
-vec3 BT2390EETF(vec3 color, float maxLum) {
-    const vec3 LUMA = vec3(0.2627, 0.6780, 0.0593); // BT.2020 (ITU-R BT.2020)
-    float L = dot(color, LUMA);
+vec3 BT2390EETF(vec3 color, float maxLum, vec3 luma) {
+    float L = dot(color, luma);
     if (L < 1e-6) return color;
 
     // Normalize luminance to [0, maxLum] range
@@ -436,7 +477,18 @@ vec3 psychoScalePurityMB2(vec3 lms, float purity_scale) {
     vec3 mb = psychoMB2FromLMS(lms);
     vec2 mb_white = psychoWhiteD65Chromaticity();
     vec2 mb_offset = mb.xy - mb_white;
-    vec2 mb_scaled = mb_white + mb_offset * max(purity_scale, 0.0);
+    vec2 direction = mb_offset;
+    float offsetLen = length(direction);
+    if (offsetLen < eps) return lms;
+
+    // Clamp scaled offset to BT.2020 gamut boundary to prevent negative LMS
+    float desiredLen = offsetLen * max(purity_scale, 0.0);
+    bool has_solution;
+    float t_max = psychoRayMaxT_BT2020(mb_white, direction / offsetLen, has_solution);
+    float maxLen = has_solution ? t_max : offsetLen;
+    float clampedLen = min(desiredLen, maxLen * 0.98); // 2% margin from boundary
+
+    vec2 mb_scaled = mb_white + (direction / offsetLen) * clampedLen;
     return psychoLMSFromMB2(vec3(mb_scaled, mb.z));
 }
 
@@ -502,7 +554,8 @@ vec3 psychoNakaRushton(vec3 x, vec3 peak, vec3 gray, float cone_exp) {
 }
 
 // Main PsychoV tonemapping function
-vec3 psychoTonemap(vec3 bt709_linear,
+// wideGamutInput: if true, input/output are BT.2020 (skip BT.709↔BT.2020 conversions)
+vec3 psychoTonemap(vec3 inputColor, bool wideGamutInput,
     float peak_value, float highlights, float shadows, float contrast,
     float purity_scale, float bleaching_intensity, float clip_point,
     float hue_restore, float adaptation_contrast, float white_curve_mode,
@@ -513,9 +566,8 @@ vec3 psychoTonemap(vec3 bt709_linear,
     const vec3 lms_midgray_raw = psychoLMSFromBT2020(vec3(0.18));
     const float lum_midgray = psychoLuminanceFromLMS(lms_midgray_raw);
 
-    vec3 bt2020 = psychoBT2020FromBT709(bt709_linear);
+    vec3 bt2020 = wideGamutInput ? inputColor : psychoBT2020FromBT709(inputColor);
     vec3 lms_color_raw = psychoLMSFromBT2020(bt2020);
-    lms_color_raw = psychoGamutCompress(lms_color_raw);
 
     float lum_current = psychoLuminanceFromLMS(lms_color_raw);
     float lum_target = lum_current;
@@ -590,7 +642,7 @@ vec3 psychoTonemap(vec3 bt709_linear,
 
     lms_toned_unit = psychoGamutCompress(lms_toned_unit);
     vec3 bt2020_toned = psychoBT2020FromLMS(lms_toned_unit);
-    return psychoBT709FromBT2020(bt2020_toned);
+    return wideGamutInput ? bt2020_toned : psychoBT709FromBT2020(bt2020_toned);
 }
 
 // ============================================================================
@@ -605,13 +657,6 @@ vec3 linearToSRGB(vec3 c) {
 // ============================================================================
 // HDR10 Output Support (ST.2084 PQ + BT.2020)
 // ============================================================================
-
-// BT.709 → BT.2020 color matrix (ITU-R BT.2087-0, column-major for GLSL)
-const mat3 BT709_TO_BT2020 = mat3(
-    0.6274, 0.0691, 0.0164,
-    0.3293, 0.9195, 0.0880,
-    0.0433, 0.0113, 0.8956
-);
 
 // Dedicated PQ OETF for HDR10 output — input is normalized [0,1] where 1.0 = 10000 nits
 // (Different from the existing PQ_OETF which is used for ICtCp with /100 normalization)
@@ -631,69 +676,137 @@ void main() {
     vec3 expColor = hdr * gExposure.exposure;
 
     bool hdr10Output = gExposure.hdr10OutputEnabled > 0.5;
-
-    // Expand color volume in ICtCp space (perceptually uniform chroma).
-    // Scaling Ct/Cp pushes colors into BT.2020 gamut without hue distortion.
-    // Out-of-BT.709-gamut values produced here are correctly handled by the
-    // downstream BT709_TO_BT2020 matrix in the HDR10 output path.
-    if (gExposure.saturation != 1.0) {
-        vec3 ictcp = bt709ToICtCp(max(expColor, vec3(0.0)));
-        ictcp.yz *= gExposure.saturation;
-        expColor = ictcpToBt709(ictcp);
-    }
-
     float paperWhite = gExposure.paperWhiteNits;
     float peak = gExposure.peakNits;
 
-    // HDR headroom: highlights can be this many times brighter than paper white
-    // SDR has no headroom (peak = paper white); HDR uses display peak
-    float hdrHeadroom = hdr10Output ? (peak / paperWhite) : 1.0;
-
-    vec3 mapped;
-    if (gExposure.psychoEnabled > 0.5) {
-        // PsychoV tonemapper — perceptual LMS-based
-        // PsychoV always needs HDR headroom to function correctly.
-        // Unlike BT.2390 (which degrades to passthrough at maxLum=1.0),
-        // PsychoV's Neutwo curve compresses everything at peak=1.0.
-        // Use peak/paperWhite unconditionally (default ≈4.93 = 1000/203).
-        float psychoPeak = peak / paperWhite;
-        mapped = psychoTonemap(expColor,
-            psychoPeak,
-            gExposure.psychoHighlights,
-            gExposure.psychoShadows,
-            gExposure.psychoContrast,
-            gExposure.psychoPurity,
-            gExposure.psychoBleaching,
-            gExposure.psychoClipPoint,
-            gExposure.psychoHueRestore,
-            gExposure.psychoAdaptContrast,
-            gExposure.psychoWhiteCurve,
-            gExposure.psychoConeExponent);
-    } else {
-        // BT.2390 EETF tone mapper — maps scene luminance to display luminance
-        mapped = BT2390EETF(expColor, hdrHeadroom);
-    }
-
     if (hdr10Output) {
-        // HDR10 output path
+        // ====================================================================
+        // HDR10 WIDE-GAMUT PIPELINE — works in BT.2020 throughout
+        // RT pipeline outputs native BT.2020 — no conversion needed.
+        // ====================================================================
+        vec3 workingColor = expColor;  // Already BT.2020 from RT pipeline
+
+        // Saturation in Oklab (BT.2020 matrices — direct, no intermediate BT.709)
+        if (gExposure.saturation != 1.0) {
+            vec3 lab = bt2020ToOklab(max(workingColor, vec3(0.0)));
+            lab.yz *= gExposure.saturation;
+            vec3 boosted = oklabToBt2020(lab);
+
+            // Gamut clamp: if saturation boost pushed color outside BT.2020 gamut,
+            // reduce chroma toward achromatic point until all components >= 0.
+            // Prevents purple hue shifts from negative-component clipping on
+            // highly saturated BT.2020 colors (blackbody fire/lava).
+            float minC = min(boosted.r, min(boosted.g, boosted.b));
+            if (minC < 0.0) {
+                vec3 gray = oklabToBt2020(vec3(lab.x, 0.0, 0.0));
+                // Find max t in [0,1] such that gray + t*(boosted - gray) >= 0
+                vec3 d = gray - boosted;
+                float t = 1.0;
+                if (d.r > 1e-6 && boosted.r < 0.0) t = min(t, gray.r / d.r);
+                if (d.g > 1e-6 && boosted.g < 0.0) t = min(t, gray.g / d.g);
+                if (d.b > 1e-6 && boosted.b < 0.0) t = min(t, gray.b / d.b);
+                boosted = mix(gray, boosted, max(t, 0.0));
+            }
+            workingColor = boosted;
+        }
+
+        float hdrHeadroom = peak / paperWhite;
+
+        vec3 mapped;
+        if (gExposure.psychoEnabled > 0.5) {
+            // PsychoV: input is BT.2020, output stays BT.2020 (wideGamutInput=true)
+            float psychoPeak = peak / paperWhite;
+            mapped = psychoTonemap(workingColor, true,
+                psychoPeak,
+                gExposure.psychoHighlights,
+                gExposure.psychoShadows,
+                gExposure.psychoContrast,
+                gExposure.psychoPurity,
+                gExposure.psychoBleaching,
+                gExposure.psychoClipPoint,
+                gExposure.psychoHueRestore,
+                gExposure.psychoAdaptContrast,
+                gExposure.psychoWhiteCurve,
+                gExposure.psychoConeExponent);
+        } else {
+            // BT.2390 EETF with BT.2020 luma weights
+            mapped = BT2390EETF(workingColor, hdrHeadroom, LUMA_BT2020);
+        }
+
+        // Output is already BT.2020 — no gamut conversion needed
         vec3 nits = mapped * paperWhite;
-
-        // BT.709 → BT.2020 gamut conversion (in linear light, before peak clamp).
-        vec3 bt2020 = BT709_TO_BT2020 * nits;
-
-        // Clamp to display peak in BT.2020 space
-        bt2020 = clamp(bt2020, vec3(0.0), vec3(peak));
-
-        // PQ encode: normalize to [0,1] where 1.0 = 10000 nits
+        vec3 bt2020 = clamp(nits, vec3(0.0), vec3(peak));
         vec3 pq = PQ_OETF_HDR10(bt2020 / 10000.0);
-
         fragColor = vec4(pq, 1.0);
+
     } else {
-        // SDR output path
+        // ====================================================================
+        // SDR PIPELINE — process in BT.2020 (identical to HDR), convert to
+        // BT.709 only after tonemapping for maximum color fidelity.
+        // ====================================================================
+        vec3 workingColor = expColor;  // Already BT.2020 from RT pipeline
+
+        // Saturation in Oklab (BT.2020 — identical to HDR path)
+        if (gExposure.saturation != 1.0) {
+            vec3 lab = bt2020ToOklab(max(workingColor, vec3(0.0)));
+            lab.yz *= gExposure.saturation;
+            vec3 boosted = oklabToBt2020(lab);
+
+            // Gamut clamp (identical to HDR path)
+            float minC = min(boosted.r, min(boosted.g, boosted.b));
+            if (minC < 0.0) {
+                vec3 gray = oklabToBt2020(vec3(lab.x, 0.0, 0.0));
+                vec3 d = gray - boosted;
+                float t = 1.0;
+                if (d.r > 1e-6 && boosted.r < 0.0) t = min(t, gray.r / d.r);
+                if (d.g > 1e-6 && boosted.g < 0.0) t = min(t, gray.g / d.g);
+                if (d.b > 1e-6 && boosted.b < 0.0) t = min(t, gray.b / d.b);
+                boosted = mix(gray, boosted, max(t, 0.0));
+            }
+            workingColor = boosted;
+        }
+
+        // SDR has no headroom above paper white — 1.0 IS the display peak.
+        // PsychoV targets [0,1] with smooth rolloff; BT.2390 hard-clips at 1.0
+        // (physically correct for SDR — no super-whites available).
+        float sdrHeadroom = 1.0;
+
+        vec3 mapped;
+        if (gExposure.psychoEnabled > 0.5) {
+            // PsychoV in BT.2020 (wideGamutInput=true, peak=1.0 for SDR)
+            mapped = psychoTonemap(workingColor, true,
+                sdrHeadroom,
+                gExposure.psychoHighlights,
+                gExposure.psychoShadows,
+                gExposure.psychoContrast,
+                gExposure.psychoPurity,
+                gExposure.psychoBleaching,
+                gExposure.psychoClipPoint,
+                gExposure.psychoHueRestore,
+                gExposure.psychoAdaptContrast,
+                gExposure.psychoWhiteCurve,
+                gExposure.psychoConeExponent);
+        } else {
+            // BT.2390 with sdrHeadroom=1.0: hard-clips at 1.0 (correct for SDR)
+            mapped = BT2390EETF(workingColor, sdrHeadroom, LUMA_BT2020);
+        }
+
+        // Convert BT.2020 → BT.709 AFTER tonemapping (preserves wide-gamut processing)
+        const mat3 BT2020_TO_BT709 = mat3(
+             1.6604910, -0.1245505, -0.0181508,
+            -0.5876411,  1.1328999, -0.1005789,
+            -0.0728499, -0.0083494,  1.1187297);
+        mapped = BT2020_TO_BT709 * mapped;
         mapped = clamp(mapped, 0.0, 1.0);
 
         bool useSrgb = gExposure.sdrTransferFunction > 0.5;
         vec3 encoded = useSrgb ? linearToSRGB(mapped) : pow(mapped, vec3(1.0 / 2.2));
+
+        // Triangular dithering: breaks 8-bit quantization banding (standard in UE5/Frostbite).
+        float n1 = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+        float n2 = fract(52.9829189 * fract(dot(gl_FragCoord.xy + vec2(0.5, 0.5), vec2(0.06711056, 0.00583715))));
+        vec3 dither = vec3(n1 + n2 - 1.0) / 255.0;
+        encoded += dither;
 
         fragColor = vec4(encoded, 1.0);
     }

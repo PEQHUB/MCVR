@@ -34,6 +34,9 @@ layout(set = 0, binding = 2) buffer ExposureBuffer {
     float psychoAdaptContrast;
     float psychoWhiteCurve;
     float psychoConeExponent;
+    // Shader-side boot adaptation timer: only ticks when actual adaptation runs (not during loading).
+    // Zeroed by GPU buffer fill on world load. Replaces CPU-side timeSinceReset.
+    float bootTimer;
 }
 expData;
 
@@ -78,6 +81,7 @@ layout(push_constant) uniform PushConstant {
     float psychoAdaptContrast;
     float psychoWhiteCurve;
     float psychoConeExponent;
+    // timeSinceReset removed: boot timer now lives in ExposureBuffer (shader-side)
 }
 pc;
 
@@ -91,9 +95,12 @@ void main() {
         expData.avgLogLum = pc.log2Min;
         if (pc.manualExposureEnabled > 0.5) {
             expData.exposure = clamp(pc.manualExposure, pc.minExposure, pc.maxExposure);
-        } else {
+        } else if (expData.exposure > 0.0) {
+            // Only clamp if we have a valid exposure; keep 0.0 from GPU buffer reset
+            // so the snap-to-target logic works on the first frame with actual scene data
             expData.exposure = clamp(expData.exposure, pc.minExposure, pc.maxExposure);
         }
+        // Don't advance bootTimer here — loading frames shouldn't consume grace period
         return;
     }
 
@@ -167,68 +174,52 @@ void main() {
     // Work in compensated exposure space for temporal adaptation.
     float targetComp = targetExposure * exp2(pc.exposureCompensation);
 
-    float highlightMix = 0.0;
-    float capExposureRaw = 3.4e38; // effectively no cap
-    float capExposure = 3.4e38;
-
-    // Optional highlight protection for improved mode. Legacy mode keeps legacy failure modes.
-    if (pc.legacyExposure < 0.5 && pc.highlightProtection > 0.0) {
-        highlightMix = clamp(pc.highlightProtection, 0.0, 1.0);
-        // Find log luminance at a high percentile of the histogram CDF.
-        uint hiCount = uint(clamp(pc.highlightPercent, 0.0, 1.0) * fTotal);
-        hiCount = clamp(hiCount, 1u, total);
-
-        uint cum2 = 0u;
-        uint hiBin = NUM_BINS - 1u;
-        uint cumBeforeHi = 0u;
-        for (uint i = 0u; i < NUM_BINS; ++i) {
-            cum2 += gHist.bins[i];
-            if (cum2 >= hiCount) {
-                hiBin = i;
-                cumBeforeHi = cum2 - gHist.bins[i];
+    // Iris response: compute a hard exposure ceiling from bright content.
+    // Applied AFTER temporal adaptation so it takes effect immediately,
+    // like real pupil constriction (~0.2s) vs slow scene adaptation (~2-5s).
+    float irisCap = 3.4e38; // no cap by default
+    if (pc.legacyExposure < 0.5) {
+        // Find 99.95th percentile luminance (top 0.05% of pixels).
+        // At 1080p ~1000 pixels — catches even a distant torch.
+        uint brightThresh = max(uint(fTotal * 0.0005), 1u);
+        uint cumTop = 0u;
+        float brightLogLum = avgLogLum;
+        for (int i = int(NUM_BINS) - 1; i >= 0; --i) {
+            cumTop += gHist.bins[i];
+            if (cumTop >= brightThresh) {
+                float tB = (float(i) + 0.5) / binCountF;
+                brightLogLum = pc.log2Min + tB * log2Range;
                 break;
             }
         }
 
-        // If the highlight tail is extremely small (e.g. sun disc), reduce highlight influence.
-        // Prevents the entire scene from going near-black just to preserve a few pixels.
-        float tailCount = float(total - cumBeforeHi);
-        float tailFrac = tailCount / fTotal;
-        float tailWeight = smoothstep(0.002, 0.02, tailFrac); // 0.2%..2% of pixels
-        highlightMix *= tailWeight;
+        // EV contrast between bright peak and scene average.
+        float evContrast = brightLogLum - avgLogLum;
 
-        float tHi = (float(hiBin) + 0.5) / binCountF;
-        float hiLogLum = pc.log2Min + tHi * log2Range;
-        float hiLum = exp2(hiLogLum);
+        // Onset at 3 EV (8x brighter), full at 8 EV (256x).
+        // 0.3 blend factor: raises effective luminance -> drops exposure ~3 EV.
+        float irisStrength = smoothstep(3.0, 8.0, evContrast) * 0.3;
 
-        float paperWhite = max(pc.paperWhiteNits, 1e-6);
-        float headroom = max(pc.peakNits / paperWhite, 1.0);
-        float highlightTarget = (pc.hdr10OutputEnabled > 0.5) ? headroom : 1.0;
-        capExposureRaw = highlightTarget / max(hiLum, 1e-6);
-
-        // Temporal smoothing for the highlight cap to reduce percentile noise.
-        // Uses log-domain smoothing so it behaves well across many stops.
-        float smoothSpeed = max(pc.highlightSmoothingSpeed, 0.0);
-        if (smoothSpeed > 0.0) {
-            float prevCap = expData.capExposureSmoothed;
-            if (prevCap <= 0.0) prevCap = capExposureRaw;
-
-            float prevLog = log2(max(prevCap, 1e-6));
-            float rawLog = log2(max(capExposureRaw, 1e-6));
-
-            // Keep symmetric smoothing: tightening too fast looks unnatural.
-            float dirSpeed = smoothSpeed;
-            float kCap = 1.0 - exp(-pc.dt * dirSpeed);
-            float smLog = mix(prevLog, rawLog, clamp(kCap, 0.0, 1.0));
-            capExposure = exp2(smLog);
+        float irisExposure;
+        if (irisStrength > 0.0) {
+            float irisLogLum = mix(avgLogLum, brightLogLum, irisStrength);
+            float irisLum = exp2(irisLogLum);
+            irisExposure = pc.middleGrey / max(irisLum, 1e-6) * exp2(pc.exposureCompensation);
         } else {
-            capExposure = capExposureRaw;
+            irisExposure = targetComp; // no bright content -> relax cap
         }
 
-        expData.capExposureSmoothed = capExposure;
-
-        float capped = min(targetComp, capExposure);
-        targetComp = mix(targetComp, capped, highlightMix);
+        // Asymmetric temporal smoothing: fast constriction, slow dilation.
+        // Constriction (cap dropping): ~80ms half-life (speed 8.0)
+        // Dilation (cap rising):       ~700ms half-life (speed 1.0)
+        float prevCap = expData.capExposureSmoothed;
+        if (prevCap <= 0.0) prevCap = irisExposure;
+        float prevLog = log2(max(prevCap, 1e-6));
+        float rawLog  = log2(max(irisExposure, 1e-6));
+        float capSpeed = (rawLog < prevLog) ? 8.0 : 1.0; // fast down, slow up
+        float kSmooth = 1.0 - exp(-pc.dt * capSpeed);
+        irisCap = exp2(mix(prevLog, rawLog, clamp(kSmooth, 0.0, 1.0)));
+        expData.capExposureSmoothed = irisCap;
     }
 
     float prevComp = expData.exposure;
@@ -238,20 +229,44 @@ void main() {
     float prevEV = log2(max(prevComp, 1e-6));
     float targetEV = log2(max(targetComp, 1e-6));
 
-    float upRate = max(pc.speedUp, 0.0);
-    float downRate = max(pc.speedDown, 0.0);
-    if (pc.legacyExposure < 0.5 && targetEV < prevEV) {
+    // Dead zone: ignore EV differences below threshold to prevent shimmer/breathing
+    // 0.05 EV ≈ 3.5% luminance change — below perceptual threshold
+    float evDiff = targetEV - prevEV;
+    if (abs(evDiff) < 0.05) evDiff = 0.0;
+
+    // Scale adaptation speed by magnitude of change: large jumps (cave entry) stay fast,
+    // subtle changes (turning slightly) become very slow, reducing pumping
+    float evMagnitude = abs(evDiff);
+    float rateScale = smoothstep(0.0, 1.0, evMagnitude); // 0..1 EV → 0..1 scale
+    rateScale = max(rateScale, 0.1); // never fully zero so it still converges
+
+    // Fast adaptation on world load: 50x speed at t=0, smooth ramp to 1x over 8 seconds.
+    // bootTimer lives in ExposureBuffer — only ticks when this adaptation path runs,
+    // so loading frames (histogram empty → early return) don't consume the grace period.
+    float bootMult = 1.0 + 49.0 * clamp(1.0 - expData.bootTimer / 8.0, 0.0, 1.0);
+    float upRate = max(pc.speedUp, 0.0) * rateScale * bootMult;
+    float downRate = max(pc.speedDown, 0.0) * rateScale * bootMult;
+    if (pc.legacyExposure < 0.5 && evDiff < 0.0) {
         downRate *= max(pc.brightAdaptBoost, 1.0);
     }
 
     float maxUp = upRate * pc.dt;
     float maxDown = downRate * pc.dt;
-    float delta = clamp(targetEV - prevEV, -maxDown, +maxUp);
+    float delta = clamp(evDiff, -maxDown, +maxUp);
     float adaptedComp = exp2(prevEV + delta);
 
+    // Apply iris cap as hard ceiling AFTER adaptation.
+    // This bypasses the slow temporal adaptation, giving immediate response
+    // to bright emitters entering the frame (like real pupil constriction).
+    adaptedComp = min(adaptedComp, irisCap);
+
     expData.avgLogLum = avgLogLum;
-    float effectiveMaxExposure = min(pc.maxExposure, capExposure);
+    float effectiveMaxExposure = pc.maxExposure;
     expData.exposure = clamp(adaptedComp, pc.minExposure, effectiveMaxExposure);
+
+    // Advance boot timer only when adaptation actually ran (not during loading early-returns)
+    expData.bootTimer += pc.dt;
+
     expData.tonemapMode = pc.tonemapMode;
     expData.Lwhite = pc.Lwhite;
     expData.exposureCompensation = pc.exposureCompensation;

@@ -23,6 +23,7 @@ bool ToneMappingModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::D
     if (images.size() == 0) return false;
 
     auto framework = framework_.lock();
+    if (!framework) return false;
     if (images[0] == nullptr) {
         hdrImages_[frameIndex] = images[0] = vk::DeviceLocalImage::create(
             framework->device(), framework->vma(), false, width_, height_, 1, formats[0],
@@ -86,8 +87,16 @@ void ToneMappingModule::setAttributes(int attributeCount, std::vector<std::strin
 
 void ToneMappingModule::build() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto worldPipeline = worldPipeline_.lock();
+    if (!worldPipeline) return;
     uint32_t size = framework->swapchain()->imageCount();
+
+    emissionImages_.resize(size);
+    emissionSampler_ = vk::Sampler::create(framework->device(), VK_FILTER_LINEAR,
+                                            VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    renderResHdrSampler_ = vk::Sampler::create(framework->device(), VK_FILTER_NEAREST,
+                                                VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 
     initDescriptorTables();
     initImages();
@@ -116,6 +125,7 @@ void ToneMappingModule::preClose() {}
 
 void ToneMappingModule::initDescriptorTables() {
     auto framework = framework_.lock();
+    if (!framework) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     descriptorTables_.resize(size);
@@ -143,6 +153,18 @@ void ToneMappingModule::initDescriptorTables() {
                                        .descriptorCount = 1,
                                        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
                                    })
+                                   .defineDescriptorLayoutSetBinding({
+                                       .binding = 3,
+                                       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                       .descriptorCount = 1,
+                                       .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+                                   })
+                                   .defineDescriptorLayoutSetBinding({
+                                       .binding = 4,
+                                       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                       .descriptorCount = 1,
+                                       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,  // histogram only
+                                   })
                                    .endDescriptorLayoutSetBinding()
                                    .endDescriptorLayoutSet()
                                    .definePushConstant(VkPushConstantRange{
@@ -159,6 +181,7 @@ void ToneMappingModule::initDescriptorTables() {
 
 void ToneMappingModule::initImages() {
     auto framework = framework_.lock();
+    if (!framework) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     for (int i = 0; i < size; i++) {
@@ -168,6 +191,7 @@ void ToneMappingModule::initImages() {
 
 void ToneMappingModule::initBuffers() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto vma = framework->vma();
     auto device = framework->device();
     uint32_t size = framework->swapchain()->imageCount();
@@ -192,6 +216,8 @@ void ToneMappingModule::initBuffers() {
 }
 
 void ToneMappingModule::initRenderPass() {
+    auto framework = framework_.lock();
+    if (!framework) return;
     renderPass_ = vk::RenderPassBuilder{}
                       .beginAttachmentDescription()
                       .defineAttachmentDescription({
@@ -223,11 +249,12 @@ void ToneMappingModule::initRenderPass() {
                           .colorAttachmentIndices = {0},
                       })
                       .endSubpassDescription()
-                      .build(framework_.lock()->device());
+                      .build(framework->device());
 }
 
 void ToneMappingModule::initFrameBuffers() {
     auto framework = framework_.lock();
+    if (!framework) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     framebuffers_.resize(size);
@@ -243,6 +270,7 @@ void ToneMappingModule::initFrameBuffers() {
 
 void ToneMappingModule::initPipeline() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto device = framework->device();
     std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
 
@@ -312,11 +340,14 @@ ToneMappingModuleContext::ToneMappingModuleContext(std::shared_ptr<FrameworkCont
 
 void ToneMappingModuleContext::render() {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
+    if (!framework) return;
     auto worldCommandBuffer = context->worldCommandBuffer;
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
 
     auto module = toneMappingModule.lock();
+    if (!module) return;
 
     // Read previous frame's computed exposure from staging buffer (GPU→CPU readback)
     if (module->exposureReadback_) {
@@ -324,11 +355,18 @@ void ToneMappingModuleContext::render() {
         if (mapped) {
             float e = *mapped;
             if (e > 0.0f && !std::isnan(e) && !std::isinf(e)) {
-                module->computedExposure_ = std::fmin(std::fmax(e, 0.001f), 100.0f);
+                module->computedExposure_ = std::fmin(std::fmax(e, 1e-7f), 100.0f);
             }
         }
     }
     Renderer::preExposure = module->computedExposure_;
+
+    // Reset exposure adaptation on world load (deferred GPU buffer zero)
+    if (Renderer::resetExposureAdaptation) {
+        module->pendingExposureReset_ = true;  // zero GPU buffer in command recording
+        module->computedExposure_ = 0.001f;    // neutral CPU-side midpoint
+        Renderer::resetExposureAdaptation = false;
+    }
 
     auto chooseSrc = [](VkImageLayout oldLayout,
                         VkPipelineStageFlags2 fallbackStage,
@@ -359,17 +397,29 @@ void ToneMappingModuleContext::render() {
               VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
               ldrSrcStage, ldrSrcAccess);
 
-    worldCommandBuffer->barriersBufferImage(
-        {{
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcQueueFamilyIndex = mainQueueIndex,
-            .dstQueueFamilyIndex = mainQueueIndex,
-            .buffer = histBuffer,
-        }},
-        {{
+    // Bind emission image per-frame (published by RT module via Renderer::emissionImages)
+    auto &emImages = Renderer::emissionImages;
+    auto frameIdx = context->frameIndex;
+    std::shared_ptr<vk::DeviceLocalImage> emissionImage;
+    if (frameIdx < emImages.size() && emImages[frameIdx]) {
+        emissionImage = emImages[frameIdx];
+        descriptorTable->bindSamplerImageForShader(module->emissionSampler_, emissionImage, 0, 3);
+    }
+
+    // Bind render-res HDR for histogram metering (DLSS input, before upscaling).
+    // When DLSS-RR is active, its neural network may attenuate extreme HDR values,
+    // weakening the iris cap. Metering from the pre-DLSS image gives accurate brightness.
+    auto &renderResImages = Renderer::renderResHdrImages;
+    std::shared_ptr<vk::DeviceLocalImage> renderResHdrImage;
+    if (frameIdx < renderResImages.size() && renderResImages[frameIdx]) {
+        renderResHdrImage = renderResImages[frameIdx];
+    } else {
+        renderResHdrImage = hdrImage;  // fallback: DLSS off → hdrImage IS render res
+    }
+    descriptorTable->bindSamplerImageForShader(module->renderResHdrSampler_, renderResHdrImage, 0, 4);
+
+    std::vector<vk::CommandBuffer::ImageMemoryBarrier> imageBarriers = {
+        {
              .srcStageMask = hdrSrcStage,
              .srcAccessMask = hdrSrcAccess,
              .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
@@ -397,8 +447,55 @@ void ToneMappingModuleContext::render() {
              .dstQueueFamilyIndex = mainQueueIndex,
              .image = ldrImage,
              .subresourceRange = vk::wholeColorSubresourceRange,
-         }});
+         }};
+
+    // Add barrier for emission image (RT wrote it, tone mapping reads it)
+    if (emissionImage) {
+        imageBarriers.push_back({
+            .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+            .oldLayout = emissionImage->imageLayout(),
+            .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .srcQueueFamilyIndex = mainQueueIndex,
+            .dstQueueFamilyIndex = mainQueueIndex,
+            .image = emissionImage,
+            .subresourceRange = vk::wholeColorSubresourceRange,
+        });
+    }
+
+    // Add barrier for render-res HDR image (DLSS/NRD wrote it, histogram reads it)
+    if (renderResHdrImage && renderResHdrImage != hdrImage) {
+        imageBarriers.push_back({
+            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+            .oldLayout = renderResHdrImage->imageLayout(),
+            .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .srcQueueFamilyIndex = mainQueueIndex,
+            .dstQueueFamilyIndex = mainQueueIndex,
+            .image = renderResHdrImage,
+            .subresourceRange = vk::wholeColorSubresourceRange,
+        });
+    }
+
+    worldCommandBuffer->barriersBufferImage(
+        {{
+            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .srcQueueFamilyIndex = mainQueueIndex,
+            .dstQueueFamilyIndex = mainQueueIndex,
+            .buffer = histBuffer,
+        }},
+        imageBarriers);
     hdrImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (emissionImage) emissionImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (renderResHdrImage && renderResHdrImage != hdrImage)
+        renderResHdrImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 #ifdef USE_AMD
     ldrImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
@@ -406,6 +503,14 @@ void ToneMappingModuleContext::render() {
 #endif
 
     vkCmdFillBuffer(worldCommandBuffer->vkCommandBuffer(), histBuffer->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
+
+    // Zero ExposureBuffer on world load so shader snaps to target (not stale previous world)
+    // This zeros exposure, capExposureSmoothed, bootTimer — shader checks <= 0.0 for each
+    if (module->pendingExposureReset_) {
+        vkCmdFillBuffer(worldCommandBuffer->vkCommandBuffer(),
+                        module->exposureData_->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
+        module->pendingExposureReset_ = false;
+    }
 
     worldCommandBuffer->barriersBufferImage(
         {{
@@ -476,6 +581,7 @@ void ToneMappingModuleContext::render() {
     pc.psychoAdaptContrast = Renderer::options.psychoAdaptContrast;
     pc.psychoWhiteCurve = static_cast<float>(Renderer::options.psychoWhiteCurve);
     pc.psychoConeExponent = Renderer::options.psychoConeExponent;
+    // Boot timer now lives in ExposureBuffer (shader-side), no CPU-side accumulation needed
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ToneMappingModulePushConstant), &pc);
@@ -483,8 +589,12 @@ void ToneMappingModuleContext::render() {
     worldCommandBuffer->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)
         ->bindComputePipeline(module->histPipeline_);
 
-    uint32_t groupX = (module->width_ + 16 - 1) / 16;
-    uint32_t groupY = (module->height_ + 16 - 1) / 16;
+    // Dispatch histogram at render-res dimensions (binding 4 = render-res HDR for metering).
+    // hist.comp uses textureSize(uHdrRenderRes) for bounds, so dispatch must cover the render-res image.
+    uint32_t histW = renderResHdrImage->width();
+    uint32_t histH = renderResHdrImage->height();
+    uint32_t groupX = (histW + 16 - 1) / 16;
+    uint32_t groupY = (histH + 16 - 1) / 16;
     vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), groupX, groupY, 1);
 
     worldCommandBuffer->barriersBufferImage(
@@ -516,8 +626,12 @@ void ToneMappingModuleContext::render() {
         }},
         {});
 
-    // Copy computed exposure float to staging buffer for CPU readback next frame
-    VkBufferCopy exposureCopy{.srcOffset = 0, .dstOffset = 0, .size = sizeof(float)};
+    // Copy visual exposure from ExposureBuffer to staging buffer for CPU readback next frame.
+    // This becomes the pre-exposure for DLSS-RR (must match actual visual exposure for stable denoising).
+    VkBufferCopy exposureCopy{
+        .srcOffset = offsetof(ToneMappingModuleExposureData, exposure),
+        .dstOffset = 0,
+        .size = sizeof(float)};
     vkCmdCopyBuffer(worldCommandBuffer->vkCommandBuffer(),
                     module->exposureData_->vkBuffer(),
                     module->exposureReadback_->vkBuffer(),

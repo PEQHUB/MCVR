@@ -43,6 +43,7 @@ struct ToneMappingModuleExposureData {
     float psychoAdaptContrast;
     float psychoWhiteCurve;      // 0.0 = Neutwo, 1.0 = Naka-Rushton
     float psychoConeExponent;
+    float bootTimer;             // Shader-side boot adaptation timer (only ticks during actual adaptation)
 };
 
 struct ToneMappingModulePushConstant {
@@ -86,6 +87,7 @@ struct ToneMappingModulePushConstant {
     float psychoAdaptContrast;
     float psychoWhiteCurve;
     float psychoConeExponent;
+    // timeSinceReset removed: boot timer now lives in ExposureBuffer (shader-side)
 };
 
 class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingModule> {
@@ -131,6 +133,9 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
   private:
     // input
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> hdrImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> emissionImages_;
+    std::shared_ptr<vk::Sampler> emissionSampler_;
+    std::shared_ptr<vk::Sampler> renderResHdrSampler_;  // NEAREST sampler for render-res histogram metering
 
     // tone mapping
     std::vector<std::shared_ptr<vk::DescriptorTable>> descriptorTables_;
@@ -138,7 +143,8 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> histBuffers_;
     std::shared_ptr<vk::DeviceLocalBuffer> exposureData_;
     std::shared_ptr<vk::HostVisibleBuffer> exposureReadback_;  // 4-byte staging for GPU→CPU readback
-    float computedExposure_ = 1.0f;                            // CPU-side mirror, 1-frame delayed
+    float computedExposure_ = 0.001f;                            // CPU-side mirror, 1-frame delayed (neutral midpoint)
+    bool pendingExposureReset_ = false;  // deferred GPU buffer zero on world load
 
     std::shared_ptr<vk::Shader> histShader_;
     std::shared_ptr<vk::ComputePipeline> histPipeline_;
