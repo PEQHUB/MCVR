@@ -166,6 +166,19 @@ class DlssRR : public SharedObject<DlssRR> {
         RESOURCE_SPECULAR_HITDISTANCE,
         RESOURCE_DIFFUSE_RAY_DIR_HIT_DIST,
         RESOURCE_SPECULAR_RAY_DIR_HIT_DIST,
+        RESOURCE_REFLECTION_MV,
+        RESOURCE_ANIMATED_TEX_MASK,
+        // Extended guide buffers (all optional, null-safe)
+        RESOURCE_PARTICLE_MASK,        // pInIsParticleMask  — transparent/refractive surface mask
+        RESOURCE_EMISSIVE,             // GBufferSurface.pInAttrib[EMISSIVE] — emissive brightness hint
+        RESOURCE_BIAS_MASK,            // pInBiasCurrentColorMask — downweight history on animated pixels
+        RESOURCE_RT_HIT_DIST,          // pInRayTracingHitDistance — per-pixel noise level hint
+        RESOURCE_MOTION_VECTORS_3D,    // pInMotionVectors3D — world-space 3D velocity (research)
+        // GBuffer surface attributes + additional inputs
+        RESOURCE_GBUFFER_METALLIC,     // GBufferSurface[METALLIC=2] — material metallic factor
+        RESOURCE_GBUFFER_SHADING_MODEL_ID, // GBufferSurface[SHADINGMODELID=6] — material type classifier
+        RESOURCE_GBUFFER_MATERIAL_ID,  // GBufferSurface[MATERIALID=7] — unique material ID per surface
+        RESOURCE_POSITION_VIEW_SPACE,  // pInPositionViewSpace — view-space hit position
 
         RESOURCE_NUM
     };
@@ -186,7 +199,8 @@ class DlssRR : public SharedObject<DlssRR> {
                              const glm::mat4 &modelView,
                              const glm::mat4 &projection,
                              float preExposure = 1.0f,
-                             bool reset = false);
+                             bool reset = false,
+                             float frameTimeDeltaMs = 16.667f);
 
   private:
     friend class NgxContext;

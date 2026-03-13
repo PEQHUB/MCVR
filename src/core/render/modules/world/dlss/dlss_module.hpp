@@ -8,6 +8,8 @@
 #include "core/render/modules/world/dlss/dlss_wrapper.hpp"
 #include "core/render/modules/world/world_module.hpp"
 
+#include <chrono>
+
 class Framework;
 class FrameworkContext;
 class WorldPipeline;
@@ -20,7 +22,7 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
 
   public:
     constexpr static std::string_view NAME = "render_pipeline.module.dlss.name";
-    constexpr static uint32_t inputImageNum = 10;
+    constexpr static uint32_t inputImageNum = 21;
     constexpr static uint32_t outputImageNum = 2;
 
     static bool initNGXContext();
@@ -62,6 +64,19 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> firstHitDepthImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> diffuseRayDirHitDistImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> specularRayDirHitDistImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> reflectionMvImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> animatedTexMaskImages_;
+    // Extended optional guide buffers
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> particleMaskImages_;      // [12] pInIsParticleMask
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> firstHitBaseEmissionImages_; // [13] GBuffer emissive
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> biasMaskImages_;           // [14] pInBiasCurrentColorMask
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> rtHitDistImages_;          // [15] pInRayTracingHitDistance
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> motionVectors3DImages_;    // [16] pInMotionVectors3D
+    // GBuffer + additional inputs
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> gbufferMetallicImages_;       // [17] GBuffer metallic
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> gbufferShadingModelIdImages_; // [18] GBuffer shading model ID
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> gbufferMaterialIdImages_;     // [19] GBuffer material ID
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> positionViewSpaceImages_;     // [20] view-space hit position
 
     // dlss
     std::shared_ptr<DlssRR> dlss_;
@@ -102,11 +117,27 @@ struct DLSSModuleContext : public WorldModuleContext, SharedObject<DLSSModuleCon
     std::shared_ptr<vk::DeviceLocalImage> firstHitDepthImage;
     std::shared_ptr<vk::DeviceLocalImage> diffuseRayDirHitDistImage;
     std::shared_ptr<vk::DeviceLocalImage> specularRayDirHitDistImage;
+    std::shared_ptr<vk::DeviceLocalImage> reflectionMvImage;
+    std::shared_ptr<vk::DeviceLocalImage> animatedTexMaskImage;
+    // Extended optional guide buffer images
+    std::shared_ptr<vk::DeviceLocalImage> particleMaskImage;
+    std::shared_ptr<vk::DeviceLocalImage> firstHitBaseEmissionImage;
+    std::shared_ptr<vk::DeviceLocalImage> biasMaskImage;
+    std::shared_ptr<vk::DeviceLocalImage> rtHitDistImage;
+    std::shared_ptr<vk::DeviceLocalImage> motionVectors3DImage;
+    // GBuffer + additional input images
+    std::shared_ptr<vk::DeviceLocalImage> gbufferMetallicImage;
+    std::shared_ptr<vk::DeviceLocalImage> gbufferShadingModelIdImage;
+    std::shared_ptr<vk::DeviceLocalImage> gbufferMaterialIdImage;
+    std::shared_ptr<vk::DeviceLocalImage> positionViewSpaceImage;
 
     // output
     std::shared_ptr<vk::DeviceLocalImage> processedImage;          // DLSS writes here (2x when outputScale2x, else 1x)
     std::shared_ptr<vk::DeviceLocalImage> finalOutputImage;        // Lanczos writes here (shared 1x, only when outputScale2x)
     std::shared_ptr<vk::DeviceLocalImage> upscaledFirstHitDepthImage;
+
+    // Per-context frame timer for InFrameTimeDeltaInMsec
+    std::chrono::steady_clock::time_point lastRenderTime_ = std::chrono::steady_clock::now();
 
     DLSSModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
                       std::shared_ptr<WorldPipelineContext> worldPipelineContext,

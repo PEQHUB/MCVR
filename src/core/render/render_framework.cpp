@@ -49,8 +49,7 @@ FrameworkContext::~FrameworkContext() {
 
 void FrameworkContext::fuseFinal() {
     auto f = framework.lock();
-
-    if (!f->isRunning()) return;
+    if (!f || !f->isRunning()) return;
 
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
     auto pipelineContext = f->pipeline_->acquirePipelineContext(shared_from_this());
@@ -361,7 +360,8 @@ void Framework::submitCommand() {
     Renderer::instance().buffers()->buildAndUploadOverlayUniformBuffer();
 
     auto pipelineContext = pipeline_->acquirePipelineContext(currentContext_);
-    if (Renderer::instance().world()->shouldRender()) pipelineContext->worldPipelineContext->render();
+    if (Renderer::instance().world()->shouldRender() && pipelineContext->worldPipelineContext)
+        pipelineContext->worldPipelineContext->render();
     pipelineContext->uiModuleContext->end();
 
     currentContext_->fuseFinal();

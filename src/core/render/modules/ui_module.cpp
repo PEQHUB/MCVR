@@ -44,6 +44,7 @@ void UIModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
                            std::shared_ptr<vk::DeviceLocalImage> image,
                            int index) {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     uint32_t size = framework->swapchain()->imageCount();
     for (int i = 0; i < size; i++) {
@@ -54,6 +55,7 @@ void UIModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
 
 void UIModule::initOverlayDescriptorTablesAndFrameSamplers() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     uint32_t size = framework->swapchain()->imageCount();
     overlayDescriptorTables_.resize(size);
@@ -107,6 +109,7 @@ void UIModule::initOverlayDescriptorTablesAndFrameSamplers() {
 
 void UIModule::initOverlayDrawImages() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     uint32_t size = framework->swapchain()->imageCount();
     overlayDrawColorImages_.resize(size);
@@ -131,6 +134,7 @@ void UIModule::initOverlayDrawImages() {
 
 void UIModule::initOverlayDrawRenderPass() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     overlayDrawRenderPass_ = vk::RenderPassBuilder{}
                                  .beginAttachmentDescription()
@@ -184,6 +188,7 @@ void UIModule::initOverlayDrawRenderPass() {
 
 void UIModule::initOverlayDrawFrameBuffers() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     uint32_t size = framework->swapchain()->imageCount();
     overlayDrawFramebuffers_.resize(size);
@@ -255,6 +260,7 @@ void UIModule::initOverlayDrawPipelineTypes() {
 
 void UIModule::initOverlayDrawPipelines() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     for (auto overlayPipelineInfo : overlayDrawPipelineInfos_) {
         auto [type, info] = overlayPipelineInfo;
@@ -311,6 +317,7 @@ void UIModule::initOverlayDrawPipelines() {
 
 void UIModule::initOverlayPostImages() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     uint32_t size = framework->swapchain()->imageCount();
     overlayPostColorImages_.resize(size);
@@ -329,6 +336,7 @@ void UIModule::initOverlayPostImages() {
 
 void UIModule::initOverlayPostRenderPass() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     overlayPostRenderPass_ = vk::RenderPassBuilder{}
                                  .beginAttachmentDescription()
@@ -366,6 +374,7 @@ void UIModule::initOverlayPostRenderPass() {
 
 void UIModule::initOverlayPostFrameBuffers() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     uint32_t size = framework->swapchain()->imageCount();
     overlayPostFramebuffers_.resize(size);
@@ -390,6 +399,7 @@ void UIModule::initOverlayPostPipelineTypes() {
 
 void UIModule::initOverlayPostPipelines() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     for (auto overlayPipelineInfo : overlayPostPipelineInfos_) {
         auto [type, info] = overlayPipelineInfo;
@@ -514,9 +524,9 @@ UIModuleContext::UIModuleContext(std::shared_ptr<FrameworkContext> context, std:
 
 void UIModuleContext::syncToCommandBuffer() {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     auto commandBuffer = context->overlayCommandBuffer->vkCommandBuffer();
 
@@ -610,9 +620,9 @@ void UIModuleContext::syncToCommandBuffer() {
 
 void UIModuleContext::syncFromContext(std::shared_ptr<UIModuleContext> other) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayScissorEnabled = other->overlayScissorEnabled;
     overlayScissor = other->overlayScissor;
@@ -655,9 +665,9 @@ void UIModuleContext::syncFromContext(std::shared_ptr<UIModuleContext> other) {
 
 void UIModuleContext::setOverlayScissorEnabled(bool enabled) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayScissorEnabled = enabled;
     if (overlayScissorEnabled) {
@@ -673,9 +683,9 @@ void UIModuleContext::setOverlayScissorEnabled(bool enabled) {
 
 void UIModuleContext::setOverlayScissor(int x, int y, int width, int height) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     // opengl scissor box with left bottom as origin
     // vulkan scissor box with left top as origin
@@ -695,9 +705,9 @@ void UIModuleContext::setOverlayScissor(int x, int y, int width, int height) {
 
 void UIModuleContext::setOverlayViewport(int x, int y, int width, int height) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayViewport.x = x;
     overlayViewport.y = y;
@@ -708,9 +718,9 @@ void UIModuleContext::setOverlayViewport(int x, int y, int width, int height) {
 
 void UIModuleContext::setOverlayBlendEnable(bool enable) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayBlendEnabled = enable;
     vkCmdSetColorBlendEnableEXT(context->overlayCommandBuffer->vkCommandBuffer(), 0, 1, &overlayBlendEnabled);
@@ -718,9 +728,9 @@ void UIModuleContext::setOverlayBlendEnable(bool enable) {
 
 void UIModuleContext::setOverlayColorBlendConstants(float const1, float const2, float const3, float const4) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayBlendConstants[0] = const1;
     overlayBlendConstants[1] = const2;
@@ -731,9 +741,9 @@ void UIModuleContext::setOverlayColorBlendConstants(float const1, float const2, 
 
 void UIModuleContext::setOverlayColorLogicOpEnable(bool enable) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayColorLogicOpEnable = enable;
     if (context->device->hasExtendedDynamicState2LogicOp()) {
@@ -746,9 +756,9 @@ void UIModuleContext::setOverlayBlendFuncSeparate(int srcColorBlendFactor,
                                                   int dstColorBlendFactor,
                                                   int dstAlphaBlendFactor) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayColorBlendEquation.srcColorBlendFactor = static_cast<VkBlendFactor>(srcColorBlendFactor);
     overlayColorBlendEquation.srcAlphaBlendFactor = static_cast<VkBlendFactor>(srcAlphaBlendFactor);
@@ -759,9 +769,9 @@ void UIModuleContext::setOverlayBlendFuncSeparate(int srcColorBlendFactor,
 
 void UIModuleContext::setOverlayBlendOpSeparate(int colorBlendOp, int alphaBlendOp) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayColorBlendEquation.colorBlendOp = static_cast<VkBlendOp>(colorBlendOp);
     overlayColorBlendEquation.alphaBlendOp = static_cast<VkBlendOp>(alphaBlendOp);
@@ -770,9 +780,9 @@ void UIModuleContext::setOverlayBlendOpSeparate(int colorBlendOp, int alphaBlend
 
 void UIModuleContext::setOverlayColorWriteMask(int colorWriteMask) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     // Keep alpha writes enabled in SDR as well.
     // The final composite pass samples overlay alpha to blend UI over the world.
@@ -782,9 +792,9 @@ void UIModuleContext::setOverlayColorWriteMask(int colorWriteMask) {
 
 void UIModuleContext::setOverlayColorLogicOp(int colorLogicOp) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayColorLogicOp = static_cast<VkLogicOp>(colorLogicOp);
     if (context->device->hasExtendedDynamicState2LogicOp()) {
@@ -794,9 +804,9 @@ void UIModuleContext::setOverlayColorLogicOp(int colorLogicOp) {
 
 void UIModuleContext::setOverlayDepthTestEnable(bool enable) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayDepthTestEnable = enable;
     vkCmdSetDepthTestEnable(context->overlayCommandBuffer->vkCommandBuffer(), overlayDepthTestEnable);
@@ -804,9 +814,9 @@ void UIModuleContext::setOverlayDepthTestEnable(bool enable) {
 
 void UIModuleContext::setOverlayDepthWriteEnable(bool enable) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayDepthWriteEnable = enable;
     vkCmdSetDepthWriteEnable(context->overlayCommandBuffer->vkCommandBuffer(), overlayDepthWriteEnable);
@@ -814,9 +824,9 @@ void UIModuleContext::setOverlayDepthWriteEnable(bool enable) {
 
 void UIModuleContext::setOverlayStencilTestEnable(bool enable) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayStencilTestEnable = enable;
     vkCmdSetStencilTestEnable(context->overlayCommandBuffer->vkCommandBuffer(), overlayStencilTestEnable);
@@ -824,9 +834,9 @@ void UIModuleContext::setOverlayStencilTestEnable(bool enable) {
 
 void UIModuleContext::setOverlayDepthCompareOp(int depthCompareOp) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayDepthCompareOp = static_cast<VkCompareOp>(depthCompareOp);
     vkCmdSetDepthCompareOp(context->overlayCommandBuffer->vkCommandBuffer(), overlayDepthCompareOp);
@@ -834,9 +844,9 @@ void UIModuleContext::setOverlayDepthCompareOp(int depthCompareOp) {
 
 void UIModuleContext::setOverlayStencilFrontFunc(int compareOp, int reference, int compareMask) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayCompareOp[0] = static_cast<VkCompareOp>(compareOp);
     overlayReference[0] = reference;
@@ -851,9 +861,9 @@ void UIModuleContext::setOverlayStencilFrontFunc(int compareOp, int reference, i
 
 void UIModuleContext::setOverlayStencilBackFunc(int compareOp, int reference, int compareMask) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayCompareOp[1] = static_cast<VkCompareOp>(compareOp);
     overlayReference[1] = reference;
@@ -868,9 +878,9 @@ void UIModuleContext::setOverlayStencilBackFunc(int compareOp, int reference, in
 
 void UIModuleContext::setOverlayStencilFrontOp(int failOp, int depthFailOp, int passOp) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayFailOp[0] = static_cast<VkStencilOp>(failOp);
     overlayDepthFailOp[0] = static_cast<VkStencilOp>(depthFailOp);
@@ -881,9 +891,9 @@ void UIModuleContext::setOverlayStencilFrontOp(int failOp, int depthFailOp, int 
 
 void UIModuleContext::setOverlayStencilBackOp(int failOp, int depthFailOp, int passOp) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayFailOp[1] = static_cast<VkStencilOp>(failOp);
     overlayDepthFailOp[1] = static_cast<VkStencilOp>(depthFailOp);
@@ -894,9 +904,9 @@ void UIModuleContext::setOverlayStencilBackOp(int failOp, int depthFailOp, int p
 
 void UIModuleContext::setOverlayStencilFrontWriteMask(int writeMask) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayWriteMask[0] = writeMask;
     vkCmdSetStencilWriteMask(context->overlayCommandBuffer->vkCommandBuffer(), VK_STENCIL_FACE_FRONT_BIT,
@@ -905,9 +915,9 @@ void UIModuleContext::setOverlayStencilFrontWriteMask(int writeMask) {
 
 void UIModuleContext::setOverlayStencilBackWriteMask(int writeMask) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayWriteMask[1] = writeMask;
     vkCmdSetStencilWriteMask(context->overlayCommandBuffer->vkCommandBuffer(), VK_STENCIL_FACE_BACK_BIT,
@@ -916,9 +926,9 @@ void UIModuleContext::setOverlayStencilBackWriteMask(int writeMask) {
 
 void UIModuleContext::setOverlayLineWidth(float lineWidth) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayLineWidth = lineWidth;
     vkCmdSetLineWidth(context->overlayCommandBuffer->vkCommandBuffer(), overlayLineWidth);
@@ -926,9 +936,9 @@ void UIModuleContext::setOverlayLineWidth(float lineWidth) {
 
 void UIModuleContext::setOverlayPolygonMode(int polygonMode) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayPolygonMode = static_cast<VkPolygonMode>(polygonMode);
     vkCmdSetPolygonModeEXT(context->overlayCommandBuffer->vkCommandBuffer(), overlayPolygonMode);
@@ -937,9 +947,9 @@ void UIModuleContext::setOverlayPolygonMode(int polygonMode) {
 
 void UIModuleContext::setOverlayCullMode(int cullMode) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayCullMode = cullMode;
     vkCmdSetCullMode(context->overlayCommandBuffer->vkCommandBuffer(), overlayCullMode);
@@ -947,9 +957,9 @@ void UIModuleContext::setOverlayCullMode(int cullMode) {
 
 void UIModuleContext::setOverlayFrontFace(int frontFace) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayFrontFace = static_cast<VkFrontFace>(frontFace);
     vkCmdSetFrontFace(context->overlayCommandBuffer->vkCommandBuffer(), overlayFrontFace);
@@ -957,9 +967,9 @@ void UIModuleContext::setOverlayFrontFace(int frontFace) {
 
 void UIModuleContext::setOverlayDepthBiasEnable(int polygonMode, bool enable) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayDepthBiasEnable = enable;
     if (overlayDepthBiasEnable)
@@ -971,9 +981,9 @@ void UIModuleContext::setOverlayDepthBiasEnable(int polygonMode, bool enable) {
 
 void UIModuleContext::setOverlayDepthBias(float depthBiasSlopeFactor, float depthBiasConstantFactor) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayDepthBiasSlopeFactor[overlayPolygonMode] = depthBiasSlopeFactor;
     overlayDepthBiasConstantFactor[overlayPolygonMode] = depthBiasConstantFactor;
@@ -982,9 +992,9 @@ void UIModuleContext::setOverlayDepthBias(float depthBiasSlopeFactor, float dept
 
 void UIModuleContext::setOverlayClearColor(float red, float green, float blue, float alpha) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
 
@@ -1005,28 +1015,29 @@ void UIModuleContext::setOverlayClearColor(float red, float green, float blue, f
 
 void UIModuleContext::setOverlayClearDepth(double depth) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayClearDepth = depth;
 }
 
 void UIModuleContext::setOverlayClearStencil(int stencil) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayClearStencil = stencil;
 }
 
 void UIModuleContext::switchOverlayDraw() {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
+    if (!framework || !framework->isRunning()) return;
     auto module = uiModule.lock();
-
-    if (!framework->isRunning()) return;
+    if (!module) return;
 
     auto mainQueueIndex = context->physicalDevice->mainQueueIndex();
 
@@ -1094,10 +1105,11 @@ void UIModuleContext::switchOverlayDraw() {
 
 void UIModuleContext::switchOverlayPost() {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
+    if (!framework || !framework->isRunning()) return;
     auto module = uiModule.lock();
-
-    if (!framework->isRunning()) return;
+    if (!module) return;
 
     auto mainQueueIndex = context->physicalDevice->mainQueueIndex();
 
@@ -1163,9 +1175,9 @@ void UIModuleContext::switchOverlayPost() {
 
 void UIModuleContext::clearOverlayEntireColorAttachment() {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     switchOverlayDraw();
 
@@ -1190,9 +1202,9 @@ void UIModuleContext::clearOverlayEntireColorAttachment() {
 
 void UIModuleContext::clearOverlayEntireDepthStencilAttachment(int aspectMask) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     switchOverlayDraw();
 
@@ -1216,10 +1228,11 @@ void UIModuleContext::drawIndexed(std::shared_ptr<vk::DeviceLocalBuffer> vertexB
                                   uint32_t indexCount,
                                   VkIndexType indexType) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
+    if (!framework || !framework->isRunning()) return;
     auto module = uiModule.lock();
-
-    if (!framework->isRunning()) return;
+    if (!module) return;
 
     switchOverlayDraw();
 
@@ -1238,10 +1251,11 @@ void UIModuleContext::drawIndexed(std::shared_ptr<vk::DeviceLocalBuffer> vertexB
 
 void UIModuleContext::postBlur(int times) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
+    if (!framework || !framework->isRunning()) return;
     auto module = uiModule.lock();
-
-    if (!framework->isRunning()) return;
+    if (!module) return;
 
     int postID = Renderer::instance().buffers()->getPostID();
 
@@ -1359,9 +1373,9 @@ void UIModuleContext::postBlur(int times) {
 
 void UIModuleContext::begin(std::shared_ptr<UIModuleContext> lastContext) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     overlayMode = NONE;
 
@@ -1375,9 +1389,9 @@ void UIModuleContext::begin(std::shared_ptr<UIModuleContext> lastContext) {
 
 void UIModuleContext::end() {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     if (overlayMode == DRAW) {
         context->overlayCommandBuffer->endRenderPass();

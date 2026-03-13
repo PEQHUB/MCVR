@@ -1,8 +1,10 @@
 #version 460
 #define NUM_BINS 256
-const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+const vec3 LUMA = vec3(0.2627, 0.6780, 0.0593);
 
-layout(set = 0, binding = 0) uniform sampler2D uHdr;
+layout(set = 0, binding = 0) uniform sampler2D uHdr;           // DLSS output (display res) — used by tone_mapping.frag, not here
+layout(set = 0, binding = 3) uniform sampler2D uEmission;      // RT emission (layout compatibility)
+layout(set = 0, binding = 4) uniform sampler2D uHdrRenderRes;  // Pre-DLSS render-res HDR (metering source)
 
 layout(std430, set = 0, binding = 1) buffer HistogramBuffer {
     uint bins[NUM_BINS];
@@ -10,15 +12,15 @@ layout(std430, set = 0, binding = 1) buffer HistogramBuffer {
 histData;
 
 layout(push_constant) uniform PushB {
-    float log2Min;     
-    float log2Max;     
-    float epsilon;     
-    float lowPercent;  
-    float highPercent; 
-    float middleGrey;  
-    float dt;          
-    float speedUp;     
-    float speedDown;   
+    float log2Min;
+    float log2Max;
+    float epsilon;
+    float lowPercent;
+    float highPercent;
+    float middleGrey;
+    float dt;
+    float speedUp;
+    float speedDown;
     float brightAdaptBoost;
     float minExposure;
     float maxExposure;
@@ -53,13 +55,18 @@ void main() {
 
     barrier();
 
-    ivec2 size = textureSize(uHdr, 0);
+    // Read from render-res HDR (binding 4) — the pre-DLSS composed scene.
+    // This gives the histogram accurate scene brightness that DLSS-RR hasn't
+    // modified through neural upscaling. The trimmed percentile (10-90%) handles
+    // extreme outliers, and the iris cap in exposure.comp detects bright emitters
+    // via the 99.95th percentile with asymmetric temporal smoothing.
+    ivec2 size = textureSize(uHdrRenderRes, 0);
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 
     bool inside = (p.x >= 0) && (p.y >= 0) && (p.x < size.x) && (p.y < size.y);
 
     if (inside) {
-        vec3 hdr = texelFetch(uHdr, p, 0).rgb;
+        vec3 hdr = texelFetch(uHdrRenderRes, p, 0).rgb;
 
         float lum = dot(hdr, LUMA);
         float logLum = log2(max(lum, pc.epsilon));

@@ -33,6 +33,7 @@ bool SvgfModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLo
     if (images.size() != inputImageNum) return false;
 
     auto framework = framework_.lock();
+    if (!framework) return false;
     auto createImage = [&](uint32_t index) {
         images[index] = vk::DeviceLocalImage::create(
             framework->device(), framework->vma(), false, width_, height_, 1, formats[index],
@@ -77,6 +78,7 @@ bool SvgfModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::DeviceL
 
 void SvgfModule::build() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto worldPipeline = worldPipeline_.lock();
     uint32_t size = framework->swapchain()->imageCount();
 
@@ -147,6 +149,7 @@ void SvgfModuleContext::render() {
     if (!module || !module->denoiser()) return;
 
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto worldCommandBuffer = context->worldCommandBuffer;
 
     // Transition intermediate outputs to General layout before compute

@@ -212,7 +212,9 @@ WorldPipelineContext::WorldPipelineContext(std::shared_ptr<FrameworkContext> fra
 
 void WorldPipelineContext::render() {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
+    if (!framework) return;
     auto worldCommandBuffer = context->worldCommandBuffer;
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
 
@@ -483,8 +485,9 @@ PipelineContext::PipelineContext(std::shared_ptr<FrameworkContext> frameworkCont
 
 void PipelineContext::fuseWorld() {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
-    if (!framework->isRunning()) return;
+    if (!framework || !framework->isRunning()) return;
 
     uiModuleContext->end();
 }

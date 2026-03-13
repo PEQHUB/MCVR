@@ -235,6 +235,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     vulkan12Features.descriptorBindingStorageBufferUpdateAfterBind =
         supportedVulkan12.descriptorBindingStorageBufferUpdateAfterBind;
     vulkan12Features.shaderFloat16 = supportedVulkan12.shaderFloat16;
+    vulkan12Features.shaderBufferInt64Atomics = supportedVulkan12.shaderBufferInt64Atomics;
 
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures = {};
     accelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;

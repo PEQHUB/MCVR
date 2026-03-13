@@ -30,7 +30,7 @@ layout(set = 0, binding = 14, rg32f) uniform image2D directMomentsPrev;
 layout(set = 0, binding = 15, rg32f) uniform image2D directMomentsOut;
 
 float luminance(vec3 c) {
-    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+    return dot(c, vec3(0.2627, 0.6780, 0.0593));
 }
 
 vec3 neighborhoodClamp(ivec2 pixel, vec3 centerColor, ivec2 size) {

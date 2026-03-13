@@ -380,24 +380,13 @@ void Buffers::setAndUploadSkyUniformBuffer(vk::Data::SkyUBO &ubo) {
     ubo.betaR = glm::vec3(5.802e-6, 13.558e-6, 33.100e-6);
     ubo.betaM = glm::vec3(21.000e-6, 21.000e-6, 21.000e-6);
     ubo.minViewCos = 0.02;
-    ubo.sunRadiance = glm::vec3(16);
-    ubo.moonRadiance = glm::vec3(0.4, 0.5, 1);
+    // Physical sun illuminance: 100,000 lux (clear day noon)
+    // Physical moon illuminance: ~0.1 lux (full moon), blue-shifted
+    ubo.sunRadiance = glm::vec3(100000.0f);
+    ubo.moonRadiance = glm::vec3(0.05f, 0.06f, 0.12f);
 
-    // HDR radiance scale: only apply when HDR10 output is actually active.
-    // Scaling scene radiance by user peak/paper-white in SDR leads to clipping/behavior changes.
-    bool hdr10OutputActive = false;
-    if (framework && framework->swapchain()) {
-        hdr10OutputActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
-    }
-
-    float hdrRadianceScale = 1.0f;
-    if (hdr10OutputActive) {
-        float denom = (Renderer::options.hdrPaperWhiteNits > 0.0f) ? Renderer::options.hdrPaperWhiteNits : 1.0f;
-        hdrRadianceScale = Renderer::options.hdrPeakNits / denom;
-        ubo.sunRadiance *= hdrRadianceScale;
-        ubo.moonRadiance *= hdrRadianceScale;
-    }
-    ubo.hdrRadianceScale = hdrRadianceScale;
+    // hdrRadianceScale is no longer used — pre-exposure handles HDR/SDR unification
+    ubo.hdrRadianceScale = 1.0f;
 
     if (skyUniformBuffer_[context->frameIndex] == nullptr) {
         skyUniformBuffer_[context->frameIndex] =

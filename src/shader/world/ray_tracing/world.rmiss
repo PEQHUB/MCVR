@@ -6,6 +6,7 @@
 #include "../util/ray_payloads.glsl"
 #include "../util/util.glsl"
 #include "common/shared.hpp"
+#include "../util/colorspace.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 layout(set = 0, binding = 1) uniform sampler2D transLUT;
@@ -26,7 +27,8 @@ layout(set = 2, binding = 2) uniform SkyUniform {
 layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
 
 vec2 transmittanceUv(float r, float mu, SkyUBO ubo) {
-    float u = clamp(mu * 0.5 + 0.5, 0.0, 1.0);
+    // Clamp u away from exact 0/1 to avoid texel edge artifacts at mu = ±1 (horizon/zenith LUT edges).
+    float u = clamp(mu * 0.5 + 0.5, 0.001, 0.999);
     float v = clamp((r - ubo.Rg) / (ubo.Rt - ubo.Rg), 0.0, 1.0);
     return vec2(u, v);
 }
@@ -129,15 +131,16 @@ void main() {
         vec3 sunDir = normalize(skyUBO.sunDirection);
         vec3 moonDir = normalize(skyUBO.moonDirection);
 
-        // Fade sky brightness to black after sunset.
-        // sunDir.y is continuous and avoids hard transitions.
+        // Sun elevation fade for billboard rendering and rain blend.
         // 1.0 above ~+1 deg, 0.0 below ~-6 deg.
+        // Note: NOT applied to cubemap sky radiance — atmosphere physics handles day/night transition.
         float daySky = smoothstep(-0.10, 0.02, sunDir.y);
 
         float progress = clamp(skyUBO.rainGradient * skyUBO.envSky.y, 0.0, 1.0);
-        vec3 rainyRadiance = mix(vec3(0.0), vec3(0.1), smoothstep(-0.3, 0.3, sunDir.y));
-        vec3 sunnyRadiance = texture(skyFull, rayDir).rgb * skyUBO.envSky.x;
-        vec3 skyRadiance = mix(sunnyRadiance, rainyRadiance, progress) * daySky;
+        vec3 rainyRadianceNight = CS_BT709_TO_BT2020 * (skyUBO.moonRadiance * skyUBO.envCelestial.w * 0.3);
+        vec3 rainyRadiance = mix(rainyRadianceNight, CS_BT709_TO_BT2020 * vec3(0.1), daySky);
+        vec3 sunnyRadiance = CS_BT709_TO_BT2020 * (texture(skyFull, rayDir).rgb * skyUBO.envSky.x);
+        vec3 skyRadiance = mix(sunnyRadiance, rainyRadiance, progress);
         mainRay.radiance += skyRadiance * mainRay.throughput;
 
         if (worldUBO.skyType == 1) {
@@ -157,7 +160,10 @@ void main() {
                         float mu = clamp(dot(up, sunDir), -1.0, 1.0);
                         r = clamp(r, skyUBO.Rg, skyUBO.Rt);
                         vec3 T = sampleTransmittance(r, mu);
-                        vec3 sunRadiance = (sunSample.rgb * skyUBO.sunRadiance * skyUBO.envCelestial.z * T * sunSample.a) * daySky;
+                        // Fade sun disk when ray direction approaches or crosses the horizon,
+                        // preventing a hard cutoff line when the sun is low in the sky.
+                        float sunHorizonFade = smoothstep(-0.03, 0.01, rd.y);
+                        vec3 sunRadiance = CS_BT709_TO_BT2020 * ((sunSample.rgb * skyUBO.sunRadiance * skyUBO.envCelestial.z * T * sunSample.a) * daySky * sunHorizonFade);
                         mainRay.radiance += mix(sunRadiance, vec3(0.0), progress) * mainRay.throughput;
                     }
                 }
@@ -182,8 +188,8 @@ void main() {
                         float mu = clamp(dot(up, moonDir), -1.0, 1.0);
                         r = clamp(r, skyUBO.Rg, skyUBO.Rt);
                         vec3 T = sampleTransmittance(r, mu);
-                        // Scale down moon radiance by 95% for subtle physical moon
-                        vec3 moonRadiance = (moonSample.rgb * skyUBO.moonRadiance * skyUBO.envCelestial.w * T * moonSample.a) * 0.05;
+                        // Moon radiance is already physical (~0.1 lux) — no reduction needed
+                        vec3 moonRadiance = CS_BT709_TO_BT2020 * (moonSample.rgb * skyUBO.moonRadiance * skyUBO.envCelestial.w * T * moonSample.a);
                         mainRay.radiance += mix(moonRadiance, vec3(nightCompensite), progress) * mainRay.throughput;
                     }
                 } else {

@@ -128,6 +128,7 @@ bool UpscalerModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::Dev
 
 void UpscalerModule::build() {
     auto fw = framework_.lock();
+    if (!fw) return;
     auto wp = worldPipeline_.lock();
     uint32_t size = fw->swapchain()->imageCount();
 
@@ -199,6 +200,7 @@ void UpscalerModule::build() {
 
 void UpscalerModule::initDescriptorTables() {
     auto fw = framework_.lock();
+    if (!fw) return;
     uint32_t size = fw->swapchain()->imageCount();
     depthDescriptorTables_.resize(size);
 
@@ -243,6 +245,7 @@ void UpscalerModule::initDescriptorTables() {
 
 void UpscalerModule::initImages() {
     auto fw = framework_.lock();
+    if (!fw) return;
     uint32_t size = fw->swapchain()->imageCount();
 
     for (uint32_t i = 0; i < size; i++) {
@@ -260,6 +263,7 @@ void UpscalerModule::initImages() {
 
 void UpscalerModule::initPipeline() {
     auto fw = framework_.lock();
+    if (!fw) return;
     auto shader = vk::Shader::create(fw->device(), (Renderer::folderPath / "shaders/world/upscaler/linear_to_device_depth_comp.spv").string());
 
     depthConversionPipeline_ = vk::ComputePipelineBuilder{}
@@ -270,6 +274,7 @@ void UpscalerModule::initPipeline() {
 
 void UpscalerModule::initLanczosResources() {
     auto fw = framework_.lock();
+    if (!fw) return;
     uint32_t size = fw->swapchain()->imageCount();
 
     // Create 2x intermediate images for FSR3 output
@@ -402,6 +407,7 @@ UpscalerModuleContext::UpscalerModuleContext(std::shared_ptr<FrameworkContext> f
 
 bool UpscalerModuleContext::checkCameraReset(const glm::vec3 &cameraPos, const glm::vec3 &cameraDir) {
     auto module = upscalerModule_.lock();
+    if (!module) return false;
     if (module->firstFrame_) {
         module->firstFrame_ = false;
         module->lastCameraPos_ = cameraPos;
@@ -443,8 +449,11 @@ void UpscalerModuleContext::render() {
     if (!module) return;
 
     auto fwContext = frameworkContext.lock();
+    if (!fwContext) return;
+    auto fw = fwContext->framework.lock();
+    if (!fw) return;
     auto worldCommandBuffer = fwContext->worldCommandBuffer;
-    auto mainQueueIndex = fwContext->framework.lock()->physicalDevice()->mainQueueIndex();
+    auto mainQueueIndex = fw->physicalDevice()->mainQueueIndex();
 
     if (!module->fsr3Enabled_) {
         worldCommandBuffer->barriersBufferImage(

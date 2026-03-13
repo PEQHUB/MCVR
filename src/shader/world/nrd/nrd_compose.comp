@@ -50,5 +50,6 @@ void main() {
         result = diffuseTerm + specularTerm + emission;
     }
 
+    if (any(isnan(result))) result = vec3(0.0);
     imageStore(outImage, pixel, vec4(max(result, 0.0), 1.0));
 }

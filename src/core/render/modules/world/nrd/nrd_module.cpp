@@ -98,6 +98,7 @@ bool NrdModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::DeviceLo
 
 void NrdModule::build() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto worldPipeline = worldPipeline_.lock();
     uint32_t size = framework->swapchain()->imageCount();
 
@@ -200,8 +201,10 @@ void NrdModuleContext::render() {
     if (!module || !module->wrapper()) return;
 
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto worldCommandBuffer = context->worldCommandBuffer;
     auto framework = context->framework.lock();
+    if (!framework) return;
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
     auto buffers = Renderer::instance().buffers();
     auto worldUBO = static_cast<vk::Data::WorldUBO *>(buffers->worldUniformBuffer()->mappedPtr());
@@ -431,6 +434,7 @@ void NrdModuleContext::render() {
 
 void NrdModule::createCompositionPipeline(std::shared_ptr<vk::Device> device, uint32_t contextCount) {
     auto framework = framework_.lock();
+    if (!framework) return;
     composeDescriptorTables_.resize(contextCount);
 
     composeSamplers_[0] = vk::Sampler::create(device, VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR,
@@ -560,6 +564,7 @@ void NrdModule::createPreparePipeline(std::shared_ptr<vk::Device> device, uint32
     }
 
     auto framework = framework_.lock();
+    if (!framework) return;
     prepareDescriptorTables_.resize(contextCount);
     for (uint32_t i = 0; i < contextCount; ++i) {
         prepareDescriptorTables_[i] =

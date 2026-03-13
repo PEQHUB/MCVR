@@ -60,6 +60,7 @@ bool PostRenderModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::De
     if (images.size() != inputImageNum) return false;
 
     auto framework = framework_.lock();
+    if (!framework) return false;
     if (images[0] == nullptr) {
         ldrImages_[frameIndex] = images[0] = vk::DeviceLocalImage::create(
             framework->device(), framework->vma(), false, width_, height_, 1, formats[0],
@@ -98,7 +99,9 @@ void PostRenderModule::setAttributes(int attributeCount, std::vector<std::string
 
 void PostRenderModule::build() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto worldPipeline = worldPipeline_.lock();
+    if (!worldPipeline) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     initDescriptorTables();
@@ -124,6 +127,7 @@ void PostRenderModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
                                    std::shared_ptr<vk::DeviceLocalImage> image,
                                    int index) {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     uint32_t size = framework->swapchain()->imageCount();
     for (int i = 0; i < size; i++) {
@@ -137,6 +141,7 @@ void PostRenderModule::preClose() {}
 
 void PostRenderModule::initDescriptorTables() {
     auto framework = framework_.lock();
+    if (!framework) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     descriptorTables_.resize(size);
@@ -234,6 +239,7 @@ void PostRenderModule::initDescriptorTables() {
 
 void PostRenderModule::initImages() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto device = framework->device();
     auto vma = framework->vma();
     uint32_t size = framework->swapchain()->imageCount();
@@ -283,6 +289,7 @@ static inline vk::VertexFormat::PBRTriangle makeStarVertex(const glm ::vec3 dir,
 
 void PostRenderModule::initBuffers() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto device = framework->device();
     auto vma = framework->vma();
 
@@ -379,7 +386,9 @@ void PostRenderModule::initBuffers() {
 }
 
 void PostRenderModule::initRenderPass() {
-    auto device = framework_.lock()->device();
+    auto framework = framework_.lock();
+    if (!framework) return;
+    auto device = framework->device();
     worldLightMapRenderPass_ = vk::RenderPassBuilder{}
                                    .beginAttachmentDescription()
                                    .defineAttachmentDescription({
@@ -488,6 +497,7 @@ void PostRenderModule::initRenderPass() {
 
 void PostRenderModule::initFrameBuffers() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto device = framework->device();
     uint32_t size = framework->swapchain()->imageCount();
 
@@ -519,6 +529,7 @@ void PostRenderModule::initFrameBuffers() {
 
 void PostRenderModule::initPipeline() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto device = framework->device();
     std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
 
@@ -773,11 +784,14 @@ PostRenderModuleContext::PostRenderModuleContext(std::shared_ptr<FrameworkContex
 
 void PostRenderModuleContext::render() {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
+    if (!framework) return;
     auto worldCommandBuffer = context->worldCommandBuffer;
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
 
     auto module = postRenderModule.lock();
+    if (!module) return;
 
     auto buffers = Renderer::instance().buffers();
 

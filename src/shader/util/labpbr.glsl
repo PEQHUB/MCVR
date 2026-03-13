@@ -15,6 +15,12 @@ struct LabPBRMat {
     vec3 normal;
     float ao;
     float height;
+    // Principled BSDF extensions
+    float anisotropic;
+    float sheenWeight;
+    float sheenTint;
+    float coatWeight;
+    float coatRoughness;
 };
 
 vec3 CalculateF0(vec3 n, vec3 k) {
@@ -96,6 +102,13 @@ LabPBRMat convertLabPBRMaterial(vec4 texAlbedo, vec4 texSpecular, vec4 texNormal
         mat.albedo = texAlbedo.rgb;
         mat.f0 = texAlbedo.rgb;
     }
+
+    // Principled BSDF defaults (overridden by material block data if present)
+    mat.anisotropic = 0.0;
+    mat.sheenWeight = 0.0;
+    mat.sheenTint = 0.0;
+    mat.coatWeight = 0.0;
+    mat.coatRoughness = 0.0;
 
     mat.normal.xy = texNormal.xy * 2.0 - 1.0;
     mat.normal.z = sqrt(1.0 - dot(mat.normal.xy, mat.normal.xy));

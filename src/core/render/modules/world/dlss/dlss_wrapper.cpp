@@ -375,7 +375,8 @@ NVSDK_NGX_Result DlssRR::denoise(std::shared_ptr<vk::CommandBuffer> cmdBuffer,
                                  const glm::mat4 &modelView,
                                  const glm::mat4 &projection,
                                  float preExposure,
-                                 bool reset) {
+                                 bool reset,
+                                 float frameTimeDeltaMs) {
     assert(m_dlssdHandle);
 
     auto getResource = [this](DlssResource res) -> NVSDK_NGX_Resource_VK * {
@@ -391,11 +392,39 @@ NVSDK_NGX_Result DlssRR::denoise(std::shared_ptr<vk::CommandBuffer> cmdBuffer,
     evalParams.pInSpecularHitDistance = getResource(RESOURCE_SPECULAR_HITDISTANCE);
     evalParams.pInDiffuseRayDirectionHitDistance = getResource(RESOURCE_DIFFUSE_RAY_DIR_HIT_DIST);
     evalParams.pInSpecularRayDirectionHitDistance = getResource(RESOURCE_SPECULAR_RAY_DIR_HIT_DIST);
+    evalParams.pInMotionVectorsReflections = getResource(RESOURCE_REFLECTION_MV);
+    evalParams.pInAnimatedTextureMask = getResource(RESOURCE_ANIMATED_TEX_MASK);
+    // Extended optional guide buffers
+    evalParams.pInIsParticleMask = getResource(RESOURCE_PARTICLE_MASK);
+    if (getResource(RESOURCE_EMISSIVE))
+        evalParams.GBufferSurface.pInAttrib[NVSDK_NGX_GBUFFER_EMISSIVE] = getResource(RESOURCE_EMISSIVE);
+    evalParams.pInBiasCurrentColorMask = getResource(RESOURCE_BIAS_MASK);
+    evalParams.pInRayTracingHitDistance = getResource(RESOURCE_RT_HIT_DIST);
+    evalParams.pInMotionVectors3D = getResource(RESOURCE_MOTION_VECTORS_3D);
     evalParams.pInNormals = getResource(RESOURCE_NORMALROUGHNESS);
     evalParams.pInDepth = getResource(RESOURCE_LINEARDEPTH);
     evalParams.pInMotionVectors = getResource(RESOURCE_MOTIONVECTOR);
-    // Is this needed with NVSDK_NGX_DLSS_Roughness_Mode_Packed?
     evalParams.pInRoughness = getResource(RESOURCE_NORMALROUGHNESS);
+
+    // GBuffer surface attributes — fill all available slots for maximum DLSS-RR quality
+    evalParams.GBufferSurface.pInAttrib[NVSDK_NGX_GBUFFER_ALBEDO] = getResource(RESOURCE_DIFFUSE_ALBEDO);
+    evalParams.GBufferSurface.pInAttrib[NVSDK_NGX_GBUFFER_ROUGHNESS] = getResource(RESOURCE_NORMALROUGHNESS);
+    if (getResource(RESOURCE_GBUFFER_METALLIC))
+        evalParams.GBufferSurface.pInAttrib[NVSDK_NGX_GBUFFER_METALLIC] = getResource(RESOURCE_GBUFFER_METALLIC);
+    evalParams.GBufferSurface.pInAttrib[NVSDK_NGX_GBUFFER_SPECULAR] = getResource(RESOURCE_SPECULAR_ALBEDO);
+    evalParams.GBufferSurface.pInAttrib[NVSDK_NGX_GBUFFER_NORMALS] = getResource(RESOURCE_NORMALROUGHNESS);
+    if (getResource(RESOURCE_GBUFFER_SHADING_MODEL_ID))
+        evalParams.GBufferSurface.pInAttrib[NVSDK_NGX_GBUFFER_SHADINGMODELID] = getResource(RESOURCE_GBUFFER_SHADING_MODEL_ID);
+    if (getResource(RESOURCE_GBUFFER_MATERIAL_ID))
+        evalParams.GBufferSurface.pInAttrib[NVSDK_NGX_GBUFFER_MATERIALID] = getResource(RESOURCE_GBUFFER_MATERIAL_ID);
+    evalParams.GBufferSurface.pInAttrib[NVSDK_NGX_GBUFFER_SPECULAR_ALBEDO] = getResource(RESOURCE_SPECULAR_ALBEDO);
+    if (getResource(RESOURCE_REFLECTION_MV))
+        evalParams.GBufferSurface.pInAttrib[NVSDK_NGX_GBUFFER_SPECULAR_MVEC] = getResource(RESOURCE_REFLECTION_MV);
+
+    // Additional inputs — view-space position + high-res depth
+    if (getResource(RESOURCE_POSITION_VIEW_SPACE))
+        evalParams.pInPositionViewSpace = getResource(RESOURCE_POSITION_VIEW_SPACE);
+    evalParams.pInDepthHighRes = getResource(RESOURCE_LINEARDEPTH);
 
     evalParams.InJitterOffsetX = -jitter.x;
     evalParams.InJitterOffsetY = -jitter.y;
@@ -416,6 +445,9 @@ NVSDK_NGX_Result DlssRR::denoise(std::shared_ptr<vk::CommandBuffer> cmdBuffer,
     evalParams.InReset = reset;
     evalParams.InPreExposure = preExposure;
     evalParams.InExposureScale = 1.0f / preExposure;  // Undo pre-exposure in DLSS output
+    // Input is pre-exposed linear HDR — no engine tonemapper applied before DLSS-RR
+    evalParams.InToneMapperType = NVSDK_NGX_TONEMAPPER_STRING;  // = 0, means "none / custom"
+    evalParams.InFrameTimeDeltaInMsec = frameTimeDeltaMs;
 
     NGX_RETURN_ON_FAIL(
         NGX_VULKAN_EVALUATE_DLSSD_EXT(cmdBuffer->vkCommandBuffer(), m_dlssdHandle, m_ngxParams, &evalParams));

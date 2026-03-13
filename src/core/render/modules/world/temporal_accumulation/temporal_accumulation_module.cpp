@@ -25,6 +25,7 @@ bool TemporalAccumulationModule::setOrCreateInputImages(std::vector<std::shared_
     if (images.size() != inputImageNum) return false;
 
     auto framework = framework_.lock();
+    if (!framework) return false;
     if (images[0] == nullptr) {
         hdrNoisyImages_[frameIndex] = images[0] = vk::DeviceLocalImage::create(
             framework->device(), framework->vma(), false, width_, height_, 1, formats[0],
@@ -72,7 +73,9 @@ void TemporalAccumulationModule::setAttributes(int attributeCount, std::vector<s
 
 void TemporalAccumulationModule::build() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto worldPipeline = worldPipeline_.lock();
+    if (!worldPipeline) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     initDescriptorTables();
@@ -101,6 +104,7 @@ void TemporalAccumulationModule::preClose() {}
 
 void TemporalAccumulationModule::initDescriptorTables() {
     auto framework = framework_.lock();
+    if (!framework) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     descriptorTables_.resize(size);
@@ -155,6 +159,7 @@ void TemporalAccumulationModule::initDescriptorTables() {
 
 void TemporalAccumulationModule::initImages() {
     auto framework = framework_.lock();
+    if (!framework) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     accumulatedRadianceImage_ = vk::DeviceLocalImage::create(
@@ -182,6 +187,8 @@ void TemporalAccumulationModule::initImages() {
 }
 
 void TemporalAccumulationModule::initRenderPass() {
+    auto framework = framework_.lock();
+    if (!framework) return;
     renderPass_ = vk::RenderPassBuilder{}
                       .beginAttachmentDescription()
                       .defineAttachmentDescription({
@@ -219,11 +226,12 @@ void TemporalAccumulationModule::initRenderPass() {
                           .colorAttachmentIndices = {0},
                       })
                       .endSubpassDescription()
-                      .build(framework_.lock()->device());
+                      .build(framework->device());
 }
 
 void TemporalAccumulationModule::initFrameBuffers() {
     auto framework = framework_.lock();
+    if (!framework) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     framebuffers_.resize(size);
@@ -240,6 +248,7 @@ void TemporalAccumulationModule::initFrameBuffers() {
 
 void TemporalAccumulationModule::initPipeline() {
     auto framework = framework_.lock();
+    if (!framework) return;
     std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
     vertShader_ =
         vk::Shader::create(framework->device(), (shaderPath / "world/temporal_accumulation/tmp_acc_vert.spv").string());
@@ -301,11 +310,14 @@ TemporalAccumulationModuleContext::TemporalAccumulationModuleContext(
 
 void TemporalAccumulationModuleContext::render() {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
+    if (!framework) return;
     auto worldCommandBuffer = context->worldCommandBuffer;
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
 
     auto module = temporalAccumulationModule.lock();
+    if (!module) return;
 
     TemporalAccumulationPushConstant pc{};
     pc.alpha = module->alpha_;

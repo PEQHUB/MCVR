@@ -1,6 +1,7 @@
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 
 #include "core/render/buffers.hpp"
+#include "core/render/lights.hpp"
 #include "core/render/modules/world/ray_tracing/submodules/atmosphere.hpp"
 #include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
 #include "core/render/pipeline.hpp"
@@ -30,6 +31,16 @@ void RayTracingModule::init(std::shared_ptr<Framework> framework, std::shared_pt
     directLightDepthImages_.resize(size);
     diffuseRayDirHitDistImages_.resize(size);
     specularRayDirHitDistImages_.resize(size);
+    reflectionMvImages_.resize(size);
+    animatedTexMaskImages_.resize(size);
+    particleMaskImages_.resize(size);
+    biasMaskImages_.resize(size);
+    rtHitDistImages_.resize(size);
+    motionVectors3DImages_.resize(size);
+    gbufferMetallicImages_.resize(size);
+    gbufferShadingModelIdImages_.resize(size);
+    gbufferMaterialIdImages_.resize(size);
+    positionViewSpaceImages_.resize(size);
 
     atmosphere_ = Atmosphere::create(framework, shared_from_this());
     worldPrepare_ = WorldPrepare::create(framework, shared_from_this());
@@ -61,6 +72,7 @@ bool RayTracingModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::D
     if (!set) { return false; }
 
     auto framework = framework_.lock();
+    if (!framework) return false;
     for (int i = 0; i < images.size(); i++) {
         if (images[i] == nullptr) {
             images[i] = vk::DeviceLocalImage::create(
@@ -85,6 +97,16 @@ bool RayTracingModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::D
     directLightDepthImages_[frameIndex] = images[13];
     diffuseRayDirHitDistImages_[frameIndex] = images[14];
     specularRayDirHitDistImages_[frameIndex] = images[15];
+    reflectionMvImages_[frameIndex] = images[16];
+    animatedTexMaskImages_[frameIndex] = images[17];
+    particleMaskImages_[frameIndex] = images[18];
+    biasMaskImages_[frameIndex] = images[19];
+    rtHitDistImages_[frameIndex] = images[20];
+    motionVectors3DImages_[frameIndex] = images[21];
+    gbufferMetallicImages_[frameIndex] = images[22];
+    gbufferShadingModelIdImages_[frameIndex] = images[23];
+    gbufferMaterialIdImages_[frameIndex] = images[24];
+    positionViewSpaceImages_[frameIndex] = images[25];
 
     // Create reservoir images for ReSTIR DI (only once, shared across frames)
     if (!reservoirImages_[0]) {
@@ -130,7 +152,9 @@ void RayTracingModule::build() {
     worldPrepare_->build();
 
     auto framework = framework_.lock();
+    if (!framework) return;
     auto worldPipeline = worldPipeline_.lock();
+    if (!worldPipeline) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     contexts_.resize(size);
@@ -141,6 +165,10 @@ void RayTracingModule::build() {
     initSBT();
     initSpatialPipeline();
     initClusterPipeline();
+    sharcCapacity_ = 1u << static_cast<uint32_t>(Renderer::options.sharcCapacityExponent);
+    initSharcBuffers();
+    initSharcUpdatePipeline();
+    initSharcResolvePipeline();
 
     for (int i = 0; i < size; i++) {
         contexts_[i] =
@@ -162,6 +190,7 @@ void RayTracingModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
                                    std::shared_ptr<vk::DeviceLocalImage> image,
                                    int index) {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     uint32_t size = framework->swapchain()->imageCount();
     for (int i = 0; i < size; i++) {
@@ -183,11 +212,14 @@ void RayTracingModule::preClose() {
         if (clusterPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, clusterPipelineLayout_, nullptr);
         if (clusterDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, clusterDescSetLayout_, nullptr);
         if (clusterDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, clusterDescPool_, nullptr);
+        if (sharcResolvePipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, sharcResolvePipeline_, nullptr);
+        if (sharcResolvePipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, sharcResolvePipelineLayout_, nullptr);
     }
 }
 
 void RayTracingModule::initDescriptorTables() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     uint32_t size = framework->swapchain()->imageCount();
     rayTracingDescriptorTables_.resize(size);
@@ -474,6 +506,66 @@ void RayTracingModule::initDescriptorTables() {
                     .descriptorCount = 1,
                     .stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
                 })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 21, // binding 21: reflectionMvImage (DLSS-RR specular reflection MVs)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 22, // binding 22: animTexMaskImage (DLSS-RR animated texture mask)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 23, // binding 23: particleMaskImage (DLSS-RR transparent/refractive surface mask)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 24, // binding 24: biasMaskImage (DLSS-RR bias current color mask)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 25, // binding 25: rtHitDistImage (DLSS-RR per-pixel noise level hint)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 26, // binding 26: motionVectors3DImage (DLSS-RR world-space 3D velocity)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 27, // binding 27: gbufferMetallicImage (GBuffer metallic factor)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 28, // binding 28: gbufferShadingModelIdImage (GBuffer shading model ID)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 29, // binding 29: gbufferMaterialIdImage (GBuffer material ID)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 30, // binding 30: positionViewSpaceImage (view-space hit position)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
                 .definePushConstant({
@@ -489,6 +581,7 @@ void RayTracingModule::initDescriptorTables() {
 
 void RayTracingModule::initImages() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     uint32_t size = framework->swapchain()->imageCount();
 
@@ -515,6 +608,25 @@ void RayTracingModule::initImages() {
         rayTracingDescriptorTables_[i]->bindImage(directLightDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 13);
         rayTracingDescriptorTables_[i]->bindImage(diffuseRayDirHitDistImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 16);
         rayTracingDescriptorTables_[i]->bindImage(specularRayDirHitDistImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 17);
+        rayTracingDescriptorTables_[i]->bindImage(reflectionMvImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 21);
+        if (animatedTexMaskImages_[i])
+            rayTracingDescriptorTables_[i]->bindImage(animatedTexMaskImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 22);
+        if (particleMaskImages_[i])
+            rayTracingDescriptorTables_[i]->bindImage(particleMaskImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 23);
+        if (biasMaskImages_[i])
+            rayTracingDescriptorTables_[i]->bindImage(biasMaskImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 24);
+        if (rtHitDistImages_[i])
+            rayTracingDescriptorTables_[i]->bindImage(rtHitDistImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 25);
+        if (motionVectors3DImages_[i])
+            rayTracingDescriptorTables_[i]->bindImage(motionVectors3DImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 26);
+        if (gbufferMetallicImages_[i])
+            rayTracingDescriptorTables_[i]->bindImage(gbufferMetallicImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 27);
+        if (gbufferShadingModelIdImages_[i])
+            rayTracingDescriptorTables_[i]->bindImage(gbufferShadingModelIdImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 28);
+        if (gbufferMaterialIdImages_[i])
+            rayTracingDescriptorTables_[i]->bindImage(gbufferMaterialIdImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 29);
+        if (positionViewSpaceImages_[i])
+            rayTracingDescriptorTables_[i]->bindImage(positionViewSpaceImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 30);
 
         // ReSTIR DI reservoir images (initial binding, rebound each frame in render)
         if (reservoirImages_[0]) {
@@ -522,10 +634,14 @@ void RayTracingModule::initImages() {
             rayTracingDescriptorTables_[i]->bindImage(reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL, 3, 15);
         }
     }
+
+    // Publish emission images so tone mapping can add them back after DLSS-RR denoising
+    Renderer::emissionImages = firstHitBaseEmissionImages_;
 }
 
 void RayTracingModule::initPipeline() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto device = framework->device();
 
     std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
@@ -624,6 +740,7 @@ void RayTracingModule::initPipeline() {
 
 void RayTracingModule::initSBT() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     sbts_.resize(framework->swapchain()->imageCount());
     for (int i = 0; i < framework->swapchain()->imageCount(); i++) {
@@ -634,6 +751,7 @@ void RayTracingModule::initSBT() {
 
 void RayTracingModule::initSpatialPipeline() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto device = framework->device();
     VkDevice dev = device->vkDevice();
     uint32_t size = framework->swapchain()->imageCount();
@@ -698,6 +816,7 @@ void RayTracingModule::initSpatialPipeline() {
 
 void RayTracingModule::initClusterPipeline() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto device = framework->device();
     VkDevice dev = device->vkDevice();
     uint32_t size = framework->swapchain()->imageCount();
@@ -766,6 +885,150 @@ void RayTracingModule::initClusterPipeline() {
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 }
 
+void RayTracingModule::initSharcBuffers() {
+    auto framework = framework_.lock();
+    if (!framework) return;
+
+    VkBufferUsageFlags sharcUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+        | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+    sharcHashEntries_ = vk::DeviceLocalBuffer::create(
+        framework->vma(), framework->device(), sharcCapacity_ * 8, sharcUsage);
+    sharcAccumulation_ = vk::DeviceLocalBuffer::create(
+        framework->vma(), framework->device(), sharcCapacity_ * 16, sharcUsage);
+    sharcResolved_ = vk::DeviceLocalBuffer::create(
+        framework->vma(), framework->device(), sharcCapacity_ * 16, sharcUsage);
+
+    sharcBuffersInitialized_ = false; // Will zero-fill on first use
+}
+
+void RayTracingModule::initSharcUpdatePipeline() {
+    auto framework = framework_.lock();
+    if (!framework) return;
+    auto device = framework->device();
+
+    std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
+    sharcUpdateRayGenShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/sharc_update_rgen.spv").string());
+    if (!sharcUpdateRayGenShader_) {
+        std::cerr << "[SHARC] Failed to load sharc_update_rgen.spv" << std::endl;
+        return;
+    }
+
+    // Build update RT pipeline with same CHS/AHS/miss shaders as main pipeline
+    sharcUpdatePipeline_ =
+        vk::RayTracingPipelineBuilder{}
+            .beginShaderStage()
+            .defineShaderStage(sharcUpdateRayGenShader_, VK_SHADER_STAGE_RAYGEN_BIT_KHR)                     // 0 (update rgen)
+            .defineShaderStage(worldRayMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                            // 1
+            .defineShaderStage(handRayMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                             // 2
+            .defineShaderStage(shadowRayMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                           // 3
+            .defineShaderStage(worldSolidTransparentClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)  // 4
+            .defineShaderStage(worldNoReflectClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)         // 5
+            .defineShaderStage(worldCloudClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)             // 6
+            .defineShaderStage(worldTransparentAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)               // 7
+            .defineShaderStage(worldNoReflectAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                 // 8
+            .defineShaderStage(worldCloudAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                     // 9
+            .defineShaderStage(shadowRayClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)              // 10
+            .defineShaderStage(shadowAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                         // 11
+            .defineShaderStage(boatWaterMaskClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)          // 12
+            .defineShaderStage(boatWaterMaskAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                  // 13
+            .defineShaderStage(endPortalClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)              // 14
+            .defineShaderStage(endPortalAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                      // 15
+            .defineShaderStage(endGatewayClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)             // 16
+            .defineShaderStage(endGatewayAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                     // 17
+            .defineShaderStage(pointLightShadowMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                    // 18
+            .endShaderStage()
+            .beginShaderGroup()
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 0, VK_SHADER_UNUSED_KHR,
+                               VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR)
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 1, VK_SHADER_UNUSED_KHR,
+                               VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR)
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 2, VK_SHADER_UNUSED_KHR,
+                               VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR)
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 3, VK_SHADER_UNUSED_KHR,
+                               VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR)
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 18, VK_SHADER_UNUSED_KHR,
+                               VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR) // point light shadow miss
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 10, 11,
+                               VK_SHADER_UNUSED_KHR) // shadow
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 4,
+                               VK_SHADER_UNUSED_KHR,
+                               VK_SHADER_UNUSED_KHR) // world solid
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 4, 7,
+                               VK_SHADER_UNUSED_KHR) // world transparent
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 5, 8,
+                               VK_SHADER_UNUSED_KHR) // world no reflect
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 6, 9,
+                               VK_SHADER_UNUSED_KHR) // world cloud
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 12, 13,
+                               VK_SHADER_UNUSED_KHR) // boat water mask
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 14, 15,
+                               VK_SHADER_UNUSED_KHR) // end portal
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 16, 17,
+                               VK_SHADER_UNUSED_KHR) // end gateway
+            .endShaderGroup()
+            .definePipelineLayout(rayTracingDescriptorTables_[0])
+            .build(device);
+
+    if (!sharcUpdatePipeline_) {
+        std::cerr << "[SHARC] Failed to create update RT pipeline" << std::endl;
+        return;
+    }
+
+    // Create SBTs for the update pipeline (same structure as main: 4 miss, 8 hit groups)
+    sharcUpdateSbts_.resize(framework->swapchain()->imageCount());
+    for (int i = 0; i < framework->swapchain()->imageCount(); i++) {
+        sharcUpdateSbts_[i] = vk::SBT::create(framework->physicalDevice(), framework->device(), framework->vma(),
+                                               sharcUpdatePipeline_, 4, 8);
+    }
+}
+
+void RayTracingModule::initSharcResolvePipeline() {
+    auto framework = framework_.lock();
+    if (!framework) return;
+    auto device = framework->device();
+    VkDevice dev = device->vkDevice();
+
+    // Destroy existing handles before recreating (prevents resource leak on rebuild)
+    if (sharcResolvePipeline_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(dev, sharcResolvePipeline_, nullptr);
+        sharcResolvePipeline_ = VK_NULL_HANDLE;
+    }
+    if (sharcResolvePipelineLayout_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(dev, sharcResolvePipelineLayout_, nullptr);
+        sharcResolvePipelineLayout_ = VK_NULL_HANDLE;
+    }
+
+    std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
+    sharcResolveShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/sharc_resolve_comp.spv").string());
+    if (!sharcResolveShader_) {
+        std::cerr << "[SHARC] Failed to load sharc_resolve_comp.spv" << std::endl;
+        return;
+    }
+
+    // Pipeline layout with push constant only (no descriptor sets — uses BDA)
+    VkPushConstantRange pushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 76}; // 19 fields × 4 bytes (with uint64_t alignment)
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pipelineLayoutInfo.setLayoutCount = 0;
+    pipelineLayoutInfo.pSetLayouts = nullptr;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+    vkCreatePipelineLayout(dev, &pipelineLayoutInfo, nullptr, &sharcResolvePipelineLayout_);
+
+    VkComputePipelineCreateInfo pipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipelineInfo.stage.module = sharcResolveShader_->vkShaderModule();
+    pipelineInfo.stage.pName = "main";
+    pipelineInfo.layout = sharcResolvePipelineLayout_;
+    VkResult result = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &sharcResolvePipeline_);
+    if (result != VK_SUCCESS) {
+        std::cerr << "[SHARC] Failed to create resolve compute pipeline: " << result << std::endl;
+        sharcResolvePipeline_ = VK_NULL_HANDLE;
+    }
+}
+
 RayTracingModuleContext::RayTracingModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
                                                  std::shared_ptr<WorldPipelineContext> worldPipelineContext,
                                                  std::shared_ptr<RayTracingModule> rayTracingModule)
@@ -773,6 +1036,8 @@ RayTracingModuleContext::RayTracingModuleContext(std::shared_ptr<FrameworkContex
       rayTracingModule(rayTracingModule),
       rayTracingDescriptorTable(rayTracingModule->rayTracingDescriptorTables_[frameworkContext->frameIndex]),
       sbt(rayTracingModule->sbts_[frameworkContext->frameIndex]),
+      sharcUpdateSbt(frameworkContext->frameIndex < rayTracingModule->sharcUpdateSbts_.size()
+                     ? rayTracingModule->sharcUpdateSbts_[frameworkContext->frameIndex] : nullptr),
       hdrNoisyOutputImage(rayTracingModule->hdrNoisyOutputImages_[frameworkContext->frameIndex]),
       diffuseAlbedoImage(rayTracingModule->diffuseAlbedoImages_[frameworkContext->frameIndex]),
       specularAlbedoImage(rayTracingModule->specularAlbedoImages_[frameworkContext->frameIndex]),
@@ -804,11 +1069,14 @@ void RayTracingModuleContext::render() {
     }
 
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
+    if (!framework) return;
     auto worldCommandBuffer = context->worldCommandBuffer;
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
 
     auto module = rayTracingModule.lock();
+    if (!module) return;
 
     rayTracingDescriptorTable->bindAS(worldPrepareContext->tlas, 1, 0);
     rayTracingDescriptorTable->bindBuffer(worldPrepareContext->blasOffsetsBuffer, 1, 1);
@@ -830,15 +1098,24 @@ void RayTracingModuleContext::render() {
     rayTracingDescriptorTable->bindBuffer(buffers->lastWorldUniformBuffer(), 2, 1);
     rayTracingDescriptorTable->bindBuffer(buffers->skyUniformBuffer(), 2, 2);
 
-    // ReSTIR DI: fixed-role reservoir binding
-    // Binding 14 = reservoir[0] (CHS writes temporal output)
-    // Binding 15 = reservoir[1] when spatial enabled (CHS reads spatial output)
-    //            = reservoir[0] when spatial disabled (CHS self-reads temporal, safe per-pixel)
+    // ReSTIR DI: reservoir image binding
+    // Binding 14 = CHS write (temporal output)
+    // Binding 15 = CHS read (previous frame source)
     if (module->reservoirImages_[0]) {
         bool spatialEnabled = Renderer::options.restirEnabled && Renderer::options.restirSpatialEnabled && module->spatialPipeline_ != VK_NULL_HANDLE;
-        rayTracingDescriptorTable->bindImage(module->reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL, 3, 14);
-        rayTracingDescriptorTable->bindImage(
-            module->reservoirImages_[spatialEnabled ? 1 : 0], VK_IMAGE_LAYOUT_GENERAL, 3, 15);
+        if (spatialEnabled) {
+            // Spatial path: CHS writes [0], spatial transforms [0]→[1], next CHS reads [1]
+            // No self-aliasing: CHS reads [1] and writes [0]
+            rayTracingDescriptorTable->bindImage(module->reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL, 3, 14);
+            rayTracingDescriptorTable->bindImage(module->reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL, 3, 15);
+        } else {
+            // No spatial: ping-pong to prevent read-write race on same image
+            uint32_t frameIdx = context->frameIndex;
+            int writeIdx = frameIdx & 1;
+            int readIdx  = 1 - writeIdx;
+            rayTracingDescriptorTable->bindImage(module->reservoirImages_[writeIdx], VK_IMAGE_LAYOUT_GENERAL, 3, 14);
+            rayTracingDescriptorTable->bindImage(module->reservoirImages_[readIdx], VK_IMAGE_LAYOUT_GENERAL, 3, 15);
+        }
     }
 
     // Bounce ReSTIR DI: per-bounce reservoir images (bindings 18-20)
@@ -855,7 +1132,8 @@ void RayTracingModuleContext::render() {
                        | (Renderer::options.areaLightsEnabled ? 2 : 0)
                        | (Renderer::options.restirEnabled ? 4 : 0)
                        | (Renderer::options.restirSimplifiedBRDF ? 8 : 0)
-                       | (Renderer::options.restirBounceEnabled ? 16 : 0);
+                       | (Renderer::options.restirBounceEnabled ? 16 : 0)
+                       | (Renderer::options.sharcEnabled ? 32 : 0);
     pushConstant.areaLightCount = worldPrepareContext->areaLightCount;
     pushConstant.shadowSoftness = Renderer::options.shadowSoftness;
     pushConstant.risCandidates = Renderer::options.restirCandidates;
@@ -863,7 +1141,34 @@ void RayTracingModuleContext::render() {
     pushConstant.wClamp = Renderer::options.restirWClamp;
     // Only apply pre-exposure when DLSS-RR is active (it undoes it via InExposureScale).
     // When DLSS-RR is off, tone mapper would see double exposure (preExposure × autoExposure).
-    pushConstant.preExposure = (Renderer::options.denoiserMode == 1) ? Renderer::preExposure : 1.0f;
+    // DIAGNOSTIC: Force preExposure=1.0 to test if DLSS-RR works without pre-exposure scaling.
+    // TODO: Remove this diagnostic line once root cause is found.
+    pushConstant.preExposure = 1.0f;
+    // pushConstant.preExposure = (Renderer::options.denoiserMode == 1) ? Renderer::preExposure : 1.0f;
+
+    // POM
+    pushConstant.pomHeightScale  = Renderer::options.pomEnabled ? Renderer::options.pomHeightScale : 0.0f;
+    pushConstant.pomSteps        = Renderer::options.pomSteps;
+    pushConstant.pomRefinement   = Renderer::options.pomRefinement;
+    pushConstant.pomFadeDistance = Renderer::options.pomFadeDistance;
+
+    // SHARC radiance cache
+    if (Renderer::options.sharcEnabled && module->sharcHashEntries_) {
+        auto worldUBO = static_cast<vk::Data::WorldUBO *>(buffers->worldUniformBuffer()->mappedPtr());
+        pushConstant.sharcHashEntries = module->sharcHashEntries_->bufferAddress();
+        pushConstant.sharcAccumulation = module->sharcAccumulation_->bufferAddress();
+        pushConstant.sharcResolved = module->sharcResolved_->bufferAddress();
+        pushConstant.sharcCameraX = static_cast<float>(worldUBO->cameraPos.x);
+        pushConstant.sharcCameraY = static_cast<float>(worldUBO->cameraPos.y);
+        pushConstant.sharcCameraZ = static_cast<float>(worldUBO->cameraPos.z);
+        pushConstant.sharcSceneScale = Renderer::options.sharcSceneScale;
+        pushConstant.sharcCapacity = module->sharcCapacity_;
+        pushConstant.sharcRadianceScale = 1e3f;
+        pushConstant.sharcFrameIndex = module->sharcFrameIndex_;
+        pushConstant.sharcRoughnessThreshold = Renderer::options.sharcRoughnessThreshold;
+        pushConstant.sharcUpdateBlockSize = Renderer::options.sharcUpdateBlockSize;
+        pushConstant.sharcUpdateBounces = Renderer::options.sharcUpdateBounces;
+    }
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), rayTracingDescriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
@@ -997,6 +1302,153 @@ void RayTracingModuleContext::render() {
             0, 1, &clusterBarrier, 0, nullptr, 0, nullptr);
     }
 
+    // Reset SHARC buffers when disabled so re-enable starts fresh (prevents stale cache artifacts)
+    if (!Renderer::options.sharcEnabled && module->sharcBuffersInitialized_) {
+        module->sharcBuffersInitialized_ = false;
+        module->sharcFrameIndex_ = 0;
+    }
+
+    // Check if SHARC capacity exponent changed — reallocate buffers if needed
+    // Must wait for GPU idle before freeing old buffers (previous frames reference them via BDA)
+    {
+        uint32_t desiredCapacity = 1u << static_cast<uint32_t>(
+            std::max(18, std::min(26, Renderer::options.sharcCapacityExponent)));
+        if (desiredCapacity != module->sharcCapacity_ && module->sharcHashEntries_) {
+            auto fw = module->framework_.lock();
+            if (fw) {
+                // Drain GPU — old buffers are still referenced by in-flight command buffers
+                vkDeviceWaitIdle(fw->device()->vkDevice());
+
+                VkBufferUsageFlags sharcUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                    | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                    | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                module->sharcCapacity_ = desiredCapacity;
+                module->sharcHashEntries_ = vk::DeviceLocalBuffer::create(
+                    fw->vma(), fw->device(), desiredCapacity * 8, sharcUsage);
+                module->sharcAccumulation_ = vk::DeviceLocalBuffer::create(
+                    fw->vma(), fw->device(), desiredCapacity * 16, sharcUsage);
+                module->sharcResolved_ = vk::DeviceLocalBuffer::create(
+                    fw->vma(), fw->device(), desiredCapacity * 16, sharcUsage);
+                module->sharcBuffersInitialized_ = false;
+                module->sharcFrameIndex_ = 0;
+                // Update push constant BDAs for this frame
+                pushConstant.sharcHashEntries = module->sharcHashEntries_->bufferAddress();
+                pushConstant.sharcAccumulation = module->sharcAccumulation_->bufferAddress();
+                pushConstant.sharcResolved = module->sharcResolved_->bufferAddress();
+                pushConstant.sharcCapacity = desiredCapacity;
+            }
+        }
+    }
+
+    // SHARC 3-pass dispatch: update → resolve → main render (with cache query)
+    if (Renderer::options.sharcEnabled && module->sharcUpdatePipeline_ && module->sharcResolvePipeline_ != VK_NULL_HANDLE
+        && module->sharcHashEntries_) {
+        VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
+
+        // Zero-fill SHARC buffers on first use
+        if (!module->sharcBuffersInitialized_) {
+            vkCmdFillBuffer(cmd, module->sharcHashEntries_->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
+            vkCmdFillBuffer(cmd, module->sharcAccumulation_->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
+            vkCmdFillBuffer(cmd, module->sharcResolved_->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
+
+            VkMemoryBarrier fillBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            fillBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            fillBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                0, 1, &fillBarrier, 0, nullptr, 0, nullptr);
+            module->sharcBuffersInitialized_ = true;
+        }
+
+        // Pass 1: SHARC Update (sparse RT — populates cache with bounce radiance)
+        // Disable ReSTIR in update pass to prevent CHS reservoir writes.
+        // Area lights (bit 1) stay ENABLED — CHS fallback paths (deterministic top-2 shadowed
+        // for primary, unshadowed 8-light accumulation for bounce) do NOT write reservoirs.
+        RayTracingPushConstant updatePC = pushConstant;
+        updatePC.flags &= ~(4 | 16); // Clear restir (4), restir bounce (16) — keep area lights
+        vkCmdPushConstants(cmd, rayTracingDescriptorTable->vkPipelineLayout(),
+                           VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                               VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
+                               VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
+                           0, sizeof(RayTracingPushConstant), &updatePC);
+
+        int ds = std::max(1, Renderer::options.sharcDownscale);
+        worldCommandBuffer->bindDescriptorTable(rayTracingDescriptorTable, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
+            ->bindRTPipeline(module->sharcUpdatePipeline_)
+            ->raytracing(sharcUpdateSbt, hdrNoisyOutputImage->width() / ds, hdrNoisyOutputImage->height() / ds, 1);
+
+        // Barrier: update RT writes → resolve compute reads
+        VkMemoryBarrier updateBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        updateBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        updateBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &updateBarrier, 0, nullptr, 0, nullptr);
+
+        // Pass 2: SHARC Resolve (compute — temporal blend + stale eviction)
+        struct SharcResolvePushConstant {
+            float cameraPositionPrevX, cameraPositionPrevY, cameraPositionPrevZ;
+            uint32_t accumulationFrameNum;
+            uint32_t staleFrameNumMax;
+            uint32_t frameIndex;
+            uint64_t hashEntriesBDA;
+            uint64_t accumulationBDA;
+            uint64_t resolvedBDA;
+            float cameraX, cameraY, cameraZ;
+            float sceneScale;
+            uint32_t capacity;
+            float radianceScale;
+            uint32_t enableAntiFirefly;
+        } resolvePC = {};
+
+        resolvePC.cameraPositionPrevX = module->sharcPrevCameraX_;
+        resolvePC.cameraPositionPrevY = module->sharcPrevCameraY_;
+        resolvePC.cameraPositionPrevZ = module->sharcPrevCameraZ_;
+        resolvePC.accumulationFrameNum = static_cast<uint32_t>(Renderer::options.sharcAccumulationFrames);
+        resolvePC.staleFrameNumMax = static_cast<uint32_t>(Renderer::options.sharcStaleFrames);
+        resolvePC.frameIndex = module->sharcFrameIndex_;
+        resolvePC.hashEntriesBDA = module->sharcHashEntries_->bufferAddress();
+        resolvePC.accumulationBDA = module->sharcAccumulation_->bufferAddress();
+        resolvePC.resolvedBDA = module->sharcResolved_->bufferAddress();
+        resolvePC.cameraX = pushConstant.sharcCameraX;
+        resolvePC.cameraY = pushConstant.sharcCameraY;
+        resolvePC.cameraZ = pushConstant.sharcCameraZ;
+        resolvePC.sceneScale = Renderer::options.sharcSceneScale;
+        resolvePC.capacity = module->sharcCapacity_;
+        resolvePC.radianceScale = 1e3f;
+        resolvePC.enableAntiFirefly = 1;
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->sharcResolvePipeline_);
+        vkCmdPushConstants(cmd, module->sharcResolvePipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, 76, &resolvePC);
+        vkCmdDispatch(cmd, (module->sharcCapacity_ + 63) / 64, 1, 1);
+
+        // Barrier: resolve compute writes → main RT reads
+        VkMemoryBarrier resolveBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        resolveBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        resolveBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            0, 1, &resolveBarrier, 0, nullptr, 0, nullptr);
+
+        // Update tracking for next frame
+        module->sharcPrevCameraX_ = pushConstant.sharcCameraX;
+        module->sharcPrevCameraY_ = pushConstant.sharcCameraY;
+        module->sharcPrevCameraZ_ = pushConstant.sharcCameraZ;
+        module->sharcFrameIndex_++;
+    }
+
+    // Re-push RT push constants (may have been invalidated by compute pipeline bind above)
+    vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), rayTracingDescriptorTable->vkPipelineLayout(),
+                       VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                           VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
+                           VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
+                       0, sizeof(RayTracingPushConstant), &pushConstant);
+
+    // Pass 3: Main Render (existing RT dispatch — now queries SHARC cache on bounces >= 1)
     worldCommandBuffer->bindDescriptorTable(rayTracingDescriptorTable, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
         ->bindRTPipeline(module->rayTracingPipeline_)
         ->raytracing(sbt, hdrNoisyOutputImage->width(), hdrNoisyOutputImage->height(), 1);
@@ -1032,6 +1484,7 @@ void RayTracingModuleContext::render() {
 
         std::vector<VkWriteDescriptorSet> spatialWrites;
         std::vector<std::unique_ptr<VkDescriptorImageInfo>> spatialInfos;
+        // Spatial reads CHS temporal output [0], writes spatial output [1]
         addSpatialImg(0, module->reservoirImages_[0], spatialWrites, spatialInfos);
         addSpatialImg(1, module->reservoirImages_[1], spatialWrites, spatialInfos);
         addSpatialImg(2, normalRoughnessImage, spatialWrites, spatialInfos);

@@ -68,8 +68,10 @@ struct PrimaryRay {
     T_FLOAT directLightHitT;
     T_UINT stop;
     T_UINT cont;
+    T_FLOAT roughness;
     T_FLOAT albedoEmission;
     T_UINT pixelPacked;
+    T_UINT emBlockTypeOut; // EmissiveBlock ordinal passed from CHS to rgen for bloom color
 };
 
 struct ShadowRay {

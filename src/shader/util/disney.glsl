@@ -135,7 +135,7 @@ vec3 SampleVMF(inout uint seed, vec3 mu, float kappa) {
 }
 
 float Luminance(vec3 c) {
-    return 0.212671 * c.x + 0.715160 * c.y + 0.072169 * c.z;
+    return 0.2627 * c.x + 0.6780 * c.y + 0.0593 * c.z;
 }
 
 float DielectricFresnel(float cosThetaI, float eta) {
@@ -183,6 +183,12 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
 
     if (localH.z < 0.0) localH = -localH;
 
+    // Anisotropic roughness (Disney 2015 parameterization)
+    float a = max(mat.roughness, 1e-4);
+    float aspect = sqrt(1.0 - 0.9 * mat.anisotropic);
+    float ax = max(a / aspect, 1e-4);
+    float ay = max(a * aspect, 1e-4);
+
     // Model weights
     float dielectricWeight = (1.0 - mat.metallic) * (1.0 - mat.transmission);
     float metalWeight = mat.metallic;
@@ -195,18 +201,20 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
     float dielectricPr = dielectricWeight * Luminance(mix(mat.f0, vec3(1.0), schlickWeight));
     float metalPr = metalWeight * Luminance(mix(mat.albedo, vec3(1.0), schlickWeight));
     float glassPr = glassWeight;
+    float coatPr = mat.coatWeight * 0.25;
 
-    float invTotalWeight = 1.0 / (diffPr + dielectricPr + metalPr + glassPr + 1e-5);
+    float invTotalWeight = 1.0 / (diffPr + dielectricPr + metalPr + glassPr + coatPr + 1e-5);
     diffPr *= invTotalWeight;
     dielectricPr *= invTotalWeight;
     metalPr *= invTotalWeight;
     glassPr *= invTotalWeight;
+    coatPr *= invTotalWeight;
 
     bool reflect = localL.z * localV.z > 0.0;
     float tmpPdf = 0.0;
     float VDotH = abs(dot(localV, localH));
 
-    // Diffuse
+    // Diffuse (+ sheen, which rides on diffuse sampling)
     if (diffPr > 0.0 && reflect) {
         float LDotH = dot(localL, localH);
         float Rr = 2.0 * mat.roughness * LDotH * LDotH;
@@ -224,16 +232,24 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
 
         f += diffuseColor * dielectricWeight;
         pdf += (localL.z * INV_PI) * diffPr; // Cosine weighted PDF
+
+        // Sheen lobe (Disney 2015 — retroreflective fabric sheen)
+        if (mat.sheenWeight > 0.0) {
+            float FH = SchlickWeight(abs(LDotH));
+            float lum = Luminance(mat.albedo);
+            vec3 Ctint = lum > 0.0 ? mat.albedo / lum : vec3(1.0);
+            vec3 Csheen = mix(vec3(1.0), Ctint, mat.sheenTint);
+            f += mat.sheenWeight * Csheen * FH * dielectricWeight;
+        }
     }
 
-    // Dielectric Reflection
+    // Dielectric Reflection (anisotropic GGX)
     if (dielectricPr > 0.0 && reflect) {
         float F = DielectricFresnel(VDotH, 1.0 / mat.ior);
 
-        float a = max(mat.roughness, 1e-4);
-        float D = GTR2Aniso(localH.z, localH.x, localH.y, a, a);
-        float G1 = SmithGAniso(abs(localV.z), localV.x, localV.y, a, a);
-        float G2 = G1 * SmithGAniso(abs(localL.z), localL.x, localL.y, a, a);
+        float D = GTR2Aniso(localH.z, localH.x, localH.y, ax, ay);
+        float G1 = SmithGAniso(abs(localV.z), localV.x, localV.y, ax, ay);
+        float G2 = G1 * SmithGAniso(abs(localL.z), localL.x, localL.y, ax, ay);
 
         tmpPdf = G1 * D / (4.0 * localV.z);
         vec3 specColor = vec3(F) * D * G2 / (4.0 * localL.z * localV.z);
@@ -242,14 +258,13 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
         pdf += tmpPdf * dielectricPr;
     }
 
-    // Metallic Reflection
+    // Metallic Reflection (anisotropic GGX)
     if (metalPr > 0.0 && reflect) {
         vec3 FMetal = mix(mat.albedo, vec3(1.0), SchlickWeight(VDotH));
 
-        float a = max(mat.roughness, 1e-4);
-        float D = GTR2Aniso(localH.z, localH.x, localH.y, a, a);
-        float G1 = SmithGAniso(abs(localV.z), localV.x, localV.y, a, a);
-        float G2 = G1 * SmithGAniso(abs(localL.z), localL.x, localL.y, a, a);
+        float D = GTR2Aniso(localH.z, localH.x, localH.y, ax, ay);
+        float G1 = SmithGAniso(abs(localV.z), localV.x, localV.y, ax, ay);
+        float G2 = G1 * SmithGAniso(abs(localL.z), localL.x, localL.y, ax, ay);
 
         tmpPdf = G1 * D / (4.0 * localV.z);
         vec3 specColor = FMetal * D * G2 / (4.0 * localL.z * localV.z);
@@ -258,13 +273,12 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
         pdf += tmpPdf * metalPr;
     }
 
-    // Glass / Specular BSDF
+    // Glass / Specular BSDF (anisotropic GGX)
     if (glassPr > 0.0) {
         float F = DielectricFresnel(VDotH, eta);
-        float a = max(mat.roughness, 1e-4);
-        float D = GTR2Aniso(localH.z, localH.x, localH.y, a, a);
-        float G1 = SmithGAniso(abs(localV.z), localV.x, localV.y, a, a);
-        float G2 = G1 * SmithGAniso(abs(localL.z), localL.x, localL.y, a, a);
+        float D = GTR2Aniso(localH.z, localH.x, localH.y, ax, ay);
+        float G1 = SmithGAniso(abs(localV.z), localV.x, localV.y, ax, ay);
+        float G2 = G1 * SmithGAniso(abs(localL.z), localL.x, localL.y, ax, ay);
 
         if (reflect) {
             tmpPdf = G1 * D / (4.0 * localV.z);
@@ -285,6 +299,20 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
         }
     }
 
+    // Coat lobe (GGX clearcoat, fixed IOR 1.5 → F0 = 0.04, isotropic)
+    if (coatPr > 0.0 && reflect) {
+        float ca = max(mat.coatRoughness * mat.coatRoughness, 1e-4);
+        float D = GTR2Aniso(localH.z, localH.x, localH.y, ca, ca);
+        float G1 = SmithGAniso(abs(localV.z), localV.x, localV.y, ca, ca);
+        float G2 = G1 * SmithGAniso(abs(localL.z), localL.x, localL.y, ca, ca);
+        float FH = SchlickWeight(VDotH);
+        float F = mix(0.04, 1.0, FH);
+
+        f += vec3(mat.coatWeight * F * D * G2 / (4.0 * abs(localL.z) * abs(localV.z)));
+        tmpPdf = G1 * D / (4.0 * localV.z);
+        pdf += tmpPdf * coatPr;
+    }
+
     return f * abs(localL.z); // Cosine term applied
 }
 
@@ -298,6 +326,12 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
     float r2 = rand(seed);
     float r3 = rand(seed);
 
+    // Anisotropic roughness
+    float a = max(mat.roughness, 1e-4);
+    float aspect = sqrt(1.0 - 0.9 * mat.anisotropic);
+    float ax = max(a / aspect, 1e-4);
+    float ay = max(a * aspect, 1e-4);
+
     float dielectricWeight = (1.0 - mat.metallic) * (1.0 - mat.transmission);
     float metalWeight = mat.metallic;
     float glassWeight = (1.0 - mat.metallic) * mat.transmission;
@@ -307,45 +341,52 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
     float dielectricPr = dielectricWeight * Luminance(mix(mat.f0, vec3(1.0), schlickWeight));
     float metalPr = metalWeight * Luminance(mix(mat.albedo, vec3(1.0), schlickWeight));
     float glassPr = glassWeight;
+    float coatPr = mat.coatWeight * 0.25;
 
-    float invTotalWeight = 1.0 / (diffPr + dielectricPr + metalPr + glassPr + 1e-5);
+    float invTotalWeight = 1.0 / (diffPr + dielectricPr + metalPr + glassPr + coatPr + 1e-5);
     diffPr *= invTotalWeight;
     dielectricPr *= invTotalWeight;
     metalPr *= invTotalWeight;
     glassPr *= invTotalWeight;
+    coatPr *= invTotalWeight;
 
     float cdf0 = diffPr;
     float cdf1 = cdf0 + dielectricPr;
     float cdf2 = cdf1 + metalPr;
+    float cdf3 = cdf2 + glassPr;
 
     vec3 localL;
 
-    if (r3 < cdf0) { // Diffuse
+    if (r3 < cdf0) { // Diffuse (+ sheen evaluated in DisneyEval)
         lobeType = 0;
         localL = CosineSampleHemisphere(r1, r2);
     } else if (r3 < cdf2) {                      // Dielectric + Metallic Reflection
         lobeType = 1;
-        float a = max(mat.roughness, 1e-4);
-        vec3 localH = SampleGGXVNDF(localV, a, a, r1, r2);
+        vec3 localH = SampleGGXVNDF(localV, ax, ay, r1, r2);
         if (localH.z < 0.0) localH = -localH;
         localL = normalize(reflect(-localV, localH));
-    } else {                                     // Glass
+    } else if (r3 < cdf3) {                     // Glass
         lobeType = 2;
-        float a = max(mat.roughness, 1e-4);
-        vec3 localH = SampleGGXVNDF(localV, a, a, r1, r2);
+        vec3 localH = SampleGGXVNDF(localV, ax, ay, r1, r2);
         if (localH.z < 0.0) localH = -localH;
 
         float eta = (localV.z > 0.0) ? (1.0 / mat.ior) : mat.ior;
         float F = DielectricFresnel(abs(dot(localV, localH)), eta);
 
         // Rescale random number for reuse
-        float r_glass = (r3 - cdf2) / (1.0 - cdf2 + 1e-5);
+        float r_glass = (r3 - cdf2) / (cdf3 - cdf2 + 1e-5);
 
         if (r_glass < F) {
             localL = normalize(reflect(-localV, localH));
         } else {
             localL = normalize(refract(-localV, localH, eta));
         }
+    } else {                                     // Coat
+        lobeType = 3;
+        float ca = max(mat.coatRoughness * mat.coatRoughness, 1e-4);
+        vec3 localH = SampleGGXVNDF(localV, ca, ca, r1, r2);
+        if (localH.z < 0.0) localH = -localH;
+        localL = normalize(reflect(-localV, localH));
     }
 
     L = ToWorld(T, B, N, localL);

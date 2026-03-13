@@ -8,16 +8,26 @@
 std::shared_ptr<NgxContext> DLSSModule::ngxContext_ = nullptr;
 
 bool DLSSModule::initNGXContext() {
+    auto framework = Renderer::instance().framework();
+
+    // DLSS requires an NVIDIA GPU — skip entirely on AMD/Intel to avoid
+    // crashes in NVSDK_NGX_VULKAN_Init (DLL loader fails before returning).
+    uint32_t vendorID = framework->physicalDevice()->properties().vendorID;
+    if (vendorID != 0x10de) {
+        std::cerr << "[DLSS] Skipping — GPU vendor 0x" << std::hex << vendorID
+                  << std::dec << " is not NVIDIA (0x10de)" << std::endl;
+        return false;
+    }
+
     std::filesystem::path dlssPath = Renderer::folderPath / "dlss";
     std::error_code ec;
     if (!std::filesystem::create_directories(dlssPath, ec)) {
         if (ec) {
-            std::cerr << "Failed to create directory: " << ec.message() << std::endl;
-            exit(EXIT_FAILURE);
+            std::cerr << "[DLSS] Failed to create directory: " << ec.message() << std::endl;
+            return false;
         }
     }
 
-    auto framework = Renderer::instance().framework();
     ngxContext_ = NgxContext::create();
 
     NgxContext::NgxInitInfo ngxInitInfo{};
@@ -71,6 +81,17 @@ void DLSSModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<Worl
     firstHitDepthImages_.resize(size);
     diffuseRayDirHitDistImages_.resize(size);
     specularRayDirHitDistImages_.resize(size);
+    reflectionMvImages_.resize(size);
+    animatedTexMaskImages_.resize(size);
+    particleMaskImages_.resize(size);
+    firstHitBaseEmissionImages_.resize(size);
+    biasMaskImages_.resize(size);
+    rtHitDistImages_.resize(size);
+    motionVectors3DImages_.resize(size);
+    gbufferMetallicImages_.resize(size);
+    gbufferShadingModelIdImages_.resize(size);
+    gbufferMaterialIdImages_.resize(size);
+    positionViewSpaceImages_.resize(size);
     processedImages_.resize(size);
     upscaledFirstHitDepthImages_.resize(size);
     upscaled2xImages_.resize(size);
@@ -82,6 +103,7 @@ bool DLSSModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLo
                                         std::vector<VkFormat> &formats,
                                         uint32_t frameIndex) {
     auto framework = framework_.lock();
+    if (!framework) return false;
     if (ngxContext_ == nullptr) return false;
 
     if (images.size() != inputImageNum) return false;
@@ -139,6 +161,17 @@ bool DLSSModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLo
     createOrResize(7); firstHitDepthImages_[frameIndex] = images[7];
     createOrResize(8); diffuseRayDirHitDistImages_[frameIndex] = images[8];
     createOrResize(9); specularRayDirHitDistImages_[frameIndex] = images[9];
+    createOrResize(10); reflectionMvImages_[frameIndex] = images[10];
+    createOrResize(11); animatedTexMaskImages_[frameIndex] = images[11];
+    createOrResize(12); particleMaskImages_[frameIndex] = images[12];
+    createOrResize(13); firstHitBaseEmissionImages_[frameIndex] = images[13];
+    createOrResize(14); biasMaskImages_[frameIndex] = images[14];
+    createOrResize(15); rtHitDistImages_[frameIndex] = images[15];
+    createOrResize(16); motionVectors3DImages_[frameIndex] = images[16];
+    createOrResize(17); gbufferMetallicImages_[frameIndex] = images[17];
+    createOrResize(18); gbufferShadingModelIdImages_[frameIndex] = images[18];
+    createOrResize(19); gbufferMaterialIdImages_[frameIndex] = images[19];
+    createOrResize(20); positionViewSpaceImages_[frameIndex] = images[20];
 
     return true;
 }
@@ -147,6 +180,7 @@ bool DLSSModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::DeviceL
                                          std::vector<VkFormat> &formats,
                                          uint32_t frameIndex) {
     auto framework = framework_.lock();
+    if (!framework) return false;
     if (ngxContext_ == nullptr) return false;
 
     if (images.size() != outputImageNum || images[0] == nullptr) return false;
@@ -231,6 +265,11 @@ void DLSSModule::build() {
 
         contexts_[i] = ctx;
     }
+
+    // Publish render-res HDR (DLSS input) for tone mapping histogram metering.
+    // The histogram must read pre-DLSS data to get accurate scene brightness,
+    // because DLSS-RR may attenuate extreme HDR values during neural upscaling.
+    Renderer::renderResHdrImages = hdrImages_;
 }
 
 std::vector<std::shared_ptr<WorldModuleContext>> &DLSSModule::contexts() {
@@ -254,6 +293,7 @@ void DLSSModule::preClose() {
 
 void DLSSModule::initLanczosResources() {
     auto fw = framework_.lock();
+    if (!fw) return;
     uint32_t size = fw->swapchain()->imageCount();
 
     // Create 2x intermediate images for DLSS output
@@ -323,12 +363,25 @@ DLSSModuleContext::DLSSModuleContext(std::shared_ptr<FrameworkContext> framework
       firstHitDepthImage(dlssModule->firstHitDepthImages_[frameworkContext->frameIndex]),
       diffuseRayDirHitDistImage(dlssModule->diffuseRayDirHitDistImages_[frameworkContext->frameIndex]),
       specularRayDirHitDistImage(dlssModule->specularRayDirHitDistImages_[frameworkContext->frameIndex]),
+      reflectionMvImage(dlssModule->reflectionMvImages_[frameworkContext->frameIndex]),
+      animatedTexMaskImage(dlssModule->animatedTexMaskImages_[frameworkContext->frameIndex]),
+      particleMaskImage(dlssModule->particleMaskImages_[frameworkContext->frameIndex]),
+      firstHitBaseEmissionImage(dlssModule->firstHitBaseEmissionImages_[frameworkContext->frameIndex]),
+      biasMaskImage(dlssModule->biasMaskImages_[frameworkContext->frameIndex]),
+      rtHitDistImage(dlssModule->rtHitDistImages_[frameworkContext->frameIndex]),
+      motionVectors3DImage(dlssModule->motionVectors3DImages_[frameworkContext->frameIndex]),
+      gbufferMetallicImage(dlssModule->gbufferMetallicImages_[frameworkContext->frameIndex]),
+      gbufferShadingModelIdImage(dlssModule->gbufferShadingModelIdImages_[frameworkContext->frameIndex]),
+      gbufferMaterialIdImage(dlssModule->gbufferMaterialIdImages_[frameworkContext->frameIndex]),
+      positionViewSpaceImage(dlssModule->positionViewSpaceImages_[frameworkContext->frameIndex]),
       processedImage(dlssModule->processedImages_[frameworkContext->frameIndex]),
       upscaledFirstHitDepthImage(dlssModule->upscaledFirstHitDepthImages_[frameworkContext->frameIndex]) {}
 
 void DLSSModuleContext::render() {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
+    if (!framework) return;
     auto worldCommandBuffer = context->worldCommandBuffer;
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
 
@@ -462,6 +515,42 @@ void DLSSModuleContext::render() {
         diffuseRayDirHitDistImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
         specularRayDirHitDistImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
 
+        // Reflection MV is optional — guard against null if pipeline connection is missing
+        if (reflectionMvImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = reflectionMvImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = reflectionMvImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            reflectionMvImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        }
+
+        // Animated texture mask is optional — guard against null if format creation failed
+        if (animatedTexMaskImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = animatedTexMaskImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = animatedTexMaskImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            animatedTexMaskImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        }
+
         module->dlss_->setResource(DlssRR::RESOURCE_COLOR_IN, hdrImage);
         module->dlss_->setResource(DlssRR::RESOURCE_COLOR_OUT, processedImage);
         module->dlss_->setResource(DlssRR::RESOURCE_DIFFUSE_ALBEDO, diffuseAlbedoImage);
@@ -472,14 +561,179 @@ void DLSSModuleContext::render() {
         module->dlss_->setResource(DlssRR::RESOURCE_SPECULAR_HITDISTANCE, specularHitDepthImage);
         module->dlss_->setResource(DlssRR::RESOURCE_DIFFUSE_RAY_DIR_HIT_DIST, diffuseRayDirHitDistImage);
         module->dlss_->setResource(DlssRR::RESOURCE_SPECULAR_RAY_DIR_HIT_DIST, specularRayDirHitDistImage);
+        if (reflectionMvImage)
+            module->dlss_->setResource(DlssRR::RESOURCE_REFLECTION_MV, reflectionMvImage);
+        if (animatedTexMaskImage)
+            module->dlss_->setResource(DlssRR::RESOURCE_ANIMATED_TEX_MASK, animatedTexMaskImage);
+
+        // Extended DLSS-RR guide buffers — all optional
+        if (particleMaskImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = particleMaskImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = particleMaskImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            particleMaskImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            module->dlss_->setResource(DlssRR::RESOURCE_PARTICLE_MASK, particleMaskImage);
+        }
+        if (firstHitBaseEmissionImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = firstHitBaseEmissionImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = firstHitBaseEmissionImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            firstHitBaseEmissionImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            module->dlss_->setResource(DlssRR::RESOURCE_EMISSIVE, firstHitBaseEmissionImage);
+        }
+        if (biasMaskImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = biasMaskImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = biasMaskImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            biasMaskImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            module->dlss_->setResource(DlssRR::RESOURCE_BIAS_MASK, biasMaskImage);
+        }
+        if (rtHitDistImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = rtHitDistImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = rtHitDistImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            rtHitDistImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            module->dlss_->setResource(DlssRR::RESOURCE_RT_HIT_DIST, rtHitDistImage);
+        }
+        if (motionVectors3DImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = motionVectors3DImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = motionVectors3DImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            motionVectors3DImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            module->dlss_->setResource(DlssRR::RESOURCE_MOTION_VECTORS_3D, motionVectors3DImage);
+        }
+        if (gbufferMetallicImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = gbufferMetallicImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = gbufferMetallicImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            gbufferMetallicImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            module->dlss_->setResource(DlssRR::RESOURCE_GBUFFER_METALLIC, gbufferMetallicImage);
+        }
+        if (gbufferShadingModelIdImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = gbufferShadingModelIdImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = gbufferShadingModelIdImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            gbufferShadingModelIdImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            module->dlss_->setResource(DlssRR::RESOURCE_GBUFFER_SHADING_MODEL_ID, gbufferShadingModelIdImage);
+        }
+        if (gbufferMaterialIdImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = gbufferMaterialIdImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = gbufferMaterialIdImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            gbufferMaterialIdImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            module->dlss_->setResource(DlssRR::RESOURCE_GBUFFER_MATERIAL_ID, gbufferMaterialIdImage);
+        }
+        if (positionViewSpaceImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = positionViewSpaceImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = positionViewSpaceImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            positionViewSpaceImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            module->dlss_->setResource(DlssRR::RESOURCE_POSITION_VIEW_SPACE, positionViewSpaceImage);
+        }
 
         auto worldUBOBuffer = Renderer::instance().buffers()->worldUniformBuffer();
         auto worldUBO = static_cast<vk::Data::WorldUBO *>(worldUBOBuffer->mappedPtr());
         if (worldUBO != nullptr) {
             glm::vec2 jitter = worldUBO->cameraJitter;
-            float preExposure = Renderer::preExposure;
+            // DIAGNOSTIC: Force preExposure=1.0 to match RT push constant diagnostic
+            float preExposure = 1.0f; // Renderer::preExposure;
+            // Per-context frame time delta for DLSS temporal motion estimation
+            auto now = std::chrono::steady_clock::now();
+            float frameTimeDeltaMs = std::chrono::duration<float, std::milli>(now - lastRenderTime_).count();
+            lastRenderTime_ = now;
             module->dlss_->denoise(worldCommandBuffer, glm::uvec2{module->inputWidth_, module->inputHeight_}, jitter,
-                                   worldUBO->cameraViewMat, worldUBO->cameraProjMat, preExposure);
+                                   worldUBO->cameraViewMat, worldUBO->cameraProjMat, preExposure, false,
+                                   frameTimeDeltaMs);
         }
     }
 

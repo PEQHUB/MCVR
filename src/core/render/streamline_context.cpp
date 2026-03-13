@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include "core/render/renderer.hpp"
 
 // ---- static member definitions ----
 void *StreamlineContext::interposerModule_ = nullptr;
@@ -347,6 +348,21 @@ bool StreamlineContext::onDeviceCreated() {
         initOpts.frameLimitUs = 0;
         sl::Result res = pfnReflexSetOptions(initOpts);
         slCout() << "initial slReflexSetOptions(eOff) result=" << static_cast<int>(res) << std::endl;
+
+        // Reapply saved Reflex settings — Java loadProperties() runs before
+        // onDeviceCreated(), so the initial nativeSetReflexEnabled() call is
+        // ignored (reflexSupported_ was still false). Reapply now.
+        if (Renderer::options.reflexEnabled) {
+            sl::ReflexOptions saved{};
+            saved.mode = Renderer::options.reflexBoost
+                ? sl::ReflexMode::eLowLatencyWithBoost
+                : sl::ReflexMode::eLowLatency;
+            saved.frameLimitUs = 0;
+            sl::Result r2 = pfnReflexSetOptions(saved);
+            slCout() << "reapply saved Reflex mode="
+                     << static_cast<int>(saved.mode)
+                     << " result=" << static_cast<int>(r2) << std::endl;
+        }
     }
 
     return true;

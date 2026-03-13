@@ -11,6 +11,7 @@
 #include "../util/ray_payloads.glsl"
 #include "../util/util.glsl"
 #include "common/shared.hpp"
+#include "../util/colorspace.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
@@ -183,6 +184,7 @@ void main() {
         tint = albedoValue.rgb * colorLayer + glint;
     }
 
+    tint = CS_BT709_TO_BT2020 * tint;  // BT.709 -> BT.2020 working space
     albedoValue = vec4(tint, albedoValue.a);
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
 

@@ -25,7 +25,7 @@ const float kPhiColor = 8.0;  // Tighter than diffuse
 const float kPhiNormal = 128.0;  // Balanced for specular denoising
 
 float luminance(vec3 c) {
-    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+    return dot(c, vec3(0.2627, 0.6780, 0.0593));
 }
 
 void main() {

@@ -23,12 +23,32 @@ struct RayTracingPushConstant {
     int numRayBounces;
     int flags;           // bit 0: simplified indirect, bit 1: area lights enabled
                          // bit 2: restir, bit 3: simplified BRDF, bit 4: restir bounce
+                         // bit 5: SHARC enabled
     int areaLightCount;  // number of active area lights this frame
     float shadowSoftness;
     int risCandidates;   // total RIS candidates per pixel
     int temporalMClamp;  // temporal reservoir M clamp (used as float in shader)
     int wClamp;          // importance weight W clamp (used as float in shader)
     float preExposure;   // pre-exposure multiplier for DLSS-RR normalization
+    // POM fields (fields 8-11, 16 bytes)
+    float pomHeightScale;        // 0 = disabled, else depth scale (0.01-0.50)
+    int   pomSteps;              // linear search steps (8-512)
+    int   pomRefinement;         // binary refinement iterations (0-8)
+    float pomFadeDistance;       // distance in blocks to fade POM out (8-256)
+    // SHARC fields (offset 48, 52 bytes) — buffer device addresses + grid params
+    uint64_t sharcHashEntries;   // BDA of hash entry buffer
+    uint64_t sharcAccumulation;  // BDA of accumulation buffer
+    uint64_t sharcResolved;      // BDA of resolved radiance buffer
+    float sharcCameraX;          // camera world position for LOD grid
+    float sharcCameraY;
+    float sharcCameraZ;
+    float sharcSceneScale;       // scene scale for voxel sizing (default 4.0)
+    uint32_t sharcCapacity;      // hash map capacity (2^21 = 2M entries)
+    float sharcRadianceScale;    // quantization scale for accumulation atomics
+    uint32_t sharcFrameIndex;    // frame counter for resolve
+    float sharcRoughnessThreshold; // min roughness for cache query (0=all, 1=diffuse only)
+    int sharcUpdateBlockSize;      // sparse update NxN block size (2-8)
+    int sharcUpdateBounces;        // max bounces in SHARC update pass (2-8)
 };
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {
@@ -39,7 +59,7 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
   public:
     constexpr static std::string_view NAME = "render_pipeline.module.ray_tracing.name";
     constexpr static uint32_t inputImageNum = 0;
-    constexpr static uint32_t outputImageNum = 16;
+    constexpr static uint32_t outputImageNum = 26;
 
     RayTracingModule();
 
@@ -70,6 +90,9 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     void initSBT();
     void initSpatialPipeline();
     void initClusterPipeline();
+    void initSharcBuffers();
+    void initSharcUpdatePipeline();
+    void initSharcResolvePipeline();
 
   private:
     // input
@@ -138,6 +161,17 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightDepthImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> diffuseRayDirHitDistImages_;   // DLSS-RR guide: xyz=dir, w=hitDist
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> specularRayDirHitDistImages_;  // DLSS-RR guide: xyz=dir, w=hitDist
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> reflectionMvImages_;            // DLSS-RR guide: specular reflection MVs
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> animatedTexMaskImages_;         // DLSS-RR guide: animated texture mask
+    // Extended DLSS-RR guide buffers
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> particleMaskImages_;            // [18] transparent/refractive surface mask
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> biasMaskImages_;               // [19] history bias for animated/emissive surfaces
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> rtHitDistImages_;              // [20] per-pixel noise level hint
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> motionVectors3DImages_;        // [21] world-space 3D velocity
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> gbufferMetallicImages_;       // [22] GBuffer metallic
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> gbufferShadingModelIdImages_; // [23] GBuffer shading model ID
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> gbufferMaterialIdImages_;     // [24] GBuffer material ID
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> positionViewSpaceImages_;     // [25] view-space hit position
 
     // ReSTIR DI reservoir images (fixed roles)
     // [0] = temporal output (CHS writes), [1] = spatial output (compute writes)
@@ -166,6 +200,25 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     static constexpr int TILE_SIZE = 16;
     static constexpr int MAX_LIGHTS_PER_TILE = 512;
 
+    // SHARC radiance cache
+    uint32_t sharcCapacity_ = 1u << 21; // dynamic: 2^exponent entries
+    std::shared_ptr<vk::DeviceLocalBuffer> sharcHashEntries_;
+    std::shared_ptr<vk::DeviceLocalBuffer> sharcAccumulation_;
+    std::shared_ptr<vk::DeviceLocalBuffer> sharcResolved_;
+    bool sharcBuffersInitialized_ = false;
+    uint32_t sharcFrameIndex_ = 0;
+    float sharcPrevCameraX_ = 0.0f, sharcPrevCameraY_ = 0.0f, sharcPrevCameraZ_ = 0.0f;
+
+    // SHARC update RT pipeline (sparse tracing to populate cache)
+    std::shared_ptr<vk::Shader> sharcUpdateRayGenShader_;
+    std::shared_ptr<vk::RayTracingPipeline> sharcUpdatePipeline_;
+    std::vector<std::shared_ptr<vk::SBT>> sharcUpdateSbts_;
+
+    // SHARC resolve compute pipeline (temporal blend + stale eviction)
+    VkPipeline sharcResolvePipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout sharcResolvePipelineLayout_ = VK_NULL_HANDLE;
+    std::shared_ptr<vk::Shader> sharcResolveShader_;
+
     // submodules
     std::shared_ptr<Atmosphere> atmosphere_;
     std::shared_ptr<WorldPrepare> worldPrepare_;
@@ -182,6 +235,7 @@ struct RayTracingModuleContext : public WorldModuleContext, SharedObject<RayTrac
     // ray tracing
     std::shared_ptr<vk::DescriptorTable> rayTracingDescriptorTable;
     std::shared_ptr<vk::SBT> sbt;
+    std::shared_ptr<vk::SBT> sharcUpdateSbt;  // SHARC update pipeline SBT
 
     // output
     std::shared_ptr<vk::DeviceLocalImage> hdrNoisyOutputImage;

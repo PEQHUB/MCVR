@@ -4,7 +4,16 @@
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_atomic_int64 : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_EXT_shader_16bit_storage : enable
+#extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_opacity_micromap : require
+
+#define SHARC_ENABLE_GLSL 1
+#define SHARC_ENABLE_64_BIT_ATOMICS 1
+#define SHARC_PROPAGATION_DEPTH 4
 
 #include "../util/labpbr.glsl"
 #include "../util/random.glsl"
@@ -12,6 +21,10 @@
 #include "../util/ray_payloads.glsl"
 #include "../util/util.glsl"
 #include "common/shared.hpp"
+#include "../util/colorspace.glsl"
+
+#include "SharcGlsl.h"
+#include "SharcCommon.h"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
@@ -96,6 +109,16 @@ layout(set = 3, binding = 12, rgba16f) uniform image2D firstHitBaseEmissionImage
 layout(set = 3, binding = 13, r16f) uniform image2D directLightDepthImage;
 layout(set = 3, binding = 16, rgba16f) uniform image2D diffuseRayDirHitDistImage;
 layout(set = 3, binding = 17, rgba16f) uniform image2D specularRayDirHitDistImage;
+layout(set = 3, binding = 21, rg16f)   uniform image2D reflectionMvImage;
+layout(set = 3, binding = 22, r16f)    uniform image2D animTexMaskImage;
+layout(set = 3, binding = 23, r16f)    uniform image2D particleMaskImage;
+layout(set = 3, binding = 24, r16f)    uniform image2D biasMaskImage;
+layout(set = 3, binding = 25, r16f)    uniform image2D rtHitDistImage;
+layout(set = 3, binding = 26, rgba16f) uniform image2D motionVectors3DImage;
+layout(set = 3, binding = 27, r16f)    uniform image2D gbufferMetallicImage;
+layout(set = 3, binding = 28, r16f)    uniform image2D gbufferShadingModelIdImage;
+layout(set = 3, binding = 29, r16f)    uniform image2D gbufferMaterialIdImage;
+layout(set = 3, binding = 30, rgba16f) uniform image2D positionViewSpaceImage;
 
 layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer VertexBuffer {
     PBRTriangle vertices[];
@@ -116,8 +139,28 @@ layout(push_constant) uniform PushConstant {
     int temporalMClamp;
     int wClamp;
     float preExposure;
+    float pomHeightScale;
+    int pomSteps;
+    int pomRefinement;
+    float pomFadeDistance;
+    // SHARC fields
+    uint64_t sharcHashEntries;
+    uint64_t sharcAccumulation;
+    uint64_t sharcResolved;
+    float sharcCameraX;
+    float sharcCameraY;
+    float sharcCameraZ;
+    float sharcSceneScale;
+    uint sharcCapacity;
+    float sharcRadianceScale;
+    uint sharcFrameIndex;
+    float sharcRoughnessThreshold;
+    int sharcUpdateBlockSize;
+    int sharcUpdateBounces;
 }
 pc;
+
+#define SHARC_ENABLED ((pc.flags & 32) != 0)
 
 layout(location = 0) rayPayloadEXT PrimaryRay mainRay;
 
@@ -187,6 +230,8 @@ void main() {
     float diffuseHitDist = 0.0;
     vec3 specularRayDir = vec3(0.0);
     float specularHitDist = 0.0;
+    // DLSS-RR guide: world-space 3D velocity (computed inside MV block)
+    vec3 velocity3D = vec3(0.0);
 
     mainRay.seed = worldUBO.seed;
     for (int isHand = 0; isHand <= 1; isHand++) {
@@ -219,8 +264,10 @@ void main() {
             mainRay.directLightRadiance = vec3(0.0);
             mainRay.directLightHitT = 0.0;
             mainRay.albedoEmission = 0.0;
+            mainRay.emBlockTypeOut = 255u;
             mainRay.stop = 0;
             mainRay.cont = 0;
+            mainRay.roughness = 1.0;
 
             float len;
             uint mask;
@@ -230,17 +277,17 @@ void main() {
                 if (psrDepth == 0) {
                     len = 1000;
                     if (worldUBO.isFirstPerson > 0) {
-                        mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                        mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                     } else {
                         mask =
-                            WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                            WORLD_MASK | PLAYER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                     }
                 } else if (psrDepth <= 1) {
                     len = 1000;
-                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                 } else {
                     len = 384;
-                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                 }
             } else {
                 if (psrDepth == 0) {
@@ -249,11 +296,11 @@ void main() {
                     missId = 1;
                 } else if (psrDepth <= 1) {
                     len = 384;
-                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                     missId = 0;
                 } else {
                     len = 384;
-                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                     missId = 0;
                 }
             }
@@ -281,9 +328,10 @@ void main() {
             // (Fast clouds are geometry-based; OFF disables both.)
             if (isHand == 0 && psrDepth == 0 && skyUBO.cloudTile.x >= 0) {
                 // Only pay cloud integration for sky / far-horizon rays.
+                // Soft horizon fade: smoothstep 0.0→0.06 eliminates the hard cutoff line at the horizon edge.
                 bool farOrSky = (mainRay.hitT == INF_DISTANCE) || (mainRay.hitT > 256.0);
-                bool looksUp = traceDir.y > 0.02;
-                if (farOrSky && looksUp) {
+                float cloudHorizonWeight = smoothstep(0.0, 0.06, traceDir.y);
+                if (farOrSky && cloudHorizonWeight > 0.0) {
                     float tMax = len;
                     if (mainRay.hitT != INF_DISTANCE) {
                         tMax = min(mainRay.hitT, len);
@@ -294,9 +342,10 @@ void main() {
                                                                   8, 4);
 
                     vec3 dL = mainRay.radiance - radianceBeforeTrace;
-                    mainRay.radiance = radianceBeforeTrace + seg.L * throughputBeforeTrace + dL * seg.T;
-                    // Preserve the hit shader's throughput update; apply medium transmittance to it.
-                    mainRay.throughput *= seg.T;
+                    // Blend cloud result by horizon weight: weight=1 → full clouds, weight=0 → no change.
+                    vec3 cloudRadiance = radianceBeforeTrace + seg.L * throughputBeforeTrace + dL * seg.T;
+                    mainRay.radiance = mix(mainRay.radiance, cloudRadiance, cloudHorizonWeight);
+                    mainRay.throughput *= mix(vec3(1.0), seg.T, cloudHorizonWeight);
                 }
             }
 
@@ -336,10 +385,8 @@ void main() {
             if (mainRay.cont > 0) continue;
 
             // Did we hit anything other than a mirror?
-            // If so, stop PSR
-            // TODO: currently no PSR
-            if (true) { break; }
-            // if (mainRay.roughness >= 0.01) { break; }
+            // If so, stop PSR — the final non-mirror surface becomes the primary surface.
+            if (mainRay.roughness >= 0.001) { break; }
 
             // special stop
             if (mainRay.stop > 0) { break; }
@@ -371,7 +418,10 @@ void main() {
                 imageStore(diffuseAlbedoImage, pixel, vec4(reinhardMax(mainRay.radiance), 0));
                 imageStore(specularAlbedoImage, pixel, vec4(0));
                 imageStore(normalRoughnessImage, pixel, vec4(0));
-                // imageStore(dlssSpecHitDistance, pixel, vec4(0.0));
+                imageStore(gbufferMetallicImage, pixel, vec4(0));
+                imageStore(gbufferShadingModelIdImage, pixel, vec4(0));
+                imageStore(gbufferMaterialIdImage, pixel, vec4(0));
+                imageStore(positionViewSpaceImage, pixel, vec4(0));
 
                 vec4 motionOrigin;
                 if (!isPsr) {
@@ -421,6 +471,30 @@ void main() {
 
             vec4 normalRoughness = vec4(worldNormal, firstHitMat.roughness);
             imageStore(normalRoughnessImage, pixel, normalRoughness);
+        }
+
+        // GBuffer: metallic factor
+        imageStore(gbufferMetallicImage, pixel, vec4(firstHitMat.metallic, 0.0, 0.0, 0.0));
+        // GBuffer: shading model ID (0=default, 0.25=metal, 0.5=transmissive, 0.75=emissive, 1.0=subsurface)
+        {
+            float shadingId = 0.0;
+            if (firstHitMat.metallic > 0.5) shadingId = 0.25;
+            else if (mainRay.lobeType == 2u) shadingId = 0.5;
+            else if (firstHitMat.emission > 0.0) shadingId = 0.75;
+            else if (firstHitMat.subSurface > 0.0) shadingId = 1.0;
+            imageStore(gbufferShadingModelIdImage, pixel, vec4(shadingId, 0.0, 0.0, 0.0));
+        }
+        // GBuffer: material ID (geometry-based hash for cross-material temporal filtering)
+        {
+            uint matHash = mainRay.instanceIndex * 31u + mainRay.geometryIndex;
+            float materialId = float(matHash % 256u) / 255.0;
+            imageStore(gbufferMaterialIdImage, pixel, vec4(materialId, 0.0, 0.0, 0.0));
+        }
+        // View-space hit position (for DLSS-RR spatial reuse)
+        {
+            vec3 virtualRelPos = origin + orgDirection * T;
+            vec4 viewPos = worldUBO.cameraEffectedViewMat * vec4(virtualRelPos, 1.0);
+            imageStore(positionViewSpaceImage, pixel, vec4(viewPos.xyz, 1.0));
         }
 
         // ViewZ buffer
@@ -476,6 +550,9 @@ void main() {
             vec2 motionVec =
                 computeCameraMotionVector(prevRelativeMVP, pixelCenter, vec4(originRelativeToPrevCam, 1.0));
             imageStore(motionVectorImage, pixel, vec4(motionVec, 0.0, 0.0));
+            // 3D world-space velocity: prevWorldPos - currWorldPos (camera motion removed)
+            // For static geo → 0; for moving objects → actual displacement
+            velocity3D = originRelativeToPrevCam - cameraDelta - virtualRelativeOrigin;
         }
 
         // sightly make the first non-mirror hit brighter
@@ -489,10 +566,27 @@ void main() {
 
         isFirstHitNoisy = mainRay.noisy > 0;
         if (isFirstHitNoisy) {
-            // Boost emission intensity to 50.0 for visible glow in HDR
-            // abs() on albedoEmission: CHS stores the abs value, but safety guard here too
-            float combinedEmission = max(firstHitMat.emission, abs(mainRay.albedoEmission));
-            firstHitEmission = 50.0 * mainRay.albedoValue.rgb * combinedEmission;
+            // Emission in scene-referred units (1.0 = EMISSION_REFERENCE_NITS cd/m²).
+            // Vertex nits (albedoEmission) are authoritative when set; LabPBR is fallback only.
+            const float EMISSION_REFERENCE_NITS = 200.0;
+            float absAlbedoEmission = abs(mainRay.albedoEmission);
+            float combinedEmission = (absAlbedoEmission > 0.0) ? absAlbedoEmission : (firstHitMat.emission * EMISSION_REFERENCE_NITS);
+            float sceneEmission = combinedEmission / EMISSION_REFERENCE_NITS;
+
+            // Texture-based emission mask (must match CHS smoothstep)
+            vec3 emTint = mainRay.albedoValue.rgb;
+            float texLum = dot(emTint, vec3(0.2627, 0.6780, 0.0593));
+            sceneEmission *= smoothstep(0.10, 0.40, texLum);
+
+            // Flame color override for bloom
+            if (mainRay.emBlockTypeOut < 50u) {
+                vec3 co = worldUBO.emissionData[mainRay.emBlockTypeOut].rgb;
+                if (dot(co, co) > 0.0001) {
+                    float flameMask = smoothstep(0.15, 0.5, texLum);
+                    emTint = mix(emTint, co, flameMask);
+                }
+            }
+            firstHitEmission = emTint * sceneEmission;
             if (mainRay.lobeType == 0 || mainRay.lobeType == 2) { // Diffuse OR Refraction
                 isFirstHitDiffuse = true;
                 firstHitDirectRadiance = mainRay.directLightRadiance;
@@ -513,6 +607,12 @@ void main() {
         //====================================================================================================================
         // STEP 2 - Get the indirect contribution at non-mirror hit position
         //====================================================================================================================
+        // Track minimum roughness along the bounce path for SHARC gating.
+        // Industry standard: if ANY bounce was specular/transmissive (roughness < threshold),
+        // skip radiance cache for the entire remaining path. This prevents view-independent
+        // cached radiance from appearing in view-dependent reflections and refractions.
+        float minPathRoughness = mainRay.roughness; // PSR termination surface roughness
+
         for (int b = psrDepth; b < pc.numRayBounces; b++) {
             if (mainRay.stop > 0) break;
 
@@ -523,16 +623,16 @@ void main() {
             if (b == 0) {
                 len = 1000;
                 if (worldUBO.isFirstPerson > 0) {
-                    mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+                    mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                 } else {
-                    mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+                    mask = WORLD_MASK | PLAYER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                 }
             } else if (b <= 1) {
                 len = 1000;
-                mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+                mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
             } else {
                 len = 384;
-                mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | CLOUD_MASK;
+                mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | CLOUD_MASK | BOAT_WATER_MASK;
             }
 
             // Force 2-state OMM on indirect bounces: eliminates all AHS invocations
@@ -541,6 +641,14 @@ void main() {
             if (b >= 1) {
                 bounceFlags |= gl_RayFlagsForceOpacityMicromap2StateEXT;
             }
+
+            // Save state before trace for SHARC cache hit replacement.
+            // On a cache hit, we discard the CHS contribution (which includes direct light
+            // at this hit) and replace it with the cached total outgoing radiance (which
+            // already contains that same direct light plus all further bounces).
+            vec3 radianceBeforeBounce = mainRay.radiance;
+            vec3 throughputBeforeBounce = mainRay.throughput;
+
             traceRayEXT(topLevelAS, bounceFlags, mask,
                         1,                          // sbtRecordOffset
                         1,                          // sbtRecordStride
@@ -563,8 +671,60 @@ void main() {
                 }
             }
 
-            // Russian roulette for path termination (skip for first few bounces)
-            if (b > 2) {
+            // SHARC cache query: early terminate indirect bounces using cached radiance.
+            // Query at b >= 1 (skip primary PSR hit — always needs full CHS evaluation).
+            // Gate on BOTH path roughness (no specular/transmissive bounces along path)
+            // AND current surface roughness (don't cache view-dependent specular outgoing).
+            // On cache hit, REPLACE the CHS contribution with the cached total outgoing
+            // radiance to avoid double-counting direct light at this surface.
+            if (SHARC_ENABLED && b >= 1 && mainRay.stop == 0 && mainRay.hitT != INF_DISTANCE
+                && minPathRoughness >= pc.sharcRoughnessThreshold
+                && mainRay.roughness >= pc.sharcRoughnessThreshold) {
+                SharcParameters sharcParams;
+                sharcParams.gridParameters.cameraPosition = float3(pc.sharcCameraX, pc.sharcCameraY, pc.sharcCameraZ);
+                sharcParams.gridParameters.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
+                sharcParams.gridParameters.sceneScale = pc.sharcSceneScale;
+                sharcParams.gridParameters.levelBias = float(SHARC_GRID_LEVEL_BIAS);
+                sharcParams.hashMapData.capacity = pc.sharcCapacity;
+                sharcParams.hashMapData.hashEntriesBuffer = RWStructuredBuffer_uint64_t(pc.sharcHashEntries);
+                sharcParams.resolvedBuffer = RWStructuredBuffer_SharcPackedData(pc.sharcResolved);
+
+                // Convert camera-relative hit position to absolute world coords
+                vec3 absoluteHitPos = mainRay.worldPos + vec3(worldUBO.cameraPos.xyz);
+
+                // Voxel size guard: reject queries where hitT is shorter than the voxel.
+                // Without this, short-segment bounces can read cached radiance from the
+                // opposite side of thin walls (light leaking through 1-block walls).
+                uint queryLevel = HashGridGetLevel(absoluteHitPos, sharcParams.gridParameters);
+                float queryVoxelSize = HashGridGetVoxelSize(queryLevel, sharcParams.gridParameters);
+                if (mainRay.hitT < queryVoxelSize) {
+                    // Skip SHARC query — ray segment too short for this voxel resolution
+                } else {
+                    SharcHitData hitData;
+                    hitData.positionWorld = absoluteHitPos;
+                    hitData.normalWorld = mainRay.normal;
+
+                    vec3 cachedRadiance;
+                    if (SharcGetCachedRadiance(sharcParams, hitData, cachedRadiance, false)) {
+                        // Discard the CHS contribution at this hit and use cached total instead.
+                        // radianceBeforeBounce = accumulated radiance from all previous bounces.
+                        // throughputBeforeBounce = path throughput BEFORE CHS modified it.
+                        // cachedRadiance = total outgoing radiance at this surface (direct + all indirect).
+                        mainRay.radiance = radianceBeforeBounce + throughputBeforeBounce * cachedRadiance;
+                        break; // Early path termination — cache hit
+                    }
+                }
+            }
+
+            // Update path roughness tracking (before next bounce).
+            // Once the path goes through a specular/transmissive surface, it stays specular.
+            minPathRoughness = min(minPathRoughness, mainRay.roughness);
+
+            // Russian roulette for path termination (skip for first few bounces and perfect mirrors)
+            // Perfect specular surfaces (roughness < 0.001) are exempt: their throughput decays
+            // via Fresnel each bounce but must never be stochastically terminated — otherwise
+            // the mirror chain abruptly shows albedo instead of continued reflection.
+            if (b > 2 && mainRay.roughness >= 0.001) {
                 float maxComponent = max(mainRay.throughput.r, max(mainRay.throughput.g, mainRay.throughput.b));
                 float rrProbability = min(maxComponent, 0.9);
                 if (rand(mainRay.seed) > rrProbability) { break; }
@@ -581,6 +741,10 @@ void main() {
         if (isFirstHitNoisy) {
             if (isFirstHitDiffuse) { // Diffuse
                 firstHitIndirectRadiance = mainRay.radiance - firstHitDirectRadiance;
+                // Subtract primary-hit emission to prevent double-counting with NRD compose:
+                // NRD compose adds raw emission from firstHitBaseEmissionImage separately,
+                // so the denoised indirect channel must NOT contain it.
+                firstHitIndirectRadiance = max(firstHitIndirectRadiance - firstHitEmission, vec3(0.0));
             }
         }
 
@@ -594,7 +758,7 @@ void main() {
     float densityAir = 0.0000;
     float densityFog = 2.0 / max(worldUBO.fogEnd - worldUBO.fogStart, 1e-3);
     if (skyUBO.cameraSubmersionType == 1) { // underwater
-        vec3 waterColor = skyUBO.envWaterTintFog.rgb;
+        vec3 waterColor = CS_BT709_TO_BT2020 * skyUBO.envWaterTintFog.rgb;
         float waterFogStrength = max(0.0, skyUBO.envWaterTintFog.a);
         mainRay.radiance *= waterColor;
 
@@ -604,7 +768,7 @@ void main() {
     } else if (DISABLE_RENDER_DISTANCE_FOG == 0) {
         if (worldUBO.skyType == 0) { // None
             mainRay.radiance = applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog,
-                                        worldUBO.fogColor.rgb);
+                                        CS_BT709_TO_BT2020 * worldUBO.fogColor.rgb);
         } else if (worldUBO.skyType == 1) { // Normal
             if (!psrHitSky) {
                 vec3 eyeToPSRHitPosition = psrHitPosition - eyePos;
@@ -614,8 +778,8 @@ void main() {
                 vec3 sunDir = normalize(skyUBO.sunDirection);
                 vec3 rayDir = orgDirection;
                 float progress = clamp(skyUBO.rainGradient * skyUBO.envSky.y, 0.0, 1.0);
-                vec3 rainyRadiance = mix(vec3(0.04, 0.05, 0.1), vec3(0.1), smoothstep(-0.3, 0.3, sunDir.y));
-                vec3 sunnyRadiance = texture(skyFull, rayDir).rgb * skyUBO.envSky.x;
+                vec3 rainyRadiance = CS_BT709_TO_BT2020 * mix(vec3(0.04, 0.05, 0.1), vec3(0.1), smoothstep(-0.3, 0.3, sunDir.y));
+                vec3 sunnyRadiance = CS_BT709_TO_BT2020 * (texture(skyFull, rayDir).rgb * skyUBO.envSky.x);
                 vec3 fogRadiance = mix(sunnyRadiance, rainyRadiance, progress);
 
                 mainRay.radiance =
@@ -623,7 +787,7 @@ void main() {
             }
         } else if (worldUBO.skyType == 2) { // End
             mainRay.radiance = applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog,
-                                        worldUBO.fogColor.rgb);
+                                        CS_BT709_TO_BT2020 * worldUBO.fogColor.rgb);
         }
     }
 
@@ -636,7 +800,12 @@ void main() {
         } else {
             imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
             imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
-            imageStore(firstHitSpecularImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+            // Subtract primary-hit emission to prevent double-counting with NRD compose
+            // (NRD compose adds raw emission from firstHitBaseEmissionImage separately)
+            vec3 specularRadiance = max(mainRay.radiance - firstHitEmission, vec3(0.0));
+            float specLum = dot(specularRadiance, vec3(0.2126, 0.7152, 0.0722));
+            if (specLum > 1000.0) specularRadiance *= 1000.0 / specLum;
+            imageStore(firstHitSpecularImage, ivec2(pixel), vec4(specularRadiance, 1.0));
             imageStore(firstHitClearImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
         }
     } else {
@@ -650,5 +819,62 @@ void main() {
     imageStore(specularHitDepthImage, ivec2(pixel), vec4(specHitDepth, vec3(1.0)));
     imageStore(diffuseRayDirHitDistImage, ivec2(pixel), vec4(diffuseRayDir, diffuseHitDist));
     imageStore(specularRayDirHitDistImage, ivec2(pixel), vec4(specularRayDir, specularHitDist));
-    imageStore(outputImage, ivec2(pixel), vec4(mainRay.radiance * pc.preExposure, 1.0));
+    // Reflection motion vectors: MV of the object seen through the specular lobe.
+    // Only compute for near-mirror surfaces (roughness < 0.01) where specularRayDir is
+    // nearly deterministic. For rougher surfaces, specularRayDir is a noisy BSDF sample
+    // that varies per frame — encoding noise as motion causes DLSS-RR temporal rejection (boiling).
+    {
+        vec2 rv = vec2(0.0);
+        if (!isFirstHitDiffuse && isFirstHitNoisy && firstHitMat.roughness < 0.01
+            && specularHitDist > 0.0 && specularHitDist < 10000.0) {
+            vec3 primaryHitPos = eyePos + orgDirection * psrHitDepth;
+            vec3 cd = vec3(worldUBO.cameraPos.xyz - lastWorldUBO.cameraPos.xyz);
+            mat4 prevMVP = lastWorldUBO.cameraProjMat * lastWorldUBO.cameraEffectedViewMat;
+            vec3 reflectedPos = primaryHitPos + specularRayDir * specularHitDist;
+            rv = computeCameraMotionVector(prevMVP, pixelCenter, vec4(reflectedPos + cd, 1.0));
+        }
+        imageStore(reflectionMvImage, ivec2(pixel), vec4(rv, 0.0, 0.0));
+    }
+    // Animated texture mask: 1.0 for pixels whose primary surface has temporally unstable texels
+    // (lava emBlockTypeOut==0, or water lobeType==2). Helps DLSS-RR reduce ghosting on animated surfaces.
+    {
+        bool isAnimated = isFirstHitNoisy &&
+                          (mainRay.emBlockTypeOut == 0u || mainRay.lobeType == 2u);
+        imageStore(animTexMaskImage, ivec2(pixel), vec4(isAnimated ? 1.0 : 0.0, 0.0, 0.0, 0.0));
+    }
+    // Particle/refractive mask: 1.0 for transparent/refractive surfaces (water, glass).
+    // Helps DLSS-RR distinguish refracted surfaces from opaque geometry.
+    {
+        bool isRefractive = isFirstHitNoisy && (mainRay.lobeType == 2u);
+        imageStore(particleMaskImage, ivec2(pixel), vec4(isRefractive ? 1.0 : 0.0, 0.0, 0.0, 0.0));
+    }
+    // Bias current color mask: downweight stale history on temporally unstable pixels.
+    // 1.0 for lava (animated texture), 0.5 for other emissive surfaces, 0.0 otherwise.
+    {
+        float biasMask = 0.0;
+        if (isFirstHitNoisy) {
+            bool isLava = (mainRay.emBlockTypeOut == 0u);  // lava: animated emissive
+            bool isEmissive = (dot(firstHitEmission, firstHitEmission) > 0.0001);
+            biasMask = isLava ? 1.0 : (isEmissive ? 0.5 : 0.0);
+        }
+        imageStore(biasMaskImage, ivec2(pixel), vec4(biasMask, 0.0, 0.0, 0.0));
+    }
+    // RT hit distance noise hint: roughness × normalized primary-hit distance.
+    // Higher roughness + longer ray = more variance for DLSS-RR to account for.
+    // Use if-else (not ternary) to avoid reading uninitialized firstHitMat when !isFirstHitNoisy.
+    {
+        float noisiness = 0.0;
+        if (isFirstHitNoisy) {
+            noisiness = firstHitMat.roughness * clamp(psrHitDepth / 32.0, 0.0, 1.0);
+        }
+        imageStore(rtHitDistImage, ivec2(pixel), vec4(noisiness, 0.0, 0.0, 0.0));
+    }
+    // World-space 3D velocity: object displacement from prev to current frame (camera motion removed).
+    // Computed inside the Motion Vector block above; zero for sky and non-noisy pixels.
+    imageStore(motionVectors3DImage, ivec2(pixel), vec4(velocity3D, 0.0));
+    // Prevent RGBA16F overflow: clamp radiance BEFORE pre-exposure so
+    // radiance * preExposure <= 65000. Clamping before multiplication
+    // preserves DLSS-RR contract: receives clampedRad*E, undoes /E → clampedRad (exact).
+    float maxRadiance = 65000.0 / max(pc.preExposure, 1.0);
+    imageStore(outputImage, ivec2(pixel), vec4(min(mainRay.radiance, vec3(maxRadiance)) * pc.preExposure, 1.0));
 }

@@ -36,7 +36,7 @@ const float gAlpha = 0.02;         // Increased from 0.01 for slightly faster re
 const float gMomentsAlpha = 0.1; 
 
 float luminance(vec3 c) {
-    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+    return dot(c, vec3(0.2627, 0.6780, 0.0593));
 }
 
 vec3 RGBToYCoCg(vec3 rgb) {

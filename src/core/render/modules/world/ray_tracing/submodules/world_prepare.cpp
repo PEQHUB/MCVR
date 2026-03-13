@@ -4,6 +4,7 @@
 #include "core/render/chunks.hpp"
 #include "core/render/entities.hpp"
 #include "core/render/lights.hpp"
+#include "core/render/colorspace.hpp"
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
@@ -23,7 +24,9 @@ void WorldPrepare::init(std::shared_ptr<Framework> framework, std::shared_ptr<Ra
 
 void WorldPrepare::build() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto rayTracingModule = rayTracingModule_.lock();
+    if (!rayTracingModule) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     contexts_.resize(size);
@@ -44,7 +47,9 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
                                        std::vector<uint64_t> &lastIndexBufferAddrs,
                                        std::vector<glm::mat4> &lastObjToWorldMats) {
     auto context = frameworkContext.lock();
+    if (!context) return;
     auto framework = context->framework.lock();
+    if (!framework) return;
     auto vma = framework->vma();
     auto device = framework->device();
     auto physicalDevice = framework->physicalDevice();
@@ -133,9 +138,11 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
 
 void WorldPrepareContext::render() {
     auto module = worldPrepare.lock();
+    if (!module) return;
 
     std::shared_ptr<Framework> framework = Renderer::instance().framework();
     std::shared_ptr<FrameworkContext> context = frameworkContext.lock();
+    if (!context) return;
     std::shared_ptr<vk::VMA> vma = framework->vma();
     std::shared_ptr<vk::Device> device = framework->device();
     std::shared_ptr<vk::PhysicalDevice> physicalDevice = framework->physicalDevice();
@@ -393,7 +400,7 @@ void WorldPrepareContext::render() {
                 if (perBlock < 0.001f) continue;  // Skip disabled lights
 
                 // CPU-side distance cull: skip lights beyond their defined radius
-                float effectiveIntensity = def.intensity * Renderer::options.areaLightIntensity * perBlock;
+                float effectiveIntensity = def.lumens * LUMENS_TO_INTENSITY * Renderer::options.areaLightIntensity * perBlock;
                 float maxRange = Renderer::options.areaLightRange;
                 if (d2 > maxRange * maxRange) continue;
 
@@ -404,10 +411,19 @@ void WorldPrepareContext::render() {
                 int tid = src.lightTypeId;
                 al.position = glm::vec3(rx, ry + def.yOffset + opts.perBlockYOffset[tid], rz);
                 al.halfExtent = def.halfExtent * opts.perBlockScale[tid];
-                al.color = glm::vec3(
-                    opts.perBlockColorR[tid] >= 0 ? opts.perBlockColorR[tid] : def.color.r,
-                    opts.perBlockColorG[tid] >= 0 ? opts.perBlockColorG[tid] : def.color.g,
-                    opts.perBlockColorB[tid] >= 0 ? opts.perBlockColorB[tid] : def.color.b);
+                if (opts.perBlockColorR[tid] >= 0) {
+                    // Per-block override: user BT.709 color -> BT.2020
+                    glm::vec3 userColor(opts.perBlockColorR[tid], opts.perBlockColorG[tid], opts.perBlockColorB[tid]);
+                    al.color = colorspace::BT709_TO_BT2020 * userColor;
+                } else {
+                    // Blackbody (XYZ -> BT.2020) or spectral uplift (BT.709 -> BT.2020 + chroma boost)
+                    // Per-block temperature override from UI sliders (0 = use LIGHT_DEFS default)
+                    float colorTemp = def.colorTemperature;
+                    if (opts.perBlockTemperatureK[tid] > 0) {
+                        colorTemp = opts.perBlockTemperatureK[tid];
+                    }
+                    al.color = colorspace::computeEmissionColor(colorTemp, def.color, def.spectralPurity);
+                }
                 al.intensity = effectiveIntensity;
                 al.radius = maxRange;
 
@@ -432,11 +448,10 @@ void WorldPrepareContext::render() {
             gatheredLights.resize(MAX_AREA_LIGHTS);
         }
 
-        // Compute per-light effective radius based on intensity
+        // Use areaLightRange directly — contribution sort already prioritizes nearby lights.
+        // Frostbite windowing (1-(d/R)^2)^2 handles smooth falloff at boundary.
         for (auto &lwd : gatheredLights) {
-            float maxR = Renderer::options.areaLightRange;
-            float effectiveRadius = std::min(maxR, std::sqrt(lwd.light.intensity / 0.001f));
-            lwd.light.radius = std::max(effectiveRadius, 4.0f);
+            lwd.light.radius = Renderer::options.areaLightRange;
         }
 
         areaLightCount = static_cast<int>(gatheredLights.size());
@@ -480,7 +495,12 @@ void WorldPrepareContext::render() {
         .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
     }});
 
-    rayTracingModuleContext.lock()->sbt->setupHitSBT(geometryTypes);
+    auto rtModuleCtx = rayTracingModuleContext.lock();
+    if (!rtModuleCtx) return;
+    rtModuleCtx->sbt->setupHitSBT(geometryTypes);
+    if (rtModuleCtx->sharcUpdateSbt) {
+        rtModuleCtx->sharcUpdateSbt->setupHitSBT(geometryTypes);
+    }
 
     uploadBuffer(blasOffset, vertexBufferAddrs, indexBufferAddrs, lastVertexBufferAddrs, lastIndexBufferAddrs,
                  lastObjToWorldMats);

@@ -347,7 +347,7 @@ vec3 cloudMainLightRadiance(SkyUBO skyUBO, out vec3 toLight) {
         radiance = (skyUBO.sunRadiance * skyUBO.envCelestial.z);
     } else {
         toLight = normalize(skyUBO.moonDirection);
-        radiance = (skyUBO.moonRadiance * skyUBO.envCelestial.w) * 0.05;
+        radiance = skyUBO.moonRadiance * skyUBO.envCelestial.w;
     }
 
     float threshold = 0.3;
@@ -600,10 +600,10 @@ CloudSegmentResult integrateCloudSegment(vec3 ro, vec3 rd, float tMin, float tMa
 
 
     vec3 toLight;
-    vec3 lightRadiance = cloudMainLightRadiance(skyUBO, toLight);
+    vec3 lightRadiance = CS_BT709_TO_BT2020 * cloudMainLightRadiance(skyUBO, toLight);
 
     // Ambient fill from sky cubemap.
-    vec3 skyAmbient = texture(skyFull, vec3(0.0, 1.0, 0.0)).rgb * skyUBO.envSky.x;
+    vec3 skyAmbient = CS_BT709_TO_BT2020 * (texture(skyFull, vec3(0.0, 1.0, 0.0)).rgb * skyUBO.envSky.x);
     skyAmbient = max(skyAmbient, vec3(0.0));
 
     float ambientStrength = max(skyUBO.cloudLighting.y, 0.0);

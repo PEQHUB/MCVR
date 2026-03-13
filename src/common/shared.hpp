@@ -141,7 +141,7 @@ namespace VertexFormat {
         T_FLOAT albedoEmission;
 
         T_VEC3 postBase;
-        T_UINT pad1;
+        T_UINT emissiveBlockType; // EmissiveBlock ordinal (0-39), 255 = none/LabPBR
     };
 #ifdef __cplusplus
 }; // namespace VertexFormat
@@ -247,6 +247,16 @@ namespace Data {
         T_UINT endPortalTextureID;
         T_UINT pad4;
         T_UINT pad5;
+
+        T_VEC4 emissionData[50]; // Per-block: .rgb = BT.2020 color override (0,0,0 = use texture), .a = scalar multiplier
+
+        // Principled BSDF material overrides: 5 vec4 per block × 160 blocks = 800 vec4
+        // Pack 0 [idx+0]:   (f0.r, f0.g, f0.b, roughness)
+        // Pack 1 [idx+160]: (metallic, transmission, ior, subsurface)
+        // Pack 2 [idx+320]: (anisotropic, sheenWeight, sheenTint, coatWeight)
+        // Pack 3 [idx+480]: (coatRoughness, noiseScale, noiseStrength, noiseOctaves)
+        // Pack 4 [idx+640]: (channelR, channelG, channelB, textureBlend)
+        T_VEC4 materialData[800];
     };
 
     struct SkyUBO {
@@ -331,7 +341,14 @@ namespace Data {
         T_INT specular;
         T_INT normal;
         T_INT flag;
+        T_INT properties;  // bit 0: has height map data (enables POM)
     };
+
+#ifdef __cplusplus
+    static constexpr int TEX_PROP_HAS_HEIGHT_MAP = 1;
+#else
+    #define TEX_PROP_HAS_HEIGHT_MAP 1
+#endif
 
     struct TextureMapping {
         TextureMapEntry entries[4096];

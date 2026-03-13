@@ -59,6 +59,7 @@ void HdrCompositePass::destroy() {
 
 void HdrCompositePass::initShaders() {
     auto framework = framework_.lock();
+    if (!framework) return;
     std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
 
     vertShader_ = vk::Shader::create(
@@ -78,6 +79,7 @@ void HdrCompositePass::initShaders() {
 
 void HdrCompositePass::initSampler() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     // Nearest sampling — source and destination dimensions match exactly.
     sampler_ = vk::Sampler::create(
@@ -91,6 +93,7 @@ void HdrCompositePass::initSampler() {
 
 void HdrCompositePass::initDescriptorSets() {
     auto framework = framework_.lock();
+    if (!framework) return;
     uint32_t imageCount = framework->swapchain()->imageCount();
 
     descriptorTables_.resize(imageCount);
@@ -126,6 +129,7 @@ void HdrCompositePass::initDescriptorSets() {
 
 void HdrCompositePass::initRenderPass() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto swapchainFormat = framework->swapchain()->vkSurfaceFormat().format;
 
     renderPass_ = vk::RenderPassBuilder{}
@@ -160,6 +164,7 @@ void HdrCompositePass::initRenderPass() {
 
 void HdrCompositePass::initFramebuffers() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto &swapchainImages = framework->swapchain()->swapchainImages();
     uint32_t imageCount = framework->swapchain()->imageCount();
 
@@ -178,6 +183,7 @@ void HdrCompositePass::initFramebuffers() {
 
 void HdrCompositePass::initPipeline() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto device = framework->device();
 
     auto makePipeline = [&](std::shared_ptr<vk::Shader> fragShader) {

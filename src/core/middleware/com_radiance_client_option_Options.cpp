@@ -84,6 +84,52 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.simplifiedIndirect = enabled;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharcEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.sharcEnabled = (enabled == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharcSceneScale(
+    JNIEnv *, jclass, jfloat scale, jboolean write) {
+    Renderer::options.sharcSceneScale = scale;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharcRoughnessThreshold(
+    JNIEnv *, jclass, jfloat threshold, jboolean write) {
+    Renderer::options.sharcRoughnessThreshold = threshold;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharcAccumulationFrames(
+    JNIEnv *, jclass, jint frames, jboolean write) {
+    Renderer::options.sharcAccumulationFrames = frames;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharcStaleFrames(
+    JNIEnv *, jclass, jint frames, jboolean write) {
+    Renderer::options.sharcStaleFrames = frames;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharcDownscale(
+    JNIEnv *, jclass, jint downscale, jboolean write) {
+    Renderer::options.sharcDownscale = downscale;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharcUpdateBlockSize(
+    JNIEnv *, jclass, jint blockSize, jboolean write) {
+    Renderer::options.sharcUpdateBlockSize = blockSize;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharcUpdateBounces(
+    JNIEnv *, jclass, jint bounces, jboolean write) {
+    Renderer::options.sharcUpdateBounces = bounces;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharcCapacityExponent(
+    JNIEnv *, jclass, jint exponent, jboolean write) {
+    Renderer::options.sharcCapacityExponent = exponent;
+    // Note: buffer reallocation requires restart. The exponent is used at init time.
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOutputScale2x(
     JNIEnv *, jclass, jboolean enabled, jboolean write) {
     Renderer::options.outputScale2x = enabled;
@@ -109,7 +155,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMaxExposure(
     JNIEnv *, jclass, jint maxExposure, jboolean write) {
-    Renderer::options.maxExposure = static_cast<float>(maxExposure);
+    Renderer::options.maxExposure = static_cast<float>(maxExposure) * 0.1f;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureCompensation(
@@ -375,6 +421,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::instance().world()->chunks()->resetScheduler();
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeResetExposureAdaptation(
+    JNIEnv *, jclass) {
+    Renderer::resetExposureAdaptation = true;
+}
+
 // --- Area Lights ---
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightsEnabled(
@@ -439,6 +490,15 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     }
 }
 
+// --- Per-Block Temperature ---
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetBlockTemperature(
+    JNIEnv *, jclass, jint typeId, jfloat kelvin, jboolean write) {
+    if (typeId >= 0 && typeId < 50) {
+        Renderer::options.perBlockTemperatureK[typeId] = std::clamp(kelvin, 773.15f, 4273.15f);
+    }
+}
+
 // --- ReSTIR Tuning ---
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirCandidates(
@@ -481,5 +541,32 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirBounceEnabled(
     JNIEnv *, jclass, jboolean enabled, jboolean write) {
     Renderer::options.restirBounceEnabled = enabled;
+}
+
+// --- Parallax Occlusion Mapping ---
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMEnabled(
+    JNIEnv *, jclass, jboolean v, jboolean) {
+    Renderer::options.pomEnabled = (v == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMHeightScale(
+    JNIEnv *, jclass, jfloat v, jboolean) {
+    Renderer::options.pomHeightScale = std::clamp(v, 0.01f, 0.50f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMSteps(
+    JNIEnv *, jclass, jint v, jboolean) {
+    Renderer::options.pomSteps = std::clamp(v, 8, 512);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMRefinement(
+    JNIEnv *, jclass, jint v, jboolean) {
+    Renderer::options.pomRefinement = std::clamp(v, 0, 8);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMFadeDistance(
+    JNIEnv *, jclass, jfloat v, jboolean) {
+    Renderer::options.pomFadeDistance = std::clamp(v, 8.0f, 256.0f);
 }
 

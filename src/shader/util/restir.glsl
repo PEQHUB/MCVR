@@ -101,12 +101,12 @@ vec4 packReservoirVis(Reservoir r, bool visible) {
 
 // Compute target PDF (luminance of unshadowed contribution)
 float computeTargetPdf(vec3 unshadowedContrib) {
-    return dot(unshadowedContrib, vec3(0.2126, 0.7152, 0.0722));
+    return dot(unshadowedContrib, vec3(0.2627, 0.6780, 0.0593));
 }
 
 // BRDF-aware target PDF: includes NdotL for better importance sampling
 float computeTargetPdfBRDF(vec3 unshadowedContrib, float NdotL) {
-    return dot(unshadowedContrib * max(NdotL, 0.0), vec3(0.2126, 0.7152, 0.0722));
+    return dot(unshadowedContrib * max(NdotL, 0.0), vec3(0.2627, 0.6780, 0.0593));
 }
 
 #endif

@@ -26,7 +26,7 @@ void main() {
             ivec2 q = pixel + ivec2(dx, dy);
             if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
             vec3 val = imageLoad(directHistoryImage, q).rgb;
-            float L = dot(val, vec3(0.2126, 0.7152, 0.0722));
+            float L = dot(val, vec3(0.2627, 0.6780, 0.0593));
             sumL += L;
             sumL2 += L * L;
             count += 1.0;

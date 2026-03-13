@@ -16,7 +16,9 @@ void Atmosphere::init(std::shared_ptr<Framework> framework, std::shared_ptr<RayT
 
 void Atmosphere::build() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto rayTracingModule = rayTracingModule_.lock();
+    if (!rayTracingModule) return;
     uint32_t size = framework->swapchain()->imageCount();
 
     contexts_.resize(size);
@@ -36,6 +38,7 @@ void Atmosphere::build() {
 
 void Atmosphere::initDescriptorTables() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     atmLUTImageSampler_ = vk::Sampler::create(framework->device(), VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR,
                                               VK_SAMPLER_ADDRESS_MODE_REPEAT);
@@ -94,6 +97,7 @@ void Atmosphere::initDescriptorTables() {
 
 void Atmosphere::initImages() {
     auto framework = framework_.lock();
+    if (!framework) return;
 
     atmLUTImage_ = vk::DeviceLocalImage::create(framework->device(), framework->vma(), false, 512, 128, 1,
                                                 VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -163,6 +167,8 @@ void Atmosphere::initImages() {
 }
 
 void Atmosphere::initAtmLUTRenderPass() {
+    auto framework = framework_.lock();
+    if (!framework) return;
     atmLUTRenderPass_ = vk::RenderPassBuilder{}
                             .beginAttachmentDescription()
                             .defineAttachmentDescription({
@@ -189,10 +195,12 @@ void Atmosphere::initAtmLUTRenderPass() {
                                 .colorAttachmentIndices = {0},
                             })
                             .endSubpassDescription()
-                            .build(framework_.lock()->device());
+                            .build(framework->device());
 }
 
 void Atmosphere::initAtmCubeMapRenderPass() {
+    auto framework = framework_.lock();
+    if (!framework) return;
     atmCubeMapRenderPass_ = vk::RenderPassBuilder{}
                                 .beginAttachmentDescription()
                                 .defineAttachmentDescription({
@@ -219,12 +227,14 @@ void Atmosphere::initAtmCubeMapRenderPass() {
                                     .colorAttachmentIndices = {0},
                                 })
                                 .endSubpassDescription()
-                                .build(framework_.lock()->device());
+                                .build(framework->device());
 }
 
 void Atmosphere::initFrameBuffers() {
     auto framework = framework_.lock();
+    if (!framework) return;
     auto rayTracingModule = rayTracingModule_.lock();
+    if (!rayTracingModule) return;
 
     atmLUTFramebuffer_ = vk::FramebufferBuilder{}
                              .beginAttachment()
@@ -248,6 +258,7 @@ void Atmosphere::initFrameBuffers() {
 
 void Atmosphere::initAtmLUTPipeline() {
     auto framework = framework_.lock();
+    if (!framework) return;
     std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
     atmLUTVertShader_ = vk::Shader::create(framework->device(),
                                            (shaderPath / "world/ray_tracing/atmosphere/trans_lut_vert.spv").string());
@@ -290,6 +301,7 @@ void Atmosphere::initAtmLUTPipeline() {
 
 void Atmosphere::initAtmCubeMapPipeline() {
     auto framework = framework_.lock();
+    if (!framework) return;
     std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
     atmCubeMapVertShader_ = vk::Shader::create(framework->device(),
                                                (shaderPath / "world/ray_tracing/atmosphere/skycube_vert.spv").string());
@@ -347,11 +359,13 @@ void AtmosphereContext::render() {
     atmDescriptorTable->bindBuffer(buffers->skyUniformBuffer(), 1, 1);
 
     auto frameworkContextPtr = frameworkContext.lock();
+    if (!frameworkContextPtr) return;
     auto worldCommandBuffer = frameworkContextPtr->worldCommandBuffer;
     auto physicalDevice = frameworkContextPtr->physicalDevice;
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
 
     auto module = atmosphere.lock();
+    if (!module) return;
 
     auto chooseSrc = [](VkImageLayout oldLayout,
                         VkPipelineStageFlags2 fallbackStage,

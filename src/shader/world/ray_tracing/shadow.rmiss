@@ -4,6 +4,7 @@
 
 #include "../util/ray_payloads.glsl"
 #include "common/shared.hpp"
+#include "../util/colorspace.glsl"
 
 layout(set = 0, binding = 1) uniform sampler2D transLUT;
 
@@ -46,9 +47,9 @@ void main() {
 
         vec3 T = sampleTransmittance(r, muSun);
 
-        radiance = (skyUBO.sunRadiance * skyUBO.envCelestial.z) * T;
+        radiance = CS_BT709_TO_BT2020 * ((skyUBO.sunRadiance * skyUBO.envCelestial.z) * T);
     } else {
-        radiance = skyUBO.moonRadiance * skyUBO.envCelestial.w;
+        radiance = CS_BT709_TO_BT2020 * (skyUBO.moonRadiance * skyUBO.envCelestial.w);
     }
 
     float factor = 1.0;

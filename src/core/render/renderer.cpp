@@ -7,7 +7,10 @@
 
 std::filesystem::path Renderer::folderPath{};
 Options Renderer::options{};
-float Renderer::preExposure = 1.0f;
+float Renderer::preExposure = 0.00002f;  // Init for physical sun ~100k lux (avoids first-frame FP16 overflow)
+bool Renderer::resetExposureAdaptation = false;
+std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::emissionImages;
+std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::renderResHdrImages;
 
 Renderer::Renderer(GLFWwindow *window)
     : framework_(Framework::create(window)),

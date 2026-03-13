@@ -143,9 +143,9 @@ struct Chunk1 : public SharedObject<Chunk1> {
     constexpr static float T_HALF = 200; // ms
     constexpr static float T_WEIGHT = 1.0;
 
-    constexpr static float D_HALF = 96; // blocks
+    constexpr static float D_HALF = 48; // blocks (sharper distance falloff for spiral loading)
     constexpr static float D_SENSITIVITY = 1.5;
-    constexpr static float D_WEIGHT = 1.2;
+    constexpr static float D_WEIGHT = 2.0; // stronger distance preference
 
     int x, y, z;
     int64_t latestVersion = 0;

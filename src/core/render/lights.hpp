@@ -59,115 +59,128 @@ enum LightTypeId {
 
 struct LightTypeDef {
     float halfExtent;      // cube half-size (0.5=full, 0.05=point, 0.15=small, 0.3=medium)
-    float intensity;       // brightness factor derived from light level / 15.0
+    float lumens;          // physically-based luminous power (total output in lumens)
     float radius;          // max effective range in blocks
-    glm::vec3 color;       // pre-computed emissive RGB
+    glm::vec3 color;       // BT.709 base/fallback color (converted to BT.2020 at SSBO upload)
     float yOffset;         // vertical offset from block center (0.35 = flame tip)
     float flickerStrength; // procedural flicker amplitude (0.0=none, 0.08=torch, 0.15=candle)
+    float colorTemperature; // Kelvin for blackbody (0 = non-thermal, uses color field)
+    float spectralPurity;   // BT.2020 chroma boost (0.0 = none, 0.5 = aggressive)
 };
 
-// Indexed by LightTypeId. Intensity = lightLevel / 15.0, radius ~ lightLevel * 3.2.
+// Converts lumens to the internal intensity scale.
+// Calibrated for HDR area lights with cubeFaceArea attenuation.
+// Small lights (halfExtent=0.10, faceArea=0.04) need high intensity to compensate for
+// the area factor. 500/150 ≈ 3.33 gives torch (3000 lm) intensity 10000,
+// producing ~8000 nits at 4 blocks on stone walls — strong warm glow on HDR.
+inline constexpr float LUMENS_TO_INTENSITY = 500.0f / 150.0f;  // ~3.333
+
+// Indexed by LightTypeId. Lumens = real-world luminous power.
+// Intensity is derived at runtime: intensity = lumens * LUMENS_TO_INTENSITY * globalMultiplier * perBlockMultiplier
 // yOffset: vertical shift from block center (0.35 = flame tip for torches/candles)
+// colorTemperature: Kelvin for blackbody emitters (XYZ -> BT.2020 directly). 0 = use color field.
+// spectralPurity: chroma boost in BT.2020 space for non-thermal emitters.
 inline constexpr std::array<LightTypeDef, LIGHT_TYPE_COUNT> LIGHT_DEFS = {{
-    // LIGHT_TORCH          (level 14, spherical point light, warm orange)
-    { 0.0f, 0.25f, 48.0f, {1.0f, 0.7f, 0.3f}, 0.07f, 0.08f },
-    // LIGHT_SOUL_TORCH     (level 10, spherical point light, cyan)
-    { 0.0f, 0.42f, 40.0f, {0.3f, 0.8f, 0.9f}, 0.12f, 0.04f },
-    // LIGHT_LANTERN         (level 15, small, warm orange)
-    { 0.15f, 1.000f, 48.0f, {1.0f, 0.7f, 0.3f}, -0.1f, 0.03f },
-    // LIGHT_SOUL_LANTERN    (level 10, small, cyan)
-    { 0.15f, 0.667f, 40.0f, {0.3f, 0.8f, 0.9f}, -0.1f, 0.02f },
-    // LIGHT_CAMPFIRE        (level 15, small, warm orange)
-    { 0.15f, 1.000f, 48.0f, {1.0f, 0.7f, 0.3f}, 0.15f, 0.05f },
-    // LIGHT_SOUL_CAMPFIRE   (level 10, small, cyan)
-    { 0.15f, 0.667f, 40.0f, {0.3f, 0.8f, 0.9f}, 0.15f, 0.04f },
-    // LIGHT_GLOWSTONE       (level 15, full, golden)
-    { 0.50f, 1.000f, 48.0f, {1.0f, 0.85f, 0.5f}, 0.0f, 0.0f },
-    // LIGHT_SEA_LANTERN     (level 15, full, blue-white)
-    { 0.50f, 1.000f, 48.0f, {0.7f, 0.85f, 1.0f}, 0.0f, 0.0f },
-    // LIGHT_SHROOMLIGHT     (level 15, full, orange)
-    { 0.50f, 1.000f, 48.0f, {1.0f, 0.6f, 0.3f}, 0.0f, 0.0f },
-    // LIGHT_JACK_O_LANTERN  (level 15, full, warm orange)
-    { 0.50f, 1.000f, 48.0f, {1.0f, 0.7f, 0.3f}, 0.0f, 0.0f },
-    // LIGHT_END_ROD         (level 14, point, cool white)
-    { 0.05f, 0.933f, 48.0f, {0.95f, 0.9f, 1.0f}, 0.0f, 0.0f },
-    // LIGHT_BEACON          (level 15, medium, bright white)
-    { 0.30f, 1.000f, 64.0f, {0.9f, 0.95f, 1.0f}, 0.0f, 0.0f },
-    // LIGHT_OCHRE_FROGLIGHT (level 15, full, yellow)
-    { 0.50f, 1.000f, 48.0f, {1.0f, 0.9f, 0.5f}, 0.0f, 0.0f },
-    // LIGHT_VERDANT_FROGLIGHT (level 15, full, green)
-    { 0.50f, 1.000f, 48.0f, {0.4f, 1.0f, 0.5f}, 0.0f, 0.0f },
-    // LIGHT_PEARL_FROGLIGHT (level 15, full, pink)
-    { 0.50f, 1.000f, 48.0f, {0.9f, 0.6f, 0.8f}, 0.0f, 0.0f },
-    // LIGHT_REDSTONE_TORCH  (level 7, point, deep red)
-    { 0.05f, 0.467f, 32.0f, {1.0f, 0.2f, 0.1f}, 0.35f, 0.06f },
-    // LIGHT_REDSTONE_LAMP   (level 15, full, deep red)
-    { 0.50f, 1.000f, 48.0f, {1.0f, 0.2f, 0.1f}, 0.0f, 0.0f },
-    // LIGHT_CANDLE           (consolidated, point, warm — intensity boosted for visibility)
-    { 0.05f, 0.600f, 40.0f, {1.0f, 0.75f, 0.35f}, 0.3f, 0.12f },
+    //                                                                                          temp    purity
+    // LIGHT_TORCH          (3000 lm — standard torch, blackbody 1800K)
+    { 0.10f, 3000.0f, 48.0f, {1.0f, 0.7f, 0.3f}, 0.07f, 0.08f,  1800.0f, 0.00f },
+    // LIGHT_SOUL_TORCH     (1600 lm — fantasy blue fire, spectral uplift)
+    { 0.10f, 1600.0f, 40.0f, {0.3f, 0.8f, 0.9f}, 0.12f, 0.04f,     0.0f, 0.35f },
+    // LIGHT_LANTERN         (200 lm — oil lantern, blackbody 2200K + slight uplift)
+    { 0.15f, 200.0f, 48.0f, {1.0f, 0.7f, 0.3f}, -0.1f, 0.03f,  2200.0f, 0.05f },
+    // LIGHT_SOUL_LANTERN    (100 lm — soul variant, spectral uplift)
+    { 0.15f, 100.0f, 40.0f, {0.3f, 0.8f, 0.9f}, -0.1f, 0.02f,     0.0f, 0.30f },
+    // LIGHT_CAMPFIRE        (800 lm — open wood fire, blackbody 1500K)
+    { 0.15f, 800.0f, 48.0f, {1.0f, 0.7f, 0.3f}, 0.15f, 0.05f,  1500.0f, 0.00f },
+    // LIGHT_SOUL_CAMPFIRE   (400 lm — blue variant, spectral uplift)
+    { 0.15f, 400.0f, 40.0f, {0.3f, 0.8f, 0.9f}, 0.15f, 0.04f,     0.0f, 0.30f },
+    // LIGHT_GLOWSTONE       (300 lm — phosphorescent mineral, spectral uplift)
+    { 0.50f, 300.0f, 48.0f, {1.0f, 0.85f, 0.5f}, 0.0f, 0.0f,      0.0f, 0.40f },
+    // LIGHT_SEA_LANTERN     (250 lm — bioluminescent aqua, spectral uplift)
+    { 0.50f, 250.0f, 48.0f, {0.7f, 0.85f, 1.0f}, 0.0f, 0.0f,      0.0f, 0.45f },
+    // LIGHT_SHROOMLIGHT     (250 lm — bioluminescent fungus, spectral uplift)
+    { 0.50f, 250.0f, 48.0f, {1.0f, 0.6f, 0.3f}, 0.0f, 0.0f,       0.0f, 0.35f },
+    // LIGHT_JACK_O_LANTERN  (50 lm — candle inside pumpkin, blackbody 1900K)
+    { 0.50f, 50.0f, 48.0f, {1.0f, 0.7f, 0.3f}, 0.0f, 0.0f,    1900.0f, 0.00f },
+    // LIGHT_END_ROD         (400 lm — fluorescent, slight uplift)
+    { 0.05f, 400.0f, 48.0f, {0.95f, 0.9f, 1.0f}, 0.0f, 0.0f,      0.0f, 0.20f },
+    // LIGHT_BEACON          (2000 lm — powerful focused light)
+    { 0.30f, 2000.0f, 64.0f, {0.9f, 0.95f, 1.0f}, 0.0f, 0.0f,     0.0f, 0.00f },
+    // LIGHT_OCHRE_FROGLIGHT (200 lm — bioluminescent warm)
+    { 0.50f, 200.0f, 48.0f, {1.0f, 0.9f, 0.5f}, 0.0f, 0.0f,       0.0f, 0.00f },
+    // LIGHT_VERDANT_FROGLIGHT (200 lm — bioluminescent green)
+    { 0.50f, 200.0f, 48.0f, {0.4f, 1.0f, 0.5f}, 0.0f, 0.0f,       0.0f, 0.00f },
+    // LIGHT_PEARL_FROGLIGHT (200 lm — bioluminescent pink)
+    { 0.50f, 200.0f, 48.0f, {0.9f, 0.6f, 0.8f}, 0.0f, 0.0f,       0.0f, 0.00f },
+    // LIGHT_REDSTONE_TORCH  (20 lm — dim deep red, spectral uplift)
+    { 0.05f, 20.0f, 32.0f, {1.0f, 0.2f, 0.1f}, 0.35f, 0.06f,      0.0f, 0.45f },
+    // LIGHT_REDSTONE_LAMP   (800 lm — red incandescent, spectral uplift)
+    { 0.50f, 800.0f, 48.0f, {1.0f, 0.2f, 0.1f}, 0.0f, 0.0f,       0.0f, 0.45f },
+    // LIGHT_CANDLE           (13 lm — single candle, blackbody 1800K)
+    { 0.05f, 13.0f, 40.0f, {1.0f, 0.75f, 0.35f}, 0.3f, 0.12f,  1800.0f, 0.00f },
     // [18] UNUSED — formerly CANDLE_2
-    { 0.05f, 0.600f, 40.0f, {1.0f, 0.75f, 0.35f}, 0.3f, 0.12f },
+    { 0.05f, 13.0f, 40.0f, {1.0f, 0.75f, 0.35f}, 0.3f, 0.12f,     0.0f, 0.00f },
     // [19] UNUSED — formerly CANDLE_3
-    { 0.05f, 0.600f, 40.0f, {1.0f, 0.75f, 0.35f}, 0.3f, 0.12f },
+    { 0.05f, 13.0f, 40.0f, {1.0f, 0.75f, 0.35f}, 0.3f, 0.12f,     0.0f, 0.00f },
     // [20] UNUSED — formerly CANDLE_4
-    { 0.05f, 0.600f, 40.0f, {1.0f, 0.75f, 0.35f}, 0.3f, 0.12f },
-    // LIGHT_CAVE_VINES      (level 14, point, warm)
-    { 0.05f, 0.933f, 48.0f, {1.0f, 0.75f, 0.35f}, 0.35f, 0.03f },
-    // LIGHT_GLOW_LICHEN     (level 7, point, teal)
-    { 0.05f, 0.467f, 32.0f, {0.4f, 0.8f, 0.6f}, 0.0f, 0.0f },
-    // LIGHT_FURNACE         (level 13, medium, fire orange)
-    { 0.30f, 0.867f, 40.0f, {1.0f, 0.5f, 0.2f}, 0.0f, 0.04f },
-    // LIGHT_BLAST_FURNACE   (level 13, medium, fire orange)
-    { 0.30f, 0.867f, 40.0f, {1.0f, 0.5f, 0.2f}, 0.0f, 0.04f },
-    // LIGHT_SMOKER           (level 13, medium, fire orange)
-    { 0.30f, 0.867f, 40.0f, {1.0f, 0.5f, 0.2f}, 0.0f, 0.04f },
-    // LIGHT_ENDER_CHEST     (level 7, small, teal)
-    { 0.15f, 0.467f, 32.0f, {0.3f, 0.7f, 0.5f}, 0.0f, 0.02f },
-    // LIGHT_CRYING_OBSIDIAN (level 10, medium, purple)
-    { 0.30f, 0.667f, 40.0f, {0.6f, 0.2f, 0.9f}, 0.0f, 0.03f },
-    // LIGHT_NETHER_PORTAL   (level 11, medium, purple)
-    { 0.30f, 0.733f, 40.0f, {0.5f, 0.2f, 0.8f}, 0.0f, 0.02f },
-    // LIGHT_CONDUIT          (level 15, medium, bright white)
-    { 0.30f, 1.000f, 48.0f, {0.9f, 0.95f, 1.0f}, 0.0f, 0.0f },
-    // LIGHT_RESPAWN_ANCHOR_1 (level 4, medium, warm amber)
-    { 0.30f, 0.267f, 28.0f, {1.0f, 0.6f, 0.2f}, 0.0f, 0.0f },
-    // LIGHT_RESPAWN_ANCHOR_2 (level 7, medium, warm amber)
-    { 0.30f, 0.467f, 32.0f, {1.0f, 0.6f, 0.2f}, 0.0f, 0.0f },
-    // LIGHT_RESPAWN_ANCHOR_3 (level 10, medium, warm amber)
-    { 0.30f, 0.667f, 40.0f, {1.0f, 0.6f, 0.2f}, 0.0f, 0.0f },
-    // LIGHT_RESPAWN_ANCHOR_4 (level 15, medium, warm amber)
-    { 0.30f, 1.000f, 48.0f, {1.0f, 0.6f, 0.2f}, 0.0f, 0.0f },
-    // LIGHT_AMETHYST_CLUSTER (level 5, point, purple)
-    { 0.05f, 0.333f, 24.0f, {0.7f, 0.5f, 0.9f}, 0.0f, 0.0f },
-    // LIGHT_LARGE_AMETHYST_BUD (level 4, point, purple)
-    { 0.05f, 0.267f, 24.0f, {0.7f, 0.5f, 0.9f}, 0.0f, 0.0f },
-    // LIGHT_COPPER_BULB     (level 15, full, warm)
-    { 0.50f, 1.000f, 48.0f, {1.0f, 0.7f, 0.4f}, 0.0f, 0.0f },
-    // LIGHT_ENCHANTING_TABLE (level 1, point, green-teal)
-    { 0.05f, 0.067f, 16.0f, {0.5f, 0.8f, 0.5f}, 0.0f, 0.02f },
-    // --- New: formerly emissive-only blocks ---
-    // LIGHT_LAVA             (level 15, full, deep orange)
-    { 0.50f, 1.000f, 48.0f, {1.0f, 0.4f, 0.1f}, 0.0f, 0.0f },
-    // LIGHT_FIRE             (level 15, small, orange)
-    { 0.15f, 1.000f, 48.0f, {1.0f, 0.6f, 0.2f}, 0.15f, 0.12f },
-    // LIGHT_SOUL_FIRE        (level 10, small, cyan)
-    { 0.15f, 0.667f, 40.0f, {0.3f, 0.8f, 0.9f}, 0.15f, 0.08f },
-    // LIGHT_MAGMA_BLOCK      (level 3, full, deep red-orange)
-    { 0.50f, 0.200f, 24.0f, {1.0f, 0.3f, 0.1f}, 0.0f, 0.0f },
-    // LIGHT_SCULK_SENSOR     (level 1, small, dark teal)
-    { 0.15f, 0.067f, 16.0f, {0.2f, 0.5f, 0.5f}, 0.0f, 0.02f },
-    // LIGHT_SCULK_CATALYST   (level 1, medium, dark teal)
-    { 0.30f, 0.067f, 16.0f, {0.2f, 0.5f, 0.5f}, 0.0f, 0.02f },
-    // LIGHT_SCULK_VEIN       (level 1, point, dark teal)
-    { 0.05f, 0.067f, 16.0f, {0.2f, 0.5f, 0.5f}, 0.0f, 0.0f },
-    // LIGHT_SCULK            (level 1, full, dark teal)
-    { 0.50f, 0.067f, 16.0f, {0.15f, 0.4f, 0.4f}, 0.0f, 0.0f },
-    // LIGHT_SCULK_SHRIEKER   (level 1, medium, dark teal)
-    { 0.30f, 0.067f, 16.0f, {0.2f, 0.5f, 0.5f}, 0.0f, 0.0f },
-    // LIGHT_BREWING_STAND    (level 1, small, warm amber)
-    { 0.15f, 0.067f, 16.0f, {1.0f, 0.6f, 0.2f}, 0.0f, 0.0f },
-    // LIGHT_END_PORTAL       (level 15, full, deep purple)
-    { 0.50f, 1.000f, 48.0f, {0.3f, 0.1f, 0.5f}, 0.0f, 0.0f },
-    // LIGHT_END_PORTAL_FRAME (level 1, small, green-teal)
-    { 0.15f, 0.067f, 16.0f, {0.4f, 0.7f, 0.4f}, 0.0f, 0.02f },
+    { 0.05f, 13.0f, 40.0f, {1.0f, 0.75f, 0.35f}, 0.3f, 0.12f,     0.0f, 0.00f },
+    // LIGHT_CAVE_VINES      (10 lm — dim bioluminescent berries)
+    { 0.05f, 10.0f, 48.0f, {1.0f, 0.75f, 0.35f}, 0.35f, 0.03f,    0.0f, 0.00f },
+    // LIGHT_GLOW_LICHEN     (5 lm — very dim bioluminescence)
+    { 0.05f, 5.0f, 32.0f, {0.4f, 0.8f, 0.6f}, 0.0f, 0.0f,         0.0f, 0.00f },
+    // LIGHT_FURNACE         (300 lm — fire behind grate, blackbody 1400K)
+    { 0.30f, 300.0f, 40.0f, {1.0f, 0.5f, 0.2f}, 0.0f, 0.04f,  1400.0f, 0.00f },
+    // LIGHT_BLAST_FURNACE   (500 lm — hotter smelting fire, blackbody 1600K)
+    { 0.30f, 500.0f, 40.0f, {1.0f, 0.5f, 0.2f}, 0.0f, 0.04f,  1600.0f, 0.00f },
+    // LIGHT_SMOKER           (200 lm — cooking fire, blackbody 1400K)
+    { 0.30f, 200.0f, 40.0f, {1.0f, 0.5f, 0.2f}, 0.0f, 0.04f,  1400.0f, 0.00f },
+    // LIGHT_ENDER_CHEST     (15 lm — subtle magical glow)
+    { 0.15f, 15.0f, 32.0f, {0.3f, 0.7f, 0.5f}, 0.0f, 0.02f,       0.0f, 0.00f },
+    // LIGHT_CRYING_OBSIDIAN (40 lm — purple fluorescent)
+    { 0.30f, 40.0f, 40.0f, {0.6f, 0.2f, 0.9f}, 0.0f, 0.03f,       0.0f, 0.00f },
+    // LIGHT_NETHER_PORTAL   (80 lm — plasma purple, spectral uplift)
+    { 0.30f, 80.0f, 40.0f, {0.5f, 0.2f, 0.8f}, 0.0f, 0.02f,       0.0f, 0.50f },
+    // LIGHT_CONDUIT          (500 lm — powerful aquatic light)
+    { 0.30f, 500.0f, 48.0f, {0.9f, 0.95f, 1.0f}, 0.0f, 0.0f,      0.0f, 0.00f },
+    // LIGHT_RESPAWN_ANCHOR_1 (20 lm — low charge)
+    { 0.30f, 20.0f, 28.0f, {1.0f, 0.6f, 0.2f}, 0.0f, 0.0f,        0.0f, 0.00f },
+    // LIGHT_RESPAWN_ANCHOR_2 (50 lm — medium-low)
+    { 0.30f, 50.0f, 32.0f, {1.0f, 0.6f, 0.2f}, 0.0f, 0.0f,        0.0f, 0.00f },
+    // LIGHT_RESPAWN_ANCHOR_3 (100 lm — medium-high)
+    { 0.30f, 100.0f, 40.0f, {1.0f, 0.6f, 0.2f}, 0.0f, 0.0f,       0.0f, 0.00f },
+    // LIGHT_RESPAWN_ANCHOR_4 (200 lm — full charge)
+    { 0.30f, 200.0f, 48.0f, {1.0f, 0.6f, 0.2f}, 0.0f, 0.0f,       0.0f, 0.00f },
+    // LIGHT_AMETHYST_CLUSTER (8 lm — crystal fluorescence, spectral uplift)
+    { 0.05f, 8.0f, 24.0f, {0.7f, 0.5f, 0.9f}, 0.0f, 0.0f,         0.0f, 0.45f },
+    // LIGHT_LARGE_AMETHYST_BUD (5 lm — smaller crystal, spectral uplift)
+    { 0.05f, 5.0f, 24.0f, {0.7f, 0.5f, 0.9f}, 0.0f, 0.0f,         0.0f, 0.45f },
+    // LIGHT_COPPER_BULB     (600 lm — electric bulb, blackbody 2700K + slight uplift)
+    { 0.50f, 600.0f, 48.0f, {1.0f, 0.7f, 0.4f}, 0.0f, 0.0f,   2700.0f, 0.05f },
+    // LIGHT_ENCHANTING_TABLE (3 lm — faint magical glow)
+    { 0.05f, 3.0f, 16.0f, {0.5f, 0.8f, 0.5f}, 0.0f, 0.02f,        0.0f, 0.00f },
+    // --- Formerly emissive-only blocks ---
+    // LIGHT_LAVA             (1500 lm — flowing lava, blackbody 1323K basaltic ~1050°C)
+    { 0.50f, 1500.0f, 48.0f, {1.0f, 0.4f, 0.1f}, 0.0f, 0.0f,  1323.0f, 0.00f },
+    // LIGHT_FIRE             (500 lm — open flame, blackbody 1500K)
+    { 0.15f, 500.0f, 48.0f, {1.0f, 0.6f, 0.2f}, 0.15f, 0.12f, 1500.0f, 0.00f },
+    // LIGHT_SOUL_FIRE        (250 lm — blue flame, spectral uplift)
+    { 0.15f, 250.0f, 40.0f, {0.3f, 0.8f, 0.9f}, 0.15f, 0.08f,     0.0f, 0.30f },
+    // LIGHT_MAGMA_BLOCK      (80 lm — cooling lava, blackbody 1200K)
+    { 0.50f, 80.0f, 24.0f, {1.0f, 0.3f, 0.1f}, 0.0f, 0.0f,    1200.0f, 0.00f },
+    // LIGHT_SCULK_SENSOR     (2 lm — deep-sea bioluminescence, spectral uplift)
+    { 0.15f, 2.0f, 16.0f, {0.2f, 0.5f, 0.5f}, 0.0f, 0.02f,        0.0f, 0.40f },
+    // LIGHT_SCULK_CATALYST   (3 lm — slightly brighter sculk, spectral uplift)
+    { 0.30f, 3.0f, 16.0f, {0.2f, 0.5f, 0.5f}, 0.0f, 0.02f,        0.0f, 0.40f },
+    // LIGHT_SCULK_VEIN       (1 lm — very dim, spectral uplift)
+    { 0.05f, 1.0f, 16.0f, {0.2f, 0.5f, 0.5f}, 0.0f, 0.0f,         0.0f, 0.40f },
+    // LIGHT_SCULK            (1 lm — very dim, spectral uplift)
+    { 0.50f, 1.0f, 16.0f, {0.15f, 0.4f, 0.4f}, 0.0f, 0.0f,        0.0f, 0.40f },
+    // LIGHT_SCULK_SHRIEKER   (3 lm — slightly brighter sculk, spectral uplift)
+    { 0.30f, 3.0f, 16.0f, {0.2f, 0.5f, 0.5f}, 0.0f, 0.0f,         0.0f, 0.40f },
+    // LIGHT_BREWING_STAND    (5 lm — small pilot flame, blackbody 2000K)
+    { 0.15f, 5.0f, 16.0f, {1.0f, 0.6f, 0.2f}, 0.0f, 0.0f,     2000.0f, 0.00f },
+    // LIGHT_END_PORTAL       (30 lm — void energy, spectral uplift)
+    { 0.50f, 30.0f, 48.0f, {0.3f, 0.1f, 0.5f}, 0.0f, 0.0f,        0.0f, 0.50f },
+    // LIGHT_END_PORTAL_FRAME (3 lm — faint eye glow)
+    { 0.15f, 3.0f, 16.0f, {0.4f, 0.7f, 0.4f}, 0.0f, 0.02f,        0.0f, 0.00f },
 }};

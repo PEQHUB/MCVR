@@ -15,8 +15,12 @@
 #include "../util/area_light.glsl"
 #include "../util/restir.glsl"
 #include "../util/ray_offset.glsl"
+#include "../util/colorspace.glsl"
+#include "../util/noise.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
+
+#include "../util/pom.glsl"
 
 #include "../util/clouds.glsl"
 
@@ -98,6 +102,11 @@ layout(push_constant) uniform PushConstant {
     int temporalMClamp;
     int wClamp;
     float preExposure;
+    // POM fields (fields 8-11, 16 bytes)
+    float pomHeightScale;       // 0 = disabled, else depth scale (0.01-0.50)
+    int   pomSteps;             // linear search steps (8-512)
+    int   pomRefinement;        // binary refinement iterations (0-8)
+    float pomFadeDistance;      // distance in blocks to fade POM out (8-256)
 } pc;
 #define SIMPLIFIED_INDIRECT ((pc.flags & 1) != 0)
 #define AREA_LIGHTS_ON ((pc.flags & 2) != 0)
@@ -220,8 +229,57 @@ void main() {
     vec4 normalValue;
     ivec4 flagValue;
     vec2 textureUV;
+    vec3 rawAlbedoLinear = vec3(1.0); // raw albedo before tinting, for texture roughness derivation
     if (useTexture > 0) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
+
+        // POM: offset UVs using height field (primary ray only, with normal texture + height data)
+        if (pc.pomHeightScale > 0.0 && normalTextureID >= 0
+            && (mapping.entries[textureID].properties & TEX_PROP_HAS_HEIGHT_MAP) != 0
+            && mainRay.index == 0) {
+            float pomDist = gl_HitTEXT;
+            float pomFade = 1.0 - smoothstep(pc.pomFadeDistance * 0.5, pc.pomFadeDistance, pomDist);
+            if (pomFade > 0.001) {
+                // Tile boundaries from vertex UVs
+                vec2 uvMin = min(min(v0.textureUV, v1.textureUV), v2.textureUV);
+                vec2 uvMax = max(max(v0.textureUV, v1.textureUV), v2.textureUV);
+
+                // TBN in object space → world space
+                vec3 edge1 = v1.pos - v0.pos;
+                vec3 edge2 = v2.pos - v0.pos;
+                vec3 geoN = normalize(cross(edge1, edge2));
+                vec2 duv1 = v1.textureUV - v0.textureUV;
+                vec2 duv2 = v2.textureUV - v0.textureUV;
+                float pomDet = duv1.x * duv2.y - duv2.x * duv1.y;
+                vec3 tangentObj;
+                if (abs(pomDet) < 1e-6) {
+                    tangentObj = (abs(geoN.x) > 0.99) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+                } else {
+                    float f = 1.0 / pomDet;
+                    tangentObj = vec3(
+                        f * (duv2.y * edge1.x - duv1.y * edge2.x),
+                        f * (duv2.y * edge1.y - duv1.y * edge2.y),
+                        f * (duv2.y * edge1.z - duv1.y * edge2.z));
+                }
+                vec3 TObj = normalize(tangentObj - geoN * dot(geoN, tangentObj));
+                vec3 BObj = cross(geoN, TObj);
+                mat3 nMat = transpose(mat3(gl_WorldToObject3x4EXT));
+                vec3 T = normalize(nMat * TObj);
+                vec3 B = normalize(nMat * BObj);
+                vec3 N = normalize(nMat * geoN);
+
+                // View direction in tangent space
+                vec3 viewDirTS = vec3(dot(viewDir, T), dot(viewDir, B), dot(viewDir, N));
+
+                int effectiveSteps = max(int(float(pc.pomSteps) * pomFade), 4);
+                int effectiveRefinement = (pomFade > 0.5) ? pc.pomRefinement : 0;
+
+                textureUV = parallaxOcclusionMapping(
+                    textureUV, viewDirTS, normalTextureID,
+                    pc.pomHeightScale, effectiveSteps, effectiveRefinement,
+                    uvMin, uvMax);
+            }
+        }
 
         // ray cone
         float coneRadiusWorld = mainRay.coneWidth + gl_HitTEXT * mainRay.coneSpread;
@@ -231,6 +289,7 @@ void main() {
         float lod = 0; // lodWithCone(textures[nonuniformEXT(textureID)], textureUV, coneRadiusWorld, dposdu, dposdv);
 
         albedoValue = textureLod(textures[nonuniformEXT(textureID)], textureUV, lod);
+        rawAlbedoLinear = albedoValue.rgb; // save before tinting for texture roughness derivation
         if (specularTextureID >= 0) {
             specularValue = textureLod(textures[nonuniformEXT(specularTextureID)], textureUV, lod);
         } else {
@@ -276,8 +335,60 @@ void main() {
         tint = albedoValue.rgb * colorLayer + glint;
     }
 
+    tint = CS_BT709_TO_BT2020 * tint;  // BT.709 -> BT.2020 working space
     albedoValue = vec4(tint, albedoValue.a);
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
+
+    // Principled BSDF material override from WorldUBO (5 × vec4 per block)
+    // emissiveBlockType packs: bits 0-7 = emissive type, bits 8-15 = material type (ordinal+1, 0=none)
+    float matNoiseScale = 0.0;
+    float matNoiseStrength = 0.0;
+    int matNoiseOctaves = 2;
+    uint packedBlockType = v0.emissiveBlockType;
+    uint materialType = (packedBlockType >> 8u) & 0xFFu;
+    if (materialType > 0u && materialType <= 160u) {
+        uint idx = materialType - 1u;
+        vec4 pack0 = worldUbo.materialData[idx];          // F0.rgb, roughness
+        vec4 pack1 = worldUbo.materialData[idx + 160u];   // metallic, transmission, ior, subsurface
+        vec4 pack2 = worldUbo.materialData[idx + 320u];   // anisotropic, sheenWeight, sheenTint, coatWeight
+        vec4 pack3 = worldUbo.materialData[idx + 480u];   // coatRoughness, noiseScale, noiseStrength, noiseOctaves
+        vec4 pack4 = worldUbo.materialData[idx + 640u];   // channelR, channelG, channelB, textureBlend
+
+        if (dot(pack0.rgb, pack0.rgb) > 0.0001) {
+            mat.f0 = pack0.rgb;
+            float matRoughness = pack0.a * pack0.a;  // perceptual → GGX alpha
+
+            // Texture roughness channel routing: derive roughness from albedo channel mix
+            float textureBlend = pack4.w;
+            if (textureBlend > 0.001) {
+                float weightSum = pack4.x + pack4.y + pack4.z;
+                float signal = dot(rawAlbedoLinear, pack4.xyz) / max(weightSum, 0.001);
+                float texRoughness = (1.0 - signal) * (1.0 - signal);  // squared for GGX alpha
+                mat.roughness = mix(matRoughness, texRoughness, textureBlend);
+            } else {
+                mat.roughness = matRoughness;
+            }
+
+            mat.metallic = pack1.x;
+            mat.transmission = pack1.y;
+            mat.ior = max(pack1.z, 1.0);
+            mat.subSurface = pack1.w;
+            mat.anisotropic = pack2.x;
+            mat.sheenWeight = pack2.y;
+            mat.sheenTint = pack2.z;
+            mat.coatWeight = pack2.w;
+            mat.coatRoughness = pack3.x;
+
+            // Extract noise parameters from pack3
+            matNoiseScale = pack3.y;
+            matNoiseStrength = pack3.z;
+            matNoiseOctaves = int(pack3.w);
+
+            if (mat.metallic > 0.5) {
+                mat.albedo = mat.f0;  // metals: albedo = F0
+            }
+        }
+    }
 
     // the provided normal is unreliable! (such as grass, etc.)
     // calculate on the fly for now
@@ -285,9 +396,30 @@ void main() {
     vec3 normal =
         calculateNormal(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, mat.normal, viewDir, geometricNormal);
 
+    // Procedural noise modulation for metallic surfaces
+    if (matNoiseStrength > 0.001 && mat.metallic > 0.5) {
+        vec3 noisePos = worldPos * matNoiseScale;
+        float n = fbm(noisePos, matNoiseOctaves);
+        mat.roughness = clamp(mat.roughness + n * matNoiseStrength, 0.0, 1.0);
+        // Normal perturbation from noise gradient
+        float eps = 0.01 / max(matNoiseScale, 0.1);
+        vec3 grad = snoiseGradient(noisePos, eps) * matNoiseStrength * 0.3;
+        vec3 T = normalize(cross(normal, abs(normal.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0)));
+        vec3 B = cross(normal, T);
+        normal = normalize(normal + grad.x * T + grad.y * B);
+    }
+
+    // Write roughness to mainRay for PSR decision in rgen
+    mainRay.roughness = mat.roughness;
+
+    // Scene-referred emission normalization: 1.0 = 200 cd/m² (ITU-R BT.2408 paper white).
+    // Physical nit values from vertex data are divided by this to keep radiance in a range
+    // that fits RGBA16F after pre-exposure multiplication (max ~60 × preExp 32 = 1920).
+    const float EMISSION_REFERENCE_NITS = 200.0;
+
     // Visible area light cube: if this hit point is inside a small light cube, render as solid emissive
     if (AREA_LIGHTS_ON && pc.areaLightCount > 0 && mainRay.index == 0) {
-        int checkCount = min(pc.areaLightCount, 64);
+        int checkCount = pc.areaLightCount;
 
         for (int i = 0; i < checkCount; i++) {
             int idx = i;
@@ -302,7 +434,7 @@ void main() {
                 if (cubeFade < 0.01) continue;
 
                 // Visible emissive cube — route through CLEAR path (bypasses NRD denoiser)
-                mainRay.radiance = al.color * max(al.intensity, 1.0) * 200.0 * cubeFade * mainRay.throughput;
+                mainRay.radiance = al.color * max(al.intensity, 1.0) * cubeFade * mainRay.throughput;
                 mainRay.albedoValue = vec4(al.color, 1.0);
                 mainRay.albedoEmission = 0.0;
                 mainRay.specularValue = vec4(0.0);
@@ -320,6 +452,7 @@ void main() {
                 mainRay.baryCoords = baryCoords;
                 mainRay.noisy = 0;
                 mainRay.lobeType = 0;
+                mainRay.roughness = 1.0;
                 mainRay.stop = 1;
                 return;
             }
@@ -334,7 +467,32 @@ void main() {
     albedoEmission = abs(rawAlbedoEmission);
     bool hasAreaLight = rawAlbedoEmission < -0.0001;
 
-    float combinedEmission = max(mat.emission, albedoEmission);
+    // Apply per-block emission data from UBO (color override + scalar multiplier)
+    // Extract emissive type from lower 8 bits of packed field
+    uint emBlockType = packedBlockType & 0xFFu;
+    mainRay.emBlockTypeOut = emBlockType;
+    vec3 emissionTint = tint; // default: texture albedo (BT.2020)
+    if (emBlockType < 50u && albedoEmission > 0.0) {
+        vec4 emData = worldUbo.emissionData[emBlockType];
+        albedoEmission *= emData.a; // scalar multiplier
+        if (dot(emData.rgb, emData.rgb) > 0.0001) {
+            // Flame mask: only bright texture pixels (actual flame) get the spectral color.
+            // Dark pixels (wood stick, stone base) keep their texture albedo.
+            float texLum = dot(tint, vec3(0.2627, 0.6780, 0.0593)); // BT.2020 luminance
+            float flameMask = smoothstep(0.15, 0.5, texLum);
+            emissionTint = mix(tint, emData.rgb, flameMask);
+        }
+    }
+
+    // Emission in scene-referred units (1.0 = EMISSION_REFERENCE_NITS cd/m²).
+    // Vertex nits (albedoEmission) are authoritative when set; LabPBR is fallback only.
+    float combinedEmission = (albedoEmission != 0.0) ? albedoEmission : (mat.emission * EMISSION_REFERENCE_NITS);
+    float sceneEmission = combinedEmission / EMISSION_REFERENCE_NITS;
+
+    // Texture-based emission mask: only bright texels (flame head) emit.
+    // Dark texels (wood stick, stone base) get zero emission.
+    float maskLum = dot(tint, vec3(0.2627, 0.6780, 0.0593));
+    sceneEmission *= smoothstep(0.10, 0.40, maskLum);
 
     float factor;
     if (mainRay.index == 0) {
@@ -342,14 +500,15 @@ void main() {
     } else if (hasAreaLight) {
         factor = 0.0;
     } else {
-        factor = 4.0 * skyUBO.hdrRadianceScale; // Emissive mode: reduced from 16x to 4x
+        factor = 1.0; // Emissive mode
     }
 
-    vec3 emissionRadiance = factor * tint * combinedEmission * mainRay.throughput;
+    // Emission radiance: emissionTint is BT.2020 (texture albedo or spectral flame color).
+    vec3 emissionRadiance = factor * emissionTint * sceneEmission * mainRay.throughput;
 
-    // Per-sample contribution clamping to prevent fireflies
-    float emissionLum = dot(emissionRadiance, vec3(0.2126, 0.7152, 0.0722));
-    float maxContribution = 4.0;
+    // Per-sample contribution clamping to prevent fireflies (scene-referred range)
+    float emissionLum = luminanceBT2020(emissionRadiance);
+    float maxContribution = 1000.0;
     if (emissionLum > maxContribution) {
         emissionRadiance *= maxContribution / emissionLum;
     }
@@ -360,6 +519,11 @@ void main() {
     mainRay.hitT = gl_HitTEXT;
     mainRay.coneWidth += gl_HitTEXT * mainRay.coneSpread;
 
+    // Perfect specular surfaces have a Dirac delta BRDF — they redirect light,
+    // they don't scatter it. Direct lighting appears through the reflection chain.
+    bool isPerfectSpecular = (mat.roughness < 0.001);
+
+    if (!isPerfectSpecular) {
     // shadow ray for direct lighting
     vec3 sunDir = normalize(skyUBO.sunDirection);
     vec3 lightDir = sunDir;
@@ -383,7 +547,7 @@ void main() {
 
         uint shadowMask = WORLD_MASK;
         if (mainRay.isHand == 0) {
-            shadowMask |= PLAYER_MASK;  // world surfaces see player shadows; hand does not (prevents self-shadowing)
+            shadowMask |= PLAYER_MASK | PLAYER_HEAD_MASK;  // world surfaces see player shadows; hand does not (prevents self-shadowing)
         }
 
         traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT,
@@ -410,8 +574,8 @@ void main() {
         // Hand shadow smoothing: apply ambient floor with smooth falloff
         // Prevents harsh black transitions on hand geometry in shadow
         if (mainRay.isHand > 0) {
-            float shadowLum = dot(finalLightRadiance, vec3(0.2126, 0.7152, 0.0722));
-            float ambientFloor = 0.08 * dot(mainRay.throughput, vec3(0.2126, 0.7152, 0.0722));
+            float shadowLum = dot(finalLightRadiance, vec3(0.2627, 0.6780, 0.0593));
+            float ambientFloor = 0.08 * dot(mainRay.throughput, vec3(0.2627, 0.6780, 0.0593));
             float blend = smoothstep(0.0, ambientFloor * 2.0, shadowLum);
             vec3 handAmbient = ambientFloor * tint * mainRay.throughput;
             finalLightRadiance = mix(handAmbient, finalLightRadiance, blend);
@@ -425,27 +589,22 @@ void main() {
 
     // Area light illumination
     if (AREA_LIGHTS_ON && pc.areaLightCount > 0 && mainRay.index == 0) {
-        int searchCount = min(pc.areaLightCount, 128);
+        int searchCount = pc.areaLightCount;
 
         if (RESTIR_ENABLED) {
             // ======== Clean ReSTIR DI: RIS → Temporal → Shadow → Shade ========
             ivec2 pixel = ivec2(mainRay.pixelPacked & 0xFFFFu, mainRay.pixelPacked >> 16u);
 
             // --- Load previous frame reservoir via motion vector reprojection ---
+            // MV read is from previous dispatch (stale but consistent per-pixel).
+            // No normal/depth validation here — those images have intra-dispatch race
+            // conditions (rgen writes after CHS). Temporal merge naturally handles
+            // geometry changes via target PDF re-evaluation at current worldPos.
             vec2 mv = imageLoad(motionVectorImage, pixel).xy;
             ivec2 prevPixel = ivec2(round(vec2(pixel) + mv));
             ivec2 imgSize = imageSize(reservoirPreviousImage);
             bool prevValid = (prevPixel.x >= 0 && prevPixel.y >= 0 &&
                               prevPixel.x < imgSize.x && prevPixel.y < imgSize.y);
-
-            if (prevValid) {
-                vec3 prevNorm = imageLoad(normalRoughnessImage, prevPixel).xyz;
-                float prevDepth = imageLoad(linearDepthImage, prevPixel).r;
-                float currDepth = imageLoad(linearDepthImage, pixel).r;
-                if (dot(normal, prevNorm) < 0.9 ||
-                    abs(currDepth - prevDepth) / max(currDepth, 0.001) > 0.1)
-                    prevValid = false;
-            }
 
             vec4 prevPacked = prevValid ? imageLoad(reservoirPreviousImage, prevPixel) : vec4(0.0);
             Reservoir prevRes = unpackReservoir(prevPacked);
@@ -455,11 +614,11 @@ void main() {
             int prevLightIdx = -1;
             uint prevStableId = prevRes.lightStableId;
 
-            // Cap at 64: contribution-sorted global list makes top-64 sufficient.
-            // Larger pool increases per-frame variance → noisy → denoiser lag + elevated blacks.
-            int effectiveCount = min(pc.areaLightCount, 64);
+            // Use full light buffer as candidate pool — temporal reuse (M=20) converges.
+            // Per-pixel cost stays at risCandidates (32) evaluations regardless of pool size.
+            int effectiveCount = pc.areaLightCount;
             int numCandidates = min(pc.risCandidates, effectiveCount);
-            float sourcePdf = 1.0 / float(effectiveCount);
+            float sourcePdf = 1.0 / float(max(effectiveCount, 1));
 
             for (int c = 0; c < numCandidates; c++) {
                 // Uniform random selection from available lights
@@ -516,9 +675,9 @@ void main() {
                 updateReservoir(currentRes, stableId, idx, weight, targetPdf, unshadowed, alDir, dist, mainRay.seed);
             }
 
-            // Fallback: scan tile list for stableId match (uint comparison only)
+            // Fallback: scan full list for stableId match (uint comparison only)
             if (prevLightIdx < 0 && prevStableId != 0u) {
-                int scanCount = min(effectiveCount, 32);
+                int scanCount = effectiveCount;
                 for (int i = 0; i < scanCount; i++) {
                     int idx = i;
                     if (floatBitsToUint(areaLightBuffer.lights[idx]._unused.x) == prevStableId) {
@@ -668,7 +827,7 @@ void main() {
 
                 // DisneyEval already includes cosine — no NdotL here
                 vec3 unshadowed = al.color * al.intensity * atten;
-                float contrib = dot(unshadowed, vec3(0.2126, 0.7152, 0.0722));
+                float contrib = dot(unshadowed, vec3(0.2627, 0.6780, 0.0593));
 
                 if (contrib > bestContrib[0]) {
                     bestIdx[1] = bestIdx[0]; bestContrib[1] = bestContrib[0];
@@ -739,9 +898,9 @@ void main() {
         int prevLightIdx = -1;
         uint prevStableId = prevRes.lightStableId;
 
-        int searchCount = min(pc.areaLightCount, 128 / 4);
+        int searchCount = pc.areaLightCount;
         int numCandidates = min(pc.risCandidates, searchCount);
-        float sourcePdf = 1.0 / float(searchCount);
+        float sourcePdf = 1.0 / float(max(searchCount, 1));
 
         for (int c = 0; c < numCandidates; c++) {
             int idx = clamp(int(rand(mainRay.seed) * float(searchCount)), 0, searchCount - 1);
@@ -789,9 +948,9 @@ void main() {
             updateReservoir(currentRes, sid, idx, weight, targetPdf, unshadowed, alDir, dist, mainRay.seed);
         }
 
-        // Fallback: scan global SSBO for stableId match (uint comparison only)
+        // Fallback: scan full list for stableId match (uint comparison only)
         if (prevLightIdx < 0 && prevStableId != 0u) {
-            int scanCount = min(pc.areaLightCount, 32);
+            int scanCount = searchCount;
             for (int i = 0; i < scanCount; i++) {
                 if (floatBitsToUint(areaLightBuffer.lights[i]._unused.x) == prevStableId) {
                     prevLightIdx = i;
@@ -894,7 +1053,7 @@ void main() {
 
     } else if (AREA_LIGHTS_ON && pc.areaLightCount > 0 && mainRay.index > 0) {
         // Fallback when ReSTIR disabled: original unshadowed 8-light accumulation
-        int bounceSearchCount = min(pc.areaLightCount, max(128 / 16, 8));
+        int bounceSearchCount = pc.areaLightCount;
         vec3 alAccum = vec3(0.0);
 
         for (int i = 0; i < bounceSearchCount; i++) {
@@ -947,6 +1106,8 @@ void main() {
         mainRay.radiance += alAccum * mainRay.throughput;
     }
 
+    } // !isPerfectSpecular
+
     mainRay.instanceIndex = instanceID;
     mainRay.geometryIndex = geometryID;
     mainRay.primitiveIndex = gl_PrimitiveID;
@@ -957,6 +1118,62 @@ void main() {
     mainRay.specularValue = specularValue;
     mainRay.normalValue = normalValue;
     mainRay.flagValue = flagValue;
+
+    // PSR mirror/glass continuation: if roughness is near-zero, trace deterministically
+    // instead of stochastic BSDF sampling. The rgen PSR loop will continue tracing.
+    if (mat.roughness < 0.001) {
+        if (mat.transmission > 0.0) {
+            // PSR glass: deterministic Snell refraction for transmissive materials
+            bool entering = dot(gl_WorldRayDirectionEXT, geometricNormal) < 0.0;
+            float eta = entering ? (1.0 / mat.ior) : mat.ior;
+            vec3 faceNormal = entering ? normal : -normal;
+            vec3 refractDir = refract(gl_WorldRayDirectionEXT, faceNormal, eta);
+
+            // Fresnel reflectance (Schlick) to determine reflect vs refract
+            float cosTheta = max(dot(viewDir, faceNormal), 0.0);
+            float r0 = ((1.0 - mat.ior) / (1.0 + mat.ior));
+            r0 = r0 * r0;
+            float fresnelReflect = r0 + (1.0 - r0) * pow(1.0 - cosTheta, 5.0);
+            // Blend reflection amount by (1 - transmission): full transmission → mostly refract
+            fresnelReflect *= (1.0 - mat.transmission);
+
+            if (length(refractDir) < 0.001 || fresnelReflect > 0.999) {
+                // Total internal reflection fallback
+                vec3 reflectDir = reflect(gl_WorldRayDirectionEXT, faceNormal);
+                vec3 bounceOffsetN = dot(reflectDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
+                mainRay.origin = offset_ray(worldPos, bounceOffsetN);
+                mainRay.direction = reflectDir;
+                mainRay.throughput *= mat.f0;
+                mainRay.lobeType = 1; // specular
+            } else {
+                // Refraction path
+                vec3 bounceOffsetN = dot(refractDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
+                mainRay.origin = offset_ray(worldPos, bounceOffsetN);
+                mainRay.direction = refractDir;
+                mainRay.throughput *= (1.0 - fresnelReflect);
+                mainRay.lobeType = 2; // transmission
+            }
+            mainRay.noisy = 0;
+            mainRay.stop = 0;
+            return;
+        } else {
+            // PSR mirror: opaque specular reflection
+            vec3 reflectDir = reflect(gl_WorldRayDirectionEXT, normal);
+            vec3 bounceOffsetN = dot(reflectDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
+            mainRay.origin = offset_ray(worldPos, bounceOffsetN);
+            mainRay.direction = reflectDir;
+
+            // Fresnel reflectance (Schlick) — preserves mirror tint for metals
+            float cosTheta = max(dot(viewDir, normal), 0.0);
+            vec3 fresnel = mat.f0 + (1.0 - mat.f0) * pow(1.0 - cosTheta, 5.0);
+            mainRay.throughput *= fresnel;
+
+            mainRay.noisy = 0;
+            mainRay.lobeType = 1; // specular
+            mainRay.stop = 0;
+            return;
+        }
+    }
 
     // sample next direction using Disney BSDF
     vec3 sampleDir;
@@ -969,6 +1186,14 @@ void main() {
 
     // early exit if sampling failed (check BEFORE updating throughput to avoid amplification)
     if (pdf <= 1e-6) {
+        mainRay.stop = 1;
+        return;
+    }
+
+    // Prevent light leaks: perturbed normals can sample directions below the
+    // geometric surface plane. Kill these for non-transmissive lobes (diffuse/specular).
+    // Transmission (lobeType 2: glass/water) still needs through-surface rays.
+    if (lobeType != 2 && dot(sampleDir, geometricNormal) <= 0.0) {
         mainRay.stop = 1;
         return;
     }
