@@ -35,6 +35,10 @@ layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
     TextureMapping mapping;
 };
 
+layout(set = 1, binding = 10) readonly buffer BlenderPBRMappingBuffer {
+    BlenderPBRMapping blenderPBR;
+};
+
 layout(set = 2, binding = 0) uniform Uniform {
     WorldUBO ubo;
 };
@@ -157,7 +161,7 @@ void main() {
         // Blender PBR: check extraTex for transmission override
         int texProps = mapping.entries[textureID].properties;
         if ((texProps & TEX_PROP_DIRECT_PBR) != 0) {
-            int xTex = mapping.entries[textureID].extraTex;
+            int xTex = blenderPBR.entries[textureID].extraTex;
             if (xTex >= 0) {
                 float bpTrans = texture(textures[nonuniformEXT(xTex)], uv).g;
                 mat.transmission = bpTrans;

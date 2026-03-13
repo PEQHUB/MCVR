@@ -31,6 +31,7 @@ Buffers::Buffers(std::shared_ptr<Framework> framework) {
     lastWorldUniformBuffer_.resize(size);
     skyUniformBuffer_.resize(size);
     textureMappingBuffer_.resize(size);
+    blenderPBRMappingBuffer_.resize(size);
     exposureDataBuffer_.resize(size);
     lightMapUniformBuffer_.resize(size);
 }
@@ -412,6 +413,21 @@ void Buffers::setAndUploadTextureMappingBuffer(vk::Data::TextureMapping &mapping
     textureMappingBuffer_[context->frameIndex]->uploadToBuffer(&mapping);
 }
 
+void Buffers::setAndUploadBlenderPBRMappingBuffer(vk::Data::BlenderPBRMapping &mapping) {
+    auto framework = Renderer::instance().framework();
+    auto context = framework->safeAcquireCurrentContext();
+    auto vma = framework->vma();
+    auto device = framework->device();
+
+    if (blenderPBRMappingBuffer_[context->frameIndex] == nullptr) {
+        blenderPBRMappingBuffer_[context->frameIndex] =
+            vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::BlenderPBRMapping),
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    }
+
+    blenderPBRMappingBuffer_[context->frameIndex]->uploadToBuffer(&mapping);
+}
+
 void Buffers::setAndUploadExposureDataBuffer(vk::Data::ExposureData &exposureData) {
     auto framework = Renderer::instance().framework();
     auto context = framework->safeAcquireCurrentContext();
@@ -512,6 +528,16 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::textureMappingBuffer() {
 
     if (textureMappingBuffer_[context->frameIndex]) {
         return textureMappingBuffer_[context->frameIndex];
+    } else {
+        return nullptr;
+    }
+}
+
+std::shared_ptr<vk::HostVisibleBuffer> Buffers::blenderPBRMappingBuffer() {
+    auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
+
+    if (blenderPBRMappingBuffer_[context->frameIndex]) {
+        return blenderPBRMappingBuffer_[context->frameIndex];
     } else {
         return nullptr;
     }

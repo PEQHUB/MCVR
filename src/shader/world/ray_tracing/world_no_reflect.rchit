@@ -51,6 +51,10 @@ layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
     TextureMapping mapping;
 };
 
+layout(set = 1, binding = 10) readonly buffer BlenderPBRMappingBuffer {
+    BlenderPBRMapping blenderPBR;
+};
+
 layout(set = 2, binding = 0) uniform WorldUniform {
     WorldUBO worldUbo;
 };
@@ -191,13 +195,13 @@ void main() {
     // Blender PBR per-channel overlay
     int texProps = mapping.entries[textureID].properties;
     if ((texProps & TEX_PROP_DIRECT_PBR) != 0 && useTexture > 0) {
-        int rTex  = mapping.entries[textureID].roughnessTex;
-        int mTex  = mapping.entries[textureID].metallicTex;
-        int eTex  = mapping.entries[textureID].emissionTex;
-        int nTex  = mapping.entries[textureID].normalBPTex;
-        int hTex  = mapping.entries[textureID].heightTex;
-        int aeTex = mapping.entries[textureID].aoTex;
-        int xTex  = mapping.entries[textureID].extraTex;
+        int rTex  = blenderPBR.entries[textureID].roughnessTex;
+        int mTex  = blenderPBR.entries[textureID].metallicTex;
+        int eTex  = blenderPBR.entries[textureID].emissionTex;
+        int nTex  = blenderPBR.entries[textureID].normalBPTex;
+        int hTex  = blenderPBR.entries[textureID].heightTex;
+        int aeTex = blenderPBR.entries[textureID].aoTex;
+        int xTex  = blenderPBR.entries[textureID].extraTex;
 
         float bpR  = (rTex  >= 0) ? textureLod(textures[nonuniformEXT(rTex)],  textureUV, 0).r : -1.0;
         float bpM  = (mTex  >= 0) ? textureLod(textures[nonuniformEXT(mTex)],  textureUV, 0).r : -1.0;

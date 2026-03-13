@@ -340,12 +340,16 @@ namespace Data {
         T_VEC4 cloudLighting;
     };
 
+    // Hot path: 16 bytes per entry, read by every ray hit (unchanged from original)
     struct TextureMapEntry {
         T_INT specular;
         T_INT normal;
         T_INT flag;
         T_INT properties;    // bit 0: has height map, bit 2: has Blender PBR channel(s)
-        // Blender PBR per-channel texture IDs (-1 = not provided)
+    };
+
+    // Cold path: 32 bytes per entry, only read when TEX_PROP_DIRECT_PBR is set
+    struct BlenderPBREntry {
         T_INT roughnessTex;  // R8/R16 UNORM, perceptual roughness [0,1]
         T_INT metallicTex;   // R8 UNORM, continuous [0,1]
         T_INT emissionTex;   // R8 UNORM, emission intensity [0,1] (0=none)
@@ -353,7 +357,7 @@ namespace Data {
         T_INT heightTex;     // R8/R16 UNORM, displacement height [0,1]
         T_INT aoTex;         // R8 UNORM, ambient occlusion [0,1] (1=no occlusion)
         T_INT extraTex;      // RGBA8: R=subsurface, G=transmission, B=coatWeight, A=anisotropic
-        T_INT _reserved;     // pad to 48 bytes (12 ints)
+        T_INT _reserved;
     };
 
 #ifdef __cplusplus
@@ -366,6 +370,10 @@ namespace Data {
 
     struct TextureMapping {
         TextureMapEntry entries[8192];
+    };
+
+    struct BlenderPBRMapping {
+        BlenderPBREntry entries[8192];
     };
 
     struct ExposureData {

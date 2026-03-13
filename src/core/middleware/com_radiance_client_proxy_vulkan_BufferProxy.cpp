@@ -107,6 +107,13 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferPr
     buffers->setAndUploadTextureMappingBuffer(*mapping);
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateBlenderPBRMapping(JNIEnv *, jclass, jlong ptr) {
+    auto buffers = Renderer::instance().buffers();
+    if (buffers == nullptr) return;
+    vk::Data::BlenderPBRMapping *mapping = reinterpret_cast<vk::Data::BlenderPBRMapping *>(ptr);
+    buffers->setAndUploadBlenderPBRMappingBuffer(*mapping);
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateLightMapUniform(JNIEnv *,
                                                                                                jclass,
                                                                                                jlong ptr) {
