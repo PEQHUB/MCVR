@@ -107,6 +107,7 @@ layout(push_constant) uniform PushConstant {
     int   pomSteps;             // linear search steps (8-512)
     int   pomRefinement;        // binary refinement iterations (0-8)
     float pomFadeDistance;      // distance in blocks to fade POM out (8-256)
+    float colorExpansion;       // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
 } pc;
 #define SIMPLIFIED_INDIRECT ((pc.flags & 1) != 0)
 #define AREA_LIGHTS_ON ((pc.flags & 2) != 0)
@@ -139,7 +140,7 @@ layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
 layout(location = 1) rayPayloadEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
 
-vec3 calculateNormal(vec3 p0, vec3 p1, vec3 p2, vec2 uv0, vec2 uv1, vec2 uv2, vec3 matNormal, vec3 viewDir, out vec3 geometricNormal) {
+vec3 calculateNormal(vec3 p0, vec3 p1, vec3 p2, vec2 uv0, vec2 uv1, vec2 uv2, vec3 matNormal, vec3 viewDir, out vec3 geometricNormal, bool openglNormal) {
     vec3 edge1 = p1 - p0;
     vec3 edge2 = p2 - p0;
     vec3 geoNormalObj = normalize(cross(edge1, edge2));
@@ -173,9 +174,11 @@ vec3 calculateNormal(vec3 p0, vec3 p1, vec3 p2, vec2 uv0, vec2 uv1, vec2 uv2, ve
     vec3 B = normalize(normalMatrix * BObj);
     vec3 N = geometricNormalWorld;
 
-    // LabPBR / DirectX (Y-)
+    // LabPBR uses DirectX (Y-) convention; Blender PBR uses OpenGL (Y+) — no flip needed
     vec3 correctedLocalNormal = matNormal;
-    correctedLocalNormal.y = -correctedLocalNormal.y;
+    if (!openglNormal) {
+        correctedLocalNormal.y = -correctedLocalNormal.y;
+    }
 
     vec3 finalNormal = normalize(T * correctedLocalNormal.x + B * correctedLocalNormal.y + N * correctedLocalNormal.z);
 
@@ -274,10 +277,11 @@ void main() {
                 int effectiveSteps = max(int(float(pc.pomSteps) * pomFade), 4);
                 int effectiveRefinement = (pomFade > 0.5) ? pc.pomRefinement : 0;
 
+                int bpHeightTex = mapping.entries[textureID].heightTex;
                 textureUV = parallaxOcclusionMapping(
                     textureUV, viewDirTS, normalTextureID,
                     pc.pomHeightScale, effectiveSteps, effectiveRefinement,
-                    uvMin, uvMax);
+                    uvMin, uvMax, bpHeightTex);
             }
         }
 
@@ -336,14 +340,43 @@ void main() {
     }
 
     tint = CS_BT709_TO_BT2020 * tint;  // BT.709 -> BT.2020 working space
+
     albedoValue = vec4(tint, albedoValue.a);
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
+
+    // Blender PBR per-channel overlay: sample individual textures if present
+    int texProps = mapping.entries[textureID].properties;
+    bool hasBlenderNormal = false;
+    if ((texProps & TEX_PROP_DIRECT_PBR) != 0 && useTexture > 0) {
+        int rTex  = mapping.entries[textureID].roughnessTex;
+        int mTex  = mapping.entries[textureID].metallicTex;
+        int eTex  = mapping.entries[textureID].emissionTex;
+        int nTex  = mapping.entries[textureID].normalBPTex;
+        int hTex  = mapping.entries[textureID].heightTex;
+        int aeTex = mapping.entries[textureID].aoTex;
+        int xTex  = mapping.entries[textureID].extraTex;
+
+        float bpR  = (rTex  >= 0) ? textureLod(textures[nonuniformEXT(rTex)],  textureUV, 0).r : -1.0;
+        float bpM  = (mTex  >= 0) ? textureLod(textures[nonuniformEXT(mTex)],  textureUV, 0).r : -1.0;
+        float bpE  = (eTex  >= 0) ? textureLod(textures[nonuniformEXT(eTex)],  textureUV, 0).r : -1.0;
+        vec2  bpN  = (nTex  >= 0) ? textureLod(textures[nonuniformEXT(nTex)],  textureUV, 0).rg : vec2(-1.0);
+        float bpH  = (hTex  >= 0) ? textureLod(textures[nonuniformEXT(hTex)],  textureUV, 0).r : -1.0;
+        float bpAO = (aeTex >= 0) ? textureLod(textures[nonuniformEXT(aeTex)], textureUV, 0).r : -1.0;
+        vec4  bpX  = (xTex  >= 0) ? textureLod(textures[nonuniformEXT(xTex)],  textureUV, 0)   : vec4(-1.0);
+
+        mat = overlayDirectPBR(albedoValue, mat, bpR, bpM, bpE, bpN, bpH, bpAO, bpX);
+        hasBlenderNormal = (nTex >= 0);
+    }
 
     // Principled BSDF material override from WorldUBO (5 × vec4 per block)
     // emissiveBlockType packs: bits 0-7 = emissive type, bits 8-15 = material type (ordinal+1, 0=none)
     float matNoiseScale = 0.0;
     float matNoiseStrength = 0.0;
     int matNoiseOctaves = 2;
+    int matNoiseType = 0;
+    int matNoiseSeed = 0;
+    int matNoiseTarget = 1; // bit 0=roughness, bit 1=normal, bit 2=metallic
+    float matGamutBoost = 1.0; // per-material gamut boost (1.0 = neutral)
     uint packedBlockType = v0.emissiveBlockType;
     uint materialType = (packedBlockType >> 8u) & 0xFFu;
     if (materialType > 0u && materialType <= 160u) {
@@ -353,6 +386,7 @@ void main() {
         vec4 pack2 = worldUbo.materialData[idx + 320u];   // anisotropic, sheenWeight, sheenTint, coatWeight
         vec4 pack3 = worldUbo.materialData[idx + 480u];   // coatRoughness, noiseScale, noiseStrength, noiseOctaves
         vec4 pack4 = worldUbo.materialData[idx + 640u];   // channelR, channelG, channelB, textureBlend
+        vec4 pack5 = worldUbo.materialData[idx + 800u];   // gamutBoost, reserved, reserved, reserved
 
         if (dot(pack0.rgb, pack0.rgb) > 0.0001) {
             mat.f0 = pack0.rgb;
@@ -382,7 +416,14 @@ void main() {
             // Extract noise parameters from pack3
             matNoiseScale = pack3.y;
             matNoiseStrength = pack3.z;
-            matNoiseOctaves = int(pack3.w);
+            // pack3.w packs: octaves (bits 0-3) | noiseType (bits 4-7) | seed (bits 8-17) | noiseTarget (bits 20-22)
+            int noisePacked = int(pack3.w);
+            matNoiseOctaves = noisePacked & 0xF;
+            matNoiseType = (noisePacked >> 4) & 0xF;
+            matNoiseSeed = (noisePacked >> 8) & 0x3FF;
+            matNoiseTarget = (noisePacked >> 20) & 0x7;
+
+            matGamutBoost = pack5.x; // per-material gamut boost
 
             if (mat.metallic > 0.5) {
                 mat.albedo = mat.f0;  // metals: albedo = F0
@@ -390,23 +431,76 @@ void main() {
         }
     }
 
+    // Texture gamut boost: Oklab chroma scaling on dielectric albedo only
+    // Per-material value from UBO; fallback to global push constant for vivid-flagged non-material blocks
+    float gamutFactor = (materialType != 0u) ? matGamutBoost
+                      : ((v0.emissiveBlockType & 0x10000u) != 0u ? pc.colorExpansion : 1.0);
+    if (gamutFactor != 1.0 && mat.metallic < 0.5) {
+        const mat3 bt2020_to_lms = mat3(
+            0.6167557871, 0.2651330639, 0.1001026342,
+            0.3601983994, 0.6358393640, 0.2039065193,
+            0.0230458134, 0.0990275718, 0.6959908464);
+        const mat3 lms_to_lab = mat3(
+            0.2104542553,  1.9779984951,  0.0259040371,
+            0.7936177850, -2.4285922050,  0.7827717662,
+           -0.0040720468,  0.4505937099, -0.8086757660);
+        const mat3 lab_to_lms = mat3(
+            1.0,           1.0,           1.0,
+            0.3963377774, -0.1055613458, -0.0894841775,
+            0.2158037573, -0.0638541728, -1.2914855480);
+        const mat3 lms_to_bt2020 = mat3(
+             2.1399067359, -0.8847358624, -0.0485737581,
+            -1.2463895090,  2.1632309822, -0.4545031427,
+             0.1064827729, -0.2784951194,  1.5030769008);
+
+        vec3 lms = bt2020_to_lms * max(mat.albedo, vec3(0.0));
+        vec3 lms_g = sign(lms) * pow(abs(lms), vec3(1.0 / 3.0));
+        vec3 lab = lms_to_lab * lms_g;
+        lab.yz *= gamutFactor;
+        vec3 lms_g2 = lab_to_lms * lab;
+        vec3 lms2 = lms_g2 * lms_g2 * lms_g2;
+        mat.albedo = lms_to_bt2020 * lms2;
+        // Gamut clamp: desaturate toward grey if outside BT.2020
+        float minC = min(mat.albedo.r, min(mat.albedo.g, mat.albedo.b));
+        if (minC < 0.0) {
+            float luma = dot(mat.albedo, vec3(0.2627, 0.6780, 0.0593));
+            float t = luma / (luma - minC);
+            mat.albedo = mix(vec3(luma), mat.albedo, t);
+        }
+    }
+
     // the provided normal is unreliable! (such as grass, etc.)
     // calculate on the fly for now
     vec3 geometricNormal;
     vec3 normal =
-        calculateNormal(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, mat.normal, viewDir, geometricNormal);
+        calculateNormal(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, mat.normal, viewDir, geometricNormal, hasBlenderNormal);
 
-    // Procedural noise modulation for metallic surfaces
-    if (matNoiseStrength > 0.001 && mat.metallic > 0.5) {
-        vec3 noisePos = worldPos * matNoiseScale;
-        float n = fbm(noisePos, matNoiseOctaves);
-        mat.roughness = clamp(mat.roughness + n * matNoiseStrength, 0.0, 1.0);
-        // Normal perturbation from noise gradient
-        float eps = 0.01 / max(matNoiseScale, 0.1);
-        vec3 grad = snoiseGradient(noisePos, eps) * matNoiseStrength * 0.3;
-        vec3 T = normalize(cross(normal, abs(normal.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0)));
-        vec3 B = cross(normal, T);
-        normal = normalize(normal + grad.x * T + grad.y * B);
+    // Procedural noise modulation — gated by noiseTarget bits
+    // bit 0 = roughness, bit 1 = normal perturbation, bit 2 = metallic
+    if (matNoiseStrength > 0.001 && matNoiseTarget != 0) {
+        // Use absolute world coordinates so noise is stable (doesn't follow camera)
+        vec3 noisePos = (worldPos + vec3(worldUbo.cameraPos.xyz)) * matNoiseScale;
+        // Apply seed as spatial offset for variation
+        if (matNoiseSeed > 0) {
+            noisePos += vec3(float(matNoiseSeed) * 7.13, float(matNoiseSeed) * 11.37, float(matNoiseSeed) * 23.71);
+        }
+        float n = fbmTyped(noisePos, matNoiseOctaves, matNoiseType);
+        // Roughness modulation (bit 0)
+        if ((matNoiseTarget & 1) != 0) {
+            mat.roughness = clamp(mat.roughness + n * matNoiseStrength, 0.0, 1.0);
+        }
+        // Metallic modulation (bit 2)
+        if ((matNoiseTarget & 4) != 0) {
+            mat.metallic = clamp(mat.metallic + n * matNoiseStrength, 0.0, 1.0);
+        }
+        // Normal perturbation from noise gradient (bit 1)
+        if ((matNoiseTarget & 2) != 0) {
+            float eps = 0.01 / max(matNoiseScale, 0.1);
+            vec3 grad = noiseGradientTyped(noisePos, eps, matNoiseOctaves, matNoiseType) * matNoiseStrength * 0.3;
+            vec3 T = normalize(cross(normal, abs(normal.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0)));
+            vec3 B = cross(normal, T);
+            normal = normalize(normal + grad.x * T + grad.y * B);
+        }
     }
 
     // Write roughness to mainRay for PSR decision in rgen
@@ -481,6 +575,43 @@ void main() {
             float texLum = dot(tint, vec3(0.2627, 0.6780, 0.0593)); // BT.2020 luminance
             float flameMask = smoothstep(0.15, 0.5, texLum);
             emissionTint = mix(tint, emData.rgb, flameMask);
+        }
+    }
+
+    // Per-emissive-block gamut boost (Oklab chroma scaling on emission tint)
+    if (emBlockType < 50u) {
+        float emGamut = worldUbo.emissiveGamut[emBlockType >> 2u][emBlockType & 3u];
+        if (emGamut != 1.0) {
+            const mat3 bt2020_to_lms = mat3(
+                0.6167557871, 0.2651330639, 0.1001026342,
+                0.3601983994, 0.6358393640, 0.2039065193,
+                0.0230458134, 0.0990275718, 0.6959908464);
+            const mat3 lms_to_lab = mat3(
+                0.2104542553,  1.9779984951,  0.0259040371,
+                0.7936177850, -2.4285922050,  0.7827717662,
+               -0.0040720468,  0.4505937099, -0.8086757660);
+            const mat3 lab_to_lms = mat3(
+                1.0,           1.0,           1.0,
+                0.3963377774, -0.1055613458, -0.0894841775,
+                0.2158037573, -0.0638541728, -1.2914855480);
+            const mat3 lms_to_bt2020 = mat3(
+                 2.1399067359, -0.8847358624, -0.0485737581,
+                -1.2463895090,  2.1632309822, -0.4545031427,
+                 0.1064827729, -0.2784951194,  1.5030769008);
+
+            vec3 lms = bt2020_to_lms * max(emissionTint, vec3(0.0));
+            vec3 lms_g = sign(lms) * pow(abs(lms), vec3(1.0 / 3.0));
+            vec3 lab = lms_to_lab * lms_g;
+            lab.yz *= emGamut;
+            vec3 lms_g2 = lab_to_lms * lab;
+            vec3 lms2 = lms_g2 * lms_g2 * lms_g2;
+            emissionTint = lms_to_bt2020 * lms2;
+            float minC = min(emissionTint.r, min(emissionTint.g, emissionTint.b));
+            if (minC < 0.0) {
+                float luma = dot(emissionTint, vec3(0.2627, 0.6780, 0.0593));
+                float t = luma / (luma - minC);
+                emissionTint = mix(vec3(luma), emissionTint, t);
+            }
         }
     }
 

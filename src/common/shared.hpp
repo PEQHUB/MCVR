@@ -250,13 +250,16 @@ namespace Data {
 
         T_VEC4 emissionData[50]; // Per-block: .rgb = BT.2020 color override (0,0,0 = use texture), .a = scalar multiplier
 
-        // Principled BSDF material overrides: 5 vec4 per block × 160 blocks = 800 vec4
+        T_VEC4 emissiveGamut[13]; // Per-emissive-block gamut boost, indexed as [i/4][i%4], 1.0 = neutral
+
+        // Principled BSDF material overrides: 6 vec4 per block × 160 blocks = 960 vec4
         // Pack 0 [idx+0]:   (f0.r, f0.g, f0.b, roughness)
         // Pack 1 [idx+160]: (metallic, transmission, ior, subsurface)
         // Pack 2 [idx+320]: (anisotropic, sheenWeight, sheenTint, coatWeight)
-        // Pack 3 [idx+480]: (coatRoughness, noiseScale, noiseStrength, noiseOctaves)
+        // Pack 3 [idx+480]: (coatRoughness, noiseScale, noiseStrength, noisePacked)
         // Pack 4 [idx+640]: (channelR, channelG, channelB, textureBlend)
-        T_VEC4 materialData[800];
+        // Pack 5 [idx+800]: (gamutBoost, reserved, reserved, reserved)
+        T_VEC4 materialData[960];
     };
 
     struct SkyUBO {
@@ -341,17 +344,28 @@ namespace Data {
         T_INT specular;
         T_INT normal;
         T_INT flag;
-        T_INT properties;  // bit 0: has height map data (enables POM)
+        T_INT properties;    // bit 0: has height map, bit 2: has Blender PBR channel(s)
+        // Blender PBR per-channel texture IDs (-1 = not provided)
+        T_INT roughnessTex;  // R8/R16 UNORM, perceptual roughness [0,1]
+        T_INT metallicTex;   // R8 UNORM, continuous [0,1]
+        T_INT emissionTex;   // R8 UNORM, emission intensity [0,1] (0=none)
+        T_INT normalBPTex;   // RG8/RG16 UNORM, OpenGL Y+ convention XY
+        T_INT heightTex;     // R8/R16 UNORM, displacement height [0,1]
+        T_INT aoTex;         // R8 UNORM, ambient occlusion [0,1] (1=no occlusion)
+        T_INT extraTex;      // RGBA8: R=subsurface, G=transmission, B=coatWeight, A=anisotropic
+        T_INT _reserved;     // pad to 48 bytes (12 ints)
     };
 
 #ifdef __cplusplus
     static constexpr int TEX_PROP_HAS_HEIGHT_MAP = 1;
+    static constexpr int TEX_PROP_DIRECT_PBR     = 4;
 #else
     #define TEX_PROP_HAS_HEIGHT_MAP 1
+    #define TEX_PROP_DIRECT_PBR     4
 #endif
 
     struct TextureMapping {
-        TextureMapEntry entries[4096];
+        TextureMapEntry entries[8192];
     };
 
     struct ExposureData {

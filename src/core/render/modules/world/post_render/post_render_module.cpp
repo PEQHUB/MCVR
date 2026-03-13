@@ -157,7 +157,7 @@ void PostRenderModule::initDescriptorTables() {
                                    .defineDescriptorLayoutSetBinding({
                                        .binding = 0,
                                        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                       .descriptorCount = 4096, // a very big number
+                                       .descriptorCount = 8192, // bindless texture array (blocks + Blender PBR channels)
                                        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    })
                                    .defineDescriptorLayoutSetBinding({

@@ -232,7 +232,7 @@ void RayTracingModule::initDescriptorTables() {
                 .defineDescriptorLayoutSetBinding({
                     .binding = 0,
                     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    .descriptorCount = 4096, // a very big number
+                    .descriptorCount = 8192, // bindless texture array (blocks + Blender PBR channels)
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -1151,6 +1151,10 @@ void RayTracingModuleContext::render() {
     pushConstant.pomSteps        = Renderer::options.pomSteps;
     pushConstant.pomRefinement   = Renderer::options.pomRefinement;
     pushConstant.pomFadeDistance = Renderer::options.pomFadeDistance;
+
+    // Color expansion
+    pushConstant.colorExpansion = Renderer::options.colorExpansion;
+    pushConstant._pad0 = 0;
 
     // SHARC radiance cache
     if (Renderer::options.sharcEnabled && module->sharcHashEntries_) {

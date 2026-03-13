@@ -154,6 +154,15 @@ void main() {
         hasTransmission = alpha < 0.95;
     } else {
         LabPBRMat mat = convertLabPBRMaterial(albedo * colorLayer, specular, normalVal);
+        // Blender PBR: check extraTex for transmission override
+        int texProps = mapping.entries[textureID].properties;
+        if ((texProps & TEX_PROP_DIRECT_PBR) != 0) {
+            int xTex = mapping.entries[textureID].extraTex;
+            if (xTex >= 0) {
+                float bpTrans = texture(textures[nonuniformEXT(xTex)], uv).g;
+                mat.transmission = bpTrans;
+            }
+        }
         hasTransmission = mat.transmission > 0.0;
     }
 
