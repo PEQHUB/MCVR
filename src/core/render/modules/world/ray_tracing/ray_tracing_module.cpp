@@ -232,7 +232,7 @@ void RayTracingModule::initDescriptorTables() {
                 .defineDescriptorLayoutSetBinding({
                     .binding = 0,
                     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    .descriptorCount = 8192, // bindless texture array (blocks + Blender PBR channels)
+                    .descriptorCount = 4096, // bindless texture array
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -1101,8 +1101,10 @@ void RayTracingModuleContext::render() {
     if (module->tileLightBuffer_) {
         rayTracingDescriptorTable->bindBuffer(module->tileLightBuffer_, 1, 9);
     }
-    if (buffers->blenderPBRMappingBuffer()) {
-        rayTracingDescriptorTable->bindBuffer(buffers->blenderPBRMappingBuffer(), 1, 10);
+    // Always bind Blender PBR buffer (may be real data or dummy) to avoid unbound descriptor
+    auto bpBuffer = buffers->blenderPBRMappingBuffer();
+    if (bpBuffer) {
+        rayTracingDescriptorTable->bindBuffer(bpBuffer, 1, 10);
     }
     rayTracingDescriptorTable->bindBuffer(worldBuffer, 2, 0);
     rayTracingDescriptorTable->bindBuffer(buffers->lastWorldUniformBuffer(), 2, 1);

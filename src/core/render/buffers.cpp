@@ -534,13 +534,31 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::textureMappingBuffer() {
 }
 
 std::shared_ptr<vk::HostVisibleBuffer> Buffers::blenderPBRMappingBuffer() {
-    auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
+    auto framework = Renderer::instance().framework();
+    auto context = framework->safeAcquireCurrentContext();
 
-    if (blenderPBRMappingBuffer_[context->frameIndex]) {
-        return blenderPBRMappingBuffer_[context->frameIndex];
-    } else {
-        return nullptr;
+    // Always return a valid buffer — create a minimal dummy if no Blender PBR data uploaded yet
+    if (!blenderPBRMappingBuffer_[context->frameIndex]) {
+        auto vma = framework->vma();
+        auto device = framework->device();
+        // Allocate minimum viable size (one entry = 32 bytes) to satisfy descriptor binding
+        blenderPBRMappingBuffer_[context->frameIndex] =
+            vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::BlenderPBREntry),
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        // Initialize to -1 (no textures)
+        vk::Data::BlenderPBREntry dummy{};
+        dummy.roughnessTex = -1;
+        dummy.metallicTex = -1;
+        dummy.emissionTex = -1;
+        dummy.normalBPTex = -1;
+        dummy.heightTex = -1;
+        dummy.aoTex = -1;
+        dummy.extraTex = -1;
+        dummy._reserved = 0;
+        blenderPBRMappingBuffer_[context->frameIndex]->uploadToBuffer(&dummy);
     }
+
+    return blenderPBRMappingBuffer_[context->frameIndex];
 }
 
 std::shared_ptr<vk::HostVisibleBuffer> Buffers::exposureDataBuffer() {

@@ -369,11 +369,11 @@ namespace Data {
 #endif
 
     struct TextureMapping {
-        TextureMapEntry entries[8192];
+        TextureMapEntry entries[4096];
     };
 
     struct BlenderPBRMapping {
-        BlenderPBREntry entries[8192];
+        BlenderPBREntry entries[4096];
     };
 
     struct ExposureData {
