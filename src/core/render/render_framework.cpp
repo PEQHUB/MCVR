@@ -489,12 +489,11 @@ void Framework::recreate() {
 
     Renderer::instance().textures()->bindAllTextures();
 
-    // Signal Java to trigger a full resource reload after swapchain recreate.
-    // Pending texture uploads in the staging queue are lost when resetFrame()
-    // GC's the upload queue on the next acquireContext(). Rather than trying
-    // to flush mid-recreate (which breaks image layout tracking), let Java
-    // re-upload everything — same path as a texture pack swap.
-    needsTextureReload_ = true;
+    // Only signal reload if there were pending texture uploads that will be lost.
+    // Normal resizes have an empty queue and don't need a reload.
+    if (Renderer::instance().textures()->hasPendingUploads()) {
+        needsTextureReload_ = true;
+    }
 }
 
 void Framework::waitDeviceIdle() {

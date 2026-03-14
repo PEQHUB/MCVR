@@ -22,6 +22,10 @@ void Textures::reset() {
     nextID = 0;
 }
 
+bool Textures::hasPendingUploads() const {
+    return uploadQueue_ && !uploadQueue_->empty();
+}
+
 void Textures::resetFrame() {
     auto framework = Renderer::instance().framework();
 
