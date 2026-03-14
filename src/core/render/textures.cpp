@@ -52,8 +52,9 @@ uint32_t Textures::allocateTexture() {
 }
 
 void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width, uint32_t height, VkFormat format) {
-    auto device = Renderer::instance().framework()->device();
-    auto vma = Renderer::instance().framework()->vma();
+    auto framework = Renderer::instance().framework();
+    auto device = framework->device();
+    auto vma = framework->vma();
 
     std::unique_lock<std::recursive_mutex> lck(mutex_);
 
@@ -63,7 +64,14 @@ void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width,
         exit(EXIT_FAILURE);
     }
 
-    auto framework = Renderer::instance().framework();
+    // If replacing an existing texture, wait for GPU to finish using the old one.
+    // Without this, vkUpdateDescriptorSets() overwrites the descriptor binding for
+    // in-flight frames, causing VK_ERROR_DEVICE_LOST when the GPU reads the new
+    // (empty/wrong-layout) image instead of the old one.
+    if (textures_[id] != nullptr) {
+        framework->waitRenderQueueIdle();
+    }
+
     framework->gc().collect(textures_[id]);
     textures_[id] = vk::DeviceLocalImage::create(device, vma, false, maxLevel, width, height, 1, format,
                                                  VK_IMAGE_USAGE_SAMPLED_BIT, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
@@ -77,7 +85,7 @@ void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width,
     samplers[id] =
         vk::Sampler::create(device, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT);
 
-    Renderer::instance().framework()->pipeline()->bindTexture(samplers[id], textures_[id], id);
+    framework->pipeline()->bindTexture(samplers[id], textures_[id], id);
 }
 
 void Textures::setSamplingMode(uint32_t id, VkFilter samplingMode, VkSamplerMipmapMode mipmapMode) {
@@ -324,8 +332,11 @@ void Textures::destroyTexture(uint32_t id) {
         return;
     }
 
-    // GC-collect image and sampler (deferred by swapchain frame count)
+    // Wait for GPU to finish using the texture before destroying it.
+    // The descriptor set still references this image — without waiting,
+    // in-flight command buffers may dereference freed memory.
     if (textureIter->second) {
+        framework->waitRenderQueueIdle();
         framework->gc().collect(textureIter->second);
     }
     textures_.erase(textureIter);

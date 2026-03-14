@@ -108,6 +108,7 @@ class Pipeline : public SharedObject<Pipeline> {
     std::shared_ptr<PipelineContext> acquirePipelineContext(std::shared_ptr<FrameworkContext> context);
     std::vector<std::shared_ptr<PipelineContext>> &contexts();
     void bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index);
+    void bindTextureForFrame(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index, uint32_t frameIndex);
 
     std::shared_ptr<UIModule> uiModule();
     std::shared_ptr<WorldPipeline> worldPipeline();
