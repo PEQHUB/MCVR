@@ -487,28 +487,14 @@ void Framework::recreate() {
 
     pipeline_->recreate(shared_from_this());
 
-    // Flush any pending texture uploads that were queued before recreate.
-    // Without this, acquireContext()'s resetFrame() GC's the upload queue,
-    // causing textures queued during first load to never reach the GPU (black textures).
-    {
-        auto ctx = contexts_[0];
-        ctx->uploadCommandBuffer->begin();
-        currentContext_ = ctx;
-        Renderer::instance().textures()->performQueuedUpload();
-        ctx->uploadCommandBuffer->end();
-
-        VkSubmitInfo flushSubmit = {};
-        flushSubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        flushSubmit.commandBufferCount = 1;
-        VkCommandBuffer cmdBuf = ctx->uploadCommandBuffer->vkCommandBuffer();
-        flushSubmit.pCommandBuffers = &cmdBuf;
-        vkQueueSubmit(device_->mainVkQueue(), 1, &flushSubmit, VK_NULL_HANDLE);
-        vkQueueWaitIdle(device_->mainVkQueue());
-
-        currentContext_ = nullptr;
-    }
-
     Renderer::instance().textures()->bindAllTextures();
+
+    // Signal Java to trigger a full resource reload after swapchain recreate.
+    // Pending texture uploads in the staging queue are lost when resetFrame()
+    // GC's the upload queue on the next acquireContext(). Rather than trying
+    // to flush mid-recreate (which breaks image layout tracking), let Java
+    // re-upload everything — same path as a texture pack swap.
+    needsTextureReload_ = true;
 }
 
 void Framework::waitDeviceIdle() {

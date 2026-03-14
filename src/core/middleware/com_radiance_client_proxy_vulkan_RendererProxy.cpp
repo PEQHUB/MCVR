@@ -153,6 +153,15 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
     return maxImageSize;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_needsTextureReload(JNIEnv *, jclass) {
+    if (!rendererUsable()) return JNI_FALSE;
+    auto framework = Renderer::instance().framework();
+    if (framework == nullptr) return JNI_FALSE;
+    bool needs = framework->needsTextureReload();
+    if (needs) framework->clearTextureReloadFlag();
+    return needs ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_acquireContext(JNIEnv *, jclass) {
     std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
     if (!rendererUsable()) return;

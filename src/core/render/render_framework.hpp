@@ -101,6 +101,9 @@ class Framework : public SharedObject<Framework> {
 
     GarbageCollector &gc();
 
+    bool needsTextureReload() const { return needsTextureReload_; }
+    void clearTextureReloadFlag() { needsTextureReload_ = false; }
+
   private:
     std::shared_ptr<vk::Semaphore> acquireSemaphore();
     void recycleSemaphore(std::shared_ptr<vk::Semaphore> semaphore);
@@ -136,6 +139,7 @@ class Framework : public SharedObject<Framework> {
     std::recursive_mutex recreateMtx_;
 
     bool running_ = true;
+    bool needsTextureReload_ = false;
 
     std::shared_ptr<GarbageCollector> gc_;
 };
