@@ -393,9 +393,14 @@ void main() {
         vec4 pack5 = worldUbo.materialData[idx + 800u];   // gamutBoost, reserved, reserved, reserved
 
         {
-            // Apply F0 override if set, otherwise keep LabPBR-decoded F0
+            // Apply F0 override if set; for dielectrics with zero F0, derive from IOR
             if (dot(pack0.rgb, pack0.rgb) > 0.0001) {
                 mat.f0 = pack0.rgb;
+            } else if (pack1.x < 0.5) {
+                // Dielectric: compute F0 from IOR using Fresnel equation
+                float ior = max(pack1.z, 1.0);
+                float f0 = ((ior - 1.0) * (ior - 1.0)) / ((ior + 1.0) * (ior + 1.0));
+                mat.f0 = vec3(f0);
             }
             float matRoughness = pack0.a * pack0.a;  // perceptual → GGX alpha
 
