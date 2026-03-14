@@ -488,12 +488,6 @@ void Framework::recreate() {
     pipeline_->recreate(shared_from_this());
 
     Renderer::instance().textures()->bindAllTextures();
-
-    // Only signal reload if there were pending texture uploads that will be lost.
-    // Normal resizes have an empty queue and don't need a reload.
-    if (Renderer::instance().textures()->hasPendingUploads()) {
-        needsTextureReload_ = true;
-    }
 }
 
 void Framework::waitDeviceIdle() {
