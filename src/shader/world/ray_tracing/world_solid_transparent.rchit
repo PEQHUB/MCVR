@@ -507,8 +507,12 @@ void main() {
         }
     }
 
-    // Write roughness to mainRay for PSR decision in rgen
+    // Write post-override material to mainRay for rgen G-buffer / DLSS-RR guide buffers
     mainRay.roughness = mat.roughness;
+    mainRay.metallic = mat.metallic;
+    mainRay.f0 = mat.f0;
+    mainRay.emission = mat.emission;
+    mainRay.subSurface = mat.subSurface;
 
     // Scene-referred emission normalization: 1.0 = 200 cd/m² (ITU-R BT.2408 paper white).
     // Physical nit values from vertex data are divided by this to keep radiance in a range

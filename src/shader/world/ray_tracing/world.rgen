@@ -143,6 +143,9 @@ layout(push_constant) uniform PushConstant {
     int pomSteps;
     int pomRefinement;
     float pomFadeDistance;
+    // Color expansion
+    float colorExpansion;
+    int _pad0;
     // SHARC fields
     uint64_t sharcHashEntries;
     uint64_t sharcAccumulation;
@@ -454,8 +457,15 @@ void main() {
             psrHitDepth = T;
         }
 
-        LabPBRMat mat = convertLabPBRMaterial(mainRay.albedoValue, mainRay.specularValue, mainRay.normalValue);
-        firstHitMat = mat;
+        // Use post-override material values from CHS payload for DLSS-RR guide buffers.
+        // Previously re-decoded from raw specularValue, which missed WorldUBO overrides —
+        // causing guide buffer mismatch vs rendered output → permanent DLSS-RR boiling.
+        firstHitMat.roughness = mainRay.roughness;
+        firstHitMat.metallic = mainRay.metallic;
+        firstHitMat.f0 = mainRay.f0;
+        firstHitMat.emission = mainRay.emission;
+        firstHitMat.subSurface = mainRay.subSurface;
+        firstHitMat.albedo = mainRay.albedoValue.rgb;
 
         // BaseColor/Metalness Buffer. DLSS only needs the base color ("Diffuse Albedo")
         imageStore(diffuseAlbedoImage, pixel,
@@ -584,6 +594,40 @@ void main() {
                 if (dot(co, co) > 0.0001) {
                     float flameMask = smoothstep(0.15, 0.5, texLum);
                     emTint = mix(emTint, co, flameMask);
+                }
+                // Per-emissive gamut boost (Oklab chroma scaling)
+                float emGamut = worldUBO.emissiveGamut[mainRay.emBlockTypeOut >> 2u][mainRay.emBlockTypeOut & 3u];
+                if (emGamut != 1.0) {
+                    const mat3 bt2020_to_lms = mat3(
+                        0.6167557871, 0.2651330639, 0.1001026342,
+                        0.3601983994, 0.6358393640, 0.2039065193,
+                        0.0230458134, 0.0990275718, 0.6959908464);
+                    const mat3 lms_to_lab = mat3(
+                        0.2104542553,  1.9779984951,  0.0259040371,
+                        0.7936177850, -2.4285922050,  0.7827717662,
+                       -0.0040720468,  0.4505937099, -0.8086757660);
+                    const mat3 lab_to_lms = mat3(
+                        1.0,           1.0,           1.0,
+                        0.3963377774, -0.1055613458, -0.0894841775,
+                        0.2158037573, -0.0638541728, -1.2914855480);
+                    const mat3 lms_to_bt2020 = mat3(
+                         2.1399067359, -0.8847358624, -0.0485737581,
+                        -1.2463895090,  2.1632309822, -0.4545031427,
+                         0.1064827729, -0.2784951194,  1.5030769008);
+
+                    vec3 lms = bt2020_to_lms * max(emTint, vec3(0.0));
+                    vec3 lms_g = sign(lms) * pow(abs(lms), vec3(1.0 / 3.0));
+                    vec3 lab = lms_to_lab * lms_g;
+                    lab.yz *= emGamut;
+                    vec3 lms_g2 = lab_to_lms * lab;
+                    vec3 lms2 = lms_g2 * lms_g2 * lms_g2;
+                    emTint = lms_to_bt2020 * lms2;
+                    float minC = min(emTint.r, min(emTint.g, emTint.b));
+                    if (minC < 0.0) {
+                        float luma = dot(emTint, vec3(0.2627, 0.6780, 0.0593));
+                        float t = luma / (luma - minC);
+                        emTint = mix(vec3(luma), emTint, t);
+                    }
                 }
             }
             firstHitEmission = emTint * sceneEmission;

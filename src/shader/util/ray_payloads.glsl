@@ -72,6 +72,11 @@ struct PrimaryRay {
     T_FLOAT albedoEmission;
     T_UINT pixelPacked;
     T_UINT emBlockTypeOut; // EmissiveBlock ordinal passed from CHS to rgen for bloom color
+    // Post-override material for DLSS-RR guide buffers (CHS writes after WorldUBO override)
+    T_FLOAT metallic;
+    T_VEC3 f0;
+    T_FLOAT emission;
+    T_FLOAT subSurface;
 };
 
 struct ShadowRay {
