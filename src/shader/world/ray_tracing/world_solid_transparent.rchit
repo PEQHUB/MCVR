@@ -392,8 +392,11 @@ void main() {
         vec4 pack4 = worldUbo.materialData[idx + 640u];   // channelR, channelG, channelB, textureBlend
         vec4 pack5 = worldUbo.materialData[idx + 800u];   // gamutBoost, reserved, reserved, reserved
 
-        if (dot(pack0.rgb, pack0.rgb) > 0.0001) {
-            mat.f0 = pack0.rgb;
+        {
+            // Apply F0 override if set, otherwise keep LabPBR-decoded F0
+            if (dot(pack0.rgb, pack0.rgb) > 0.0001) {
+                mat.f0 = pack0.rgb;
+            }
             float matRoughness = pack0.a * pack0.a;  // perceptual → GGX alpha
 
             // Texture roughness channel routing: derive roughness from albedo channel mix

@@ -864,18 +864,22 @@ void main() {
     imageStore(diffuseRayDirHitDistImage, ivec2(pixel), vec4(diffuseRayDir, diffuseHitDist));
     imageStore(specularRayDirHitDistImage, ivec2(pixel), vec4(specularRayDir, specularHitDist));
     // Reflection motion vectors: MV of the object seen through the specular lobe.
-    // Only compute for near-mirror surfaces (roughness < 0.01) where specularRayDir is
-    // nearly deterministic. For rougher surfaces, specularRayDir is a noisy BSDF sample
-    // that varies per frame — encoding noise as motion causes DLSS-RR temporal rejection (boiling).
+    // For low-roughness surfaces, compute from the specular hit point.
+    // Smoothly blend to zero above roughness 0.15 where the BSDF sample direction
+    // becomes too noisy to encode as coherent motion. Previous hard threshold at 0.01
+    // caused boiling at 4-10% roughness as pixels snapped across the boundary.
     {
         vec2 rv = vec2(0.0);
-        if (!isFirstHitDiffuse && isFirstHitNoisy && firstHitMat.roughness < 0.01
+        if (!isFirstHitDiffuse && isFirstHitNoisy
+            && firstHitMat.roughness < 0.15
             && specularHitDist > 0.0 && specularHitDist < 10000.0) {
             vec3 primaryHitPos = eyePos + orgDirection * psrHitDepth;
             vec3 cd = vec3(worldUBO.cameraPos.xyz - lastWorldUBO.cameraPos.xyz);
             mat4 prevMVP = lastWorldUBO.cameraProjMat * lastWorldUBO.cameraEffectedViewMat;
             vec3 reflectedPos = primaryHitPos + specularRayDir * specularHitDist;
             rv = computeCameraMotionVector(prevMVP, pixelCenter, vec4(reflectedPos + cd, 1.0));
+            // Smooth fade: full weight at roughness 0, zero weight at roughness 0.15
+            rv *= 1.0 - smoothstep(0.0, 0.15, firstHitMat.roughness);
         }
         imageStore(reflectionMvImage, ivec2(pixel), vec4(rv, 0.0, 0.0));
     }
