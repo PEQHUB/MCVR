@@ -22,6 +22,11 @@ void Textures::reset() {
     nextID = 0;
 }
 
+void Textures::clearStagingCaches() {
+    caches_.clear();
+    uploadQueue_ = std::make_shared<std::map<uint32_t, std::vector<VkBufferImageCopy>>>();
+}
+
 void Textures::resetFrame() {
     auto framework = Renderer::instance().framework();
 
@@ -37,9 +42,18 @@ void Textures::resetFrame() {
 uint32_t Textures::allocateTexture() {
     std::unique_lock<std::recursive_mutex> lck(mutex_);
 
-    textures_.emplace(std::make_pair(nextID, nullptr));
-    samplers.emplace(std::make_pair(nextID, nullptr));
-    return nextID++;
+    uint32_t id;
+    if (!freeList_.empty()) {
+        id = freeList_.back();
+        freeList_.pop_back();
+        textures_[id] = nullptr;
+        samplers[id] = nullptr;
+    } else {
+        id = nextID++;
+        textures_.emplace(std::make_pair(id, nullptr));
+        samplers.emplace(std::make_pair(id, nullptr));
+    }
+    return id;
 }
 
 void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width, uint32_t height, VkFormat format) {
@@ -302,6 +316,40 @@ void Textures::bindAllTextures() {
 
         Renderer::instance().framework()->pipeline()->bindTexture(samplers[id], texture, id);
     }
+}
+
+void Textures::destroyTexture(uint32_t id) {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
+
+    auto framework = Renderer::instance().framework();
+
+    auto textureIter = textures_.find(id);
+    if (textureIter == textures_.end()) {
+        texturesCerr() << "destroyTexture: id " << id << " not found" << std::endl;
+        return;
+    }
+
+    // GC-collect image and sampler (deferred by swapchain frame count)
+    if (textureIter->second) {
+        framework->gc().collect(textureIter->second);
+    }
+    textures_.erase(textureIter);
+
+    auto samplerIter = samplers.find(id);
+    if (samplerIter != samplers.end()) {
+        if (samplerIter->second) {
+            framework->gc().collect(samplerIter->second);
+        }
+        samplers.erase(samplerIter);
+    }
+
+    // Clean up associated caches and metadata
+    caches_.erase(id);
+    textureAlphaClass_.erase(id);
+    textureAlphaData_.erase(id);
+
+    // Return ID to free list for reuse
+    freeList_.push_back(id);
 }
 
 void Textures::setTextureAlphaClass(uint32_t id, AlphaClass alphaClass) {

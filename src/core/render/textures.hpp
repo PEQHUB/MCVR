@@ -28,6 +28,7 @@ class Textures : public SharedObject<Textures> {
 
     void reset();
     void resetFrame();
+    void clearStagingCaches();
     uint32_t allocateTexture();
     void initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width, uint32_t height, VkFormat format);
     void setSamplingMode(uint32_t id, VkFilter samplingMode, VkSamplerMipmapMode mipmapMode);
@@ -45,6 +46,7 @@ class Textures : public SharedObject<Textures> {
                      uint32_t level);
     void performQueuedUpload();
     void bindAllTextures();
+    void destroyTexture(uint32_t id);
 
     void setTextureAlphaClass(uint32_t id, AlphaClass alphaClass);
     AlphaClass getTextureAlphaClass(uint32_t id) const;
@@ -55,6 +57,7 @@ class Textures : public SharedObject<Textures> {
     std::map<uint32_t, std::shared_ptr<vk::DeviceLocalImage>> textures_;
     std::map<uint32_t, std::shared_ptr<vk::Sampler>> samplers;
     uint32_t nextID = 0;
+    std::vector<uint32_t> freeList_;
     std::recursive_mutex mutex_;
 
     std::map<uint32_t, std::shared_ptr<ImageBufferCache>> caches_;

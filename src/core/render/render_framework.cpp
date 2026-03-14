@@ -487,6 +487,11 @@ void Framework::recreate() {
 
     pipeline_->recreate(shared_from_this());
 
+    // Clear texture staging caches so they rebuild with the new frame count.
+    // Without this, minimize during first load leaves caches sized for the old
+    // swapchain image count — cache index drift causes vkCmdCopyBufferToImage
+    // to copy from wrong staging offsets, corrupting all textures.
+    Renderer::instance().textures()->clearStagingCaches();
     Renderer::instance().textures()->bindAllTextures();
 }
 
