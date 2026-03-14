@@ -487,11 +487,27 @@ void Framework::recreate() {
 
     pipeline_->recreate(shared_from_this());
 
-    // Clear texture staging caches so they rebuild with the new frame count.
-    // Without this, minimize during first load leaves caches sized for the old
-    // swapchain image count — cache index drift causes vkCmdCopyBufferToImage
-    // to copy from wrong staging offsets, corrupting all textures.
-    Renderer::instance().textures()->clearStagingCaches();
+    // Flush any pending texture uploads that were queued before recreate.
+    // Without this, acquireContext()'s resetFrame() GC's the upload queue,
+    // causing textures queued during first load to never reach the GPU (black textures).
+    {
+        auto ctx = contexts_[0];
+        ctx->uploadCommandBuffer->begin();
+        currentContext_ = ctx;
+        Renderer::instance().textures()->performQueuedUpload();
+        ctx->uploadCommandBuffer->end();
+
+        VkSubmitInfo flushSubmit = {};
+        flushSubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        flushSubmit.commandBufferCount = 1;
+        VkCommandBuffer cmdBuf = ctx->uploadCommandBuffer->vkCommandBuffer();
+        flushSubmit.pCommandBuffers = &cmdBuf;
+        vkQueueSubmit(device_->mainVkQueue(), 1, &flushSubmit, VK_NULL_HANDLE);
+        vkQueueWaitIdle(device_->mainVkQueue());
+
+        currentContext_ = nullptr;
+    }
+
     Renderer::instance().textures()->bindAllTextures();
 }
 

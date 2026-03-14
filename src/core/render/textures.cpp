@@ -22,11 +22,6 @@ void Textures::reset() {
     nextID = 0;
 }
 
-void Textures::clearStagingCaches() {
-    caches_.clear();
-    uploadQueue_ = std::make_shared<std::map<uint32_t, std::vector<VkBufferImageCopy>>>();
-}
-
 void Textures::resetFrame() {
     auto framework = Renderer::instance().framework();
 

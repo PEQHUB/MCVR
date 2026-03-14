@@ -28,7 +28,6 @@ class Textures : public SharedObject<Textures> {
 
     void reset();
     void resetFrame();
-    void clearStagingCaches();
     uint32_t allocateTexture();
     void initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width, uint32_t height, VkFormat format);
     void setSamplingMode(uint32_t id, VkFilter samplingMode, VkSamplerMipmapMode mipmapMode);
