@@ -160,10 +160,18 @@ layout(push_constant) uniform PushConstant {
     float sharcRoughnessThreshold;
     int sharcUpdateBlockSize;
     int sharcUpdateBounces;
+    // Offline accumulation
+    int offlineFlags;
+    int accumFrameCount;
+    float aperture;
+    float focalDistance;
 }
 pc;
 
 #define SHARC_ENABLED ((pc.flags & 32) != 0)
+#define OFFLINE_ACCUMULATING  ((pc.offlineFlags & 1) != 0)
+#define OFFLINE_DISABLE_RR    ((pc.offlineFlags & 2) != 0)
+#define OFFLINE_DISABLE_CLAMP ((pc.offlineFlags & 4) != 0)
 
 layout(location = 0) rayPayloadEXT PrimaryRay mainRay;
 
@@ -211,6 +219,22 @@ void main() {
     const vec3 eyePos = origin;
     vec3 direction = normalize(vec3(worldUBO.cameraEffectedViewMatInv * vec4(viewNear.xyz, 0.0)));
     const vec3 orgDirection = direction;
+
+    // Thin lens DOF (offline accumulation only)
+    if (OFFLINE_ACCUMULATING && pc.aperture > 0.0) {
+        uint dofSeed = uint(pixel.x * 1973 + pixel.y * 9277 + pc.accumFrameCount * 26699) | 1u;
+        float r1 = rand(dofSeed);
+        float r2 = rand(dofSeed);
+        // Concentric disk sample for uniform lens sampling
+        float theta = 2.0 * 3.14159265 * r2;
+        float r = pc.aperture * sqrt(r1);
+        vec2 lensUV = vec2(r * cos(theta), r * sin(theta));
+        vec3 focalPoint = origin + direction * pc.focalDistance;
+        vec3 cameraRight = normalize(vec3(worldUBO.cameraEffectedViewMatInv * vec4(1, 0, 0, 0)));
+        vec3 cameraUp = normalize(vec3(worldUBO.cameraEffectedViewMatInv * vec4(0, 1, 0, 0)));
+        origin += cameraRight * lensUV.x + cameraUp * lensUV.y;
+        direction = normalize(focalPoint - origin);
+    }
 
     const uint rayFlags = gl_RayFlagsCullBackFacingTrianglesEXT;
     float surfaceDepth = 0.0;
@@ -768,7 +792,7 @@ void main() {
             // Perfect specular surfaces (roughness < 0.001) are exempt: their throughput decays
             // via Fresnel each bounce but must never be stochastically terminated — otherwise
             // the mirror chain abruptly shows albedo instead of continued reflection.
-            if (b > 2 && mainRay.roughness >= 0.001) {
+            if (b > 2 && mainRay.roughness >= 0.001 && !OFFLINE_DISABLE_RR) {
                 float maxComponent = max(mainRay.throughput.r, max(mainRay.throughput.g, mainRay.throughput.b));
                 float rrProbability = min(maxComponent, 0.9);
                 if (rand(mainRay.seed) > rrProbability) { break; }
@@ -777,7 +801,7 @@ void main() {
 
             // Per-bounce throughput clamp to prevent firefly paths
             float tMag = max(mainRay.throughput.r, max(mainRay.throughput.g, mainRay.throughput.b));
-            if (tMag > 10.0) {
+            if (tMag > 10.0 && !OFFLINE_DISABLE_CLAMP) {
                 mainRay.throughput *= 10.0 / tMag;
             }
         }

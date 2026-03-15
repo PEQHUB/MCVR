@@ -570,3 +570,48 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.pomFadeDistance = std::clamp(v, 8.0f, 256.0f);
 }
 
+// --- Offline Accumulation ---
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineState(
+    JNIEnv *, jclass, jint state, jboolean) {
+    Renderer::options.offlineState = static_cast<uint32_t>(std::clamp(state, 0, 2));
+    if (state == 2) {
+        Renderer::accumFrameCount = 0;  // reset on entering accumulation
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineBounces(
+    JNIEnv *, jclass, jint bounces, jboolean) {
+    Renderer::options.offlineBounces = static_cast<uint32_t>(std::clamp(bounces, 1, 64));
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineDisableRR(
+    JNIEnv *, jclass, jboolean disable, jboolean) {
+    Renderer::options.offlineDisableRR = disable;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineDisableClamp(
+    JNIEnv *, jclass, jboolean disable, jboolean) {
+    Renderer::options.offlineDisableClamp = disable;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineAperture(
+    JNIEnv *, jclass, jfloat aperture, jboolean) {
+    Renderer::options.offlineAperture = std::clamp(aperture, 0.0f, 0.1f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineFocalDistance(
+    JNIEnv *, jclass, jfloat dist, jboolean) {
+    Renderer::options.offlineFocalDistance = std::clamp(dist, 1.0f, 256.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeResetAccumulation(
+    JNIEnv *, jclass) {
+    Renderer::accumFrameCount = 0;
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_option_Options_nativeGetAccumFrameCount(
+    JNIEnv *, jclass) {
+    return static_cast<jint>(Renderer::accumFrameCount);
+}
+

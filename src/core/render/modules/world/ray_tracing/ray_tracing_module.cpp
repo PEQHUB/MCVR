@@ -1138,14 +1138,17 @@ void RayTracingModuleContext::render() {
         }
     }
 
+    bool accumulating = Renderer::options.offlineState == 2;
     RayTracingPushConstant pushConstant{};
-    pushConstant.numRayBounces = static_cast<int>(Renderer::options.rayBounces);
+    pushConstant.numRayBounces = accumulating
+        ? static_cast<int>(Renderer::options.offlineBounces)
+        : static_cast<int>(Renderer::options.rayBounces);
     pushConstant.flags = (Renderer::options.simplifiedIndirect ? 1 : 0)
                        | (Renderer::options.areaLightsEnabled ? 2 : 0)
                        | (Renderer::options.restirEnabled ? 4 : 0)
                        | (Renderer::options.restirSimplifiedBRDF ? 8 : 0)
                        | (Renderer::options.restirBounceEnabled ? 16 : 0)
-                       | (Renderer::options.sharcEnabled ? 32 : 0);
+                       | ((Renderer::options.sharcEnabled && !accumulating) ? 32 : 0);
     pushConstant.areaLightCount = worldPrepareContext->areaLightCount;
     pushConstant.shadowSoftness = Renderer::options.shadowSoftness;
     pushConstant.risCandidates = Renderer::options.restirCandidates;
@@ -1184,6 +1187,20 @@ void RayTracingModuleContext::render() {
         pushConstant.sharcRoughnessThreshold = Renderer::options.sharcRoughnessThreshold;
         pushConstant.sharcUpdateBlockSize = Renderer::options.sharcUpdateBlockSize;
         pushConstant.sharcUpdateBounces = Renderer::options.sharcUpdateBounces;
+    }
+
+    // Offline accumulation
+    pushConstant.offlineFlags = (accumulating ? 1 : 0)
+                              | (Renderer::options.offlineDisableRR ? 2 : 0)
+                              | (Renderer::options.offlineDisableClamp ? 4 : 0);
+    pushConstant.accumFrameCount = static_cast<int>(Renderer::accumFrameCount);
+    pushConstant.aperture = accumulating ? Renderer::options.offlineAperture : 0.0f;
+    pushConstant.focalDistance = Renderer::options.offlineFocalDistance;
+
+    // Force pre-exposure to 1.0 during accumulation (exposure locked)
+    if (accumulating) {
+        pushConstant.preExposure = 1.0f;
+        pushConstant.temporalMClamp = 0;  // no temporal reuse during accumulation
     }
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), rayTracingDescriptorTable->vkPipelineLayout(),

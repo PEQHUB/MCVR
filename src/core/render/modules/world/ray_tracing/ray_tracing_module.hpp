@@ -35,7 +35,10 @@ struct RayTracingPushConstant {
     int   pomSteps;              // linear search steps (8-512)
     int   pomRefinement;         // binary refinement iterations (0-8)
     float pomFadeDistance;       // distance in blocks to fade POM out (8-256)
-    // SHARC fields (offset 48, 52 bytes) — buffer device addresses + grid params
+    // Color expansion (offset 48, 8 bytes)
+    float colorExpansion;        // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
+    int   _pad0;
+    // SHARC fields (offset 56, 56 bytes) — buffer device addresses + grid params
     uint64_t sharcHashEntries;   // BDA of hash entry buffer
     uint64_t sharcAccumulation;  // BDA of accumulation buffer
     uint64_t sharcResolved;      // BDA of resolved radiance buffer
@@ -49,6 +52,11 @@ struct RayTracingPushConstant {
     float sharcRoughnessThreshold; // min roughness for cache query (0=all, 1=diffuse only)
     int sharcUpdateBlockSize;      // sparse update NxN block size (2-8)
     int sharcUpdateBounces;        // max bounces in SHARC update pass (2-8)
+    // Offline accumulation fields (offset 112, 16 bytes)
+    int offlineFlags;              // bit 0: accumulating, bit 1: disable RR, bit 2: disable clamp
+    int accumFrameCount;           // frame index for jitter sequence during accumulation
+    float aperture;                // thin lens aperture radius (0 = pinhole)
+    float focalDistance;           // focal distance in blocks
 };
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {

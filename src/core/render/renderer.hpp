@@ -146,6 +146,17 @@ struct Options {
     int   pomSteps        = 64;     // Linear search steps (8–512)
     int   pomRefinement   = 4;      // Binary refinement iterations (0–8)
     float pomFadeDistance = 64.0f;  // Distance in blocks to fade POM out (8–256)
+
+    // Color expansion
+    float colorExpansion = 1.0f;    // Per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
+
+    // Offline accumulation mode
+    uint32_t offlineState = 0;       // 0=NORMAL, 1=FREE, 2=ACCUMULATING
+    uint32_t offlineBounces = 16;    // ray bounces during accumulation (1-64)
+    bool offlineDisableRR = false;   // disable Russian Roulette for unbiased mode
+    bool offlineDisableClamp = false;// disable throughput clamp for unbiased mode
+    float offlineAperture = 0.0f;    // thin lens aperture (0=pinhole, 0.001-0.1)
+    float offlineFocalDistance = 10.0f; // focal distance in blocks (1-256)
 };
 
 class Renderer : public Singleton<Renderer> {
@@ -156,6 +167,7 @@ class Renderer : public Singleton<Renderer> {
     static Options options;
     static float preExposure;  // Set by tone mapping, read by RT + DLSS (1-frame delay)
     static bool resetExposureAdaptation;  // Set by JNI on world load, consumed by tone mapping
+    static uint32_t accumFrameCount;  // Offline accumulation frame counter (reset on state change)
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> emissionImages;  // RT emission, read by tone mapping
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> renderResHdrImages;  // DLSS input (render-res HDR), read by tone mapping histogram
 
