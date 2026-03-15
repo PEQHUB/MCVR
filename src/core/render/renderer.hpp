@@ -51,6 +51,8 @@ struct Options {
     float exposureHighlightSmoothingSpeed = 2.0f; // 0..30, ~0.35s half-life filters percentile noise
     float exposureLog2MaxImproved = 18.0f; // Histogram max log2(luminance) for improved mode (physical sun ~100k lux needs ~17)
     float saturation = 1.3f;           // Saturation/Vibrance boost (0.0 to 2.0)
+    bool saturationAdaptive = false;   // Adaptive saturation: brightness+chroma-dependent (Special K style)
+    bool noiseLOD = true;              // Noise quality LOD: reduce octaves with distance, skip gradient far away
     uint32_t upscalerPreset = 4; // DLSS: Preset D (default). Generic for future upscalers.
 
     // SDR output transfer function
@@ -83,6 +85,7 @@ struct Options {
     float areaLightIntensity = 1.0f;      // Global multiplier [0.0 - 5.0]
     float areaLightRange = 128.0f;        // Max cull distance [8 - 512]
     float shadowSoftness = 1.0f;          // Shadow softness multiplier [0.0 - 2.0]
+    float colorExpansion = 1.0f;          // Per-block vivid color chroma boost [0.0 - 2.0] (1.0 = neutral)
 
     // ReSTIR DI tuning
     int restirCandidates = 32;            // Total RIS candidates per pixel [8 - 64]
@@ -146,6 +149,9 @@ struct Options {
     int   pomSteps        = 64;     // Linear search steps (8–512)
     int   pomRefinement   = 4;      // Binary refinement iterations (0–8)
     float pomFadeDistance = 64.0f;  // Distance in blocks to fade POM out (8–256)
+
+    // Diagnostics
+    bool loggingEnabled = false;
 };
 
 class Renderer : public Singleton<Renderer> {

@@ -43,6 +43,9 @@ typedef void (*PFN_glfwWaitEvents)(void);
 typedef GLFWmonitor *(*PFN_glfwGetWindowMonitor)(GLFWwindow *);
 typedef GLFWmonitor *(*PFN_glfwGetPrimaryMonitor)(void);
 typedef const GLFWvidmode *(*PFN_glfwGetVideoMode)(GLFWmonitor *);
+typedef void (*PFN_glfwGetWindowPos)(GLFWwindow *, int *, int *);
+typedef void (*PFN_glfwSetWindowPos)(GLFWwindow *, int, int);
+typedef void (*PFN_glfwSetWindowSize)(GLFWwindow *, int, int);
 
 extern PFN_glfwInit p_glfwInit;
 extern PFN_glfwTerminate p_glfwTerminate;
@@ -56,6 +59,9 @@ extern PFN_glfwWaitEvents p_glfwWaitEvents;
 extern PFN_glfwGetWindowMonitor p_glfwGetWindowMonitor;
 extern PFN_glfwGetPrimaryMonitor p_glfwGetPrimaryMonitor;
 extern PFN_glfwGetVideoMode p_glfwGetVideoMode;
+extern PFN_glfwGetWindowPos p_glfwGetWindowPos;
+extern PFN_glfwSetWindowPos p_glfwSetWindowPos;
+extern PFN_glfwSetWindowSize p_glfwSetWindowSize;
 
 #    define GLFW_Init p_glfwInit
 #    define GLFW_Terminate p_glfwTerminate
@@ -69,6 +75,9 @@ extern PFN_glfwGetVideoMode p_glfwGetVideoMode;
 #    define GLFW_GetWindowMonitor p_glfwGetWindowMonitor
 #    define GLFW_GetPrimaryMonitor p_glfwGetPrimaryMonitor
 #    define GLFW_GetVideoMode p_glfwGetVideoMode
+#    define GLFW_GetWindowPos p_glfwGetWindowPos
+#    define GLFW_SetWindowPos p_glfwSetWindowPos
+#    define GLFW_SetWindowSize p_glfwSetWindowSize
 #else
 #    define GLFW_Init glfwInit
 #    define GLFW_Terminate glfwTerminate
@@ -82,6 +91,9 @@ extern PFN_glfwGetVideoMode p_glfwGetVideoMode;
 #    define GLFW_GetWindowMonitor glfwGetWindowMonitor
 #    define GLFW_GetPrimaryMonitor glfwGetPrimaryMonitor
 #    define GLFW_GetVideoMode glfwGetVideoMode
+#    define GLFW_GetWindowPos glfwGetWindowPos
+#    define GLFW_SetWindowPos glfwSetWindowPos
+#    define GLFW_SetWindowSize glfwSetWindowSize
 #endif
 
 #include <memory>

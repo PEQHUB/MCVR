@@ -1,4 +1,5 @@
 #include "core/vulkan/framework.hpp"
+#include "core/render/crash_ring_buffer.hpp"
 
 #include <iostream>
 
@@ -95,12 +96,14 @@ std::shared_ptr<vk::Framework::Context> vk::Framework::acquireContext() {
     uint32_t imageIndex;
     if (vkAcquireNextImageKHR(device_->vkDevice(), swapchain_->vkSwapchain(), UINT64_MAX,
                               imageAcquiredSemaphore->vkSemaphore(), VK_NULL_HANDLE, &imageIndex) != VK_SUCCESS) {
-        std::cerr << "Cannot acquire images from swapchain" << std::endl;
-        exit(EXIT_FAILURE);
+        crashExit(-1, "vk::Framework acquireNextImage failed");
     }
 
     std::shared_ptr<Fence> fence = contexts_[imageIndex]->commandFinishedFence;
-    vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+    VkResult fenceResult = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+    if (fenceResult != VK_SUCCESS) {
+        crashExit(fenceResult, "vk::Framework waitForFences failed");
+    }
     vkResetFences(device_->vkDevice(), 1, &fence->vkFence());
 
     if (contexts_[imageIndex]->imageAcquiredSemaphore != VK_NULL_HANDLE) {

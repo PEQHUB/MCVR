@@ -43,7 +43,7 @@ struct ToneMappingModuleExposureData {
     float psychoAdaptContrast;
     float psychoWhiteCurve;      // 0.0 = Neutwo, 1.0 = Naka-Rushton
     float psychoConeExponent;
-    float bootTimer;             // Shader-side boot adaptation timer (only ticks during actual adaptation)
+    float saturationAdaptive;    // 0.0 = linear chroma multiply, 1.0 = adaptive (Special K style)
 };
 
 struct ToneMappingModulePushConstant {
@@ -87,7 +87,7 @@ struct ToneMappingModulePushConstant {
     float psychoAdaptContrast;
     float psychoWhiteCurve;
     float psychoConeExponent;
-    // timeSinceReset removed: boot timer now lives in ExposureBuffer (shader-side)
+    float saturationAdaptive;    // 0.0 = linear chroma multiply, 1.0 = adaptive
 };
 
 class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingModule> {

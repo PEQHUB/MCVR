@@ -34,7 +34,7 @@ layout(set = 0, binding = 2) readonly buffer ExposureBuffer {
     float psychoAdaptContrast;
     float psychoWhiteCurve;      // 0.0 = Neutwo, 1.0 = Naka-Rushton
     float psychoConeExponent;
-    float bootTimer;             // layout parity (not read by tone mapper)
+    float saturationAdaptive;    // 0.0 = linear chroma multiply, 1.0 = adaptive
 }
 gExposure;
 
@@ -689,25 +689,21 @@ void main() {
         // Saturation in Oklab (BT.2020 matrices — direct, no intermediate BT.709)
         if (gExposure.saturation != 1.0) {
             vec3 lab = bt2020ToOklab(max(workingColor, vec3(0.0)));
-            lab.yz *= gExposure.saturation;
-            vec3 boosted = oklabToBt2020(lab);
 
-            // Gamut clamp: if saturation boost pushed color outside BT.2020 gamut,
-            // reduce chroma toward achromatic point until all components >= 0.
-            // Prevents purple hue shifts from negative-component clipping on
-            // highly saturated BT.2020 colors (blackbody fire/lava).
-            float minC = min(boosted.r, min(boosted.g, boosted.b));
-            if (minC < 0.0) {
-                vec3 gray = oklabToBt2020(vec3(lab.x, 0.0, 0.0));
-                // Find max t in [0,1] such that gray + t*(boosted - gray) >= 0
-                vec3 d = gray - boosted;
-                float t = 1.0;
-                if (d.r > 1e-6 && boosted.r < 0.0) t = min(t, gray.r / d.r);
-                if (d.g > 1e-6 && boosted.g < 0.0) t = min(t, gray.g / d.g);
-                if (d.b > 1e-6 && boosted.b < 0.0) t = min(t, gray.b / d.b);
-                boosted = mix(gray, boosted, max(t, 0.0));
+            if (gExposure.saturationAdaptive > 0.5) {
+                // Adaptive mode: brightness+chroma-dependent boost (inspired by Special K)
+                float chroma = length(lab.yz);
+                float L = lab.x;
+                float adaptAmount = (1.0 - exp2(-4.0 * chroma * chroma))
+                                  * (1.0 - exp2(-4.0 * gExposure.saturation * L * L));
+                lab.yz *= 1.0 + adaptAmount * (gExposure.saturation - 1.0);
+            } else {
+                // Linear mode: self-limiting sigmoid boost (no clamping needed)
+                float boostAmount = 1.0 - exp2(-4.0 * gExposure.saturation * dot(lab.yz, lab.yz));
+                lab.yz *= 1.0 + boostAmount * (gExposure.saturation - 1.0);
             }
-            workingColor = boosted;
+
+            workingColor = max(oklabToBt2020(lab), vec3(0.0));
         }
 
         float hdrHeadroom = peak / paperWhite;
@@ -749,21 +745,19 @@ void main() {
         // Saturation in Oklab (BT.2020 — identical to HDR path)
         if (gExposure.saturation != 1.0) {
             vec3 lab = bt2020ToOklab(max(workingColor, vec3(0.0)));
-            lab.yz *= gExposure.saturation;
-            vec3 boosted = oklabToBt2020(lab);
 
-            // Gamut clamp (identical to HDR path)
-            float minC = min(boosted.r, min(boosted.g, boosted.b));
-            if (minC < 0.0) {
-                vec3 gray = oklabToBt2020(vec3(lab.x, 0.0, 0.0));
-                vec3 d = gray - boosted;
-                float t = 1.0;
-                if (d.r > 1e-6 && boosted.r < 0.0) t = min(t, gray.r / d.r);
-                if (d.g > 1e-6 && boosted.g < 0.0) t = min(t, gray.g / d.g);
-                if (d.b > 1e-6 && boosted.b < 0.0) t = min(t, gray.b / d.b);
-                boosted = mix(gray, boosted, max(t, 0.0));
+            if (gExposure.saturationAdaptive > 0.5) {
+                float chroma = length(lab.yz);
+                float L = lab.x;
+                float adaptAmount = (1.0 - exp2(-4.0 * chroma * chroma))
+                                  * (1.0 - exp2(-4.0 * gExposure.saturation * L * L));
+                lab.yz *= 1.0 + adaptAmount * (gExposure.saturation - 1.0);
+            } else {
+                float boostAmount = 1.0 - exp2(-4.0 * gExposure.saturation * dot(lab.yz, lab.yz));
+                lab.yz *= 1.0 + boostAmount * (gExposure.saturation - 1.0);
             }
-            workingColor = boosted;
+
+            workingColor = max(oklabToBt2020(lab), vec3(0.0));
         }
 
         // SDR has no headroom above paper white — 1.0 IS the display peak.

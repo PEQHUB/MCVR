@@ -167,6 +167,27 @@ void main() {
                 mat.transmission = bpTrans;
             }
         }
+        // Material override: read transmission/roughness from UBO (same as CHS)
+        uint packedBlockType = v0.emissiveBlockType;
+        uint materialType = (packedBlockType >> 8u) & 0xFFu;
+        if (materialType > 0u && materialType <= 160u) {
+            uint idx = materialType - 1u;
+            vec4 pack0 = ubo.materialData[idx];          // F0.rgb, roughness
+            vec4 pack1 = ubo.materialData[idx + 160u];   // metallic, transmission, ior, subsurface
+
+            // Override transmission from material slider
+            if (pack1.y >= 0.0) {
+                mat.transmission = pack1.y;
+            }
+
+            // Roughness modulates shadow color: smooth glass = clear colored shadow,
+            // rough glass = scattered/dimmer (frosty)
+            if (mat.transmission > 0.0) {
+                float matRoughness = pack0.a * pack0.a;  // perceptual -> GGX alpha
+                tint = mix(tint, vec3(1.0), clamp(matRoughness * 2.0, 0.0, 1.0));
+            }
+        }
+
         hasTransmission = mat.transmission > 0.0;
     }
 

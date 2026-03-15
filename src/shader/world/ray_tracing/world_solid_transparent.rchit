@@ -115,6 +115,7 @@ layout(push_constant) uniform PushConstant {
 } pc;
 #define SIMPLIFIED_INDIRECT ((pc.flags & 1) != 0)
 #define AREA_LIGHTS_ON ((pc.flags & 2) != 0)
+#define NOISE_LOD_ON   ((pc.flags & 64) != 0)
 #define RESTIR_ENABLED ((pc.flags & 4) != 0)
 #define RESTIR_SIMPLIFIED_BRDF ((pc.flags & 8) != 0)
 #define RESTIR_BOUNCE_ENABLED ((pc.flags & 16) != 0)
@@ -241,6 +242,7 @@ void main() {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
 
         // POM: offset UVs using height field (primary ray only, with normal texture + height data)
+        // Only runs when global pomEnabled=true (pomHeightScale > 0 in push constant)
         if (pc.pomHeightScale > 0.0 && normalTextureID >= 0
             && (mapping.entries[textureID].properties & TEX_PROP_HAS_HEIGHT_MAP) != 0
             && mainRay.index == 0) {
@@ -269,7 +271,7 @@ void main() {
                         f * (duv2.y * edge1.z - duv1.y * edge2.z));
                 }
                 vec3 TObj = normalize(tangentObj - geoN * dot(geoN, tangentObj));
-                vec3 BObj = cross(geoN, TObj);
+                vec3 BObj = cross(geoN, TObj) * sign(pomDet);
                 mat3 nMat = transpose(mat3(gl_WorldToObject3x4EXT));
                 vec3 T = normalize(nMat * TObj);
                 vec3 B = normalize(nMat * BObj);
@@ -282,6 +284,7 @@ void main() {
                 int effectiveRefinement = (pomFade > 0.5) ? pc.pomRefinement : 0;
 
                 int bpHeightTex = blenderPBR.entries[textureID].heightTex;
+
                 textureUV = parallaxOcclusionMapping(
                     textureUV, viewDirTS, normalTextureID,
                     pc.pomHeightScale, effectiveSteps, effectiveRefinement,
@@ -372,6 +375,9 @@ void main() {
         hasBlenderNormal = (nTex >= 0);
     }
 
+    // Save AutoPBR/LabPBR roughness before material overrides (for Tex Roughness blend)
+    float texSourceRoughness = mat.roughness;
+
     // Principled BSDF material override from WorldUBO (5 × vec4 per block)
     // emissiveBlockType packs: bits 0-7 = emissive type, bits 8-15 = material type (ordinal+1, 0=none)
     float matNoiseScale = 0.0;
@@ -404,19 +410,29 @@ void main() {
             }
             float matRoughness = pack0.a * pack0.a;  // perceptual → GGX alpha
 
-            // Texture roughness channel routing: derive roughness from albedo channel mix
+            // Tex Roughness: blend between slider roughness and AutoPBR/LabPBR per-pixel roughness
+            // AutoPBR controls (gamma, variance, edge, min/max) shape texSourceRoughness
             float textureBlend = pack4.w;
             if (textureBlend > 0.001) {
-                float weightSum = pack4.x + pack4.y + pack4.z;
-                float signal = dot(rawAlbedoLinear, pack4.xyz) / max(weightSum, 0.001);
-                float texRoughness = (1.0 - signal) * (1.0 - signal);  // squared for GGX alpha
-                mat.roughness = mix(matRoughness, texRoughness, textureBlend);
-            } else {
-                mat.roughness = matRoughness;
+                // Use AutoPBR roughness from specular texture if available,
+                // fall back to albedo-channel derivation if no specular texture
+                float texRoughness;
+                if (specularTextureID >= 0) {
+                    texRoughness = texSourceRoughness;  // AutoPBR/resource pack roughness
+                } else {
+                    float weightSum = pack4.x + pack4.y + pack4.z;
+                    float signal = dot(rawAlbedoLinear, pack4.xyz) / max(weightSum, 0.001);
+                    texRoughness = (1.0 - signal) * (1.0 - signal);
+                }
+                mat.roughness = max(mix(matRoughness, texRoughness, textureBlend), 0.01);
+            } else if (specularTextureID < 0 || mat.transmission > 0.0) {
+                // No specular texture, OR transmissive block → slider roughness
+                mat.roughness = max(matRoughness, 0.01);
             }
+            // else: opaque with specular texture → keep LabPBR/AutoPBR roughness from texture
 
             mat.metallic = pack1.x;
-            mat.transmission = pack1.y;
+            if (pack1.y >= 0.0) mat.transmission = pack1.y;
             mat.ior = max(pack1.z, 1.0);
             mat.subSurface = pack1.w;
             mat.anisotropic = pack2.x;
@@ -433,12 +449,21 @@ void main() {
             matNoiseOctaves = noisePacked & 0xF;
             matNoiseType = (noisePacked >> 4) & 0xF;
             matNoiseSeed = (noisePacked >> 8) & 0x3FF;
-            matNoiseTarget = (noisePacked >> 20) & 0x7;
+            matNoiseTarget = (noisePacked >> 20) & 0xF;
 
             matGamutBoost = pack5.x; // per-material gamut boost
 
             if (mat.metallic > 0.5) {
-                mat.albedo = mat.f0;  // metals: albedo = F0
+                if (textureBlend > 0.001) {
+                    // Textured metal: preserve texture detail in reflectance
+                    // Modulate F0 by texture luminance variation
+                    float texLum = dot(mat.albedo, vec3(0.2627, 0.6780, 0.0593));
+                    float avgLum = max(texLum, 0.01); // avoid div-by-zero
+                    vec3 texDetail = mat.albedo / avgLum; // normalized texture pattern
+                    mat.albedo = mat.f0 * mix(vec3(1.0), texDetail, textureBlend);
+                } else {
+                    mat.albedo = mat.f0;  // flat metal: pure F0 color
+                }
             }
         }
     }
@@ -447,7 +472,9 @@ void main() {
     // Per-material value from UBO; fallback to global push constant for vivid-flagged non-material blocks
     float gamutFactor = (materialType != 0u) ? matGamutBoost
                       : ((v0.emissiveBlockType & 0x10000u) != 0u ? pc.colorExpansion : 1.0);
-    if (gamutFactor != 1.0 && mat.metallic < 0.5) {
+    // Skip gamut boost for metals and HDR/emissive pixels (Oklab cube root overflows on values > 1.0)
+    float maxAlbedo = max(mat.albedo.r, max(mat.albedo.g, mat.albedo.b));
+    if (gamutFactor != 1.0 && mat.metallic < 0.5 && maxAlbedo <= 1.0) {
         const mat3 bt2020_to_lms = mat3(
             0.6167557871, 0.2651330639, 0.1001026342,
             0.3601983994, 0.6358393640, 0.2039065193,
@@ -468,17 +495,12 @@ void main() {
         vec3 lms = bt2020_to_lms * max(mat.albedo, vec3(0.0));
         vec3 lms_g = sign(lms) * pow(abs(lms), vec3(1.0 / 3.0));
         vec3 lab = lms_to_lab * lms_g;
-        lab.yz *= gamutFactor;
+        // Self-limiting chroma boost (Special K style): lerp toward target, bounded by sigmoid
+        float boostAmount = 1.0 - exp2(-4.0 * gamutFactor * dot(lab.yz, lab.yz));
+        lab.yz *= 1.0 + boostAmount * (gamutFactor - 1.0);
         vec3 lms_g2 = lab_to_lms * lab;
         vec3 lms2 = lms_g2 * lms_g2 * lms_g2;
-        mat.albedo = lms_to_bt2020 * lms2;
-        // Gamut clamp: desaturate toward grey if outside BT.2020
-        float minC = min(mat.albedo.r, min(mat.albedo.g, mat.albedo.b));
-        if (minC < 0.0) {
-            float luma = dot(mat.albedo, vec3(0.2627, 0.6780, 0.0593));
-            float t = luma / (luma - minC);
-            mat.albedo = mix(vec3(luma), mat.albedo, t);
-        }
+        mat.albedo = max(lms_to_bt2020 * lms2, vec3(0.0));
     }
 
     // the provided normal is unreliable! (such as grass, etc.)
@@ -488,27 +510,44 @@ void main() {
         calculateNormal(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, mat.normal, viewDir, geometricNormal, hasBlenderNormal);
 
     // Procedural noise modulation — gated by noiseTarget bits
-    // bit 0 = roughness, bit 1 = normal perturbation, bit 2 = metallic
-    if (matNoiseStrength > 0.001 && matNoiseTarget != 0) {
+    // bit 0 = roughness, bit 1 = normal perturbation, bit 2 = metallic, bit 3 = roughness additive only
+    // Skip noise when throughput is too low (deep bounces — noise contribution invisible)
+    float maxThroughput = max(mainRay.throughput.r, max(mainRay.throughput.g, mainRay.throughput.b));
+    if (matNoiseStrength > 0.001 && matNoiseTarget != 0 && maxThroughput > 0.01) {
+        // Noise LOD: reduce octaves with distance, skip normal gradient far away
+        int effectiveOctaves = matNoiseOctaves;
+        float hitDist = gl_HitTEXT;
+        bool skipNormalGradient = false;
+        if (NOISE_LOD_ON) {
+            // Reduce 1 octave per 32 blocks distance (high octaves are invisible at distance)
+            effectiveOctaves = max(1, effectiveOctaves - int(hitDist / 32.0));
+            // Normal gradient is 6x fbmTyped cost — skip beyond 48 blocks (invisible detail)
+            skipNormalGradient = hitDist > 48.0;
+        }
+
         // Use absolute world coordinates so noise is stable (doesn't follow camera)
         vec3 noisePos = (worldPos + vec3(worldUbo.cameraPos.xyz)) * matNoiseScale;
         // Apply seed as spatial offset for variation
         if (matNoiseSeed > 0) {
             noisePos += vec3(float(matNoiseSeed) * 7.13, float(matNoiseSeed) * 11.37, float(matNoiseSeed) * 23.71);
         }
-        float n = fbmTyped(noisePos, matNoiseOctaves, matNoiseType);
-        // Roughness modulation (bit 0)
+        float n = fbmTyped(noisePos, effectiveOctaves, matNoiseType);
+        // Roughness modulation (bit 0 or bit 3)
         if ((matNoiseTarget & 1) != 0) {
+            // Bidirectional: noise adds and removes roughness
             mat.roughness = clamp(mat.roughness + n * matNoiseStrength, 0.0, 1.0);
+        } else if ((matNoiseTarget & 8) != 0) {
+            // Additive only: noise only increases roughness (never makes things shinier)
+            mat.roughness = clamp(mat.roughness + max(n, 0.0) * matNoiseStrength, 0.0, 1.0);
         }
         // Metallic modulation (bit 2)
         if ((matNoiseTarget & 4) != 0) {
             mat.metallic = clamp(mat.metallic + n * matNoiseStrength, 0.0, 1.0);
         }
         // Normal perturbation from noise gradient (bit 1)
-        if ((matNoiseTarget & 2) != 0) {
+        if ((matNoiseTarget & 2) != 0 && !skipNormalGradient) {
             float eps = 0.01 / max(matNoiseScale, 0.1);
-            vec3 grad = noiseGradientTyped(noisePos, eps, matNoiseOctaves, matNoiseType) * matNoiseStrength * 0.3;
+            vec3 grad = noiseGradientTyped(noisePos, eps, effectiveOctaves, matNoiseType) * matNoiseStrength * 0.3;
             vec3 T = normalize(cross(normal, abs(normal.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0)));
             vec3 B = cross(normal, T);
             normal = normalize(normal + grad.x * T + grad.y * B);

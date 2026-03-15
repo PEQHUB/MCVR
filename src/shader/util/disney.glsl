@@ -226,7 +226,8 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
         // Fake subsurface
         float Fss90 = 0.5 * Rr;
         float Fss = mix(1.0, Fss90, FL) * mix(1.0, Fss90, FV);
-        float ss = 1.25 * (Fss * (1.0 / (localL.z + localV.z) - 0.5) + 0.5);
+        float denom = localL.z + localV.z;
+        float ss = (denom > 1e-4) ? 1.25 * (Fss * (1.0 / denom - 0.5) + 0.5) : 1.0;
 
         vec3 diffuseColor = INV_PI * mat.albedo * mix(Fd + Fretro, ss, mat.subSurface);
 

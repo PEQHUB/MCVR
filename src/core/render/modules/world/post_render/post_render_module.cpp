@@ -7,6 +7,7 @@
 #include "core/render/renderer.hpp"
 
 #include <algorithm>
+#include <iostream>
 #include <cstring>
 #include <glm/gtc/packing.hpp>
 #include <random>
@@ -381,8 +382,15 @@ void PostRenderModule::initBuffers() {
     vkSubmitInfo.pCommandBuffers = &oneTimeBuffer->vkCommandBuffer();
     vkSubmitInfo.signalSemaphoreCount = 0;
     vkSubmitInfo.pSignalSemaphores = nullptr;
-    vkQueueSubmit(device->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
-    vkWaitForFences(device->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+    VkResult submitResult = vkQueueSubmit(device->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
+    if (submitResult != VK_SUCCESS) {
+        std::cout << "PostRender vkQueueSubmit failed with error: " << std::dec << submitResult << std::endl;
+        return;
+    }
+    VkResult fenceResult = vkWaitForFences(device->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+    if (fenceResult != VK_SUCCESS) {
+        std::cout << "PostRender vkWaitForFences failed with error: " << std::dec << fenceResult << std::endl;
+    }
 }
 
 void PostRenderModule::initRenderPass() {

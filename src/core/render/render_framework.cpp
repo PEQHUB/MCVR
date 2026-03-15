@@ -12,6 +12,9 @@
 #include "core/render/textures.hpp"
 #include "core/render/world.hpp"
 
+#include "core/render/crash_ring_buffer.hpp"
+#include "core/render/radiance_logger.hpp"
+
 #include <iostream>
 #include <random>
 
@@ -254,6 +257,11 @@ Framework::~Framework() {
 
 void Framework::acquireContext() {
     if (!running_) return;
+    g_crashRing.advanceFrame();
+
+    if (RadianceLogger::isEnabled()) {
+        RadianceLogger::log("Frame", "INFO", "frame=%llu begin", g_crashRing.frameCount());
+    }
 
     // Streamline: advance frame token and sleep at the very top of the frame.
     // Per NVIDIA QA checklist: "slReflexSleep is called regardless of Reflex Low Latency mode state."
@@ -271,6 +279,7 @@ void Framework::acquireContext() {
 
     std::shared_ptr<vk::Semaphore> imageAcquiredSemaphore = acquireSemaphore();
     uint32_t imageIndex;
+    g_crashRing.record("acquireImage");
     result = vkAcquireNextImageKHR(device_->vkDevice(), swapchain_->vkSwapchain(), UINT64_MAX,
                                    imageAcquiredSemaphore->vkSemaphore(), VK_NULL_HANDLE, &imageIndex);
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -278,18 +287,17 @@ void Framework::acquireContext() {
         recreate();
         return;
     } else if (result != VK_SUCCESS) {
-        std::cerr << "Cannot acquire images from swapchain" << std::endl;
         recycleSemaphore(imageAcquiredSemaphore);
         waitDeviceIdle();
-        exit(EXIT_FAILURE);
+        crashExit(result, "vkAcquireNextImageKHR failed");
     }
 
     std::shared_ptr<vk::Fence> fence = contexts_[imageIndex]->commandFinishedFence;
+    g_crashRing.record("waitFence");
     result = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
     if (result != VK_SUCCESS) {
-        std::cout << "vkWaitForFences failed with error: " << std::dec << result << std::endl;
         waitDeviceIdle();
-        exit(EXIT_FAILURE);
+        crashExit(result, "vkWaitForFences failed");
     }
     currentContextIndex_ = imageIndex;
     currentContext_ = contexts_[imageIndex];
@@ -392,16 +400,26 @@ void Framework::submitCommand() {
     vkSubmitInfo.pSignalSemaphores = signalSemaphores.data();
 
     std::shared_ptr<vk::Fence> fence = currentContext_->commandFinishedFence;
-    vkResetFences(device_->vkDevice(), 1, &fence->vkFence());
+    g_crashRing.record("resetFence");
+    VkResult resetResult = vkResetFences(device_->vkDevice(), 1, &fence->vkFence());
+    if (resetResult != VK_SUCCESS) {
+        waitDeviceIdle();
+        crashExit(resetResult, "vkResetFences failed");
+    }
 
     // PCL: bracket the GPU submit
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::eRenderSubmitStart);
 #endif
-    vkQueueSubmit(device_->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
+    g_crashRing.record("queueSubmit");
+    VkResult submitResult = vkQueueSubmit(device_->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::eRenderSubmitEnd);
 #endif
+    if (submitResult != VK_SUCCESS) {
+        waitDeviceIdle();
+        crashExit(submitResult, "vkQueueSubmit failed");
+    }
 }
 
 void Framework::present() {
@@ -420,6 +438,7 @@ void Framework::present() {
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentStart);
 #endif
+    g_crashRing.record("present");
     VkResult result = vkQueuePresentKHR(device_->mainVkQueue(), &presentInfo);
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentEnd);
@@ -430,9 +449,8 @@ void Framework::present() {
         recreate();
         return;
     } else if (result != VK_SUCCESS) {
-        std::cerr << "failed to submit present command buffer" << std::endl;
         waitDeviceIdle();
-        exit(EXIT_FAILURE);
+        crashExit(result, "vkQueuePresentKHR failed");
     }
 }
 
@@ -521,9 +539,8 @@ void Framework::takeScreenshot(bool withUI, int width, int height, int channel, 
     std::shared_ptr<vk::Fence> fence = context->commandFinishedFence;
     VkResult result = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
     if (result != VK_SUCCESS) {
-        std::cout << "vkWaitForFences failed with error for screenshot: " << std::dec << result << std::endl;
         waitDeviceIdle();
-        exit(EXIT_FAILURE);
+        crashExit(result, "vkWaitForFences failed (screenshot)");
     }
 
     std::shared_ptr<vk::HostVisibleBuffer> dstBuffer;
@@ -633,9 +650,8 @@ void Framework::takeScreenshot(bool withUI, int width, int height, int channel, 
     vkQueueSubmit(device_->mainVkQueue(), 1, &vkSubmitInfo, oneTimeFence->vkFence());
     result = vkWaitForFences(device_->vkDevice(), 1, &oneTimeFence->vkFence(), true, UINT64_MAX);
     if (result != VK_SUCCESS) {
-        std::cout << "vkWaitForFences failed with error for screenshot: " << std::dec << result << std::endl;
         waitDeviceIdle();
-        exit(EXIT_FAILURE);
+        crashExit(result, "vkWaitForFences failed (screenshot)");
     }
 
     if (!needFormatConversion) {
@@ -706,9 +722,8 @@ VkFormat Framework::takeScreenshotRawHdrPacked(bool withUI,
     std::shared_ptr<vk::Fence> fence = context->commandFinishedFence;
     VkResult result = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
     if (result != VK_SUCCESS) {
-        std::cout << "vkWaitForFences failed with error for screenshot: " << std::dec << result << std::endl;
         waitDeviceIdle();
-        exit(EXIT_FAILURE);
+        crashExit(result, "vkWaitForFences failed (screenshot)");
     }
 
     std::shared_ptr<vk::HostVisibleBuffer> dstBuffer;
@@ -821,9 +836,8 @@ VkFormat Framework::takeScreenshotRawHdrPacked(bool withUI,
     vkQueueSubmit(device_->mainVkQueue(), 1, &vkSubmitInfo, oneTimeFence->vkFence());
     result = vkWaitForFences(device_->vkDevice(), 1, &oneTimeFence->vkFence(), true, UINT64_MAX);
     if (result != VK_SUCCESS) {
-        std::cout << "vkWaitForFences failed with error for screenshot: " << std::dec << result << std::endl;
         waitDeviceIdle();
-        exit(EXIT_FAILURE);
+        crashExit(result, "vkWaitForFences failed (screenshot)");
     }
 
     std::memcpy(dstPointer, dstBuffer->mappedPtr(), rawBufferSize);

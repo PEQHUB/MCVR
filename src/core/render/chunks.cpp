@@ -1,6 +1,7 @@
 #include "core/render/chunks.hpp"
 
 #include "core/render/buffers.hpp"
+#include "core/render/crash_ring_buffer.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/textures.hpp"
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <iostream>
 
 ChunkBuildData::ChunkBuildData(int64_t id,
                                int x,
@@ -435,11 +437,13 @@ void ChunkBuildScheduler::tryCheckBatchesFinish() {
     auto iterFence = buildingFences_.begin();
     auto iterBatch = buildingBatches_.begin();
     for (; iterFence != buildingFences_.end() && iterBatch != buildingBatches_.end();) {
-        if (vkWaitForFences(device->vkDevice(), 1, &(*iterFence)->vkFence(), true, 0) == VK_SUCCESS) {
+        VkResult fenceResult = vkWaitForFences(device->vkDevice(), 1, &(*iterFence)->vkFence(), true, 0);
+        if (fenceResult == VK_SUCCESS) {
             vkResetFences(device->vkDevice(), 1, &(*iterFence)->vkFence());
             freeFences_.push(*iterFence);
 
             for (auto chunkBuildData : (*iterBatch)->batchData) {
+                if (chunkBuildData->id >= static_cast<int>(chunks_.size())) continue;
                 chunks_[chunkBuildData->id]->enqueue(chunkBuildData);
 
                 ChunkPackedData data = {
@@ -452,6 +456,10 @@ void ChunkBuildScheduler::tryCheckBatchesFinish() {
 
             iterFence = buildingFences_.erase(iterFence);
             iterBatch = buildingBatches_.erase(iterBatch);
+        } else if (fenceResult != VK_TIMEOUT) {
+            g_crashRing.record("chunkFenceFail", fenceResult);
+            std::cout << "Chunk build fence failed with error: " << std::dec << fenceResult << std::endl;
+            break;
         }
     }
 }
@@ -464,11 +472,13 @@ void ChunkBuildScheduler::waitAllBatchesFinish() {
     auto iterFence = buildingFences_.begin();
     auto iterBatch = buildingBatches_.begin();
     for (; iterFence != buildingFences_.end() && iterBatch != buildingBatches_.end();) {
-        if (vkWaitForFences(device->vkDevice(), 1, &(*iterFence)->vkFence(), true, UINT64_MAX) == VK_SUCCESS) {
+        VkResult fenceResult = vkWaitForFences(device->vkDevice(), 1, &(*iterFence)->vkFence(), true, UINT64_MAX);
+        if (fenceResult == VK_SUCCESS) {
             vkResetFences(device->vkDevice(), 1, &(*iterFence)->vkFence());
             freeFences_.push(*iterFence);
 
             for (auto chunkBuildData : (*iterBatch)->batchData) {
+                if (chunkBuildData->id >= static_cast<int>(chunks_.size())) continue;
                 chunks_[chunkBuildData->id]->enqueue(chunkBuildData);
 
                 ChunkPackedData data = {
@@ -481,6 +491,10 @@ void ChunkBuildScheduler::waitAllBatchesFinish() {
 
             iterFence = buildingFences_.erase(iterFence);
             iterBatch = buildingBatches_.erase(iterBatch);
+        } else {
+            g_crashRing.record("chunkWaitAllFail", fenceResult);
+            std::cout << "Chunk build waitAll fence failed with error: " << std::dec << fenceResult << std::endl;
+            break;
         }
     }
 }
@@ -819,6 +833,7 @@ void Chunks::resetFrame() {
 
 void Chunks::invalidateChunk(int id) {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
+    if (id < 0 || id >= static_cast<int>(chunks_.size())) return;
     chunks_[id]->invalidate();
 
     ChunkPackedData data = {

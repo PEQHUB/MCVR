@@ -581,7 +581,7 @@ void ToneMappingModuleContext::render() {
     pc.psychoAdaptContrast = Renderer::options.psychoAdaptContrast;
     pc.psychoWhiteCurve = static_cast<float>(Renderer::options.psychoWhiteCurve);
     pc.psychoConeExponent = Renderer::options.psychoConeExponent;
-    // Boot timer now lives in ExposureBuffer (shader-side), no CPU-side accumulation needed
+    pc.saturationAdaptive = Renderer::options.saturationAdaptive ? 1.0f : 0.0f;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ToneMappingModulePushConstant), &pc);

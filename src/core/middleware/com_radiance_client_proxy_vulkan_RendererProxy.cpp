@@ -106,6 +106,9 @@ static void bind_symbols(DYNLIB_HANDLE h) {
     p_glfwGetWindowMonitor = reinterpret_cast<PFN_glfwGetWindowMonitor>(gp("glfwGetWindowMonitor"));
     p_glfwGetPrimaryMonitor = reinterpret_cast<PFN_glfwGetPrimaryMonitor>(gp("glfwGetPrimaryMonitor"));
     p_glfwGetVideoMode = reinterpret_cast<PFN_glfwGetVideoMode>(gp("glfwGetVideoMode"));
+    p_glfwGetWindowPos = reinterpret_cast<PFN_glfwGetWindowPos>(gp("glfwGetWindowPos"));
+    p_glfwSetWindowPos = reinterpret_cast<PFN_glfwSetWindowPos>(gp("glfwSetWindowPos"));
+    p_glfwSetWindowSize = reinterpret_cast<PFN_glfwSetWindowSize>(gp("glfwSetWindowSize"));
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_initFolderPath(JNIEnv *env,
@@ -256,4 +259,40 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
     VkFormat format = framework->takeScreenshotRawHdrPacked(
         withUI, width, height, reinterpret_cast<void *>(pointer), byteSize);
     return static_cast<jint>(format);
+}
+
+// --- Window position/size persistence ---
+
+extern "C" JNIEXPORT jintArray JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetWindowPosSize(
+    JNIEnv *env, jclass) {
+    jintArray result = env->NewIntArray(4);
+    if (!rendererUsable() || !Renderer::is_initialized()) return result;
+    auto *r = Renderer::try_instance();
+    if (!r || !r->framework() || !r->framework()->window()) return result;
+    auto fw = r->framework();
+    GLFWwindow *w = fw->window()->window();
+    int x = 0, y = 0, width = 0, height = 0;
+    if (GLFW_GetWindowPos) GLFW_GetWindowPos(w, &x, &y);
+    GLFW_GetWindowSize(w, &width, &height);
+    jint buf[4] = { x, y, width, height };
+    env->SetIntArrayRegion(result, 0, 4, buf);
+    return result;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeSetWindowPos(
+    JNIEnv *, jclass, jint x, jint y) {
+    if (!rendererUsable() || !Renderer::is_initialized()) return;
+    auto *r = Renderer::try_instance();
+    if (!r || !r->framework() || !r->framework()->window()) return;
+    auto fw = r->framework();
+    if (GLFW_SetWindowPos) GLFW_SetWindowPos(fw->window()->window(), x, y);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeSetWindowSize(
+    JNIEnv *, jclass, jint width, jint height) {
+    if (!rendererUsable() || !Renderer::is_initialized()) return;
+    auto *r = Renderer::try_instance();
+    if (!r || !r->framework() || !r->framework()->window()) return;
+    auto fw = r->framework();
+    if (GLFW_SetWindowSize) GLFW_SetWindowSize(fw->window()->window(), width, height);
 }

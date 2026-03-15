@@ -15,4 +15,7 @@ PFN_glfwWaitEvents p_glfwWaitEvents = nullptr;
 PFN_glfwGetWindowMonitor p_glfwGetWindowMonitor = nullptr;
 PFN_glfwGetPrimaryMonitor p_glfwGetPrimaryMonitor = nullptr;
 PFN_glfwGetVideoMode p_glfwGetVideoMode = nullptr;
+PFN_glfwGetWindowPos p_glfwGetWindowPos = nullptr;
+PFN_glfwSetWindowPos p_glfwSetWindowPos = nullptr;
+PFN_glfwSetWindowSize p_glfwSetWindowSize = nullptr;
 #endif

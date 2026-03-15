@@ -6,6 +6,8 @@
 #include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
+#include "core/render/crash_ring_buffer.hpp"
+#include "core/render/radiance_logger.hpp"
 #include "core/render/renderer.hpp"
 
 RayTracingModule::RayTracingModule() {}
@@ -1145,7 +1147,8 @@ void RayTracingModuleContext::render() {
                        | (Renderer::options.restirEnabled ? 4 : 0)
                        | (Renderer::options.restirSimplifiedBRDF ? 8 : 0)
                        | (Renderer::options.restirBounceEnabled ? 16 : 0)
-                       | (Renderer::options.sharcEnabled ? 32 : 0);
+                       | (Renderer::options.sharcEnabled ? 32 : 0)
+                       | (Renderer::options.noiseLOD ? 64 : 0);
     pushConstant.areaLightCount = worldPrepareContext->areaLightCount;
     pushConstant.shadowSoftness = Renderer::options.shadowSoftness;
     pushConstant.risCandidates = Renderer::options.restirCandidates;
@@ -1167,6 +1170,20 @@ void RayTracingModuleContext::render() {
     // Color expansion
     pushConstant.colorExpansion = Renderer::options.colorExpansion;
     pushConstant._pad0 = 0;
+
+    // Structured logging: push constants (every ~1 second)
+    if (RadianceLogger::isEnabled()) {
+        static uint64_t lastPCLog = 0;
+        uint64_t curFrame = g_crashRing.frameCount();
+        if (curFrame - lastPCLog >= 60) {
+            lastPCLog = curFrame;
+            RadianceLogger::log("RayTracing", "INFO",
+                "pushConst: bounces=%d flags=0x%x lights=%d shadowSoft=%.2f pomH=%.4f pomSteps=%d pomFade=%.0f",
+                pushConstant.numRayBounces, pushConstant.flags, pushConstant.areaLightCount,
+                pushConstant.shadowSoftness, pushConstant.pomHeightScale,
+                pushConstant.pomSteps, pushConstant.pomFadeDistance);
+        }
+    }
 
     // SHARC radiance cache
     if (Renderer::options.sharcEnabled && module->sharcHashEntries_) {

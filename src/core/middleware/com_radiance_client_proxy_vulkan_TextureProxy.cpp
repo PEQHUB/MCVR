@@ -72,4 +72,12 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_setTex
     if (textures == nullptr) return;
     textures->setTextureAlphaClass(id, static_cast<Textures::AlphaClass>(alphaClass));
 }
+
+JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_destroyTexture(JNIEnv *,
+                                                                                          jclass,
+                                                                                          jint id) {
+    auto textures = Renderer::instance().textures();
+    if (textures == nullptr) return;
+    textures->destroyTexture(static_cast<uint32_t>(id));
+}
 }

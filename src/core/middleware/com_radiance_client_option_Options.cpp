@@ -5,6 +5,7 @@
 #include "core/render/chunks.hpp"
 #include "core/render/lights.hpp"
 #include "core/render/render_framework.hpp"
+#include "core/render/radiance_logger.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/streamline_context.hpp"
 #include "core/render/textures.hpp"
@@ -267,6 +268,21 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSaturation(
     JNIEnv *, jclass, jfloat saturation, jboolean write) {
     Renderer::options.saturation = saturation;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSaturationAdaptive(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.saturationAdaptive = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetNoiseLOD(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.noiseLOD = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetColorExpansion(
+    JNIEnv *, jclass, jfloat colorExpansion, jboolean write) {
+    Renderer::options.colorExpansion = colorExpansion;
 }
 
 // PsychoV tonemapper setters
@@ -568,5 +584,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMFadeDistance(
     JNIEnv *, jclass, jfloat v, jboolean) {
     Renderer::options.pomFadeDistance = std::clamp(v, 8.0f, 256.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetLoggingEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    Renderer::options.loggingEnabled = enabled;
+    RadianceLogger::setEnabled(enabled, Renderer::folderPath);
 }
 

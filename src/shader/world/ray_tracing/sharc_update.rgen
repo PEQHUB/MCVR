@@ -51,6 +51,9 @@ layout(push_constant) uniform PushConstant {
     int pomSteps;
     int pomRefinement;
     float pomFadeDistance;
+    // Color expansion
+    float colorExpansion;
+    int _pad0;
     // SHARC fields
     uint64_t sharcHashEntries;
     uint64_t sharcAccumulation;

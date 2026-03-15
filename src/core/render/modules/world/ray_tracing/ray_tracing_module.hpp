@@ -35,7 +35,10 @@ struct RayTracingPushConstant {
     int   pomSteps;              // linear search steps (8-512)
     int   pomRefinement;         // binary refinement iterations (0-8)
     float pomFadeDistance;       // distance in blocks to fade POM out (8-256)
-    // SHARC fields (offset 48, 52 bytes) — buffer device addresses + grid params
+    // Color expansion (offset 48)
+    float colorExpansion;        // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
+    uint32_t _pad0;              // alignment padding for uint64_t below
+    // SHARC fields (offset 56, 52 bytes) — buffer device addresses + grid params
     uint64_t sharcHashEntries;   // BDA of hash entry buffer
     uint64_t sharcAccumulation;  // BDA of accumulation buffer
     uint64_t sharcResolved;      // BDA of resolved radiance buffer
