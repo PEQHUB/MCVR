@@ -455,7 +455,7 @@ void UpscalerModuleContext::render() {
     auto worldCommandBuffer = fwContext->worldCommandBuffer;
     auto mainQueueIndex = fw->physicalDevice()->mainQueueIndex();
 
-    if (!module->fsr3Enabled_) {
+    if (!module->fsr3Enabled_ || Renderer::options.offlineState == 2) {
         worldCommandBuffer->barriersBufferImage(
             {}, {{.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
                   .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,

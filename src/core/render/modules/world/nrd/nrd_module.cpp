@@ -212,6 +212,37 @@ void NrdModuleContext::render() {
 
     if (module->width_ == 0 || module->height_ == 0) return;
 
+    // Offline accumulation bypass: skip denoising, blit accumulated combined radiance to output
+    if (Renderer::options.offlineState == 2 && Renderer::accumOutputImage && denoisedRadianceImage) {
+        auto srcImage = Renderer::accumOutputImage;
+        auto cmd = worldCommandBuffer->vkCommandBuffer();
+        worldCommandBuffer->barriersBufferImage({}, {
+            {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+             .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+             .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+             .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+             .oldLayout = srcImage->imageLayout(), .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+             .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+             .image = srcImage, .subresourceRange = vk::wholeColorSubresourceRange},
+            {.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, .srcAccessMask = 0,
+             .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+             .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+             .oldLayout = denoisedRadianceImage->imageLayout(), .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+             .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+             .image = denoisedRadianceImage, .subresourceRange = vk::wholeColorSubresourceRange}});
+        VkImageBlit region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.srcOffsets[1] = {(int)srcImage->width(), (int)srcImage->height(), 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstOffsets[1] = {(int)denoisedRadianceImage->width(), (int)denoisedRadianceImage->height(), 1};
+        vkCmdBlitImage(cmd, srcImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       denoisedRadianceImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &region, VK_FILTER_LINEAR);
+        srcImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        denoisedRadianceImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        return;
+    }
+
     nrd::CommonSettings commonSettings = {};
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {

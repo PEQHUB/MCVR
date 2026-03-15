@@ -388,6 +388,39 @@ void DLSSModuleContext::render() {
     auto module = dLSSModule.lock();
     if (!module) return;
 
+    // Offline accumulation bypass: blit accumulated result to DLSS output
+    if (Renderer::options.offlineState == 2) {
+        auto cmd = worldCommandBuffer->vkCommandBuffer();
+        // Transition images for blit
+        worldCommandBuffer->barriersBufferImage({}, {
+            {.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+             .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+             .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+             .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+             .oldLayout = hdrImage->imageLayout(), .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+             .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+             .image = hdrImage, .subresourceRange = vk::wholeColorSubresourceRange},
+            {.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, .srcAccessMask = 0,
+             .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+             .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+             .oldLayout = processedImage->imageLayout(), .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+             .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+             .image = processedImage, .subresourceRange = vk::wholeColorSubresourceRange}});
+
+        VkImageBlit region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.srcOffsets[1] = {(int)hdrImage->width(), (int)hdrImage->height(), 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstOffsets[1] = {(int)processedImage->width(), (int)processedImage->height(), 1};
+        vkCmdBlitImage(cmd, hdrImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       processedImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &region, VK_FILTER_LINEAR);
+
+        hdrImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        processedImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        return;
+    }
+
     {
         worldCommandBuffer->barriersBufferImage(
             {}, {{

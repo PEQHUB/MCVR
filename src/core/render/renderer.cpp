@@ -10,6 +10,7 @@ Options Renderer::options{};
 float Renderer::preExposure = 0.00002f;  // Init for physical sun ~100k lux (avoids first-frame FP16 overflow)
 bool Renderer::resetExposureAdaptation = false;
 uint32_t Renderer::accumFrameCount = 0;
+std::shared_ptr<vk::DeviceLocalImage> Renderer::accumOutputImage;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::emissionImages;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::renderResHdrImages;
 

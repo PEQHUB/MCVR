@@ -168,6 +168,7 @@ class Renderer : public Singleton<Renderer> {
     static float preExposure;  // Set by tone mapping, read by RT + DLSS (1-frame delay)
     static bool resetExposureAdaptation;  // Set by JNI on world load, consumed by tone mapping
     static uint32_t accumFrameCount;  // Offline accumulation frame counter (reset on state change)
+    static std::shared_ptr<vk::DeviceLocalImage> accumOutputImage;  // Set by RT module during accum, read by denoiser/upscaler bypass
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> emissionImages;  // RT emission, read by tone mapping
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> renderResHdrImages;  // DLSS input (render-res HDR), read by tone mapping histogram
 

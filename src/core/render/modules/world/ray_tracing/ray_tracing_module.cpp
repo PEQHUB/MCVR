@@ -169,6 +169,7 @@ void RayTracingModule::build() {
     initSharcBuffers();
     initSharcUpdatePipeline();
     initSharcResolvePipeline();
+    initAccumulationPipeline();
 
     for (int i = 0; i < size; i++) {
         contexts_[i] =
@@ -200,6 +201,77 @@ void RayTracingModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
     }
 }
 
+void RayTracingModule::initAccumulationPipeline() {
+    auto framework = framework_.lock();
+    if (!framework) return;
+    auto device = framework->device();
+    VkDevice dev = device->vkDevice();
+    uint32_t size = framework->swapchain()->imageCount();
+
+    std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
+    accumShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/accumulate_comp.spv").string());
+    if (!accumShader_) {
+        std::cerr << "[Offline] Failed to load accumulate_comp.spv — accumulation disabled" << std::endl;
+        return;
+    }
+
+    // Create RGBA32F accumulation buffer at render resolution
+    uint32_t w = hdrNoisyOutputImages_[0]->width();
+    uint32_t h = hdrNoisyOutputImages_[0]->height();
+    accumBufferImage_ = vk::DeviceLocalImage::create(
+        device, framework->vma(), false, w, h, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT);
+
+    // Descriptor set layout: 3 storage images (accumBuffer, noisyInput, averagedOutput)
+    std::vector<VkDescriptorSetLayoutBinding> bindings = {
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+    };
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.bindingCount = (uint32_t)bindings.size();
+    layoutInfo.pBindings = bindings.data();
+    vkCreateDescriptorSetLayout(dev, &layoutInfo, nullptr, &accumDescSetLayout_);
+
+    // Pipeline layout with push constant (1 int = 4 bytes)
+    VkPushConstantRange pushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 4};
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &accumDescSetLayout_;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+    vkCreatePipelineLayout(dev, &pipelineLayoutInfo, nullptr, &accumPipelineLayout_);
+
+    // Compute pipeline
+    VkComputePipelineCreateInfo pipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipelineInfo.stage.module = accumShader_->vkShaderModule();
+    pipelineInfo.stage.pName = "main";
+    pipelineInfo.layout = accumPipelineLayout_;
+    vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &accumPipeline_);
+
+    // Descriptor pool
+    VkDescriptorPoolSize poolSizes[] = {{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 * size}};
+    VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = size;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = poolSizes;
+    vkCreateDescriptorPool(dev, &poolInfo, nullptr, &accumDescPool_);
+
+    // Allocate descriptor sets
+    std::vector<VkDescriptorSetLayout> layouts(size, accumDescSetLayout_);
+    VkDescriptorSetAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocInfo.descriptorPool = accumDescPool_;
+    allocInfo.descriptorSetCount = size;
+    allocInfo.pSetLayouts = layouts.data();
+    accumDescSets_.resize(size);
+    vkAllocateDescriptorSets(dev, &allocInfo, accumDescSets_.data());
+
+    accumPipelineInitialized_ = true;
+    std::cout << "[Offline] Accumulation pipeline initialized (" << w << "x" << h << " RGBA32F)" << std::endl;
+}
+
 void RayTracingModule::preClose() {
     auto framework = framework_.lock();
     if (framework) {
@@ -214,6 +286,10 @@ void RayTracingModule::preClose() {
         if (clusterDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, clusterDescPool_, nullptr);
         if (sharcResolvePipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, sharcResolvePipeline_, nullptr);
         if (sharcResolvePipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, sharcResolvePipelineLayout_, nullptr);
+        if (accumPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, accumPipeline_, nullptr);
+        if (accumPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, accumPipelineLayout_, nullptr);
+        if (accumDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, accumDescSetLayout_, nullptr);
+        if (accumDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, accumDescPool_, nullptr);
     }
 }
 
@@ -1374,7 +1450,9 @@ void RayTracingModuleContext::render() {
     }
 
     // SHARC 3-pass dispatch: update → resolve → main render (with cache query)
-    if (Renderer::options.sharcEnabled && module->sharcUpdatePipeline_ && module->sharcResolvePipeline_ != VK_NULL_HANDLE
+    // Skip entirely during offline accumulation — SHARC temporal cache conflicts with independent samples
+    if (Renderer::options.sharcEnabled && !accumulating
+        && module->sharcUpdatePipeline_ && module->sharcResolvePipeline_ != VK_NULL_HANDLE
         && module->sharcHashEntries_) {
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
 
@@ -1554,5 +1632,66 @@ void RayTracingModuleContext::render() {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
             0, 1, &postSpatialBarrier, 0, nullptr, 0, nullptr);
+    }
+
+    // Offline accumulation: Welford running average into RGBA32F buffer
+    if (accumulating && module->accumPipelineInitialized_) {
+        VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
+        uint32_t frameIdx = context->frameIndex;
+
+        // Barrier: RT output → compute read
+        VkMemoryBarrier accumBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        accumBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        accumBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &accumBarrier, 0, nullptr, 0, nullptr);
+
+        // Update descriptor set with current frame's images
+        VkDescriptorSet accumSet = module->accumDescSets_[frameIdx];
+        auto writeImg = [&](uint32_t binding, const std::shared_ptr<vk::DeviceLocalImage>& img,
+                            std::vector<VkWriteDescriptorSet>& writes,
+                            std::vector<std::unique_ptr<VkDescriptorImageInfo>>& infos) {
+            auto info = std::make_unique<VkDescriptorImageInfo>();
+            info->imageView = img->vkImageView(0);
+            info->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            info->sampler = VK_NULL_HANDLE;
+            writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, accumSet, binding, 0, 1,
+                             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info.get(), nullptr, nullptr});
+            infos.push_back(std::move(info));
+        };
+
+        std::vector<VkWriteDescriptorSet> accumWrites;
+        std::vector<std::unique_ptr<VkDescriptorImageInfo>> accumInfos;
+        writeImg(0, module->accumBufferImage_, accumWrites, accumInfos);   // RGBA32F accum buffer
+        writeImg(1, hdrNoisyOutputImage, accumWrites, accumInfos);          // noisy RT input
+        writeImg(2, hdrNoisyOutputImage, accumWrites, accumInfos);          // averaged output (overwrite in-place)
+
+        vkUpdateDescriptorSets(framework->device()->vkDevice(),
+            (uint32_t)accumWrites.size(), accumWrites.data(), 0, nullptr);
+
+        // Dispatch accumulation
+        int32_t fc = static_cast<int32_t>(Renderer::accumFrameCount);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->accumPipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->accumPipelineLayout_,
+            0, 1, &accumSet, 0, nullptr);
+        vkCmdPushConstants(cmd, module->accumPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, 4, &fc);
+        vkCmdDispatch(cmd,
+            (hdrNoisyOutputImage->width() + 7) / 8,
+            (hdrNoisyOutputImage->height() + 7) / 8,
+            1);
+
+        // Barrier: compute write → next stage
+        VkMemoryBarrier postAccumBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        postAccumBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        postAccumBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 1, &postAccumBarrier, 0, nullptr, 0, nullptr);
+
+        Renderer::accumFrameCount++;
+        Renderer::accumOutputImage = hdrNoisyOutputImage;  // expose for denoiser/upscaler bypass
     }
 }
