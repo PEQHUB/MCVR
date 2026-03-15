@@ -418,6 +418,34 @@ void DLSSModuleContext::render() {
 
         hdrImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         processedImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+        // Also blit first_hit_depth -> upscaledFirstHitDepth (post-render needs it)
+        if (firstHitDepthImage && upscaledFirstHitDepthImage) {
+            worldCommandBuffer->barriersBufferImage({}, {
+                {.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                 .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+                 .oldLayout = firstHitDepthImage->imageLayout(), .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = firstHitDepthImage, .subresourceRange = vk::wholeColorSubresourceRange},
+                {.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, .srcAccessMask = 0,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 .oldLayout = upscaledFirstHitDepthImage->imageLayout(), .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = upscaledFirstHitDepthImage, .subresourceRange = vk::wholeColorSubresourceRange}});
+            VkImageBlit depthRegion{};
+            depthRegion.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            depthRegion.srcOffsets[1] = {(int)firstHitDepthImage->width(), (int)firstHitDepthImage->height(), 1};
+            depthRegion.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            depthRegion.dstOffsets[1] = {(int)upscaledFirstHitDepthImage->width(), (int)upscaledFirstHitDepthImage->height(), 1};
+            vkCmdBlitImage(cmd, firstHitDepthImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           upscaledFirstHitDepthImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &depthRegion, VK_FILTER_LINEAR);
+            firstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            upscaledFirstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        }
         return;
     }
 
