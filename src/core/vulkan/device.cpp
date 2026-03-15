@@ -185,12 +185,8 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     extendedDynamicState2.pNext = &extendedDynamicState3;
     if (hasExtension(VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME)) {
         extendedDynamicState2.extendedDynamicState2 = supportedExtendedDynamicState2.extendedDynamicState2;
-#if defined(USE_AMD)
         // AMD drivers have issues with extendedDynamicState2LogicOp on both Linux and Windows
-        VkBool32 wantLogicOp = VK_FALSE;
-#else
-        VkBool32 wantLogicOp = VK_TRUE;
-#endif
+        VkBool32 wantLogicOp = physicalDevice_->isAMD() ? VK_FALSE : VK_TRUE;
         extendedDynamicState2.extendedDynamicState2LogicOp =
             (supportedExtendedDynamicState2.extendedDynamicState2LogicOp && wantLogicOp) ? VK_TRUE : VK_FALSE;
 

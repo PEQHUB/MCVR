@@ -128,9 +128,7 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
                     framework->device(), framework->vma(), false, renderWidth, renderHeight, 1,
                     blueprint->imageFormats_[idx],
                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-#ifdef USE_AMD
-                        | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-#endif
+                        | (framework->physicalDevice()->isAMD() ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0)
                 );
             }
         }
@@ -219,25 +217,17 @@ void WorldPipelineContext::render() {
     auto mainQueueIndex = framework->physicalDevice()->mainQueueIndex();
 
     // Preflight: ensure output image has a valid initial layout (avoid UNDEFINED on AMD)
+    bool isAMD = framework->physicalDevice()->isAMD();
     if (outputImage && outputImage->imageLayout() == VK_IMAGE_LAYOUT_UNDEFINED) {
-        VkImageLayout targetLayout =
-#ifdef USE_AMD
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
-        VkPipelineStageFlags2 dstStage =
-#ifdef USE_AMD
-            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-#else
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-#endif
-        VkAccessFlags2 dstAccess =
-#ifdef USE_AMD
-            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-#else
-            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-#endif
+        VkImageLayout targetLayout = isAMD
+            ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+            : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        VkPipelineStageFlags2 dstStage = isAMD
+            ? VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT
+            : (VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+        VkAccessFlags2 dstAccess = isAMD
+            ? (VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT)
+            : (VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         worldCommandBuffer->barriersBufferImage({}, {{
                                                         .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                                         .srcAccessMask = 0,
@@ -263,22 +253,14 @@ void WorldPipelineContext::render() {
                 .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                 .oldLayout = outputImage->imageLayout(),
-#ifdef USE_AMD
-                .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                .newLayout = isAMD ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                 .srcQueueFamilyIndex = mainQueueIndex,
                 .dstQueueFamilyIndex = mainQueueIndex,
                 .image = outputImage,
                 .subresourceRange = vk::wholeColorSubresourceRange,
             }});
 
-#ifdef USE_AMD
-    outputImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-    outputImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+    outputImage->imageLayout() = isAMD ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 }
 
 std::map<std::string,

@@ -6,6 +6,15 @@
 #include "core/render/renderer.hpp"
 #include "core/render/world.hpp"
 
+// Runtime GPU vendor detection for image layout selection.
+// AMD drivers require COLOR_ATTACHMENT_OPTIMAL for overlay images that are used
+// as both render targets and present sources; NVIDIA drivers work with PRESENT_SRC_KHR.
+static VkImageLayout overlayImageLayout() {
+    return Renderer::instance().framework()->physicalDevice()->isAMD()
+        ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+        : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+}
+
 UIModule::UIModule() {}
 
 void UIModule::init(std::shared_ptr<Framework> framework) {
@@ -146,13 +155,8 @@ void UIModule::initOverlayDrawRenderPass() {
                                      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
                                      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
                                      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
-#ifdef USE_AMD
-                                     .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                     .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                                     .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                     .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                                     .initialLayout = overlayImageLayout(),
+                                     .finalLayout = overlayImageLayout(),
                                  })
                                  .defineAttachmentDescription(VkAttachmentDescription{
                                      // depth
@@ -327,9 +331,8 @@ void UIModule::initOverlayPostImages() {
             framework->device(), framework->vma(), false, framework->swapchain()->vkExtent().width,
             framework->swapchain()->vkExtent().height, 1, VK_FORMAT_R8G8B8A8_SRGB,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-#ifdef USE_AMD
-                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-#endif
+                | (Renderer::instance().framework()->physicalDevice()->isAMD()
+                    ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0)
         );
     }
 }
@@ -348,13 +351,8 @@ void UIModule::initOverlayPostRenderPass() {
                                      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
                                      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                                      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-#ifdef USE_AMD
-                                     .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                     .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                                     .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                     .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                                     .initialLayout = overlayImageLayout(),
+                                     .finalLayout = overlayImageLayout(),
                                  })
                                  .endAttachmentDescription()
                                  .beginAttachmentReference()
@@ -1043,11 +1041,7 @@ void UIModuleContext::switchOverlayDraw() {
 
     if (overlayMode == POST) {
         context->overlayCommandBuffer->endRenderPass();
-#ifdef USE_AMD
-        overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-        overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+        overlayPostColorImage->imageLayout() = overlayImageLayout();
     }
 
     if (overlayMode == NONE || overlayMode == POST) {
@@ -1058,11 +1052,7 @@ void UIModuleContext::switchOverlayDraw() {
                      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .oldLayout = overlayDrawColorImage->imageLayout(),
-#ifdef USE_AMD
-                     .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                     .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                     .newLayout = overlayImageLayout(),
                      .srcQueueFamilyIndex = mainQueueIndex,
                      .dstQueueFamilyIndex = mainQueueIndex,
                      .image = overlayDrawColorImage,
@@ -1081,11 +1071,7 @@ void UIModuleContext::switchOverlayDraw() {
                      .image = overlayDrawDepthStencilImage,
                      .subresourceRange = vk::wholeDepthSubresourceRange,
                  }});
-#ifdef USE_AMD
-        overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-        overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+        overlayDrawColorImage->imageLayout() = overlayImageLayout();
         overlayDrawDepthStencilImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL;
 
         context->overlayCommandBuffer->beginRenderPass({
@@ -1115,11 +1101,7 @@ void UIModuleContext::switchOverlayPost() {
 
     if (overlayMode == DRAW) {
         context->overlayCommandBuffer->endRenderPass();
-#ifdef USE_AMD
-        overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-#else
-        overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        overlayDrawColorImage->imageLayout() = overlayImageLayout();
 #endif
         overlayDrawDepthStencilImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
@@ -1132,11 +1114,7 @@ void UIModuleContext::switchOverlayPost() {
                      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .oldLayout = overlayPostColorImage->imageLayout(),
-#ifdef USE_AMD
-                     .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                     .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                     .newLayout = overlayImageLayout(),
                      .srcQueueFamilyIndex = mainQueueIndex,
                      .dstQueueFamilyIndex = mainQueueIndex,
                      .image = overlayPostColorImage,
@@ -1154,11 +1132,7 @@ void UIModuleContext::switchOverlayPost() {
                      .image = overlayDrawColorImage,
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  }});
-#ifdef USE_AMD
-        overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-        overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+        overlayPostColorImage->imageLayout() = overlayImageLayout();
         overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         context->overlayCommandBuffer->beginRenderPass({
@@ -1273,11 +1247,7 @@ void UIModuleContext::postBlur(int times) {
         context->overlayCommandBuffer->draw(3, 1);
 
         context->overlayCommandBuffer->endRenderPass();
-#ifdef USE_AMD
-        overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-        overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+        overlayPostColorImage->imageLayout() = overlayImageLayout();
         overlayMode = NONE;
 
         auto mainQueueIndex = context->physicalDevice->mainQueueIndex();
@@ -1340,11 +1310,7 @@ void UIModuleContext::postBlur(int times) {
                      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .oldLayout = overlayPostColorImage->imageLayout(),
-#ifdef USE_AMD
-                     .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                     .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                     .newLayout = overlayImageLayout(),
                      .srcQueueFamilyIndex = mainQueueIndex,
                      .dstQueueFamilyIndex = mainQueueIndex,
                      .image = overlayPostColorImage,
@@ -1362,11 +1328,7 @@ void UIModuleContext::postBlur(int times) {
                      .image = overlayDrawColorImage,
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  }});
-#ifdef USE_AMD
-        overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-        overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+        overlayPostColorImage->imageLayout() = overlayImageLayout();
         overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 }
@@ -1395,11 +1357,7 @@ void UIModuleContext::end() {
 
     if (overlayMode == DRAW) {
         context->overlayCommandBuffer->endRenderPass();
-#ifdef USE_AMD
-        overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-        overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+        overlayDrawColorImage->imageLayout() = overlayImageLayout();
     } else if (overlayMode == POST) {
         context->overlayCommandBuffer->endRenderPass();
 
@@ -1411,21 +1369,13 @@ void UIModuleContext::end() {
                     .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                     .oldLayout = overlayDrawColorImage->imageLayout(),
-#ifdef USE_AMD
-                    .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                    .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                    .newLayout = overlayImageLayout(),
                     .srcQueueFamilyIndex = mainQueueIndex,
                     .dstQueueFamilyIndex = mainQueueIndex,
                     .image = overlayDrawColorImage,
                     .subresourceRange = vk::wholeColorSubresourceRange,
                 }});
-#ifdef USE_AMD
-        overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-        overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+        overlayDrawColorImage->imageLayout() = overlayImageLayout();
     }
 
     overlayMode = NONE;

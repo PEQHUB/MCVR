@@ -22,6 +22,11 @@ class PhysicalDevice : public SharedObject<PhysicalDevice> {
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingProperties();
     VkPhysicalDeviceAccelerationStructurePropertiesKHR accelerationStructProperties();
 
+    uint32_t vendorID() const { return properties_.vendorID; }
+    bool isAMD() const { return properties_.vendorID == 0x1002; }
+    bool isNVIDIA() const { return properties_.vendorID == 0x10de; }
+    bool isIntel() const { return properties_.vendorID == 0x8086; }
+
   private:
     std::shared_ptr<Instance> instance_;
     std::shared_ptr<Window> window_;

@@ -6,6 +6,12 @@
 
 #include <cmath>
 
+static VkImageLayout outputImageLayout() {
+    return Renderer::instance().framework()->physicalDevice()->isAMD()
+        ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+        : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+}
+
 ToneMappingModule::ToneMappingModule() {}
 
 void ToneMappingModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
@@ -228,13 +234,8 @@ void ToneMappingModule::initRenderPass() {
                       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
                       .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                       .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-#ifdef USE_AMD
-                      .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                      .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                      .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                      .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                      .initialLayout = outputImageLayout(),
+                      .finalLayout = outputImageLayout(),
                   })
                       .endAttachmentDescription()
                       .beginAttachmentReference()
@@ -438,11 +439,7 @@ void ToneMappingModuleContext::render() {
              .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
              .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
              .oldLayout = ldrImage->imageLayout(),
-#ifdef USE_AMD
-                 .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                 .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                 .newLayout = outputImageLayout(),
              .srcQueueFamilyIndex = mainQueueIndex,
              .dstQueueFamilyIndex = mainQueueIndex,
              .image = ldrImage,
@@ -496,11 +493,7 @@ void ToneMappingModuleContext::render() {
     if (emissionImage) emissionImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (renderResHdrImage && renderResHdrImage != hdrImage)
         renderResHdrImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-#ifdef USE_AMD
-    ldrImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-    ldrImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+    ldrImage->imageLayout() = outputImageLayout();
 
     vkCmdFillBuffer(worldCommandBuffer->vkCommandBuffer(), histBuffer->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
 
@@ -649,9 +642,5 @@ void ToneMappingModuleContext::render() {
         ->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS)
         ->draw(3, 1)
         ->endRenderPass();
-#ifdef USE_AMD
-    ldrImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-    ldrImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+    ldrImage->imageLayout() = outputImageLayout();
 }
