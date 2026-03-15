@@ -220,13 +220,14 @@ void RayTracingModule::initAccumulationPipeline() {
     uint32_t h = hdrNoisyOutputImages_[0]->height();
     accumBufferImage_ = vk::DeviceLocalImage::create(
         device, framework->vma(), false, w, h, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT);
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    // Transition from UNDEFINED to GENERAL (required before first storage access)
+    accumBufferImage_->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
 
-    // Descriptor set layout: 3 storage images (accumBuffer, noisyInput, averagedOutput)
+    // Descriptor set layout: 2 storage images (accumBuffer, noisyInput)
     std::vector<VkDescriptorSetLayoutBinding> bindings = {
         {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
     };
     VkDescriptorSetLayoutCreateInfo layoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     layoutInfo.bindingCount = (uint32_t)bindings.size();
@@ -252,7 +253,7 @@ void RayTracingModule::initAccumulationPipeline() {
     vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &accumPipeline_);
 
     // Descriptor pool
-    VkDescriptorPoolSize poolSizes[] = {{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 * size}};
+    VkDescriptorPoolSize poolSizes[] = {{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * size}};
     VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = size;
     poolInfo.poolSizeCount = 1;
@@ -1648,30 +1649,17 @@ void RayTracingModuleContext::render() {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 1, &accumBarrier, 0, nullptr, 0, nullptr);
 
-        // Update descriptor set with current frame's images
+        // Update descriptor set (only when images change — typically once at init)
         VkDescriptorSet accumSet = module->accumDescSets_[frameIdx];
-        auto writeImg = [&](uint32_t binding, const std::shared_ptr<vk::DeviceLocalImage>& img,
-                            std::vector<VkWriteDescriptorSet>& writes,
-                            std::vector<std::unique_ptr<VkDescriptorImageInfo>>& infos) {
-            auto info = std::make_unique<VkDescriptorImageInfo>();
-            info->imageView = img->vkImageView(0);
-            info->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-            info->sampler = VK_NULL_HANDLE;
-            writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, accumSet, binding, 0, 1,
-                             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info.get(), nullptr, nullptr});
-            infos.push_back(std::move(info));
+        VkDescriptorImageInfo accumImgInfo{VK_NULL_HANDLE, module->accumBufferImage_->vkImageView(0), VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo noisyImgInfo{VK_NULL_HANDLE, hdrNoisyOutputImage->vkImageView(0), VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet accumWrites[] = {
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, accumSet, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &accumImgInfo, nullptr, nullptr},
+            {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, accumSet, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &noisyImgInfo, nullptr, nullptr},
         };
+        vkUpdateDescriptorSets(framework->device()->vkDevice(), 2, accumWrites, 0, nullptr);
 
-        std::vector<VkWriteDescriptorSet> accumWrites;
-        std::vector<std::unique_ptr<VkDescriptorImageInfo>> accumInfos;
-        writeImg(0, module->accumBufferImage_, accumWrites, accumInfos);   // RGBA32F accum buffer
-        writeImg(1, hdrNoisyOutputImage, accumWrites, accumInfos);          // noisy RT input
-        writeImg(2, hdrNoisyOutputImage, accumWrites, accumInfos);          // averaged output (overwrite in-place)
-
-        vkUpdateDescriptorSets(framework->device()->vkDevice(),
-            (uint32_t)accumWrites.size(), accumWrites.data(), 0, nullptr);
-
-        // Dispatch accumulation
+        // Dispatch accumulation (writes averaged result to accumBuffer only)
         int32_t fc = static_cast<int32_t>(Renderer::accumFrameCount);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->accumPipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->accumPipelineLayout_,
@@ -1682,14 +1670,34 @@ void RayTracingModuleContext::render() {
             (hdrNoisyOutputImage->height() + 7) / 8,
             1);
 
-        // Barrier: compute write → next stage
+        // Barrier: compute write → blit read
         VkMemoryBarrier postAccumBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         postAccumBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        postAccumBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        postAccumBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         vkCmdPipelineBarrier(cmd,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
             0, 1, &postAccumBarrier, 0, nullptr, 0, nullptr);
+
+        // Copy accumulated average from RGBA32F accumBuffer to RGBA16F hdrNoisyOutput
+        VkImageBlit accumBlit{};
+        accumBlit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        accumBlit.srcOffsets[1] = {(int)module->accumBufferImage_->width(), (int)module->accumBufferImage_->height(), 1};
+        accumBlit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        accumBlit.dstOffsets[1] = {(int)hdrNoisyOutputImage->width(), (int)hdrNoisyOutputImage->height(), 1};
+        vkCmdBlitImage(cmd,
+            module->accumBufferImage_->vkImage(), VK_IMAGE_LAYOUT_GENERAL,
+            hdrNoisyOutputImage->vkImage(), VK_IMAGE_LAYOUT_GENERAL,
+            1, &accumBlit, VK_FILTER_NEAREST);
+
+        // Barrier: blit write → next stage read
+        VkMemoryBarrier postBlitBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        postBlitBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        postBlitBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 1, &postBlitBarrier, 0, nullptr, 0, nullptr);
 
         Renderer::accumFrameCount++;
         Renderer::accumOutputImage = hdrNoisyOutputImage;  // expose for denoiser/upscaler bypass

@@ -1102,7 +1102,6 @@ void UIModuleContext::switchOverlayPost() {
     if (overlayMode == DRAW) {
         context->overlayCommandBuffer->endRenderPass();
         overlayDrawColorImage->imageLayout() = overlayImageLayout();
-#endif
         overlayDrawDepthStencilImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
 
