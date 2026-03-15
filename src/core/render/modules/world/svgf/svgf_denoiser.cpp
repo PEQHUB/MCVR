@@ -204,7 +204,7 @@ void SvgfDenoiser::createPipelines() {
         pipelineInfo.stage.module = shader->vkShaderModule();
         pipelineInfo.stage.pName = "main";
         pipelineInfo.layout = p.pipelineLayout;
-        vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &p.pipeline);
+        vkCreateComputePipelines(dev, m_device->pipelineCache(), 1, &pipelineInfo, nullptr, &p.pipeline);
 
         p.descriptorPool = m_descriptorPool;
         std::vector<VkDescriptorSetLayout> layouts(m_contextCount, p.descriptorSetLayout);

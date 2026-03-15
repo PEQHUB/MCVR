@@ -375,8 +375,9 @@ void main() {
         hasBlenderNormal = (nTex >= 0);
     }
 
-    // Save AutoPBR/LabPBR roughness before material overrides (for Tex Roughness blend)
+    // Save original texture properties before material overrides (for masks + Tex Roughness blend)
     float texSourceRoughness = mat.roughness;
+    float texSourceLuminance = dot(mat.albedo, vec3(0.2126, 0.7152, 0.0722));
 
     // Principled BSDF material override from WorldUBO (5 × vec4 per block)
     // emissiveBlockType packs: bits 0-7 = emissive type, bits 8-15 = material type (ordinal+1, 0=none)
@@ -385,8 +386,16 @@ void main() {
     int matNoiseOctaves = 2;
     int matNoiseType = 0;
     int matNoiseSeed = 0;
-    int matNoiseTarget = 1; // bit 0=roughness, bit 1=normal, bit 2=metallic
-    float matGamutBoost = 1.0; // per-material gamut boost (1.0 = neutral)
+    int matNoiseTarget = 1; // bit 0=roughness, bit 1=normal, bit 2=metallic, bit 3=roughness additive
+    int matNoiseMaskMode = 0;  // 0=none, 1=luminance, 2=roughness, 3=metallic, 4=normal deviation
+    bool matNoiseMaskInvert = false;
+    float matNoiseMaskThreshold = 0.5;
+    int matNoiseWrap = 0;  // 0=3D, 1=surface, 2=triplanar, 3=XZ, 4=XY, 5=YZ
+    float matNoiseRotation = 0.0;  // radians
+    float matNoiseAspect = 1.0;    // Y/X ratio
+    float matNoiseLacunarity = 2.0;
+    float matNoiseContrast = 1.0;
+    float matGamutBoost = 1.0;
     uint packedBlockType = v0.emissiveBlockType;
     uint materialType = (packedBlockType >> 8u) & 0xFFu;
     if (materialType > 0u && materialType <= 160u) {
@@ -396,7 +405,8 @@ void main() {
         vec4 pack2 = worldUbo.materialData[idx + 320u];   // anisotropic, sheenWeight, sheenTint, coatWeight
         vec4 pack3 = worldUbo.materialData[idx + 480u];   // coatRoughness, noiseScale, noiseStrength, noiseOctaves
         vec4 pack4 = worldUbo.materialData[idx + 640u];   // channelR, channelG, channelB, textureBlend
-        vec4 pack5 = worldUbo.materialData[idx + 800u];   // gamutBoost, reserved, reserved, reserved
+        vec4 pack5 = worldUbo.materialData[idx + 800u];   // gamutBoost, noiseMaskThreshold, noiseMaskPacked, normalStrength
+        vec4 pack6 = worldUbo.materialData[idx + 960u];   // noiseRotation, noiseAspect, noiseLacunarity, noiseContrast
 
         {
             // Apply F0 override if set; for dielectrics with zero F0, derive from IOR
@@ -444,14 +454,32 @@ void main() {
             // Extract noise parameters from pack3
             matNoiseScale = pack3.y;
             matNoiseStrength = pack3.z;
-            // pack3.w packs: octaves (bits 0-3) | noiseType (bits 4-7) | seed (bits 8-17) | noiseTarget (bits 20-22)
+            // pack3.w packs: octaves (bits 0-3) | noiseType (bits 4-8) | seed (bits 9-17) | noiseTarget (bits 20-23)
             int noisePacked = int(pack3.w);
             matNoiseOctaves = noisePacked & 0xF;
-            matNoiseType = (noisePacked >> 4) & 0xF;
-            matNoiseSeed = (noisePacked >> 8) & 0x3FF;
+            matNoiseType = (noisePacked >> 4) & 0x1F;  // 5 bits = 0-31
+            matNoiseSeed = (noisePacked >> 9) & 0x1FF;  // 9 bits = 0-511
             matNoiseTarget = (noisePacked >> 20) & 0xF;
 
-            matGamutBoost = pack5.x; // per-material gamut boost
+            matGamutBoost = pack5.x;
+            matNoiseMaskThreshold = pack5.y;
+            int maskPacked = int(pack5.z);
+            matNoiseMaskMode = maskPacked & 0x7;       // bits 0-2
+            matNoiseMaskInvert = ((maskPacked >> 3) & 0x1) != 0; // bit 3
+            matNoiseWrap = (maskPacked >> 4) & 0x7;    // bits 4-6
+
+            // Normal strength: amplify/attenuate Auto-PBR/LabPBR normal map
+            // 0 = no override (default), >0 = scale factor (1.0 = unchanged, 2.0 = 2x stronger)
+            float matNormalStrength = pack5.w;
+            if (matNormalStrength > 0.01 && matNormalStrength != 1.0 && length(mat.normal) > 0.01) {
+                mat.normal.xy *= matNormalStrength;
+                mat.normal = normalize(mat.normal);
+            }
+
+            matNoiseRotation = pack6.x;
+            matNoiseAspect = pack6.y;
+            matNoiseLacunarity = pack6.z;
+            matNoiseContrast = pack6.w;
 
             if (mat.metallic > 0.5) {
                 if (textureBlend > 0.001) {
@@ -525,13 +553,81 @@ void main() {
             skipNormalGradient = hitDist > 48.0;
         }
 
-        // Use absolute world coordinates so noise is stable (doesn't follow camera)
-        vec3 noisePos = (worldPos + vec3(worldUbo.cameraPos.xyz)) * matNoiseScale;
-        // Apply seed as spatial offset for variation
+        // Absolute world coordinates, wrapped for float precision
+        vec3 absWorldPos = worldPos + vec3(worldUbo.cameraPos.xyz);
+        absWorldPos = mod(absWorldPos, 256.0);
+
+        // Wrapping mode: determines how 3D position maps to noise coordinates
+        vec3 noisePos;
+        if (matNoiseWrap == 1) {
+            // Surface: project onto face using geometric normal
+            vec3 an = abs(geometricNormal);
+            vec2 uv;
+            if (an.y >= an.x && an.y >= an.z) uv = absWorldPos.xz;      // top/bottom
+            else if (an.x >= an.y && an.x >= an.z) uv = absWorldPos.yz;  // east/west
+            else uv = absWorldPos.xy;                                      // north/south
+            noisePos = vec3(uv * matNoiseScale, 0.0);
+        } else if (matNoiseWrap == 2) {
+            // Triplanar: blend 3 projections weighted by normal (best quality, 3x cost)
+            noisePos = absWorldPos * matNoiseScale; // used for all 3 projections below
+        } else if (matNoiseWrap == 3) {
+            noisePos = vec3(absWorldPos.xz * matNoiseScale, 0.0); // Planar XZ
+        } else if (matNoiseWrap == 4) {
+            noisePos = vec3(absWorldPos.xy * matNoiseScale, 0.0); // Planar XY
+        } else if (matNoiseWrap == 5) {
+            noisePos = vec3(absWorldPos.yz * matNoiseScale, 0.0); // Planar YZ
+        } else {
+            noisePos = absWorldPos * matNoiseScale; // 3D (default)
+        }
+
+        // Apply rotation + aspect ratio to noise coordinates
+        if (matNoiseRotation != 0.0 || matNoiseAspect != 1.0) {
+            // Rotate XY of noisePos (works for all wrapping modes)
+            float cosR = cos(matNoiseRotation), sinR = sin(matNoiseRotation);
+            vec2 rotated = vec2(noisePos.x * cosR - noisePos.y * sinR,
+                                noisePos.x * sinR + noisePos.y * cosR);
+            noisePos.x = rotated.x;
+            noisePos.y = rotated.y * matNoiseAspect;
+        }
+
+        // Apply seed as spatial offset
         if (matNoiseSeed > 0) {
             noisePos += vec3(float(matNoiseSeed) * 7.13, float(matNoiseSeed) * 11.37, float(matNoiseSeed) * 23.71);
         }
-        float n = fbmTyped(noisePos, effectiveOctaves, matNoiseType);
+
+        float n;
+        if (matNoiseWrap == 2) {
+            // Triplanar: evaluate noise on each plane, blend by normal weight
+            vec3 w = abs(geometricNormal);
+            w = w / (w.x + w.y + w.z + 0.001); // normalize weights
+            vec3 seedOff = (matNoiseSeed > 0) ? vec3(float(matNoiseSeed) * 7.13, float(matNoiseSeed) * 11.37, float(matNoiseSeed) * 23.71) : vec3(0);
+            float nXY = fbmTyped(vec3(absWorldPos.xy * matNoiseScale, 0.0) + seedOff, effectiveOctaves, matNoiseType, matNoiseLacunarity);
+            float nXZ = fbmTyped(vec3(absWorldPos.xz * matNoiseScale, 0.0) + seedOff, effectiveOctaves, matNoiseType, matNoiseLacunarity);
+            float nYZ = fbmTyped(vec3(absWorldPos.yz * matNoiseScale, 0.0) + seedOff, effectiveOctaves, matNoiseType, matNoiseLacunarity);
+            n = nXY * w.z + nXZ * w.y + nYZ * w.x;
+        } else {
+            n = fbmTyped(noisePos, effectiveOctaves, matNoiseType, matNoiseLacunarity);
+        }
+
+        // Contrast: gamma-style power curve on noise output
+        if (matNoiseContrast != 1.0) {
+            n = sign(n) * pow(abs(n), 1.0 / max(matNoiseContrast, 0.01));
+        }
+
+        // ── Noise mask: hard binary — above threshold = full noise, below = zero ──
+        if (matNoiseMaskMode > 0) {
+            float rawMask = 0.0;
+            if (matNoiseMaskMode == 1) rawMask = texSourceLuminance;
+            else if (matNoiseMaskMode == 2) rawMask = texSourceRoughness;
+            else if (matNoiseMaskMode == 3) rawMask = mat.metallic;
+            else if (matNoiseMaskMode == 4) rawMask = 1.0 - abs(dot(normal, geometricNormal));
+
+            if (matNoiseMaskInvert) rawMask = 1.0 - rawMask;
+            // Hard step: above threshold = 1, below = 0
+            float noiseMask = step(matNoiseMaskThreshold, rawMask);
+            n *= noiseMask;
+        }
+
         // Roughness modulation (bit 0 or bit 3)
         if ((matNoiseTarget & 1) != 0) {
             // Bidirectional: noise adds and removes roughness
@@ -544,12 +640,34 @@ void main() {
         if ((matNoiseTarget & 4) != 0) {
             mat.metallic = clamp(mat.metallic + n * matNoiseStrength, 0.0, 1.0);
         }
-        // Normal perturbation from noise gradient (bit 1)
+        // Normal perturbation from noise gradient (bit 1) — also gated by mask
         if ((matNoiseTarget & 2) != 0 && !skipNormalGradient) {
-            float eps = 0.01 / max(matNoiseScale, 0.1);
-            vec3 grad = noiseGradientTyped(noisePos, eps, effectiveOctaves, matNoiseType) * matNoiseStrength * 0.3;
-            vec3 T = normalize(cross(normal, abs(normal.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0)));
-            vec3 B = cross(normal, T);
+            float eps = max(0.01 / matNoiseScale, 0.001);
+            float normalMask = 1.0;
+            if (matNoiseMaskMode > 0) {
+                float rawM = 0.0;
+                if (matNoiseMaskMode == 1) rawM = texSourceLuminance;
+                else if (matNoiseMaskMode == 2) rawM = texSourceRoughness;
+                else if (matNoiseMaskMode == 3) rawM = mat.metallic;
+                else if (matNoiseMaskMode == 4) rawM = 1.0 - abs(dot(normal, geometricNormal));
+                if (matNoiseMaskInvert) rawM = 1.0 - rawM;
+                normalMask = step(matNoiseMaskThreshold, rawM);
+            }
+            vec3 grad = noiseGradientTyped(noisePos, eps, effectiveOctaves, matNoiseType, matNoiseLacunarity) * matNoiseStrength * 0.15 * normalMask;
+            float gradLen = length(grad);
+            if (gradLen > 1.0) grad /= gradLen;
+            // Tangent frame must match the wrapping projection axes
+            vec3 T, B;
+            if (matNoiseWrap == 1) {
+                // Surface mode: tangent axes match the projected UV axes
+                vec3 an = abs(geometricNormal);
+                if (an.y >= an.x && an.y >= an.z) { T = vec3(1,0,0); B = vec3(0,0,1); }      // top/bottom: UV=XZ
+                else if (an.x >= an.y && an.x >= an.z) { T = vec3(0,1,0); B = vec3(0,0,1); }  // east/west: UV=YZ
+                else { T = vec3(1,0,0); B = vec3(0,1,0); }                                     // north/south: UV=XY
+            } else {
+                T = normalize(cross(normal, abs(normal.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0)));
+                B = cross(normal, T);
+            }
             normal = normalize(normal + grad.x * T + grad.y * B);
         }
     }

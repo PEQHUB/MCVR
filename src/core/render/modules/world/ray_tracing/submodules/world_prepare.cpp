@@ -161,7 +161,19 @@ void WorldPrepareContext::render() {
     }
 
     if (chunks->importantBLASBuilders().size() > 0) {
-        vk::BLASBuilder::batchSubmit(chunks->importantBLASBuilders(), worldCommandBuffer);
+        auto &builders = chunks->importantBLASBuilders();
+        // Cap important BLAS builds per frame to prevent GPU TDR on teleport/world load.
+        // Extra builders stay in the vector and get submitted next frame.
+        constexpr size_t MAX_IMPORTANT_BLAS_PER_FRAME = 16;
+        if (builders.size() <= MAX_IMPORTANT_BLAS_PER_FRAME) {
+            vk::BLASBuilder::batchSubmit(builders, worldCommandBuffer);
+        } else {
+            std::vector<std::shared_ptr<vk::BLASBuilder>> thisFrame(
+                builders.begin(), builders.begin() + MAX_IMPORTANT_BLAS_PER_FRAME);
+            vk::BLASBuilder::batchSubmit(thisFrame, worldCommandBuffer);
+            // Keep remaining for next frame
+            builders.erase(builders.begin(), builders.begin() + MAX_IMPORTANT_BLAS_PER_FRAME);
+        }
     }
 
     if (entities->blasBatchBuilder() != nullptr) { entities->blasBatchBuilder()->submit(worldCommandBuffer); }

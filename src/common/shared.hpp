@@ -252,14 +252,15 @@ namespace Data {
 
         T_VEC4 emissiveGamut[13]; // Per-emissive-block gamut boost, indexed as [i/4][i%4], 1.0 = neutral
 
-        // Principled BSDF material overrides: 6 vec4 per block × 160 blocks = 960 vec4
+        // Principled BSDF material overrides: 7 vec4 per block × 160 blocks = 1120 vec4
         // Pack 0 [idx+0]:   (f0.r, f0.g, f0.b, roughness)
         // Pack 1 [idx+160]: (metallic, transmission, ior, subsurface)
         // Pack 2 [idx+320]: (anisotropic, sheenWeight, sheenTint, coatWeight)
         // Pack 3 [idx+480]: (coatRoughness, noiseScale, noiseStrength, noisePacked)
         // Pack 4 [idx+640]: (channelR, channelG, channelB, textureBlend)
-        // Pack 5 [idx+800]: (gamutBoost, reserved, reserved, reserved)
-        T_VEC4 materialData[960];
+        // Pack 5 [idx+800]: (gamutBoost, noiseMaskThreshold, noiseMaskPacked, normalStrength)
+        // Pack 6 [idx+960]: (noiseRotation, noiseAspect, noiseLacunarity, noiseContrast)
+        T_VEC4 materialData[1120];
     };
 
     struct SkyUBO {

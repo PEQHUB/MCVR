@@ -6,6 +6,8 @@
 #include "core/vulkan/physical_device.hpp"
 
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <unordered_set>
 #include <vector>
@@ -351,14 +353,80 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     vkGetDeviceQueue(device_, physicalDevice_->secondaryQueueIndex(),
                      physicalDevice_->mainQueueIndex() == physicalDevice_->secondaryQueueIndex() ? 1 : 0,
                      &secondaryQueue_);
+
+    loadPipelineCache();
 }
 
 vk::Device::~Device() {
+    savePipelineCache();
+    if (pipelineCache_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineCache(device_, pipelineCache_, nullptr);
+    }
     vkDestroyDevice(device_, nullptr);
 
 #ifdef DEBUG
     deviceCout() << "device deconstructed" << std::endl;
 #endif
+}
+
+std::string vk::Device::pipelineCachePath() {
+    // Store alongside the game's config directory
+    const char *appdata = std::getenv("APPDATA");
+    if (appdata) {
+        return std::string(appdata) + "/Radiance/pipeline_cache.bin";
+    }
+    return "pipeline_cache.bin";
+}
+
+void vk::Device::loadPipelineCache() {
+    auto path = pipelineCachePath();
+    std::vector<uint8_t> cacheData;
+
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (file.is_open()) {
+        auto size = file.tellg();
+        if (size > 0) {
+            cacheData.resize(static_cast<size_t>(size));
+            file.seekg(0);
+            file.read(reinterpret_cast<char *>(cacheData.data()), size);
+        }
+        file.close();
+        deviceCout() << "Loaded pipeline cache (" << cacheData.size() << " bytes) from " << path << std::endl;
+    }
+
+    VkPipelineCacheCreateInfo cacheCreateInfo{};
+    cacheCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    cacheCreateInfo.initialDataSize = cacheData.size();
+    cacheCreateInfo.pInitialData = cacheData.empty() ? nullptr : cacheData.data();
+
+    VkResult result = vkCreatePipelineCache(device_, &cacheCreateInfo, nullptr, &pipelineCache_);
+    if (result != VK_SUCCESS) {
+        deviceCerr() << "Failed to create pipeline cache (VkResult=" << result << "), retrying empty" << std::endl;
+        // Retry with empty cache (stale data)
+        cacheCreateInfo.initialDataSize = 0;
+        cacheCreateInfo.pInitialData = nullptr;
+        vkCreatePipelineCache(device_, &cacheCreateInfo, nullptr, &pipelineCache_);
+    }
+}
+
+void vk::Device::savePipelineCache() {
+    if (pipelineCache_ == VK_NULL_HANDLE) return;
+
+    size_t dataSize = 0;
+    if (vkGetPipelineCacheData(device_, pipelineCache_, &dataSize, nullptr) != VK_SUCCESS || dataSize == 0) return;
+
+    std::vector<uint8_t> data(dataSize);
+    if (vkGetPipelineCacheData(device_, pipelineCache_, &dataSize, data.data()) != VK_SUCCESS) return;
+
+    auto path = pipelineCachePath();
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (file.is_open()) {
+        file.write(reinterpret_cast<const char *>(data.data()), dataSize);
+        file.close();
+        deviceCout() << "Saved pipeline cache (" << dataSize << " bytes) to " << path << std::endl;
+    }
 }
 
 VkDevice &vk::Device::vkDevice() {

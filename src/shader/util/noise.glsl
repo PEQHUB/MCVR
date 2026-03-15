@@ -18,6 +18,14 @@
 #define NOISE_GRADIENT    13
 #define NOISE_RINGS       14
 #define NOISE_CRACKLE     15
+#define NOISE_WAVES       16
+#define NOISE_CELLULAR    17
+#define NOISE_EROSION     18
+#define NOISE_FABRIC      19
+#define NOISE_VALUE       20  // cheap smooth noise (~5 ALU)
+#define NOISE_HASH_GRID   21  // per-cell random (~3 ALU)
+#define NOISE_SINE_LINES  22  // parallel lines (~4 ALU)
+#define NOISE_DIAMOND     23  // diamond plate grid (~8 ALU)
 
 // ── Hash functions for Worley/Voronoi ──
 
@@ -154,28 +162,30 @@ float voronoiId(vec3 p) {
 // Returns value in approximately [-1, 1] for simplex types,
 // [0, 1] for cellular types. Caller normalizes as needed.
 
-// ── Geometric patterns (IDs 8-15) — cheap, structured, no FBM needed ──
+// ── Geometric / structured patterns (IDs 8-19) ──
+// All use full 3D coordinates. Output [0, 1].
 
-// Checkerboard: alternating 0/1 cubes. ~3 ALU.
+// Checkerboard: alternating 3D cubes. ~3 ALU. [Light]
 float checkerboard(vec3 p) {
     return mod(floor(p.x) + floor(p.y) + floor(p.z), 2.0);
 }
 
-// Brick: running bond mortar pattern. ~15 ALU. Uses XZ plane.
+// Brick: running bond mortar pattern. ~15 ALU. [Light]
+// Uses XY of input — wrapping mode in the shader handles face projection.
 float brick(vec3 p) {
-    vec2 uv = p.xz;
-    uv.x *= 0.5; // 2:1 brick aspect ratio
+    vec2 uv = p.xy;
+    uv.x *= 0.5;
     float row = floor(uv.y);
-    uv.x += mod(row, 2.0) * 0.5; // offset alternating rows
+    uv.x += mod(row, 2.0) * 0.5;
     vec2 f = fract(uv);
     vec2 mortar = smoothstep(0.0, 0.06, f) * smoothstep(0.0, 0.06, 1.0 - f);
     return mortar.x * mortar.y;
 }
 
-// Hexagonal: hex tiles with edges. ~25 ALU. Uses XZ plane.
+// Hexagonal: hex tiles with edges. ~25 ALU. [Light]
 float hexagonal(vec3 p) {
-    vec2 uv = p.xz;
-    const vec2 s = vec2(1.0, 1.7320508); // (1, sqrt(3))
+    vec2 uv = p.xy;
+    const vec2 s = vec2(1.0, 1.7320508);
     vec4 hC = floor(vec4(uv, uv - vec2(0.5, 1.0)) / s.xyxy) + 0.5;
     vec4 hF = vec4(uv - hC.xy * s, uv - (hC.zw + 0.5) * s);
     vec2 d = (dot(hF.xy, hF.xy) < dot(hF.zw, hF.zw)) ? hF.xy : hF.zw;
@@ -183,38 +193,105 @@ float hexagonal(vec3 p) {
     return smoothstep(0.42, 0.48, 1.0 - hexDist * 2.0);
 }
 
-// Scratches: directional anisotropic noise (brushed metal). ~80 ALU. Elongated along X.
+// Scratches: anisotropic 3D noise (brushed metal). ~30 ALU. [Medium]
+// Now uses simplex directly — FBM octaves add detail layers.
 float scratches(vec3 p) {
-    vec3 stretched = vec3(p.x * 0.125, p.y, p.z); // 8:1 stretch
-    float s1 = snoise(stretched * 1.0) * 0.5;
-    float s2 = snoise(stretched * 2.7 + 13.7) * 0.3;
-    float s3 = snoise(stretched * 7.3 + 31.1) * 0.2;
-    float raw = s1 + s2 + s3;
-    return clamp(raw * raw * 4.0, 0.0, 1.0); // sharpen to distinct scratch lines
+    vec3 stretched = vec3(p.x * 0.125, p.y, p.z * 0.125); // 8:1 stretch in XZ
+    float raw = snoise(stretched);
+    float absRaw = abs(raw);
+    return clamp(absRaw * (3.0 - 2.0 * absRaw), 0.0, 1.0);
 }
 
-// Dots: regular grid of circular holes. ~8 ALU. Uses XZ plane.
+// Dots: circular holes. ~10 ALU. [Light]
+// Uses XY of input — wrapping mode handles projection.
 float dots(vec3 p) {
-    vec2 f = fract(p.xz) - 0.5;
+    vec2 f = fract(p.xy) - 0.5;
     float d = length(f);
     return smoothstep(0.28, 0.32, d);
 }
 
-// Gradient: linear ramp along Y axis. ~2 ALU.
+// Gradient: linear ramp along Y. ~4 ALU. [Light]
 float gradientNoise(vec3 p) {
     return fract(p.y);
 }
 
-// Rings: concentric circles in XZ plane. ~6 ALU.
+// Rings: concentric circles. ~6 ALU. [Light]
+// Uses XY of input.
 float rings(vec3 p) {
-    float d = length(p.xz);
+    float d = length(p.xy);
     return sin(d * 6.2831853) * 0.5 + 0.5;
 }
 
-// Crackle: Voronoi cell edges (F2-F1 sharpened). ~120 ALU.
+// Crackle: Voronoi cell edges (F2-F1). ~120 ALU. [Heavy]
 float crackle(vec3 p) {
     float f2f1 = worleyF2F1(p);
     return smoothstep(0.0, 0.15, f2f1);
+}
+
+// ── New patterns (IDs 16-19) ──
+
+// Waves: smooth 3D sine interference. ~8 ALU. [Light]
+float waves(vec3 p) {
+    float w = sin(p.x * 3.0) * sin(p.y * 3.7) * sin(p.z * 4.3);
+    return w * 0.5 + 0.5;
+}
+
+// Cellular: smooth Worley F1 (rounded cells). ~80 ALU. [Heavy]
+float cellular(vec3 p) {
+    return 1.0 - worleyF1(p); // invert: 1 at cell centers, 0 at edges
+}
+
+// Erosion: turbulent ridged (layered cracks). ~40 ALU. [Medium]
+// Single-sample version; FBM octaves add depth.
+float erosion(vec3 p) {
+    float n = abs(snoise(p));
+    return 1.0 - n * n; // squared abs simplex, inverted = eroded surface
+}
+
+// Fabric: woven cross-hatch pattern. ~12 ALU. [Light]
+float fabric(vec3 p) {
+    vec2 uv = p.xy;
+    float warp = sin(uv.x * 6.2831853) * 0.5 + 0.5;
+    float weft = sin(uv.y * 6.2831853) * 0.5 + 0.5;
+    return mix(warp, weft, step(0.5, fract(uv.x + uv.y)));
+}
+
+// ── Cheap noise types (IDs 20-23) — performance-focused ──
+
+// Value noise: trilinear-interpolated hash. ~5 ALU per eval. [Very Light]
+float valueNoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f); // smoothstep
+    float n00 = fract(sin(dot(i, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+    float n10 = fract(sin(dot(i + vec3(1,0,0), vec3(127.1, 311.7, 74.7))) * 43758.5453);
+    float n01 = fract(sin(dot(i + vec3(0,1,0), vec3(127.1, 311.7, 74.7))) * 43758.5453);
+    float n11 = fract(sin(dot(i + vec3(1,1,0), vec3(127.1, 311.7, 74.7))) * 43758.5453);
+    float n001 = fract(sin(dot(i + vec3(0,0,1), vec3(127.1, 311.7, 74.7))) * 43758.5453);
+    float n101 = fract(sin(dot(i + vec3(1,0,1), vec3(127.1, 311.7, 74.7))) * 43758.5453);
+    float n011 = fract(sin(dot(i + vec3(0,1,1), vec3(127.1, 311.7, 74.7))) * 43758.5453);
+    float n111 = fract(sin(dot(i + vec3(1,1,1), vec3(127.1, 311.7, 74.7))) * 43758.5453);
+    return mix(mix(mix(n00, n10, f.x), mix(n01, n11, f.x), f.y),
+               mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+}
+
+// Hash grid: flat random per cell. ~3 ALU. [Very Light]
+float hashGrid(vec3 p) {
+    vec3 i = floor(p);
+    return fract(sin(dot(i, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+}
+
+// Sine lines: parallel lines. ~4 ALU. [Very Light]
+float sineLines(vec3 p) {
+    return sin(p.x * 6.2831853) * 0.5 + 0.5;
+}
+
+// Diamond plate: raised diamond grid. ~8 ALU. [Light]
+float diamondPlate(vec3 p) {
+    vec2 uv = p.xy;
+    vec2 d = abs(fract(uv) - 0.5);
+    float diamond = (d.x + d.y); // Manhattan distance = diamond shape
+    return smoothstep(0.3, 0.5, diamond);
 }
 
 float noiseSample(vec3 p, int type) {
@@ -234,6 +311,14 @@ float noiseSample(vec3 p, int type) {
         case NOISE_GRADIENT:    return gradientNoise(p) * 2.0 - 1.0;
         case NOISE_RINGS:       return rings(p) * 2.0 - 1.0;
         case NOISE_CRACKLE:     return crackle(p) * 2.0 - 1.0;
+        case NOISE_WAVES:       return waves(p) * 2.0 - 1.0;
+        case NOISE_CELLULAR:    return cellular(p) * 2.0 - 1.0;
+        case NOISE_EROSION:     return erosion(p) * 2.0 - 1.0;
+        case NOISE_FABRIC:      return fabric(p) * 2.0 - 1.0;
+        case NOISE_VALUE:       return valueNoise(p) * 2.0 - 1.0;
+        case NOISE_HASH_GRID:   return hashGrid(p) * 2.0 - 1.0;
+        case NOISE_SINE_LINES:  return sineLines(p) * 2.0 - 1.0;
+        case NOISE_DIAMOND:     return diamondPlate(p) * 2.0 - 1.0;
         default:                return snoise(p);
     }
 }
@@ -254,9 +339,13 @@ float fbm(vec3 pos, int octaves) {
 
 // ── Typed FBM — dispatches to selected noise type per octave ──
 
-float fbmTyped(vec3 pos, int octaves, int type) {
-    // Geometric patterns: single evaluation, FBM octaves would just blur them
-    if (type >= NOISE_CHECKER) {
+float fbmTyped(vec3 pos, int octaves, int type, float lacunarity) {
+    // Binary/geometric patterns: single evaluation — FBM would destroy their structure.
+    // Smooth noise-based patterns (scratches, crackle, cellular, erosion) benefit from octaves.
+    if (type == NOISE_CHECKER || type == NOISE_BRICK || type == NOISE_HEX ||
+        type == NOISE_DOTS || type == NOISE_GRADIENT || type == NOISE_RINGS ||
+        type == NOISE_WAVES || type == NOISE_FABRIC ||
+        type == NOISE_HASH_GRID || type == NOISE_SINE_LINES || type == NOISE_DIAMOND) {
         return noiseSample(pos, type);
     }
 
@@ -278,14 +367,14 @@ float fbmTyped(vec3 pos, int octaves, int type) {
         float weight = 1.0;
         for (int i = 0; i < octaves; i++) {
             float n = 1.0 - abs(snoise(pos * frequency));
-            n *= n; // sharpen ridges
+            n *= n;
             n *= weight;
-            weight = clamp(n * 2.0, 0.0, 1.0); // feedback
+            weight = clamp(n * 2.0, 0.0, 1.0);
             value += amplitude * n;
             amplitude *= 0.5;
-            frequency *= 2.0;
+            frequency *= lacunarity;
         }
-        return value * 2.0 - 1.0; // remap to [-1, 1]
+        return value * 2.0 - 1.0;
     }
 
     // Turbulence: absolute value accumulation
@@ -296,30 +385,32 @@ float fbmTyped(vec3 pos, int octaves, int type) {
         for (int i = 0; i < octaves; i++) {
             value += amplitude * abs(snoise(pos * frequency));
             amplitude *= 0.5;
-            frequency *= 2.0;
+            frequency *= lacunarity;
         }
-        return value * 2.0 - 1.0; // remap to [-1, 1]
+        return value * 2.0 - 1.0;
     }
 
-    // Standard FBM for all other types (simplex, worley, voronoi)
+    // Standard FBM for all other types
     float value = 0.0;
     float amplitude = 0.5;
     float frequency = 1.0;
+    float totalAmp = 0.0;
     for (int i = 0; i < octaves; i++) {
         value += amplitude * noiseSample(pos * frequency, type);
+        totalAmp += amplitude;
         amplitude *= 0.5;
-        frequency *= 2.0;
+        frequency *= lacunarity;
     }
-    return value;
+    return totalAmp > 0.0 ? value / totalAmp : 0.0; // normalize to [-1, 1], guard octaves=0
 }
 
 // ── Typed gradient via central differences ──
 
-vec3 noiseGradientTyped(vec3 v, float eps, int octaves, int type) {
+vec3 noiseGradientTyped(vec3 v, float eps, int octaves, int type, float lacunarity) {
     return vec3(
-        fbmTyped(v + vec3(eps, 0, 0), octaves, type) - fbmTyped(v - vec3(eps, 0, 0), octaves, type),
-        fbmTyped(v + vec3(0, eps, 0), octaves, type) - fbmTyped(v - vec3(0, eps, 0), octaves, type),
-        fbmTyped(v + vec3(0, 0, eps), octaves, type) - fbmTyped(v - vec3(0, 0, eps), octaves, type)
+        fbmTyped(v + vec3(eps, 0, 0), octaves, type, lacunarity) - fbmTyped(v - vec3(eps, 0, 0), octaves, type, lacunarity),
+        fbmTyped(v + vec3(0, eps, 0), octaves, type, lacunarity) - fbmTyped(v - vec3(0, eps, 0), octaves, type, lacunarity),
+        fbmTyped(v + vec3(0, 0, eps), octaves, type, lacunarity) - fbmTyped(v - vec3(0, 0, eps), octaves, type, lacunarity)
     ) / (2.0 * eps);
 }
 

@@ -447,7 +447,7 @@ void NrdWrapper::createPipelines() {
                                               {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
                                                VK_SHADER_STAGE_COMPUTE_BIT, shaderModule, "main", nullptr},
                                               nrdPipeline.pipelineLayout};
-        VK_CHECK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &cpInfo, nullptr, &nrdPipeline.pipeline));
+        VK_CHECK(vkCreateComputePipelines(device, m_device->pipelineCache(), 1, &cpInfo, nullptr, &nrdPipeline.pipeline));
 #ifdef DEBUG
         std::cout << "[NRD] pipeline created " << nrdPipeline.pipeline << " idx=" << i
                   << " shader=" << pDesc.shaderIdentifier << std::endl;

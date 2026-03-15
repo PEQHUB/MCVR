@@ -261,7 +261,7 @@ std::shared_ptr<vk::GraphicsPipeline> vk::GraphicsPipelineBuilder::build(std::sh
     pipelineCreateInfo.basePipelineIndex = -1;
 
     VkPipeline pipeline;
-    if (vkCreateGraphicsPipelines(device->vkDevice(), VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &pipeline) !=
+    if (vkCreateGraphicsPipelines(device->vkDevice(), device->pipelineCache(), 1, &pipelineCreateInfo, nullptr, &pipeline) !=
         VK_SUCCESS) {
         graphicsPipelineCerr() << "failed to create graphics pipeline" << std::endl;
         exit(EXIT_FAILURE);
@@ -349,7 +349,7 @@ std::shared_ptr<vk::RayTracingPipeline> vk::RayTracingPipelineBuilder::build(std
     }
 
     VkPipeline rtPipeline;
-    if (vkCreateRayTracingPipelinesKHR(device->vkDevice(), VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
+    if (vkCreateRayTracingPipelinesKHR(device->vkDevice(), VK_NULL_HANDLE, device->pipelineCache(), 1, &pipelineInfo, nullptr,
                                        &rtPipeline) != VK_SUCCESS) {
         std::cerr << "Cannot build ray tracing pipeline" << std::endl;
         exit(EXIT_FAILURE);
@@ -379,7 +379,7 @@ std::shared_ptr<vk::ComputePipeline> vk::ComputePipelineBuilder::build(std::shar
     computePipelineCreateInfo.layout = pipelineLayout_;
 
     VkPipeline compPipeline;
-    if (vkCreateComputePipelines(device->vkDevice(), VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr,
+    if (vkCreateComputePipelines(device->vkDevice(), device->pipelineCache(), 1, &computePipelineCreateInfo, nullptr,
                                  &compPipeline) != VK_SUCCESS) {
         std::cerr << "Cannot build compute pipeline" << std::endl;
         exit(EXIT_FAILURE);

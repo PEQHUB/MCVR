@@ -17,6 +17,9 @@ class Device : public SharedObject<Device> {
     VkDevice &vkDevice();
     VkQueue &mainVkQueue();
     VkQueue &secondaryQueue();
+    VkPipelineCache pipelineCache() const { return pipelineCache_; }
+
+    void savePipelineCache();
 
     bool hasExtendedDynamicState2LogicOp() const { return extendedDynamicState2LogicOp_; }
     bool hasOMM() const { return ommSupported_; }
@@ -29,8 +32,12 @@ class Device : public SharedObject<Device> {
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue mainQueue_ = VK_NULL_HANDLE;
     VkQueue secondaryQueue_ = VK_NULL_HANDLE;
+    VkPipelineCache pipelineCache_ = VK_NULL_HANDLE;
 
     bool extendedDynamicState2LogicOp_ = false;
     bool ommSupported_ = false;
+
+    void loadPipelineCache();
+    static std::string pipelineCachePath();
 };
 }; // namespace vk

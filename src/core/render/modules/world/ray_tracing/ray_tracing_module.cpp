@@ -801,7 +801,7 @@ void RayTracingModule::initSpatialPipeline() {
     pipelineInfo.stage.module = spatialShader_->vkShaderModule();
     pipelineInfo.stage.pName = "main";
     pipelineInfo.layout = spatialPipelineLayout_;
-    vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &spatialPipeline_);
+    vkCreateComputePipelines(dev, device->pipelineCache(), 1, &pipelineInfo, nullptr, &spatialPipeline_);
 
     // Descriptor pool
     VkDescriptorPoolSize poolSizes[] = {
@@ -864,7 +864,7 @@ void RayTracingModule::initClusterPipeline() {
     pipelineInfo.stage.module = clusterShader_->vkShaderModule();
     pipelineInfo.stage.pName = "main";
     pipelineInfo.layout = clusterPipelineLayout_;
-    vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &clusterPipeline_);
+    vkCreateComputePipelines(dev, device->pipelineCache(), 1, &pipelineInfo, nullptr, &clusterPipeline_);
 
     // Descriptor pool
     VkDescriptorPoolSize poolSize = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * size};
@@ -1031,7 +1031,7 @@ void RayTracingModule::initSharcResolvePipeline() {
     pipelineInfo.stage.module = sharcResolveShader_->vkShaderModule();
     pipelineInfo.stage.pName = "main";
     pipelineInfo.layout = sharcResolvePipelineLayout_;
-    VkResult result = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &sharcResolvePipeline_);
+    VkResult result = vkCreateComputePipelines(dev, device->pipelineCache(), 1, &pipelineInfo, nullptr, &sharcResolvePipeline_);
     if (result != VK_SUCCESS) {
         std::cerr << "[SHARC] Failed to create resolve compute pipeline: " << result << std::endl;
         sharcResolvePipeline_ = VK_NULL_HANDLE;
