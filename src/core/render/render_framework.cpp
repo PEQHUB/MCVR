@@ -181,11 +181,9 @@ void FrameworkContext::fuseFinal() {
                      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .oldLayout = overlayOutput->imageLayout(),
-#ifdef USE_AMD
-                     .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                     .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                     .newLayout = physicalDevice_->isAMD()
+                         ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                         : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                      .srcQueueFamilyIndex = mainQueueIndex,
                      .dstQueueFamilyIndex = mainQueueIndex,
                      .image = overlayOutput,
@@ -204,11 +202,9 @@ void FrameworkContext::fuseFinal() {
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  }});
 
-#ifdef USE_AMD
-        overlayOutput->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-        overlayOutput->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+        overlayOutput->imageLayout() = physicalDevice_->isAMD()
+            ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+            : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
 }

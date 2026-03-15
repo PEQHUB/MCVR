@@ -144,6 +144,10 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     // enabling features
     ommSupported_ = hasExtension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME) &&
                     supportedOMMFeatures.micromap == VK_TRUE;
+    shaderBufferInt64Atomics_ = supportedVulkan12.shaderBufferInt64Atomics == VK_TRUE;
+    if (!shaderBufferInt64Atomics_) {
+        deviceCerr() << "shaderBufferInt64Atomics NOT supported — SHARC may produce artifacts" << std::endl;
+    }
 
     VkPhysicalDeviceOpacityMicromapFeaturesEXT ommFeatures{};
     ommFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT;

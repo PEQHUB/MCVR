@@ -11,6 +11,12 @@
 #include <glm/gtc/packing.hpp>
 #include <random>
 
+static VkImageLayout postRenderOutputLayout() {
+    return Renderer::instance().framework()->physicalDevice()->isAMD()
+        ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+        : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+}
+
 PostRenderModule::PostRenderModule() {}
 
 namespace {
@@ -455,13 +461,8 @@ void PostRenderModule::initRenderPass() {
                                    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
                                    .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                                    .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-#ifdef USE_AMD
-                                   .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                   .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                                   .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                   .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                                   .initialLayout = postRenderOutputLayout(),
+                                   .finalLayout = postRenderOutputLayout(),
                                })
                                .defineAttachmentDescription({
                                    // depth
@@ -810,26 +811,18 @@ void PostRenderModuleContext::render() {
     };
 
     // Force init for postRenderedImage on first use (layout tracking can be stale)
+    bool isAMD = Renderer::instance().framework()->physicalDevice()->isAMD();
     if (module && module->postRenderedInitialized_.size() > context->frameIndex &&
         module->postRenderedInitialized_[context->frameIndex] == 0) {
-        VkImageLayout targetLayout =
-#ifdef USE_AMD
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
-        VkPipelineStageFlags2 dstStage =
-#ifdef USE_AMD
-            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-#else
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-#endif
-        VkAccessFlags2 dstAccess =
-#ifdef USE_AMD
-            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-#else
-            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-#endif
+        VkImageLayout targetLayout = isAMD
+            ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+            : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        VkPipelineStageFlags2 dstStage = isAMD
+            ? VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT
+            : (VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+        VkAccessFlags2 dstAccess = isAMD
+            ? (VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT)
+            : (VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         worldCommandBuffer->barriersBufferImage(
             {}, {{.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                   .srcAccessMask = 0,
@@ -870,11 +863,7 @@ void PostRenderModuleContext::render() {
 
     // Preflight: make sure first-use layouts are valid
     ensureLayout(postRenderedImage,
-#ifdef USE_AMD
-                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                 postRenderOutputLayout(),
                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                  VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
     ensureLayout(worldLightMapImage, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -1159,11 +1148,7 @@ void PostRenderModuleContext::render() {
                      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .oldLayout = postRenderedImage->imageLayout(),
-#ifdef USE_AMD
-                     .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                     .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                     .newLayout = postRenderOutputLayout(),
                      .srcQueueFamilyIndex = mainQueueIndex,
                      .dstQueueFamilyIndex = mainQueueIndex,
                      .image = postRenderedImage,
@@ -1182,11 +1167,7 @@ void PostRenderModuleContext::render() {
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  }});
     }
-#ifdef USE_AMD
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+    postRenderedImage->imageLayout() = postRenderOutputLayout();
     worldLightMapImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     worldCommandBuffer->beginRenderPass({
@@ -1219,11 +1200,7 @@ void PostRenderModuleContext::render() {
     }
 
     worldCommandBuffer->endRenderPass();
-#ifdef USE_AMD
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+    postRenderedImage->imageLayout() = postRenderOutputLayout();
     worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     // render post star field
@@ -1249,11 +1226,7 @@ void PostRenderModuleContext::render() {
                      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                      .oldLayout = postRenderedImage->imageLayout(),
-#ifdef USE_AMD
-                     .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-#else
-                     .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-#endif
+                     .newLayout = postRenderOutputLayout(),
                      .srcQueueFamilyIndex = mainQueueIndex,
                      .dstQueueFamilyIndex = mainQueueIndex,
                      .image = postRenderedImage,
@@ -1272,11 +1245,7 @@ void PostRenderModuleContext::render() {
                      .subresourceRange = vk::wholeColorSubresourceRange,
                  }});
     }
-#ifdef USE_AMD
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+    postRenderedImage->imageLayout() = postRenderOutputLayout();
     worldLightMapImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     worldCommandBuffer->beginRenderPass({
@@ -1295,10 +1264,6 @@ void PostRenderModuleContext::render() {
         ->draw(module->starFieldVertexBuffer->size() / sizeof(vk::VertexFormat::PBRTriangle), 1);
 
     worldCommandBuffer->endRenderPass();
-#ifdef USE_AMD
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-#else
-    postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-#endif
+    postRenderedImage->imageLayout() = postRenderOutputLayout();
     worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 }

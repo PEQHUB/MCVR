@@ -72,12 +72,7 @@ find_package(JNI REQUIRED)
 message(STATUS "${JNI_INCLUDE_DIRS}")
 message(STATUS "${JNI_LIBRARIES}")
 
-option(USE_AMD "Enable AMD specific optimizations/features" ON)
-if (USE_AMD)
-    message(STATUS "AMD Support Enabled")
-else()
-    message(STATUS "AMD Support Disabled")
-endif()
+# AMD support is now automatic via runtime GPU vendor detection (no build flag needed)
 
 # FidelityFX Upscaler (FSR3 Upscaler only)
 option(MCVR_ENABLE_FFX_UPSCALER "Enable FidelityFX Upscaler support" ON)

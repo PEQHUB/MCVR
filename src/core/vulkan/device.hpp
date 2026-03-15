@@ -20,6 +20,7 @@ class Device : public SharedObject<Device> {
 
     bool hasExtendedDynamicState2LogicOp() const { return extendedDynamicState2LogicOp_; }
     bool hasOMM() const { return ommSupported_; }
+    bool has64BitAtomics() const { return shaderBufferInt64Atomics_; }
 
   private:
     std::shared_ptr<Instance> instance_;
@@ -32,5 +33,6 @@ class Device : public SharedObject<Device> {
 
     bool extendedDynamicState2LogicOp_ = false;
     bool ommSupported_ = false;
+    bool shaderBufferInt64Atomics_ = false;
 };
 }; // namespace vk
