@@ -227,6 +227,17 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     VkPipelineLayout sharcResolvePipelineLayout_ = VK_NULL_HANDLE;
     std::shared_ptr<vk::Shader> sharcResolveShader_;
 
+    // Offline accumulation compute pipeline
+    VkPipeline accumPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout accumPipelineLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout accumDescSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool accumDescPool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> accumDescSets_;
+    std::shared_ptr<vk::Shader> accumShader_;
+    std::shared_ptr<vk::DeviceLocalImage> accumBufferImage_;  // RGBA32F running average
+    bool accumPipelineInitialized_ = false;
+    void initAccumulationPipeline();
+
     // submodules
     std::shared_ptr<Atmosphere> atmosphere_;
     std::shared_ptr<WorldPrepare> worldPrepare_;
