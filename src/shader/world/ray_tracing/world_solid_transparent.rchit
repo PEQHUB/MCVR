@@ -112,6 +112,20 @@ layout(push_constant) uniform PushConstant {
     int   pomRefinement;        // binary refinement iterations (0-8)
     float pomFadeDistance;      // distance in blocks to fade POM out (8-256)
     float colorExpansion;       // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
+    uint _pad0;                 // alignment padding (offset 52)
+    // SHARC BDA fields (offsets 56-119, 64 bytes)
+    uint64_t _sharcBDA0;
+    uint64_t _sharcBDA1;
+    uint64_t _sharcBDA2;
+    float _sharcPad0, _sharcPad1, _sharcPad2, _sharcPad3;
+    uint _sharcPad4;
+    float _sharcPad5;
+    uint _sharcPad6;
+    float _sharcPad7;
+    int _sharcPad8;
+    int _sharcPad9;
+    // Offline accumulation fields (offset 120)
+    int offlineFlags;
 } pc;
 #define SIMPLIFIED_INDIRECT ((pc.flags & 1) != 0)
 #define AREA_LIGHTS_ON ((pc.flags & 2) != 0)
@@ -119,6 +133,10 @@ layout(push_constant) uniform PushConstant {
 #define RESTIR_ENABLED ((pc.flags & 4) != 0)
 #define RESTIR_SIMPLIFIED_BRDF ((pc.flags & 8) != 0)
 #define RESTIR_BOUNCE_ENABLED ((pc.flags & 16) != 0)
+#define BEER_LAW_SHADOWS   ((pc.flags & 512) != 0)
+#define NO_EMISSION_CLAMP  ((pc.flags & 1024) != 0)
+#define PHYSICAL_SUN_DISK  ((pc.flags & 2048) != 0)
+#define NO_HAND_AMBIENT    ((pc.flags & 4096) != 0)
 
 layout(set = 3, binding = 3, rgba16f) uniform readonly image2D normalRoughnessImage;
 layout(set = 3, binding = 4, rg16f) uniform readonly image2D motionVectorImage;
@@ -811,10 +829,13 @@ void main() {
     vec3 emissionRadiance = factor * emissionTint * sceneEmission * mainRay.throughput;
 
     // Per-sample contribution clamping to prevent fireflies (scene-referred range)
-    float emissionLum = luminanceBT2020(emissionRadiance);
-    float maxContribution = 1000.0;
-    if (emissionLum > maxContribution) {
-        emissionRadiance *= maxContribution / emissionLum;
+    // Ground truth: no clamping — accumulation converges naturally
+    if (!NO_EMISSION_CLAMP) {
+        float emissionLum = luminanceBT2020(emissionRadiance);
+        float maxContribution = 1000.0;
+        if (emissionLum > maxContribution) {
+            emissionRadiance *= maxContribution / emissionLum;
+        }
     }
 
     mainRay.radiance += emissionRadiance;
@@ -832,7 +853,8 @@ void main() {
     vec3 sunDir = normalize(skyUBO.sunDirection);
     vec3 lightDir = sunDir;
     // Softer sun sampling for hand = wider penumbras (500 vs 3000)
-    float kappa = (mainRay.isHand > 0) ? 500.0 : 3000.0;
+    // Ground truth: physical sun disk half-angle 0.267° → kappa ≈ 46000
+    float kappa = PHYSICAL_SUN_DISK ? 46000.0 : ((mainRay.isHand > 0) ? 500.0 : 3000.0);
     if (sunDir.y < 0) { lightDir = normalize(skyUBO.moonDirection); }
     vec3 sampledLightDir = SampleVMF(mainRay.seed, lightDir, kappa);
     vec3 shadowBiasN = dot(sampledLightDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
@@ -848,6 +870,8 @@ void main() {
         shadowRay.hitT = INF_DISTANCE;
         shadowRay.insideBoat = mainRay.insideBoat;
         shadowRay.bounceIndex = mainRay.index;
+        shadowRay.mediumAbsorption = vec3(0.0);
+        shadowRay.mediumEntryT = 0.0;
 
         uint shadowMask = WORLD_MASK;
         if (mainRay.isHand == 0) {
@@ -877,7 +901,8 @@ void main() {
 
         // Hand shadow smoothing: apply ambient floor with smooth falloff
         // Prevents harsh black transitions on hand geometry in shadow
-        if (mainRay.isHand > 0) {
+        // Ground truth: no fake ambient — accumulation provides correct indirect fill
+        if (mainRay.isHand > 0 && !NO_HAND_AMBIENT) {
             float shadowLum = dot(finalLightRadiance, vec3(0.2627, 0.6780, 0.0593));
             float ambientFloor = 0.08 * dot(mainRay.throughput, vec3(0.2627, 0.6780, 0.0593));
             float blend = smoothstep(0.0, ambientFloor * 2.0, shadowLum);

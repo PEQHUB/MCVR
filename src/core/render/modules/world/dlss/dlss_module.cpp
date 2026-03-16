@@ -388,6 +388,67 @@ void DLSSModuleContext::render() {
     auto module = dLSSModule.lock();
     if (!module) return;
 
+    // Offline accumulation bypass: blit accumulated result to DLSS output
+    if (Renderer::options.offlineState == 2 && Renderer::options.offlineDenoised == 0) {
+        auto cmd = worldCommandBuffer->vkCommandBuffer();
+        // Transition images for blit
+        worldCommandBuffer->barriersBufferImage({}, {
+            {.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+             .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+             .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+             .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+             .oldLayout = hdrImage->imageLayout(), .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+             .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+             .image = hdrImage, .subresourceRange = vk::wholeColorSubresourceRange},
+            {.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, .srcAccessMask = 0,
+             .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+             .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+             .oldLayout = processedImage->imageLayout(), .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+             .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+             .image = processedImage, .subresourceRange = vk::wholeColorSubresourceRange}});
+
+        VkImageBlit region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.srcOffsets[1] = {(int)hdrImage->width(), (int)hdrImage->height(), 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstOffsets[1] = {(int)processedImage->width(), (int)processedImage->height(), 1};
+        vkCmdBlitImage(cmd, hdrImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       processedImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &region, VK_FILTER_LINEAR);
+
+        hdrImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        processedImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+        // Also blit first_hit_depth -> upscaledFirstHitDepth (post-render needs it)
+        if (firstHitDepthImage && upscaledFirstHitDepthImage) {
+            worldCommandBuffer->barriersBufferImage({}, {
+                {.srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                 .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+                 .oldLayout = firstHitDepthImage->imageLayout(), .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = firstHitDepthImage, .subresourceRange = vk::wholeColorSubresourceRange},
+                {.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, .srcAccessMask = 0,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 .oldLayout = upscaledFirstHitDepthImage->imageLayout(), .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 .srcQueueFamilyIndex = mainQueueIndex, .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = upscaledFirstHitDepthImage, .subresourceRange = vk::wholeColorSubresourceRange}});
+            VkImageBlit depthRegion{};
+            depthRegion.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            depthRegion.srcOffsets[1] = {(int)firstHitDepthImage->width(), (int)firstHitDepthImage->height(), 1};
+            depthRegion.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            depthRegion.dstOffsets[1] = {(int)upscaledFirstHitDepthImage->width(), (int)upscaledFirstHitDepthImage->height(), 1};
+            vkCmdBlitImage(cmd, firstHitDepthImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           upscaledFirstHitDepthImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &depthRegion, VK_FILTER_LINEAR);
+            firstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            upscaledFirstHitDepthImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        }
+        return;
+    }
+
     {
         worldCommandBuffer->barriersBufferImage(
             {}, {{
@@ -735,6 +796,127 @@ void DLSSModuleContext::render() {
                                    worldUBO->cameraViewMat, worldUBO->cameraProjMat, preExposure, false,
                                    frameTimeDeltaMs);
         }
+    }
+
+    // P3: Post-DLSS Welford accumulation (DLSS+Welford mode)
+    if (Renderer::options.offlineState == 2 && Renderer::options.offlineDenoised == 1
+        && Renderer::accumPipelineReady) {
+
+        auto cmd = worldCommandBuffer->vkCommandBuffer();
+
+        // Barrier: processedImage → GENERAL for compute read/write
+        worldCommandBuffer->barriersBufferImage({}, {{
+            .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+            .oldLayout = processedImage->imageLayout(),
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = mainQueueIndex,
+            .dstQueueFamilyIndex = mainQueueIndex,
+            .image = processedImage,
+            .subresourceRange = vk::wholeColorSubresourceRange,
+        }});
+        processedImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+        // Also ensure accumBufferImage is in GENERAL
+        if (Renderer::accumBufferImage->imageLayout() != VK_IMAGE_LAYOUT_GENERAL) {
+            worldCommandBuffer->barriersBufferImage({}, {{
+                .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+                .oldLayout = Renderer::accumBufferImage->imageLayout(),
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = mainQueueIndex,
+                .dstQueueFamilyIndex = mainQueueIndex,
+                .image = Renderer::accumBufferImage,
+                .subresourceRange = vk::wholeColorSubresourceRange,
+            }});
+            Renderer::accumBufferImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+        }
+
+        // Update descriptor set: bind accumBuffer and processedImage
+        uint32_t frameIdx = context->frameIndex % Renderer::accumDescSets.size();
+        VkDescriptorImageInfo accumInfo{
+            .sampler = VK_NULL_HANDLE,
+            .imageView = Renderer::accumBufferImage->vkImageView(),
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        };
+        VkDescriptorImageInfo inputInfo{
+            .sampler = VK_NULL_HANDLE,
+            .imageView = processedImage->vkImageView(),
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        };
+        VkWriteDescriptorSet writes[2] = {
+            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+             .dstSet = Renderer::accumDescSets[frameIdx],
+             .dstBinding = 0, .dstArrayElement = 0, .descriptorCount = 1,
+             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+             .pImageInfo = &accumInfo},
+            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+             .dstSet = Renderer::accumDescSets[frameIdx],
+             .dstBinding = 1, .dstArrayElement = 0, .descriptorCount = 1,
+             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+             .pImageInfo = &inputInfo},
+        };
+        vkUpdateDescriptorSets(framework->device()->vkDevice(), 2, writes, 0, nullptr);
+
+        // Dispatch accumulate.comp
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Renderer::accumPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+            Renderer::accumPipelineLayout, 0, 1, &Renderer::accumDescSets[frameIdx], 0, nullptr);
+
+        int32_t fc = static_cast<int32_t>(Renderer::accumFrameCount);
+        vkCmdPushConstants(cmd, Renderer::accumPipelineLayout,
+            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int32_t), &fc);
+
+        uint32_t gx = (processedImage->width() + 7) / 8;
+        uint32_t gy = (processedImage->height() + 7) / 8;
+        vkCmdDispatch(cmd, gx, gy, 1);
+
+        // Barrier: compute → blit
+        worldCommandBuffer->barriersBufferImage({}, {
+            {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+             .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+             .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+             .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+             .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+             .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+             .srcQueueFamilyIndex = mainQueueIndex,
+             .dstQueueFamilyIndex = mainQueueIndex,
+             .image = Renderer::accumBufferImage,
+             .subresourceRange = vk::wholeColorSubresourceRange},
+            {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+             .srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+             .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+             .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+             .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+             .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+             .srcQueueFamilyIndex = mainQueueIndex,
+             .dstQueueFamilyIndex = mainQueueIndex,
+             .image = processedImage,
+             .subresourceRange = vk::wholeColorSubresourceRange}
+        });
+
+        // Blit averaged result back: accumBuffer → processedImage
+        VkImageBlit blitRegion{};
+        blitRegion.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blitRegion.srcOffsets[1] = {(int)Renderer::accumBufferImage->width(),
+                                    (int)Renderer::accumBufferImage->height(), 1};
+        blitRegion.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blitRegion.dstOffsets[1] = {(int)processedImage->width(),
+                                    (int)processedImage->height(), 1};
+        vkCmdBlitImage(cmd, Renderer::accumBufferImage->vkImage(),
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       processedImage->vkImage(),
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &blitRegion, VK_FILTER_LINEAR);
+
+        Renderer::accumBufferImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        processedImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+        Renderer::accumFrameCount++;
     }
 
     // Output Scale 2x: Lanczos downscale from 2x intermediate to 1x shared output

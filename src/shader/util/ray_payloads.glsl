@@ -86,6 +86,9 @@ struct ShadowRay {
     T_FLOAT hitT;
     T_UINT insideBoat;
     T_UINT bounceIndex;
+    // Beer's Law medium tracking (active when BEER_LAW_SHADOWS flag is set)
+    T_VEC3 mediumAbsorption;  // sigma_a of current medium (vec3(0) = in air)
+    T_FLOAT mediumEntryT;     // gl_HitTEXT when entering transmissive medium
 };
 
 #endif

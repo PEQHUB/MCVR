@@ -35,6 +35,15 @@ layout(set = 0, binding = 2) readonly buffer ExposureBuffer {
     float psychoWhiteCurve;      // 0.0 = Neutwo, 1.0 = Naka-Rushton
     float psychoConeExponent;
     float saturationAdaptive;    // 0.0 = linear chroma multiply, 1.0 = adaptive
+    float tonemapParam0;
+    float tonemapParam1;
+    float tonemapParam2;
+    float tonemapParam3;
+    float tonemapParam4;
+    float tonemapParam5;
+    float tonemapParam6;
+    float tonemapParam7;
+    float bootTimer;             // shader-internal (not used by frag, layout parity with exposure.comp)
 }
 gExposure;
 
@@ -655,6 +664,220 @@ vec3 linearToSRGB(vec3 c) {
 }
 
 // ============================================================================
+// SDR Tonemappers — single-pass, display-matched at peak=1.0
+// All receive BT.2020 linear input, output BT.2020 linear [0,1].
+// ============================================================================
+
+// Mode 0: Khronos PBR Neutral (default)
+// Reference: https://github.com/KhronosGroup/ToneMapping
+vec3 PBRNeutralToneMap(vec3 color) {
+    float startCompression = gExposure.tonemapParam0 > 0.0 ? gExposure.tonemapParam0 : 0.76;
+    float desaturation = gExposure.tonemapParam1 > 0.0 ? gExposure.tonemapParam1 : 0.15;
+
+    float x = min(color.r, min(color.g, color.b));
+    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < startCompression) return color;
+
+    float d = 1.0 - startCompression;
+    float newPeak = 1.0 - d * d / (peak + d - startCompression);
+    color *= newPeak / peak;
+
+    float g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
+    return mix(color, vec3(newPeak), g);
+}
+
+// Mode 1: Reinhard Extended (luminance-based, Lwhite configurable)
+// Simpler than HermiteSplineReinhard — direct Reinhard with white point.
+vec3 ReinhardExtToneMap(vec3 color) {
+    float Lwhite = gExposure.tonemapParam0 > 0.0 ? gExposure.tonemapParam0 : gExposure.Lwhite;
+    float L = dot(color, LUMA_BT2020);
+    if (L < 1e-6) return color;
+    float Lw2 = Lwhite * Lwhite;
+    float Lm = L * (1.0 + L / Lw2) / (1.0 + L);
+    Lm = clamp(Lm, 0.0, 1.0);
+    return color * (Lm / L);
+}
+
+// Mode 2: ACES Hill fit (Stephen Hill's RRT+ODT approximation)
+vec3 ACESHillToneMap(vec3 color) {
+    // P0: pre-exposure multiplier (default 1.0)
+    float preExp = gExposure.tonemapParam0 > 0.0 ? gExposure.tonemapParam0 : 1.0;
+    color *= preExp;
+    float L = dot(color, LUMA_BT2020);
+    if (L < 1e-6) return color;
+    float Lm = (L * (2.51 * L + 0.03)) / (L * (2.43 * L + 0.59) + 0.14);
+    Lm = clamp(Lm, 0.0, 1.0);
+    return color * (Lm / L);
+}
+
+// Mode 3: AgX (Troy Sobotka / Blender 4.x)
+// Proper pipeline: BT.2020 → BT.709 → AgX inset → log → sigmoid → AgX outset → BT.2020
+vec3 agxDefaultContrastApprox(vec3 x) {
+    vec3 x2 = x * x;
+    vec3 x4 = x2 * x2;
+    return + 15.5     * x4 * x2
+           - 40.14    * x4 * x
+           + 31.96    * x4
+           - 6.868    * x2 * x
+           + 0.4298   * x2
+           + 0.1191   * x
+           - 0.00232;
+}
+
+vec3 AgXToneMap(vec3 bt2020) {
+    // BT.2020 → BT.709 (AgX is designed for Rec.709)
+    const mat3 toRec709 = mat3(
+         1.6604910, -0.1245505, -0.0181508,
+        -0.5876411,  1.1328999, -0.1005789,
+        -0.0728499, -0.0083494,  1.1187297);
+    vec3 color = max(toRec709 * bt2020, vec3(1e-10));
+
+    // AgX inset matrix (Rec.709 → AgX log space)
+    const mat3 AgX_INSET = mat3(
+        0.842479062253094,  0.0423282422610123, 0.0423756549057051,
+        0.0784335999999992, 0.878468636469772,  0.0784336,
+        0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+    color = AgX_INSET * color;
+
+    // Log2 encoding
+    const float minEv = -12.47393;
+    const float maxEv = 4.026069;
+    color = clamp(log2(color), minEv, maxEv);
+    color = (color - minEv) / (maxEv - minEv);
+
+    // Sigmoid approximation
+    color = agxDefaultContrastApprox(color);
+
+    // AgX Look: post-sigmoid contrast + saturation (like Blender's Punchy/High Contrast)
+    // P0: contrast (default 1.0, >1 = punchier, Blender "Punchy" ≈ 1.4)
+    // P1: saturation (default 1.0, >1 = more vivid post-tonemap)
+    float agxContrast = gExposure.tonemapParam0 > 0.0 ? gExposure.tonemapParam0 : 1.0;
+    float agxSaturation = gExposure.tonemapParam1 > 0.0 ? gExposure.tonemapParam1 : 1.0;
+    if (agxContrast != 1.0) {
+        // Contrast pivot around 0.18 (mid-grey in AgX encoded space ≈ 0.39)
+        vec3 pivot = vec3(0.39);
+        color = pivot + (color - pivot) * agxContrast;
+        color = clamp(color, 0.0, 1.0);
+    }
+    if (agxSaturation != 1.0) {
+        vec3 luma = vec3(dot(color, vec3(0.2126, 0.7152, 0.0722)));
+        color = luma + (color - luma) * agxSaturation;
+        color = clamp(color, 0.0, 1.0);
+    }
+
+    // AgX outset matrix (AgX → Rec.709 display)
+    const mat3 AgX_OUTSET = mat3(
+         1.19687900512017,   -0.0528968517574562, -0.0529716355144438,
+        -0.0980208811401368,  1.15190312990417,   -0.0980434066391996,
+        -0.0990297440797205, -0.0989611768448433,  1.15107367264116);
+    color = max(AgX_OUTSET * color, vec3(0.0));
+
+    // BT.709 → BT.2020 (outer code does BT.2020→BT.709, round-trips to correct result)
+    const mat3 toRec2020 = mat3(
+        0.6274040, 0.0690970, 0.0163916,
+        0.3292820, 0.9195400, 0.0880132,
+        0.0433136, 0.0113612, 0.8955950);
+    return max(toRec2020 * color, vec3(0.0));
+}
+
+// Mode 4: Lottes (Timothy Lottes, GDC 2016)
+vec3 LottesToneMap(vec3 color) {
+    float L = dot(color, LUMA_BT2020);
+    if (L < 1e-6) return color;
+
+    float a = gExposure.tonemapParam0 > 0.0 ? gExposure.tonemapParam0 : 2.0;       // Contrast (Lottes GDC 2016)
+    float d = gExposure.tonemapParam1 > 0.0 ? gExposure.tonemapParam1 : 1.0;       // Shoulder
+    float hdrMax = gExposure.tonemapParam2 > 0.0 ? gExposure.tonemapParam2 : 16.0;  // Max scene luminance
+    float midIn = gExposure.tonemapParam3 > 0.0 ? gExposure.tonemapParam3 : 0.18;   // Middle grey input (18%)
+    float midOut = gExposure.tonemapParam4 > 0.0 ? gExposure.tonemapParam4 : 0.18;  // Middle grey output (preserves 18% grey)
+
+    float b = (-pow(midIn, a) + pow(hdrMax, a) * midOut) /
+              ((pow(hdrMax, a * d) - pow(midIn, a * d)) * midOut);
+    float c = (pow(hdrMax, a * d) * pow(midIn, a) - pow(hdrMax, a) * pow(midIn, a * d) * midOut) /
+              ((pow(hdrMax, a * d) - pow(midIn, a * d)) * midOut);
+
+    float Lm = pow(L, a) / (pow(L, a * d) * b + c);
+    Lm = clamp(Lm, 0.0, 1.0);
+    return color * (Lm / L);
+}
+
+// Mode 5: Frostbite (Sébastien Hillaire, SIGGRAPH 2014/2017)
+// Piecewise: linear toe + shoulder compression
+vec3 FrostbiteToneMap(vec3 color) {
+    float L = dot(color, LUMA_BT2020);
+    if (L < 1e-6) return color;
+
+    float linearEnd = gExposure.tonemapParam0 > 0.0 ? gExposure.tonemapParam0 : 0.25;
+    float shoulderStr = gExposure.tonemapParam1 > 0.0 ? gExposure.tonemapParam1 : 2.0;
+
+    // Attempt to preserve midtone linearity with smooth shoulder
+    float Lm;
+    if (L <= linearEnd) {
+        Lm = L;  // Linear region (preserves shadow detail)
+    } else {
+        // Smooth shoulder: modified exp compression
+        float x = L - linearEnd;
+        float shoulder = (1.0 - linearEnd) * (1.0 - exp(-x * shoulderStr));
+        Lm = linearEnd + shoulder;
+    }
+    Lm = clamp(Lm, 0.0, 1.0);
+    return color * (Lm / L);
+}
+
+// Mode 6: Uncharted 2 (John Hable's filmic curve)
+float hablePartialP(float x, float A, float B, float C, float D, float E, float F) {
+    return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+
+vec3 Uncharted2ToneMap(vec3 color) {
+    float L = dot(color, LUMA_BT2020);
+    if (L < 1e-6) return color;
+    float A = gExposure.tonemapParam0 > 0.0 ? gExposure.tonemapParam0 : 0.15;  // Shoulder strength
+    float B = gExposure.tonemapParam1 > 0.0 ? gExposure.tonemapParam1 : 0.50;  // Linear strength
+    float C = gExposure.tonemapParam2 > 0.0 ? gExposure.tonemapParam2 : 0.10;  // Linear angle
+    float D = gExposure.tonemapParam3 > 0.0 ? gExposure.tonemapParam3 : 0.20;  // Toe strength
+    float E = gExposure.tonemapParam4 > 0.0 ? gExposure.tonemapParam4 : 0.02;  // Toe numerator
+    float F = gExposure.tonemapParam5 > 0.0 ? gExposure.tonemapParam5 : 0.30;  // Toe denominator
+    float W = gExposure.tonemapParam6 > 0.0 ? gExposure.tonemapParam6 : 11.2;  // Linear white point
+    float Lm = hablePartialP(L, A, B, C, D, E, F) / hablePartialP(W, A, B, C, D, E, F);
+    Lm = clamp(Lm, 0.0, 1.0);
+    return color * (Lm / L);
+}
+
+// Mode 7: GT Tonemap (Hajime Uchimura, Gran Turismo)
+vec3 GTToneMap(vec3 color) {
+    float L = dot(color, LUMA_BT2020);
+    if (L < 1e-6) return color;
+
+    float P = 1.0;    // Max brightness (always 1.0 for SDR)
+    float a = gExposure.tonemapParam0 > 0.0 ? gExposure.tonemapParam0 : 1.0;    // Contrast
+    float m = gExposure.tonemapParam1 > 0.0 ? gExposure.tonemapParam1 : 0.22;   // Linear section start
+    float l = gExposure.tonemapParam2 > 0.0 ? gExposure.tonemapParam2 : 0.4;    // Linear section length
+    float c = gExposure.tonemapParam3 > 0.0 ? gExposure.tonemapParam3 : 1.33;   // Black tightness curve
+    float b = gExposure.tonemapParam4; // Black tightness lift (0.0 is valid default)
+
+    float l0 = ((P - m) * l) / a;
+    float S0 = m + l0;
+    float S1 = m + a * l0;
+    float C2 = (a * P) / (P - S1);
+    float CP = -C2 / P;
+
+    float w0 = 1.0 - smoothstep(0.0, m, L);
+    float w2 = step(m + l0, L);
+    float w1 = 1.0 - w0 - w2;
+
+    float T = m * pow(L / m, c) + b;
+    float S = P - (P - S1) * exp(CP * (L - S0));
+    float Lm = T * w0 + L * w1 + S * w2;
+    Lm = clamp(Lm, 0.0, 1.0);
+
+    return color * (Lm / L);
+}
+
+// ============================================================================
 // HDR10 Output Support (ST.2084 PQ + BT.2020)
 // ============================================================================
 
@@ -690,17 +913,21 @@ void main() {
         if (gExposure.saturation != 1.0) {
             vec3 lab = bt2020ToOklab(max(workingColor, vec3(0.0)));
 
-            if (gExposure.saturationAdaptive > 0.5) {
-                // Adaptive mode: brightness+chroma-dependent boost (inspired by Special K)
+            float sat = gExposure.saturation;
+            if (sat <= 1.0) {
+                // Linear desaturation: 0 = grayscale, 1 = neutral
+                lab.yz *= sat;
+            } else if (gExposure.saturationAdaptive > 0.5) {
+                // Adaptive boost: brightness+chroma-dependent (Special K style)
                 float chroma = length(lab.yz);
                 float L = lab.x;
                 float adaptAmount = (1.0 - exp2(-4.0 * chroma * chroma))
-                                  * (1.0 - exp2(-4.0 * gExposure.saturation * L * L));
-                lab.yz *= 1.0 + adaptAmount * (gExposure.saturation - 1.0);
+                                  * (1.0 - exp2(-4.0 * L * L));
+                lab.yz *= 1.0 + adaptAmount * (sat - 1.0);
             } else {
-                // Linear mode: self-limiting sigmoid boost (no clamping needed)
-                float boostAmount = 1.0 - exp2(-4.0 * gExposure.saturation * dot(lab.yz, lab.yz));
-                lab.yz *= 1.0 + boostAmount * (gExposure.saturation - 1.0);
+                // Self-limiting sigmoid boost for sat > 1
+                float boostAmount = 1.0 - exp2(-4.0 * dot(lab.yz, lab.yz));
+                lab.yz *= 1.0 + boostAmount * (sat - 1.0);
             }
 
             workingColor = max(oklabToBt2020(lab), vec3(0.0));
@@ -760,30 +987,18 @@ void main() {
             workingColor = max(oklabToBt2020(lab), vec3(0.0));
         }
 
-        // SDR has no headroom above paper white — 1.0 IS the display peak.
-        // PsychoV targets [0,1] with smooth rolloff; BT.2390 hard-clips at 1.0
-        // (physically correct for SDR — no super-whites available).
-        float sdrHeadroom = 1.0;
-
+        // Single-pass SDR tonemapping — mode selected by tonemapMode
+        // All tonemappers target peak=1.0 (SDR display). No virtual headroom.
         vec3 mapped;
-        if (gExposure.psychoEnabled > 0.5) {
-            // PsychoV in BT.2020 (wideGamutInput=true, peak=1.0 for SDR)
-            mapped = psychoTonemap(workingColor, true,
-                sdrHeadroom,
-                gExposure.psychoHighlights,
-                gExposure.psychoShadows,
-                gExposure.psychoContrast,
-                gExposure.psychoPurity,
-                gExposure.psychoBleaching,
-                gExposure.psychoClipPoint,
-                gExposure.psychoHueRestore,
-                gExposure.psychoAdaptContrast,
-                gExposure.psychoWhiteCurve,
-                gExposure.psychoConeExponent);
-        } else {
-            // BT.2390 with sdrHeadroom=1.0: hard-clips at 1.0 (correct for SDR)
-            mapped = BT2390EETF(workingColor, sdrHeadroom, LUMA_BT2020);
-        }
+        float mode = gExposure.tonemapMode;
+        if      (mode < 0.5) mapped = PBRNeutralToneMap(workingColor);       // 0: PBR Neutral
+        else if (mode < 1.5) mapped = ReinhardExtToneMap(workingColor); // 1: Reinhard
+        else if (mode < 2.5) mapped = ACESHillToneMap(workingColor);         // 2: ACES
+        else if (mode < 3.5) mapped = AgXToneMap(workingColor);              // 3: AgX
+        else if (mode < 4.5) mapped = LottesToneMap(workingColor);           // 4: Lottes
+        else if (mode < 5.5) mapped = FrostbiteToneMap(workingColor);        // 5: Frostbite
+        else if (mode < 6.5) mapped = Uncharted2ToneMap(workingColor);       // 6: Uncharted 2
+        else                  mapped = GTToneMap(workingColor);               // 7: GT
 
         // Convert BT.2020 → BT.709 AFTER tonemapping (preserves wide-gamut processing)
         const mat3 BT2020_TO_BT709 = mat3(

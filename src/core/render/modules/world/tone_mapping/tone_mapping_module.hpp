@@ -44,6 +44,15 @@ struct ToneMappingModuleExposureData {
     float psychoWhiteCurve;      // 0.0 = Neutwo, 1.0 = Naka-Rushton
     float psychoConeExponent;
     float saturationAdaptive;    // 0.0 = linear chroma multiply, 1.0 = adaptive (Special K style)
+    float tonemapParam0;
+    float tonemapParam1;
+    float tonemapParam2;
+    float tonemapParam3;
+    float tonemapParam4;
+    float tonemapParam5;
+    float tonemapParam6;
+    float tonemapParam7;
+    float bootTimer;             // shader-internal: adaptation boot timer (not set from CPU)
 };
 
 struct ToneMappingModulePushConstant {
@@ -88,6 +97,14 @@ struct ToneMappingModulePushConstant {
     float psychoWhiteCurve;
     float psychoConeExponent;
     float saturationAdaptive;    // 0.0 = linear chroma multiply, 1.0 = adaptive
+    float tonemapParam0;
+    float tonemapParam1;
+    float tonemapParam2;
+    float tonemapParam3;
+    float tonemapParam4;
+    float tonemapParam5;
+    float tonemapParam6;
+    float tonemapParam7;
 };
 
 class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingModule> {

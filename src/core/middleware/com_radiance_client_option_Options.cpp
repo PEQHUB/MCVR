@@ -331,6 +331,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoConeExponent(
     JNIEnv *, jclass, jfloat v, jboolean write) { Renderer::options.psychoConeExponent = v; }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTonemapParam(
+    JNIEnv *, jclass, jint index, jfloat value, jboolean write) {
+    if (index >= 0 && index < 8) Renderer::options.tonemapParams[index] = value;
+}
+
 extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_option_Options_nativeIsHdrActive(
     JNIEnv *, jclass) {
     auto *renderer = Renderer::try_instance();
@@ -600,5 +605,112 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     JNIEnv *, jclass, jboolean enabled, jboolean) {
     Renderer::options.loggingEnabled = enabled;
     RadianceLogger::setEnabled(enabled, Renderer::folderPath);
+}
+
+// --- Offline Accumulation ---
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineGroundTruth(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    Renderer::options.offlineGroundTruth = enabled;
+    // Ground truth only controls shader quality (Beer's Law, no clamping, physical sun, etc.)
+    // It does NOT force denoising mode, native res, or variance reduction settings
+    Renderer::accumFrameCount = 0;  // reset accumulation on toggle
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetBeerLawShadows(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    Renderer::options.beerLawShadows = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetNoEmissionClamp(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    Renderer::options.noEmissionClamp = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPhysicalSunDisk(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    Renderer::options.physicalSunDisk = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetNoHandAmbient(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    Renderer::options.noHandAmbient = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineState(
+    JNIEnv *, jclass, jint state, jboolean) {
+    Renderer::options.offlineState = static_cast<uint32_t>(std::clamp(state, 0, 2));
+    if (state == 2) {
+        Renderer::accumFrameCount = 0;  // reset on entering accumulation
+    }
+    // Native resolution override: save upscaler and switch to DLAA on FREE entry
+    if (state == 1 && Renderer::options.offlineNativeRes && !Renderer::options.offlineNativeResActive) {
+        Renderer::options.savedUpscalerMode = Renderer::options.upscalerMode;
+        Renderer::options.upscalerMode = 3;  // DLAA = 1:1
+        Renderer::options.needRecreate = true;
+        Renderer::options.offlineNativeResActive = true;
+    }
+    // Restore upscaler on return to NORMAL
+    if (state == 0 && Renderer::options.offlineNativeResActive) {
+        Renderer::options.upscalerMode = Renderer::options.savedUpscalerMode;
+        Renderer::options.needRecreate = true;
+        Renderer::options.offlineNativeResActive = false;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineBounces(
+    JNIEnv *, jclass, jint bounces, jboolean) {
+    Renderer::options.offlineBounces = static_cast<uint32_t>(std::clamp(bounces, 1, 128));
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineDisableRR(
+    JNIEnv *, jclass, jboolean disable, jboolean) {
+    Renderer::options.offlineDisableRR = disable;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineDisableClamp(
+    JNIEnv *, jclass, jboolean disable, jboolean) {
+    Renderer::options.offlineDisableClamp = disable;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineAperture(
+    JNIEnv *, jclass, jfloat aperture, jboolean) {
+    Renderer::options.offlineAperture = std::clamp(aperture, 0.0f, 0.1f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineFocalDistance(
+    JNIEnv *, jclass, jfloat dist, jboolean) {
+    Renderer::options.offlineFocalDistance = std::clamp(dist, 1.0f, 256.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineNativeRes(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    Renderer::options.offlineNativeRes = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineDenoised(
+    JNIEnv *, jclass, jint mode, jboolean) {
+    Renderer::options.offlineDenoised = static_cast<uint32_t>(std::clamp(mode, 0, 2));
+    // Auto-enable native res when denoised mode is active
+    if (mode > 0 && !Renderer::options.offlineNativeRes) {
+        Renderer::options.offlineNativeRes = true;
+        // If already in FREE or ACCUMULATING state, apply the override now
+        if (Renderer::options.offlineState >= 1 && !Renderer::options.offlineNativeResActive) {
+            Renderer::options.savedUpscalerMode = Renderer::options.upscalerMode;
+            Renderer::options.upscalerMode = 3;  // DLAA = 1:1
+            Renderer::options.needRecreate = true;
+            Renderer::options.offlineNativeResActive = true;
+        }
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeResetAccumulation(
+    JNIEnv *, jclass) {
+    Renderer::accumFrameCount = 0;
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_option_Options_nativeGetAccumFrameCount(
+    JNIEnv *, jclass) {
+    return static_cast<jint>(Renderer::accumFrameCount);
 }
 

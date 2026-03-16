@@ -569,8 +569,8 @@ void ToneMappingModuleContext::render() {
     pc.sdrTransferFunction = static_cast<float>(Renderer::options.sdrTransferFunction);
     pc.manualExposureEnabled = Renderer::options.manualExposureEnabled ? 1.0f : 0.0f;
     pc.manualExposure = Renderer::options.manualExposure;
-    // PsychoV tonemapper parameters
-    pc.psychoEnabled = Renderer::options.psychoEnabled ? 1.0f : 0.0f;
+    // PsychoV tonemapper parameters (HDR only — disable in SDR so legacy tonemappers work)
+    pc.psychoEnabled = (Renderer::options.psychoEnabled && hdrPipelineEnabled) ? 1.0f : 0.0f;
     pc.psychoHighlights = Renderer::options.psychoHighlights;
     pc.psychoShadows = Renderer::options.psychoShadows;
     pc.psychoContrast = Renderer::options.psychoContrast;
@@ -582,6 +582,14 @@ void ToneMappingModuleContext::render() {
     pc.psychoWhiteCurve = static_cast<float>(Renderer::options.psychoWhiteCurve);
     pc.psychoConeExponent = Renderer::options.psychoConeExponent;
     pc.saturationAdaptive = Renderer::options.saturationAdaptive ? 1.0f : 0.0f;
+    pc.tonemapParam0 = Renderer::options.tonemapParams[0];
+    pc.tonemapParam1 = Renderer::options.tonemapParams[1];
+    pc.tonemapParam2 = Renderer::options.tonemapParams[2];
+    pc.tonemapParam3 = Renderer::options.tonemapParams[3];
+    pc.tonemapParam4 = Renderer::options.tonemapParams[4];
+    pc.tonemapParam5 = Renderer::options.tonemapParams[5];
+    pc.tonemapParam6 = Renderer::options.tonemapParams[6];
+    pc.tonemapParam7 = Renderer::options.tonemapParams[7];
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ToneMappingModulePushConstant), &pc);

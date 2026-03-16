@@ -34,6 +34,15 @@ layout(set = 0, binding = 2) buffer ExposureBuffer {
     float psychoAdaptContrast;
     float psychoWhiteCurve;
     float psychoConeExponent;
+    float saturationAdaptive;
+    float tonemapParam0;
+    float tonemapParam1;
+    float tonemapParam2;
+    float tonemapParam3;
+    float tonemapParam4;
+    float tonemapParam5;
+    float tonemapParam6;
+    float tonemapParam7;
     // Shader-side boot adaptation timer: only ticks when actual adaptation runs (not during loading).
     // Zeroed by GPU buffer fill on world load. Replaces CPU-side timeSinceReset.
     float bootTimer;
@@ -81,7 +90,15 @@ layout(push_constant) uniform PushConstant {
     float psychoAdaptContrast;
     float psychoWhiteCurve;
     float psychoConeExponent;
-    // timeSinceReset removed: boot timer now lives in ExposureBuffer (shader-side)
+    float saturationAdaptive;
+    float tonemapParam0;
+    float tonemapParam1;
+    float tonemapParam2;
+    float tonemapParam3;
+    float tonemapParam4;
+    float tonemapParam5;
+    float tonemapParam6;
+    float tonemapParam7;
 }
 pc;
 
@@ -166,6 +183,15 @@ void main() {
         expData.psychoAdaptContrast = pc.psychoAdaptContrast;
         expData.psychoWhiteCurve = pc.psychoWhiteCurve;
         expData.psychoConeExponent = pc.psychoConeExponent;
+        expData.saturationAdaptive = pc.saturationAdaptive;
+        expData.tonemapParam0 = pc.tonemapParam0;
+        expData.tonemapParam1 = pc.tonemapParam1;
+        expData.tonemapParam2 = pc.tonemapParam2;
+        expData.tonemapParam3 = pc.tonemapParam3;
+        expData.tonemapParam4 = pc.tonemapParam4;
+        expData.tonemapParam5 = pc.tonemapParam5;
+        expData.tonemapParam6 = pc.tonemapParam6;
+        expData.tonemapParam7 = pc.tonemapParam7;
         return;
     }
 
@@ -291,4 +317,13 @@ void main() {
     expData.psychoAdaptContrast = pc.psychoAdaptContrast;
     expData.psychoWhiteCurve = pc.psychoWhiteCurve;
     expData.psychoConeExponent = pc.psychoConeExponent;
+    expData.saturationAdaptive = pc.saturationAdaptive;
+    expData.tonemapParam0 = pc.tonemapParam0;
+    expData.tonemapParam1 = pc.tonemapParam1;
+    expData.tonemapParam2 = pc.tonemapParam2;
+    expData.tonemapParam3 = pc.tonemapParam3;
+    expData.tonemapParam4 = pc.tonemapParam4;
+    expData.tonemapParam5 = pc.tonemapParam5;
+    expData.tonemapParam6 = pc.tonemapParam6;
+    expData.tonemapParam7 = pc.tonemapParam7;
 }

@@ -703,7 +703,7 @@ void PostRenderModule::initPipeline() {
                                  .lineWidth = 1.0f,
                                        })
                                        .beginColorBlendAttachmentState()
-                                       .defineColorBlendAttachmentState(starColorBlendAttachmentState)
+                                       .defineColorBlendAttachmentState(postColorBlendAttachmentState) // alpha blend for particles
                                        .endColorBlendAttachmentState()
                                        .definePipelineLayout(descriptorTables_[0])
                                        .build(device);
@@ -763,7 +763,7 @@ void PostRenderModule::initPipeline() {
                                           .lineWidth = 1.0f,
                                       })
                                       .beginColorBlendAttachmentState()
-                                      .defineColorBlendAttachmentState(postColorBlendAttachmentState)
+                                      .defineColorBlendAttachmentState(starColorBlendAttachmentState) // additive blend for stars
                                       .endColorBlendAttachmentState()
                                        .definePipelineLayout(descriptorTables_[0])
                                        .build(device);

@@ -53,6 +53,11 @@ struct RayTracingPushConstant {
     float sharcRoughnessThreshold; // min roughness for cache query (0=all, 1=diffuse only)
     int sharcUpdateBlockSize;      // sparse update NxN block size (2-8)
     int sharcUpdateBounces;        // max bounces in SHARC update pass (2-8)
+    // Offline accumulation fields (offset 112, 16 bytes)
+    int offlineFlags;              // bit 0: accumulating, bit 1: disable RR, bit 2: disable clamp
+    int accumFrameCount;           // frame index for jitter sequence during accumulation
+    float aperture;                // thin lens aperture radius (0 = pinhole)
+    float focalDistance;           // focal distance in blocks
 };
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {
@@ -222,6 +227,10 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     VkPipeline sharcResolvePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout sharcResolvePipelineLayout_ = VK_NULL_HANDLE;
     std::shared_ptr<vk::Shader> sharcResolveShader_;
+
+    // Offline accumulation compute pipeline (resources stored in Renderer statics)
+    std::shared_ptr<vk::Shader> accumShader_;
+    void initAccumulationPipeline();
 
     // Energy compensation LUT (64x64 RGBA16F)
     // R = GGX E(NdotV, alpha), G = FON E(NdotV, r), B = GGX E_avg(alpha), A = FON E_avg(r)

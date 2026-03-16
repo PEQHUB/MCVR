@@ -61,6 +61,7 @@ layout(push_constant) uniform PushConstant {
 } pc;
 #define SIMPLIFIED_INDIRECT ((pc.flags & 1) != 0)
 #define SIMPLIFY_THIS_RAY (SIMPLIFIED_INDIRECT && shadowRay.bounceIndex > 1)
+#define BEER_LAW_SHADOWS ((pc.flags & 512) != 0)
 
 layout(location = 1) rayPayloadInEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
@@ -182,7 +183,8 @@ void main() {
 
             // Roughness modulates shadow color: smooth glass = clear colored shadow,
             // rough glass = scattered/dimmer (frosty)
-            if (mat.transmission > 0.0) {
+            // Ground truth: no roughness tint hack — Beer's Law handles absorption correctly
+            if (mat.transmission > 0.0 && !BEER_LAW_SHADOWS) {
                 float matRoughness = pack0.a * pack0.a;  // perceptual -> GGX alpha
                 tint = mix(tint, vec3(1.0), clamp(matRoughness * 2.0, 0.0, 1.0));
             }
@@ -191,6 +193,39 @@ void main() {
         hasTransmission = mat.transmission > 0.0;
     }
 
+    if (BEER_LAW_SHADOWS) {
+        // Ground truth: Beer's Law volumetric absorption for transmissive materials
+        if (alpha < 0.05) {
+            ignoreIntersectionEXT;
+        } else if (hasTransmission) {
+            // Use gl_HitKindEXT to determine front/back face (entry/exit)
+            bool frontFace = (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT);
+            if (frontFace) {
+                // Entering transmissive medium — record absorption coefficients
+                // sigma_a = -ln(tint) per block (tint is per-block transmission color)
+                shadowRay.mediumAbsorption = -log(max(tint, vec3(0.001)));
+                shadowRay.mediumEntryT = gl_HitTEXT;
+            } else {
+                // Exiting medium — apply Beer's Law for distance traveled
+                float dist = max(gl_HitTEXT - shadowRay.mediumEntryT, 0.0);
+                if (dist > 0.001) {
+                    shadowRay.throughput *= exp(-shadowRay.mediumAbsorption * dist);
+                }
+                shadowRay.mediumAbsorption = vec3(0.0);
+            }
+            ignoreIntersectionEXT;
+        } else if (alpha < 1.0) {
+            // Semi-transparent (leaves, vines): stochastic alpha test (unbiased)
+            if (rand(shadowRay.seed) > alpha) {
+                ignoreIntersectionEXT;
+            }
+            // else: opaque hit — fall through to terminateRayEXT
+        }
+        // Fully opaque
+        terminateRayEXT;
+    }
+
+    // Online mode: existing approximations
     if (alpha < 0.05) {
         // cut-out
         ignoreIntersectionEXT;

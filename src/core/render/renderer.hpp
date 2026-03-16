@@ -57,6 +57,9 @@ struct Options {
     bool noiseLOD = true;              // Noise quality LOD: reduce octaves with distance, skip gradient far away
     bool multiScatterGGX = true;       // Kulla-Conty multi-scatter GGX energy compensation (flag bit 7)
     bool eonDiffuse = true;            // EON energy-preserving diffuse BRDF, replaces Disney diffuse (flag bit 8)
+
+    // Per-tonemapper configurable parameters (8 generic slots)
+    float tonemapParams[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     uint32_t upscalerPreset = 4; // DLSS: Preset D (default). Generic for future upscalers.
 
     // SDR output transfer function
@@ -154,6 +157,24 @@ struct Options {
     int   pomRefinement   = 4;      // Binary refinement iterations (0–8)
     float pomFadeDistance = 64.0f;  // Distance in blocks to fade POM out (8–256)
 
+    // Offline accumulation mode
+    uint32_t offlineState = 0;       // 0=NORMAL, 1=FREE, 2=ACCUMULATING
+    bool offlineGroundTruth = false; // unbiased path tracing mode (all hacks off)
+    // Individual shader quality toggles
+    bool beerLawShadows = false;
+    bool noEmissionClamp = false;
+    bool physicalSunDisk = true;
+    bool noHandAmbient = false;
+    uint32_t offlineBounces = 16;    // ray bounces during accumulation (1-128)
+    bool offlineDisableRR = false;
+    bool offlineDisableClamp = false;
+    float offlineAperture = 0.0f;    // thin lens aperture (0=pinhole, 0.001-0.1)
+    float offlineFocalDistance = 10.0f; // focal distance in blocks (1-256)
+    bool offlineNativeRes = false;        // force render-res = display-res
+    uint32_t offlineDenoised = 0;         // 0=raw, 1=DLSS+Welford, 2=DLSS temporal
+    uint32_t savedUpscalerMode = 0;       // saved for restore on exit
+    bool offlineNativeResActive = false;  // tracks if resolution was overridden
+
     // Diagnostics
     bool loggingEnabled = false;
 };
@@ -166,6 +187,18 @@ class Renderer : public Singleton<Renderer> {
     static Options options;
     static float preExposure;  // Set by tone mapping, read by RT + DLSS (1-frame delay)
     static bool resetExposureAdaptation;  // Set by JNI on world load, consumed by tone mapping
+    static uint32_t accumFrameCount;
+    static std::shared_ptr<vk::DeviceLocalImage> accumOutputImage;
+
+    // Offline accumulation pipeline (shared between RT and DLSS modules)
+    static VkPipeline accumPipeline;
+    static VkPipelineLayout accumPipelineLayout;
+    static std::shared_ptr<vk::DeviceLocalImage> accumBufferImage;
+    static VkDescriptorPool accumDescPool;
+    static VkDescriptorSetLayout accumDescSetLayout;
+    static std::vector<VkDescriptorSet> accumDescSets;
+    static bool accumPipelineReady;
+
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> emissionImages;  // RT emission, read by tone mapping
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> renderResHdrImages;  // DLSS input (render-res HDR), read by tone mapping histogram
     static GpuProfiler gpuProfiler;
