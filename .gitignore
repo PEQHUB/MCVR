@@ -82,3 +82,6 @@ bin/*
 ###### CLion ######
 .idea
 cmake-build*
+
+###### Project docs (session notes) ######
+docs/
