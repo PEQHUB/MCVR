@@ -66,6 +66,7 @@ class WorldPipeline : public SharedObject<WorldPipeline> {
     void dumpSharedImages(const char *label) const;
 
     std::vector<std::shared_ptr<WorldModule>> worldModules_;
+    std::vector<std::string> moduleNames_;  // Human-readable names for profiler
     std::vector<std::vector<std::shared_ptr<vk::DeviceLocalImage>>> sharedImages_;
 
     std::vector<std::shared_ptr<WorldPipelineContext>> contexts_;

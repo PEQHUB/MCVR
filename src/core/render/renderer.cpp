@@ -11,6 +11,7 @@ float Renderer::preExposure = 0.00002f;  // Init for physical sun ~100k lux (avo
 bool Renderer::resetExposureAdaptation = false;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::emissionImages;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::renderResHdrImages;
+GpuProfiler Renderer::gpuProfiler;
 
 Renderer::Renderer(GLFWwindow *window)
     : framework_(Framework::create(window)),

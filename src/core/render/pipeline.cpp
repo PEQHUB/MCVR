@@ -14,6 +14,8 @@
 #include "core/render/modules/world/temporal_accumulation/temporal_accumulation_module.hpp"
 #include "core/render/modules/world/tone_mapping/tone_mapping_module.hpp"
 
+#include "core/render/gpu_profiler.hpp"
+
 #include <cstdlib>
 #include <iomanip>
 #include <set>
@@ -75,6 +77,7 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
     uint32_t frameNum = framework->swapchain()->imageCount();
 
     worldModules_.resize(blueprint->moduleNames_.size());
+    moduleNames_ = blueprint->moduleNames_;
     sharedImages_.resize(frameNum,
                          std::vector<std::shared_ptr<vk::DeviceLocalImage>>(blueprint->imageFormats_.size(), nullptr));
     contexts_.resize(frameNum);
@@ -253,7 +256,42 @@ void WorldPipelineContext::render() {
         outputImage->imageLayout() = targetLayout;
     }
 
-    for (int i = 0; i < worldModuleContexts.size(); i++) { worldModuleContexts[i]->render(); }
+    // Short human-readable names for Nsight labels + GPU profiler
+    static const std::map<std::string, std::string> moduleShortNames = {
+        {"render_pipeline.module.ray_tracing.name", "RayTracing"},
+        {"render_pipeline.module.nrd.name", "NRD"},
+        {"render_pipeline.module.fsr3_upscaler.name", "FSR3"},
+        {"render_pipeline.module.dlss.name", "DLSS-RR"},
+        {"render_pipeline.module.tone_mapping.name", "ToneMapping"},
+        {"render_pipeline.module.post_render.name", "PostRender"},
+        {"render_pipeline.module.temporal_accumulation.name", "TAA"},
+        {"SVGF", "SVGF"},
+    };
+
+    auto& profiler = Renderer::gpuProfiler;
+    bool profiling = profiler.isEnabled();
+    VkCommandBuffer rawCmd = profiling ? worldCommandBuffer->vkCommandBuffer() : VK_NULL_HANDLE;
+    auto wp = worldPipeline.lock();
+
+    for (int i = 0; i < worldModuleContexts.size(); i++) {
+        // Resolve module name
+        std::string name = "Module_" + std::to_string(i);
+        if (wp && i < wp->moduleNames_.size()) {
+            auto it = moduleShortNames.find(wp->moduleNames_[i]);
+            name = (it != moduleShortNames.end()) ? it->second : wp->moduleNames_[i];
+        }
+
+        // Vulkan debug label (visible in Nsight Systems/Graphics)
+        worldCommandBuffer->beginLabel(name.c_str());
+
+        // Native GPU profiler timestamp
+        if (profiling) profiler.beginModule(rawCmd, name);
+
+        worldModuleContexts[i]->render();
+
+        if (profiling) profiler.endModule(rawCmd);
+        worldCommandBuffer->endLabel();
+    }
 
     worldCommandBuffer->barriersBufferImage(
         {}, {{

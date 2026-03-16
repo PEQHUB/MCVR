@@ -840,7 +840,7 @@ void main() {
 
     if (worldUbo.skyType == 1) {
         float pdf; // not used
-        vec3 lightBRDF = DisneyEval(mat, viewDir, normal, sampledLightDir, pdf);
+        vec3 lightBRDF = DisneyEval(mat, viewDir, normal, sampledLightDir, pdf, pc.flags);
 
         shadowRay.radiance = vec3(0.0);
         shadowRay.throughput = vec3(1.0);
@@ -1077,7 +1077,7 @@ void main() {
                     brdf = NdotL / 3.14159265 * mat.albedo;
                 } else {
                     float pdf;
-                    brdf = DisneyEval(mat, viewDir, normal, currentRes.lightDir, pdf);
+                    brdf = DisneyEval(mat, viewDir, normal, currentRes.lightDir, pdf, pc.flags);
                 }
                 alAccum = currentRes.unshadowed * brdf * currentRes.W * visibility;
             }
@@ -1180,7 +1180,7 @@ void main() {
                     brdf = NdotL / 3.14159265 * mat.albedo;
                 } else {
                     float pdf;
-                    brdf = DisneyEval(mat, viewDir, normal, bestDir[k], pdf);
+                    brdf = DisneyEval(mat, viewDir, normal, bestDir[k], pdf, pc.flags);
                 }
                 alAccum += bestUnshadowed[k] * brdf * visibility;
             }
@@ -1400,7 +1400,7 @@ void main() {
                 brdf = NdotL_b / 3.14159265 * mat.albedo;
             } else {
                 float pdf;
-                brdf = DisneyEval(mat, viewDir, normal, alDir, pdf);
+                brdf = DisneyEval(mat, viewDir, normal, alDir, pdf, pc.flags);
             }
 
             alAccum += unshadowed * brdf;
@@ -1483,7 +1483,7 @@ void main() {
     vec3 sampleDir;
     float pdf;
     uint lobeType;
-    vec3 bsdf = DisneySample(mat, viewDir, normal, sampleDir, pdf, mainRay.seed, lobeType);
+    vec3 bsdf = DisneySample(mat, viewDir, normal, sampleDir, pdf, mainRay.seed, lobeType, pc.flags);
 
     mainRay.lobeType = lobeType;
     mainRay.noisy = 1;

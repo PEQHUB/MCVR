@@ -132,6 +132,9 @@ vk::Instance::Instance() {
 
     // if (ENABLE_DEBUGGING) { push_ext(VK_EXT_DEBUG_REPORT_EXTENSION_NAME); }
 
+    // Debug utils for Nsight profiling labels (vkCmdBeginDebugUtilsLabelEXT)
+    extStorage.insert(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
     // Check for extensions
     uint32_t extensionCount = 0;
     vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);

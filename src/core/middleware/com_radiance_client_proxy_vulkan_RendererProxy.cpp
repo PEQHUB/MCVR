@@ -296,3 +296,39 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
     auto fw = r->framework();
     if (GLFW_SetWindowSize) GLFW_SetWindowSize(fw->window()->window(), width, height);
 }
+
+/**
+ * Returns GPU profiler timings as a flat string: "ModuleName:ms,ModuleName:ms,...,TOTAL:ms"
+ * Empty string if profiler disabled or no data available.
+ */
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetGpuProfile(
+    JNIEnv *env, jclass) {
+    auto& profiler = Renderer::gpuProfiler;
+    if (!profiler.isEnabled()) return env->NewStringUTF("");
+
+    auto timings = profiler.getModuleTimings();
+    if (timings.empty()) return env->NewStringUTF("");
+
+    std::string result;
+    for (auto& t : timings) {
+        if (!result.empty()) result += ",";
+        // Format: name:milliseconds (3 decimal places)
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%s:%.3f", t.name.c_str(), t.ms);
+        result += buf;
+    }
+    // Append total
+    char buf[128];
+    snprintf(buf, sizeof(buf), ",TOTAL:%.3f", profiler.getTotalGpuMs());
+    result += buf;
+
+    return env->NewStringUTF(result.c_str());
+}
+
+/**
+ * Enable/disable GPU profiler at runtime.
+ */
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeSetGpuProfileEnabled(
+    JNIEnv *, jclass, jboolean enabled) {
+    Renderer::gpuProfiler.setEnabled(enabled);
+}

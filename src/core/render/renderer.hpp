@@ -6,6 +6,8 @@
 
 #include <filesystem>
 
+#include "core/render/gpu_profiler.hpp"
+
 class Textures;
 class Framework;
 class Buffers;
@@ -53,6 +55,8 @@ struct Options {
     float saturation = 1.3f;           // Saturation/Vibrance boost (0.0 to 2.0)
     bool saturationAdaptive = false;   // Adaptive saturation: brightness+chroma-dependent (Special K style)
     bool noiseLOD = true;              // Noise quality LOD: reduce octaves with distance, skip gradient far away
+    bool multiScatterGGX = true;       // Kulla-Conty multi-scatter GGX energy compensation (flag bit 7)
+    bool eonDiffuse = true;            // EON energy-preserving diffuse BRDF, replaces Disney diffuse (flag bit 8)
     uint32_t upscalerPreset = 4; // DLSS: Preset D (default). Generic for future upscalers.
 
     // SDR output transfer function
@@ -164,6 +168,7 @@ class Renderer : public Singleton<Renderer> {
     static bool resetExposureAdaptation;  // Set by JNI on world load, consumed by tone mapping
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> emissionImages;  // RT emission, read by tone mapping
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> renderResHdrImages;  // DLSS input (render-res HDR), read by tone mapping histogram
+    static GpuProfiler gpuProfiler;
 
     ~Renderer();
 

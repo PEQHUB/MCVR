@@ -23,7 +23,8 @@ struct RayTracingPushConstant {
     int numRayBounces;
     int flags;           // bit 0: simplified indirect, bit 1: area lights enabled
                          // bit 2: restir, bit 3: simplified BRDF, bit 4: restir bounce
-                         // bit 5: SHARC enabled
+                         // bit 5: SHARC enabled, bit 6: noise LOD
+                         // bit 7: multi-scatter GGX, bit 8: EON diffuse
     int areaLightCount;  // number of active area lights this frame
     float shadowSoftness;
     int risCandidates;   // total RIS candidates per pixel
@@ -221,6 +222,12 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     VkPipeline sharcResolvePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout sharcResolvePipelineLayout_ = VK_NULL_HANDLE;
     std::shared_ptr<vk::Shader> sharcResolveShader_;
+
+    // Energy compensation LUT (64x64 RGBA16F)
+    // R = GGX E(NdotV, alpha), G = FON E(NdotV, r), B = GGX E_avg(alpha), A = FON E_avg(r)
+    std::shared_ptr<vk::DeviceLocalImage> energyLUT_;
+    std::shared_ptr<vk::Sampler> energyLUTSampler_;
+    void initEnergyLUT();
 
     // submodules
     std::shared_ptr<Atmosphere> atmosphere_;

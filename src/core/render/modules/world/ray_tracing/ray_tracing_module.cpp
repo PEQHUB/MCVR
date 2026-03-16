@@ -10,6 +10,9 @@
 #include "core/render/radiance_logger.hpp"
 #include "core/render/renderer.hpp"
 
+#include <cmath>
+#include <cstring>
+
 RayTracingModule::RayTracingModule() {}
 
 void RayTracingModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
@@ -162,6 +165,7 @@ void RayTracingModule::build() {
     contexts_.resize(size);
 
     initDescriptorTables();
+    initEnergyLUT();
     initImages();
     initPipeline();
     initSBT();
@@ -361,6 +365,12 @@ void RayTracingModule::initDescriptorTables() {
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_VERTEX_BIT |
                                   VK_SHADER_STAGE_FRAGMENT_BIT,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 4, // binding 4: energy compensation LUT (multi-scatter GGX + EON diffuse)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
                 })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
@@ -588,6 +598,210 @@ void RayTracingModule::initDescriptorTables() {
     }
 }
 
+// =============================================================================
+// Energy Compensation LUT bake (Kulla-Conty GGX + EON FON)
+// 64x64 RGBA16F: R=GGX_E, G=FON_E, B=GGX_Eavg, A=FON_Eavg
+// Runs once at init. ~2ms on modern CPUs.
+// =============================================================================
+
+namespace {
+
+// CPU versions of GGX utility functions (mirroring shader code)
+struct Vec3 { float x, y, z; };
+
+Vec3 normalize3(Vec3 v) {
+    float len = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+    if (len < 1e-8f) return {0, 0, 1};
+    return {v.x/len, v.y/len, v.z/len};
+}
+
+Vec3 sampleGGXVNDF_CPU(Vec3 V, float ax, float ay, float r1, float r2) {
+    Vec3 Vh = normalize3({ax * V.x, ay * V.y, V.z});
+    float lensq = Vh.x*Vh.x + Vh.y*Vh.y;
+    Vec3 T1 = lensq > 0 ? Vec3{-Vh.y / sqrtf(lensq), Vh.x / sqrtf(lensq), 0}
+                         : Vec3{1, 0, 0};
+    Vec3 T2 = {Vh.y*T1.z - Vh.z*T1.y, Vh.z*T1.x - Vh.x*T1.z, Vh.x*T1.y - Vh.y*T1.x};
+    float r = sqrtf(r1);
+    float phi = 6.28318530718f * r2;
+    float t1 = r * cosf(phi);
+    float t2 = r * sinf(phi);
+    float s = 0.5f * (1.0f + Vh.z);
+    t2 = (1.0f - s) * sqrtf(fmaxf(0.0f, 1.0f - t1*t1)) + s * t2;
+    float nz = sqrtf(fmaxf(0.0f, 1.0f - t1*t1 - t2*t2));
+    Vec3 Nh = {t1*T1.x + t2*T2.x + nz*Vh.x,
+               t1*T1.y + t2*T2.y + nz*Vh.y,
+               t1*T1.z + t2*T2.z + nz*Vh.z};
+    return normalize3({ax * Nh.x, ay * Nh.y, fmaxf(0.0f, Nh.z)});
+}
+
+float smithG1_CPU(float NdotV, float alpha) {
+    float a2 = alpha * alpha;
+    float c = NdotV;
+    return (2.0f * c) / (c + sqrtf(a2 + c*c - a2*c*c));
+}
+
+// Simple xorshift32 RNG
+uint32_t xorshift32(uint32_t &state) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+float randFloat(uint32_t &state) {
+    return (float)(xorshift32(state) & 0xFFFFFF) / (float)0xFFFFFF;
+}
+
+// Integrate GGX directional albedo E(mu, alpha) for F0=1 via VNDF importance sampling
+float bakeGGXDirectionalAlbedo(float NdotV, float alpha, int numSamples) {
+    NdotV = fmaxf(NdotV, 1e-4f);
+    alpha = fmaxf(alpha, 1e-4f);
+    Vec3 V = {sqrtf(1.0f - NdotV*NdotV), 0.0f, NdotV};
+    float sum = 0.0f;
+    uint32_t seed = (uint32_t)(NdotV * 12345.0f + alpha * 67890.0f + 1);
+    for (int i = 0; i < numSamples; i++) {
+        float r1 = randFloat(seed);
+        float r2 = randFloat(seed);
+        Vec3 H = sampleGGXVNDF_CPU(V, alpha, alpha, r1, r2);
+        // Reflect V around H
+        float VdotH = V.x*H.x + V.y*H.y + V.z*H.z;
+        Vec3 L = {2.0f*VdotH*H.x - V.x, 2.0f*VdotH*H.y - V.y, 2.0f*VdotH*H.z - V.z};
+        if (L.z > 0.0f) {
+            // With VNDF sampling + separable Smith, weight = G1(L)
+            sum += smithG1_CPU(L.z, alpha);
+        }
+    }
+    return fminf(fmaxf(sum / (float)numSamples, 0.0f), 1.0f);
+}
+
+// Integrate FON directional albedo E_F(mu, r) via cosine-weighted hemisphere sampling
+float bakeFONDirectionalAlbedo(float mu_o, float r, int numSamples) {
+    mu_o = fmaxf(mu_o, 1e-4f);
+    float sinTheta_o = sqrtf(1.0f - mu_o*mu_o);
+    // FON coefficients
+    float A_F = 1.0f / (1.0f + (0.5f - 2.0f / (3.0f * 3.14159265f)) * r);
+    float B_F = r * A_F;
+    float sum = 0.0f;
+    uint32_t seed = (uint32_t)(mu_o * 54321.0f + r * 98765.0f + 7);
+    for (int i = 0; i < numSamples; i++) {
+        float r1 = randFloat(seed);
+        float r2 = randFloat(seed);
+        // Cosine-weighted hemisphere sample
+        float sqrtR1 = sqrtf(r1);
+        float phi = 6.28318530718f * r2;
+        float Lx = sqrtR1 * cosf(phi);
+        float Ly = sqrtR1 * sinf(phi);
+        float Lz = sqrtf(fmaxf(0.0f, 1.0f - r1));
+        float mu_i = Lz;
+        // s = dot(L, V) - mu_i * mu_o  (V is in the xz plane)
+        float VdotL = Lx * sinTheta_o + Lz * mu_o;
+        float s = VdotL - mu_i * mu_o;
+        float t = (s > 0.0f) ? fmaxf(mu_i, mu_o) : 1.0f;
+        float f_FON = (1.0f / 3.14159265f) * (A_F + B_F * s / t);
+        // Cosine-weighted sampling: weight = f_FON * pi (PDF = cos/pi, integrand = f*cos)
+        sum += f_FON * 3.14159265f;
+    }
+    return fminf(fmaxf(sum / (float)numSamples, 0.0f), 1.0f);
+}
+
+} // anonymous namespace
+
+void RayTracingModule::initEnergyLUT() {
+    auto framework = framework_.lock();
+    if (!framework) return;
+
+    constexpr int LUT_SIZE = 64;
+    constexpr int GGX_SAMPLES = 1024;
+    constexpr int FON_SAMPLES = 512;
+
+    // Bake LUT on CPU
+    // Layout: RGBA16F, R=GGX_E(NdotV,alpha), G=FON_E(NdotV,r), B=GGX_Eavg, A=FON_Eavg
+    // UV: u=NdotV [0,1], v=perceptual roughness r [0,1]; alpha = r*r
+    std::vector<uint16_t> lutData(LUT_SIZE * LUT_SIZE * 4); // RGBA16F = 4 x fp16 per texel
+
+    // First pass: compute E values per texel
+    std::vector<float> ggxE(LUT_SIZE * LUT_SIZE);
+    std::vector<float> fonE(LUT_SIZE * LUT_SIZE);
+
+    for (int y = 0; y < LUT_SIZE; y++) {
+        float r = ((float)y + 0.5f) / (float)LUT_SIZE; // perceptual roughness
+        float alpha = r * r; // GGX alpha
+        for (int x = 0; x < LUT_SIZE; x++) {
+            float NdotV = ((float)x + 0.5f) / (float)LUT_SIZE;
+            int idx = y * LUT_SIZE + x;
+            ggxE[idx] = bakeGGXDirectionalAlbedo(NdotV, alpha, GGX_SAMPLES);
+            fonE[idx] = bakeFONDirectionalAlbedo(NdotV, r, FON_SAMPLES);
+        }
+    }
+
+    // Second pass: compute E_avg per roughness row (cosine-weighted average over NdotV)
+    std::vector<float> ggxEavg(LUT_SIZE);
+    std::vector<float> fonEavg(LUT_SIZE);
+
+    for (int y = 0; y < LUT_SIZE; y++) {
+        float sumGGX = 0.0f, sumFON = 0.0f, sumWeight = 0.0f;
+        for (int x = 0; x < LUT_SIZE; x++) {
+            float NdotV = ((float)x + 0.5f) / (float)LUT_SIZE;
+            float weight = NdotV; // cosine weight (mu * dmu, uniform spacing)
+            int idx = y * LUT_SIZE + x;
+            sumGGX += ggxE[idx] * weight;
+            sumFON += fonE[idx] * weight;
+            sumWeight += weight;
+        }
+        ggxEavg[y] = sumWeight > 0 ? sumGGX / sumWeight : 0.5f;
+        fonEavg[y] = sumWeight > 0 ? sumFON / sumWeight : 0.5f;
+    }
+
+    // Convert to fp16 and pack into RGBA16F
+    auto toFP16 = [](float f) -> uint16_t {
+        // IEEE 754 float32 to float16 conversion
+        uint32_t bits;
+        memcpy(&bits, &f, 4);
+        uint32_t sign = (bits >> 16) & 0x8000;
+        int32_t exponent = ((bits >> 23) & 0xFF) - 127 + 15;
+        uint32_t mantissa = bits & 0x7FFFFF;
+        if (exponent <= 0) return (uint16_t)sign; // underflow to 0
+        if (exponent >= 31) return (uint16_t)(sign | 0x7C00); // overflow to inf
+        return (uint16_t)(sign | (exponent << 10) | (mantissa >> 13));
+    };
+
+    for (int y = 0; y < LUT_SIZE; y++) {
+        for (int x = 0; x < LUT_SIZE; x++) {
+            int idx = y * LUT_SIZE + x;
+            int pixelBase = idx * 4;
+            lutData[pixelBase + 0] = toFP16(ggxE[idx]);      // R: GGX E(NdotV, alpha)
+            lutData[pixelBase + 1] = toFP16(fonE[idx]);       // G: FON E(NdotV, r)
+            lutData[pixelBase + 2] = toFP16(ggxEavg[y]);      // B: GGX E_avg(alpha)
+            lutData[pixelBase + 3] = toFP16(fonEavg[y]);      // A: FON E_avg(r)
+        }
+    }
+
+    // Create GPU image
+    energyLUT_ = vk::DeviceLocalImage::create(
+        framework->device(), framework->vma(), true, // persistStaging
+        LUT_SIZE, LUT_SIZE, 1,
+        VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+
+    energyLUT_->uploadToStagingBuffer(lutData.data());
+
+    // One-shot transfer: staging buffer -> GPU image
+    auto cmdBuf = vk::CommandBuffer::create(framework->device(), framework->mainCommandPool());
+    cmdBuf->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+    cmdBuf->copyToDeviceLocalImage(energyLUT_);
+    cmdBuf->end();
+    cmdBuf->submitMainQueueIndividual(framework->device());
+    vkQueueWaitIdle(framework->device()->mainVkQueue());
+
+    // Create sampler (bilinear, clamp to edge)
+    energyLUTSampler_ = vk::Sampler::create(
+        framework->device(), VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+
+    RadianceLogger::log("RayTracing", "INFO", "Energy compensation LUT baked (%dx%d, GGX=%d FON=%d samples)",
+        LUT_SIZE, LUT_SIZE, GGX_SAMPLES, FON_SAMPLES);
+}
+
 void RayTracingModule::initImages() {
     auto framework = framework_.lock();
     if (!framework) return;
@@ -641,6 +855,11 @@ void RayTracingModule::initImages() {
         if (reservoirImages_[0]) {
             rayTracingDescriptorTables_[i]->bindImage(reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL, 3, 14);
             rayTracingDescriptorTables_[i]->bindImage(reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL, 3, 15);
+        }
+
+        // Energy compensation LUT (set 2, binding 4)
+        if (energyLUT_ && energyLUTSampler_) {
+            rayTracingDescriptorTables_[i]->bindSamplerImageForShader(energyLUTSampler_, energyLUT_, 2, 4);
         }
     }
 
@@ -1069,8 +1288,16 @@ RayTracingModuleContext::RayTracingModuleContext(std::shared_ptr<FrameworkContex
       worldPrepareContext(rayTracingModule->worldPrepare_->contexts_[frameworkContext->frameIndex]) {}
 
 void RayTracingModuleContext::render() {
+    auto ctx0 = frameworkContext.lock();
+    if (ctx0) {
+        ctx0->worldCommandBuffer->beginLabel("RT:Atmosphere", 0.3f, 0.3f, 0.9f);
+    }
     atmosphereContext->render();
+    if (ctx0) ctx0->worldCommandBuffer->endLabel();
+
+    if (ctx0) ctx0->worldCommandBuffer->beginLabel("RT:BLAS/TLAS Build", 0.9f, 0.3f, 0.3f);
     worldPrepareContext->render();
+    if (ctx0) ctx0->worldCommandBuffer->endLabel();
 
     if (worldPrepareContext->tlas == nullptr) {
         std::cout << "tlas is nullptr" << std::endl;
@@ -1148,7 +1375,9 @@ void RayTracingModuleContext::render() {
                        | (Renderer::options.restirSimplifiedBRDF ? 8 : 0)
                        | (Renderer::options.restirBounceEnabled ? 16 : 0)
                        | (Renderer::options.sharcEnabled ? 32 : 0)
-                       | (Renderer::options.noiseLOD ? 64 : 0);
+                       | (Renderer::options.noiseLOD ? 64 : 0)
+                       | (Renderer::options.multiScatterGGX ? 128 : 0)
+                       | (Renderer::options.eonDiffuse ? 256 : 0);
     pushConstant.areaLightCount = worldPrepareContext->areaLightCount;
     pushConstant.shadowSoftness = Renderer::options.shadowSoftness;
     pushConstant.risCandidates = Renderer::options.restirCandidates;
@@ -1376,6 +1605,7 @@ void RayTracingModuleContext::render() {
     // SHARC 3-pass dispatch: update → resolve → main render (with cache query)
     if (Renderer::options.sharcEnabled && module->sharcUpdatePipeline_ && module->sharcResolvePipeline_ != VK_NULL_HANDLE
         && module->sharcHashEntries_) {
+        worldCommandBuffer->beginLabel("RT:SHARC Update", 0.9f, 0.6f, 0.1f);
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
 
         // Zero-fill SHARC buffers on first use
@@ -1420,6 +1650,8 @@ void RayTracingModuleContext::render() {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 1, &updateBarrier, 0, nullptr, 0, nullptr);
 
+        worldCommandBuffer->endLabel(); // end SHARC Update
+        worldCommandBuffer->beginLabel("RT:SHARC Resolve", 0.9f, 0.7f, 0.2f);
         // Pass 2: SHARC Resolve (compute — temporal blend + stale eviction)
         struct SharcResolvePushConstant {
             float cameraPositionPrevX, cameraPositionPrevY, cameraPositionPrevZ;
@@ -1472,6 +1704,7 @@ void RayTracingModuleContext::render() {
         module->sharcPrevCameraY_ = pushConstant.sharcCameraY;
         module->sharcPrevCameraZ_ = pushConstant.sharcCameraZ;
         module->sharcFrameIndex_++;
+        worldCommandBuffer->endLabel(); // end SHARC Resolve
     }
 
     // Re-push RT push constants (may have been invalidated by compute pipeline bind above)
@@ -1482,12 +1715,15 @@ void RayTracingModuleContext::render() {
                        0, sizeof(RayTracingPushConstant), &pushConstant);
 
     // Pass 3: Main Render (existing RT dispatch — now queries SHARC cache on bounces >= 1)
+    worldCommandBuffer->beginLabel("RT:MainTrace", 1.0f, 0.2f, 0.2f);
     worldCommandBuffer->bindDescriptorTable(rayTracingDescriptorTable, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
         ->bindRTPipeline(module->rayTracingPipeline_)
         ->raytracing(sbt, hdrNoisyOutputImage->width(), hdrNoisyOutputImage->height(), 1);
+    worldCommandBuffer->endLabel(); // end MainTrace
 
     // Spatial reuse compute pass (when ReSTIR and spatial reuse are both enabled)
     if (Renderer::options.restirEnabled && Renderer::options.restirSpatialEnabled && module->spatialPipeline_ != VK_NULL_HANDLE) {
+        worldCommandBuffer->beginLabel("RT:ReSTIR Spatial", 0.2f, 0.8f, 0.8f);
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
 
         // Barrier: RT shader writes → compute shader reads
@@ -1554,5 +1790,6 @@ void RayTracingModuleContext::render() {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
             0, 1, &postSpatialBarrier, 0, nullptr, 0, nullptr);
+        worldCommandBuffer->endLabel(); // end ReSTIR Spatial
     }
 }

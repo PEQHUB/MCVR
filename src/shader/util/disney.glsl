@@ -34,12 +34,17 @@
  * https://jcgt.org/published/0007/04/01/paper.pdf [8] [Pixar's Foundation for Materials]
  * https://graphics.pixar.com/library/PxrMaterialsCourse2017/paper.pdf [9] [Mitsuba 3]
  * https://github.com/mitsuba-renderer/mitsuba3
+ * [10] [Kulla & Conty 2017 — Revisiting Physically Based Shading at Imageworks]
+ * https://blog.selfshadow.com/publications/s2017-shading-course/imageworks/s2017_pbs_imageworks_slides_v2.pdf
+ * [11] [EON — Energy-Preserving Rough Diffuse BRDF (Portsmouth, Kutz, Hill 2024)]
+ * https://arxiv.org/html/2410.18026v2
  */
 
 /*
  * Modifications:
  * - Copyright (c) 2026 Radiance
- * - Changes: Applied to LabPBR materials
+ * - Changes: Applied to LabPBR materials, added Kulla-Conty multi-scatter GGX
+ *   compensation [10] and EON energy-preserving diffuse [11] via precomputed LUT.
  *
  * Note: Original license notice and permission notice are retained per MIT License.
  */
@@ -50,6 +55,15 @@
 
 #ifndef DISNEY_GLSL
 #    define DISNEY_GLSL
+
+// BRDF feature flag bits (from push constant flags field)
+#define BRDF_FLAG_MULTISCATTER_GGX 128   // bit 7
+#define BRDF_FLAG_EON_DIFFUSE      256   // bit 8
+
+// Energy compensation LUT (64x64 RGBA16F, baked at init)
+// R = GGX E(NdotV, alpha), G = FON E(NdotV, r), B = GGX E_avg, A = FON E_avg
+// UV: u = NdotV [0,1], v = perceptual roughness r [0,1] (alpha = r*r)
+layout(set = 2, binding = 4) uniform sampler2D energyLUT;
 
 vec3 ToWorld(vec3 X, vec3 Y, vec3 Z, vec3 V) {
     return V.x * X + V.y * Y + V.z * Z;
@@ -162,7 +176,32 @@ vec3 CosineSampleHemisphere(float r1, float r2) {
     return dir;
 }
 
-vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
+// ============================================================================
+// Energy LUT sampling helpers
+// LUT UV: u = NdotV, v = perceptual roughness r (alpha = r*r)
+// ============================================================================
+
+// Sample GGX directional albedo E(mu, alpha) and average E_avg(alpha)
+void sampleGGXEnergy(float NdotV, float alpha, out float E, out float E_avg) {
+    float r = sqrt(max(alpha, 0.0)); // alpha -> perceptual roughness
+    vec4 lut = texture(energyLUT, vec2(NdotV, r));
+    E = lut.r;
+    E_avg = lut.b;
+}
+
+// Sample FON directional albedo E_F(mu, r) and average E_F_avg(r)
+void sampleFONEnergy(float NdotV, float r, out float E, out float E_avg) {
+    vec4 lut = texture(energyLUT, vec2(NdotV, r));
+    E = lut.g;
+    E_avg = lut.a;
+}
+
+// ============================================================================
+// DisneyEval — Main BRDF evaluation
+// brdfFlags: push constant flags (0 = original behavior, no enhancements)
+// ============================================================================
+
+vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFlags) {
     pdf = 0.0;
     vec3 f = vec3(0.0);
 
@@ -214,29 +253,83 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
     float tmpPdf = 0.0;
     float VDotH = abs(dot(localV, localH));
 
+    // Multi-scatter GGX precomputation (shared across specular lobes)
+    bool msGGX = (brdfFlags & BRDF_FLAG_MULTISCATTER_GGX) != 0;
+    float msAlphaEff = sqrt(ax * ay); // effective isotropic alpha for anisotropic
+    float msE_o = 0.0, msE_i = 0.0, msE_avg = 0.0, ms_fms = 0.0;
+    if (msGGX && reflect) {
+        float dummy;
+        sampleGGXEnergy(abs(localV.z), msAlphaEff, msE_o, msE_avg);
+        sampleGGXEnergy(abs(localL.z), msAlphaEff, msE_i, dummy);
+        ms_fms = (1.0 - msE_o) * (1.0 - msE_i) / max(PI * (1.0 - msE_avg), 1e-5);
+    }
+
     // Diffuse (+ sheen, which rides on diffuse sampling)
     if (diffPr > 0.0 && reflect) {
-        float LDotH = dot(localL, localH);
-        float Rr = 2.0 * mat.roughness * LDotH * LDotH;
-        float FL = SchlickWeight(localL.z);
-        float FV = SchlickWeight(localV.z);
-        float Fretro = Rr * (FL + FV + FL * FV * (Rr - 1.0));
-        float Fd = (1.0 - 0.5 * FL) * (1.0 - 0.5 * FV);
+        bool eonEnabled = (brdfFlags & BRDF_FLAG_EON_DIFFUSE) != 0;
 
-        // Fake subsurface
-        float Fss90 = 0.5 * Rr;
-        float Fss = mix(1.0, Fss90, FL) * mix(1.0, Fss90, FV);
-        float denom = localL.z + localV.z;
-        float ss = (denom > 1e-4) ? 1.25 * (Fss * (1.0 / denom - 0.5) + 0.5) : 1.0;
+        if (eonEnabled) {
+            // EON energy-preserving rough diffuse [11]
+            float r = sqrt(max(mat.roughness, 0.0)); // perceptual roughness
 
-        vec3 diffuseColor = INV_PI * mat.albedo * mix(Fd + Fretro, ss, mat.subSurface);
+            // FON base (Fujii Oren-Nayar)
+            float A_F = 1.0 / (1.0 + (0.5 - 2.0 / (3.0 * PI)) * r);
+            float B_F = r * A_F;
 
-        f += diffuseColor * dielectricWeight;
+            float mu_i = abs(localL.z);
+            float mu_o = abs(localV.z);
+            float s = dot(localL, localV) - mu_i * mu_o;
+            float t = (s > 0.0) ? max(mu_i, mu_o) : 1.0;
+            float f_FON_value = INV_PI * (A_F + B_F * s / t);
+
+            // Multi-scatter compensation term (LUT-based)
+            float E_o, E_avg_d_o;
+            sampleFONEnergy(mu_o, r, E_o, E_avg_d_o);
+            float E_i, E_avg_d_i;
+            sampleFONEnergy(mu_i, r, E_i, E_avg_d_i);
+            float E_avg_d = E_avg_d_o; // same for both (same roughness row)
+
+            float rho = Luminance(mat.albedo);
+            float f_ms_d = INV_PI * (rho * rho * E_avg_d)
+                         / max(1.0 - rho * (1.0 - E_avg_d), 1e-5)
+                         * (1.0 - E_o) * (1.0 - E_i)
+                         / max(1.0 - E_avg_d, 1e-5);
+
+            vec3 diffuseColor = mat.albedo * (f_FON_value + f_ms_d);
+
+            // Diffuse-specular energy coupling: attenuate by F0-weighted specular E
+            if (msGGX) {
+                float f0_scalar = Luminance(mat.f0);
+                diffuseColor *= (1.0 - f0_scalar * msE_o) * (1.0 - f0_scalar * msE_i);
+            }
+
+            f += diffuseColor * dielectricWeight;
+        } else {
+            // Original Disney diffuse
+            float LDotH = dot(localL, localH);
+            float Rr = 2.0 * mat.roughness * LDotH * LDotH;
+            float FL = SchlickWeight(localL.z);
+            float FV = SchlickWeight(localV.z);
+            float Fretro = Rr * (FL + FV + FL * FV * (Rr - 1.0));
+            float Fd = (1.0 - 0.5 * FL) * (1.0 - 0.5 * FV);
+
+            // Fake subsurface
+            float Fss90 = 0.5 * Rr;
+            float Fss = mix(1.0, Fss90, FL) * mix(1.0, Fss90, FV);
+            float denom = localL.z + localV.z;
+            float ss = (denom > 1e-4) ? 1.25 * (Fss * (1.0 / denom - 0.5) + 0.5) : 1.0;
+
+            vec3 diffuseColor = INV_PI * mat.albedo * mix(Fd + Fretro, ss, mat.subSurface);
+
+            f += diffuseColor * dielectricWeight;
+        }
+
         pdf += (localL.z * INV_PI) * diffPr; // Cosine weighted PDF
 
         // Sheen lobe (Disney 2015 — retroreflective fabric sheen)
         if (mat.sheenWeight > 0.0) {
-            float FH = SchlickWeight(abs(LDotH));
+            float LDotH_sheen = dot(localL, localH);
+            float FH = SchlickWeight(abs(LDotH_sheen));
             float lum = Luminance(mat.albedo);
             vec3 Ctint = lum > 0.0 ? mat.albedo / lum : vec3(1.0);
             vec3 Csheen = mix(vec3(1.0), Ctint, mat.sheenTint);
@@ -255,6 +348,15 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
         tmpPdf = G1 * D / (4.0 * localV.z);
         vec3 specColor = vec3(F) * D * G2 / (4.0 * localL.z * localV.z);
 
+        // Kulla-Conty multi-scatter compensation for dielectrics
+        if (msGGX) {
+            // F_avg uses F0 (normal-incidence), NOT the angle-dependent F(theta)
+            float f0_dielectric = pow((1.0 - mat.ior) / (1.0 + mat.ior), 2.0);
+            float F_avg_d = (20.0 / 21.0) * f0_dielectric + (1.0 / 21.0);
+            float F_ms_d = (F_avg_d * msE_avg) / max(1.0 - F_avg_d * (1.0 - msE_avg), 1e-5);
+            specColor += vec3(F_ms_d * ms_fms);
+        }
+
         f += specColor * dielectricWeight;
         pdf += tmpPdf * dielectricPr;
     }
@@ -270,6 +372,13 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
         tmpPdf = G1 * D / (4.0 * localV.z);
         vec3 specColor = FMetal * D * G2 / (4.0 * localL.z * localV.z);
 
+        // Kulla-Conty multi-scatter compensation for conductors (colored F_ms)
+        if (msGGX) {
+            vec3 F_avg = (20.0 / 21.0) * mat.f0 + vec3(1.0 / 21.0);
+            vec3 F_ms = (F_avg * msE_avg) / max(vec3(1.0) - F_avg * (1.0 - msE_avg), vec3(1e-5));
+            specColor += F_ms * ms_fms;
+        }
+
         f += specColor * metalWeight;
         pdf += tmpPdf * metalPr;
     }
@@ -283,7 +392,17 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
 
         if (reflect) {
             tmpPdf = G1 * D / (4.0 * localV.z);
-            f += vec3(F) * D * G2 / (4.0 * localL.z * localV.z) * glassWeight;
+            vec3 glassSpec = vec3(F) * D * G2 / (4.0 * localL.z * localV.z);
+
+            // Multi-scatter compensation on glass reflection side (uses F0, not F(theta))
+            if (msGGX) {
+                float f0_glass = pow((1.0 - mat.ior) / (1.0 + mat.ior), 2.0);
+                float F_avg_g = (20.0 / 21.0) * f0_glass + (1.0 / 21.0);
+                float F_ms_g = (F_avg_g * msE_avg) / max(1.0 - F_avg_g * (1.0 - msE_avg), 1e-5);
+                glassSpec += vec3(F_ms_g * ms_fms);
+            }
+
+            f += glassSpec * glassWeight;
             pdf += tmpPdf * glassPr * F;
         } else {
             float denom = dot(localL, localH) + dot(localV, localH) * eta;
@@ -300,7 +419,7 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
         }
     }
 
-    // Coat lobe (GGX clearcoat, fixed IOR 1.5 → F0 = 0.04, isotropic)
+    // Coat lobe (GGX clearcoat, fixed IOR 1.5 -> F0 = 0.04, isotropic)
     if (coatPr > 0.0 && reflect) {
         float ca = max(mat.coatRoughness * mat.coatRoughness, 1e-4);
         float D = GTR2Aniso(localH.z, localH.x, localH.y, ca, ca);
@@ -309,7 +428,21 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
         float FH = SchlickWeight(VDotH);
         float F = mix(0.04, 1.0, FH);
 
-        f += vec3(mat.coatWeight * F * D * G2 / (4.0 * abs(localL.z) * abs(localV.z)));
+        vec3 coatSpec = vec3(mat.coatWeight * F * D * G2 / (4.0 * abs(localL.z) * abs(localV.z)));
+
+        // Multi-scatter compensation for coat (achromatic, F0=0.04)
+        if (msGGX) {
+            float coatE_o, coatE_avg;
+            sampleGGXEnergy(abs(localV.z), ca, coatE_o, coatE_avg);
+            float coatE_i, dummy;
+            sampleGGXEnergy(abs(localL.z), ca, coatE_i, dummy);
+            float coatF_avg = (20.0 / 21.0) * 0.04 + (1.0 / 21.0);
+            float coatF_ms = (coatF_avg * coatE_avg) / max(1.0 - coatF_avg * (1.0 - coatE_avg), 1e-5);
+            float coat_fms = (1.0 - coatE_o) * (1.0 - coatE_i) / max(PI * (1.0 - coatE_avg), 1e-5);
+            coatSpec += vec3(mat.coatWeight * coatF_ms * coat_fms);
+        }
+
+        f += coatSpec;
         tmpPdf = G1 * D / (4.0 * localV.z);
         pdf += tmpPdf * coatPr;
     }
@@ -317,7 +450,12 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
     return f * abs(localL.z); // Cosine term applied
 }
 
-vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed, out uint lobeType) {
+// Backward-compatible overload (no flags = original Disney behavior)
+vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
+    return DisneyEval(mat, V, N, L, pdf, 0);
+}
+
+vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed, out uint lobeType, int brdfFlags) {
     pdf = 0.0;
     vec3 T, B;
     Onb(N, T, B);
@@ -393,7 +531,12 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
     L = ToWorld(T, B, N, localL);
     V = ToWorld(T, B, N, localV);
 
-    return DisneyEval(mat, V, N, L, pdf);
+    return DisneyEval(mat, V, N, L, pdf, brdfFlags);
+}
+
+// Backward-compatible overload (no flags = original Disney behavior)
+vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed, out uint lobeType) {
+    return DisneySample(mat, V, N, L, pdf, seed, lobeType, 0);
 }
 
 #endif

@@ -494,6 +494,13 @@ void WorldPrepareContext::render() {
         return;
     }
 
+    // Log TLAS instance count for profiling (every 120 frames ~ 1/sec at 120fps)
+    static uint32_t tlasLogCounter = 0;
+    if (++tlasLogCounter >= 120) {
+        std::cout << "[Profiler] TLAS instances: " << instanceBuilder.instances.size() << std::endl;
+        tlasLogCounter = 0;
+    }
+
     tlas = instanceBuilder.endInstanceBuilder(device, vma)
                ->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
                ->querySizeInfo(device)

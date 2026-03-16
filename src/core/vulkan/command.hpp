@@ -115,6 +115,21 @@ class CommandBuffer : public SharedObject<CommandBuffer> {
     raytracing(std::shared_ptr<SBT> sbt, uint32_t width, uint32_t height, uint32_t depth);
     std::shared_ptr<CommandBuffer> end();
 
+    // Debug label helpers for Nsight profiling
+    void beginLabel(const char* name, float r = 0.2f, float g = 0.8f, float b = 0.2f) {
+        if (vkCmdBeginDebugUtilsLabelEXT) {
+            VkDebugUtilsLabelEXT label{VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};
+            label.pLabelName = name;
+            label.color[0] = r; label.color[1] = g; label.color[2] = b; label.color[3] = 1.0f;
+            vkCmdBeginDebugUtilsLabelEXT(commandBuffer_, &label);
+        }
+    }
+    void endLabel() {
+        if (vkCmdEndDebugUtilsLabelEXT) {
+            vkCmdEndDebugUtilsLabelEXT(commandBuffer_);
+        }
+    }
+
     void submitMainQueueIndividual(std::shared_ptr<Device> device);
     void submitMainQueueIndividual(std::shared_ptr<Device> device, std::shared_ptr<Fence> fence);
     void submitMainQueue(std::shared_ptr<Device> device, SubmitInfo submitInfo);

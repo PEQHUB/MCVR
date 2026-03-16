@@ -247,6 +247,9 @@ void Framework::init(GLFWwindow *window) {
     for (int i = 0; i < imageCount; i++) { contexts_.push_back(FrameworkContext::create(shared_from_this(), i)); }
 
     pipeline_ = Pipeline::create(shared_from_this());
+
+    // Initialize GPU profiler
+    Renderer::gpuProfiler.init(device_, physicalDevice_, 16, imageCount);
 }
 
 Framework::~Framework() {
@@ -302,6 +305,9 @@ void Framework::acquireContext() {
     currentContextIndex_ = imageIndex;
     currentContext_ = contexts_[imageIndex];
     indexHistory_.push(imageIndex);
+
+    // Read GPU profiler results from this frame's previous submission
+    Renderer::gpuProfiler.readResults(imageIndex);
     if (indexHistory_.size() > swapchain_->imageCount()) indexHistory_.pop();
 
     if (currentContext_->imageAcquiredSemaphore != VK_NULL_HANDLE) {
@@ -368,8 +374,13 @@ void Framework::submitCommand() {
     Renderer::instance().buffers()->buildAndUploadOverlayUniformBuffer();
 
     auto pipelineContext = pipeline_->acquirePipelineContext(currentContext_);
-    if (Renderer::instance().world()->shouldRender() && pipelineContext->worldPipelineContext)
+    if (Renderer::instance().world()->shouldRender() && pipelineContext->worldPipelineContext) {
+        Renderer::gpuProfiler.beginFrame(
+            currentContext_->worldCommandBuffer->vkCommandBuffer(), currentContextIndex_);
         pipelineContext->worldPipelineContext->render();
+        Renderer::gpuProfiler.endFrame(
+            currentContext_->worldCommandBuffer->vkCommandBuffer());
+    }
     pipelineContext->uiModuleContext->end();
 
     currentContext_->fuseFinal();

@@ -280,6 +280,16 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.noiseLOD = enabled;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMultiScatterGGX(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.multiScatterGGX = enabled;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetEonDiffuse(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.eonDiffuse = enabled;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetColorExpansion(
     JNIEnv *, jclass, jfloat colorExpansion, jboolean write) {
     Renderer::options.colorExpansion = colorExpansion;
