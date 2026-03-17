@@ -1469,12 +1469,14 @@ void RayTracingModuleContext::render() {
     pushConstant.risCandidates = Renderer::options.restirCandidates;
     pushConstant.temporalMClamp = Renderer::options.restirTemporalMClamp;
     pushConstant.wClamp = Renderer::options.restirWClamp;
-    // Only apply pre-exposure when DLSS-RR is active (it undoes it via InExposureScale).
-    // When DLSS-RR is off, tone mapper would see double exposure (preExposure × autoExposure).
-    // DIAGNOSTIC: Force preExposure=1.0 to test if DLSS-RR works without pre-exposure scaling.
-    // TODO: Remove this diagnostic line once root cause is found.
-    pushConstant.preExposure = 1.0f;
-    // pushConstant.preExposure = (Renderer::options.denoiserMode == 1) ? Renderer::preExposure : 1.0f;
+    // Fixed pre-exposure compresses HDR radiance into fp16-friendly range for DLSS-RR.
+    // Must be CONSTANT across frames — varying pre-exposure contaminates DLSS-RR's temporal
+    // history (accumulated at different scales) and causes visible brightness oscillation.
+    // 0.1 maps Minecraft's typical luminance range into fp16's sweet spot:
+    //   Sun/lava (1000) → 100, torch (500) → 50, dark cave (0.01) → 0.001
+    // DLSS-RR undoes it via InExposureScale = 1/0.1 = 10.
+    // Only apply when DLSS-RR is active (denoiserMode == 1).
+    pushConstant.preExposure = (Renderer::options.denoiserMode == 1) ? 0.1f : 1.0f;
 
     // POM
     pushConstant.pomHeightScale  = Renderer::options.pomEnabled ? Renderer::options.pomHeightScale : 0.0f;
@@ -1525,7 +1527,11 @@ void RayTracingModuleContext::render() {
                               | (Renderer::options.offlineNativeResActive ? 8 : 0)
                               | (Renderer::options.offlineDenoised > 0 ? 16 : 0);
     pushConstant.accumFrameCount = static_cast<int>(Renderer::accumFrameCount);
-    pushConstant.aperture = accumulating ? Renderer::options.offlineAperture : 0.0f;
+    // DOF: active in both FREE (preview) and ACCUMULATING modes
+    bool dofEnabled = (accumulating || Renderer::options.offlineState == 1)
+                      && Renderer::options.offlineAperture > 0.0f;
+    float effectiveAperture = Renderer::options.offlineAperture * Renderer::options.dofStrength;
+    pushConstant.aperture = dofEnabled ? effectiveAperture : 0.0f;
     pushConstant.focalDistance = Renderer::options.offlineFocalDistance;
 
     // Force pre-exposure to 1.0 during accumulation (exposure locked)

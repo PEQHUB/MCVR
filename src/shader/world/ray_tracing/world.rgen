@@ -175,6 +175,7 @@ pc;
 #define OFFLINE_DISABLE_CLAMP ((pc.offlineFlags & 4) != 0)
 
 layout(location = 0) rayPayloadEXT PrimaryRay mainRay;
+layout(location = 1) rayPayloadEXT ShadowRay reflectionProbe;
 
 #define NUM_PSR_PER_RAY 2
 
@@ -221,8 +222,8 @@ void main() {
     vec3 direction = normalize(vec3(worldUBO.cameraEffectedViewMatInv * vec4(viewNear.xyz, 0.0)));
     const vec3 orgDirection = direction;
 
-    // Thin lens DOF (offline accumulation only)
-    if (OFFLINE_ACCUMULATING && pc.aperture > 0.0) {
+    // Thin lens DOF (active when aperture > 0: both FREE preview and ACCUMULATING)
+    if (pc.aperture > 0.0) {
         uint dofSeed = uint(pixel.x * 1973 + pixel.y * 9277 + pc.accumFrameCount * 26699) | 1u;
         float r1 = rand(dofSeed);
         float r2 = rand(dofSeed);
@@ -260,6 +261,9 @@ void main() {
     float specularHitDist = 0.0;
     // DLSS-RR guide: world-space 3D velocity (computed inside MV block)
     vec3 velocity3D = vec3(0.0);
+    // Dense reflection probe: deterministic mirror-reflection hit distance for reflection MVs
+    float reflectionProbeHitT = INF_DISTANCE;
+    vec3 reflectionProbeVirtualDir = vec3(0.0);
 
     mainRay.seed = worldUBO.seed;
     for (int isHand = 0; isHand <= 1; isHand++) {
@@ -673,6 +677,40 @@ void main() {
             }
         }
 
+        // Dense reflection probe: trace a lightweight ray in the deterministic mirror
+        // reflection direction to find the reflected geometry's distance. This gives
+        // DLSS-RR dense, stable reflection MVs for glossy/metallic pixels (roughness <= 0.24).
+        // Uses the shadow hit group (SBT offset 0) which just writes gl_HitTEXT — no
+        // shading, no BSDF. OpaqueEXT skips any-hit for minimal traversal cost.
+        if (isFirstHitNoisy && !hitSky && firstHitMat.roughness <= 0.24) {
+            // Real-space incoming direction at PSR-resolved surface
+            vec3 incomingDir = (psrMirror * vec4(orgDirection, 0.0)).xyz;
+            // Real-space reflection direction for the probe trace
+            vec3 realReflDir = reflect(incomingDir, mainRay.normal);
+            // Virtual-space reflection direction for MV computation
+            vec3 virtualNormal = (psrMirror * vec4(mainRay.normal, 0.0)).xyz;
+            reflectionProbeVirtualDir = reflect(orgDirection, virtualNormal);
+
+            // Initialize probe payload (throughput=0 so shadow miss shader is a no-op)
+            reflectionProbe.throughput = vec3(0.0);
+            reflectionProbe.hitT = INF_DISTANCE;
+
+            traceRayEXT(topLevelAS,
+                gl_RayFlagsOpaqueEXT,       // skip any-hit, treat all geometry as opaque
+                WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK,
+                0,                          // sbtRecordOffset (shadow hit group)
+                0,                          // sbtRecordStride
+                2,                          // missIndex (shadow miss)
+                mainRay.origin,             // origin (PSR-resolved surface, already offset by CHS)
+                0.001,                      // tMin
+                realReflDir,                // direction (deterministic mirror reflection)
+                128.0,                      // tMax (128 blocks)
+                1                           // payload location 1 (ShadowRay)
+            );
+
+            reflectionProbeHitT = reflectionProbe.hitT;
+        }
+
         //====================================================================================================================
         // STEP 2 - Get the indirect contribution at non-mirror hit position
         //====================================================================================================================
@@ -888,20 +926,22 @@ void main() {
     imageStore(specularHitDepthImage, ivec2(pixel), vec4(specHitDepth, vec3(1.0)));
     imageStore(diffuseRayDirHitDistImage, ivec2(pixel), vec4(diffuseRayDir, diffuseHitDist));
     imageStore(specularRayDirHitDistImage, ivec2(pixel), vec4(specularRayDir, specularHitDist));
-    // Reflection motion vectors: MV of the object seen through the specular lobe.
-    // Only for true mirrors (roughness < 0.001, matching PSR threshold). At this
-    // roughness the specular ray direction is nearly deterministic — the MV is stable.
-    // Above 0.001, the BSDF sample direction is stochastic and varies per frame;
-    // encoding it as motion causes DLSS-RR temporal rejection (boiling).
+    // Reflection motion vectors: dense field for DLSS-RR temporal reprojection of
+    // specular content. Only for glossy/metallic surfaces (roughness <= 0.24) where the
+    // reflection probe traced above found geometry. Rough surfaces (> 0.24) get zero —
+    // DLSS-RR ignores reflection MVs for high roughness via the normalRoughness guide.
     {
         vec2 rv = vec2(0.0);
-        if (!isFirstHitDiffuse && isFirstHitNoisy && firstHitMat.roughness < 0.001
-            && specularHitDist > 0.0 && specularHitDist < 10000.0) {
-            vec3 primaryHitPos = eyePos + orgDirection * psrHitDepth;
+        if (isFirstHitNoisy && reflectionProbeHitT < INF_DISTANCE
+            && reflectionProbeHitT > 0.0) {
+            // Virtual mirror image position: reflected content appears along the original
+            // view ray at depth = surface depth + reflection depth. This is always in front
+            // of the camera (positive depth), unlike the real-world reflected position which
+            // can be behind the camera and produces garbage when projected to screen space.
+            vec3 virtualReflPos = eyePos + orgDirection * (psrHitDepth + reflectionProbeHitT);
             vec3 cd = vec3(worldUBO.cameraPos.xyz - lastWorldUBO.cameraPos.xyz);
             mat4 prevMVP = lastWorldUBO.cameraProjMat * lastWorldUBO.cameraEffectedViewMat;
-            vec3 reflectedPos = primaryHitPos + specularRayDir * specularHitDist;
-            rv = computeCameraMotionVector(prevMVP, pixelCenter, vec4(reflectedPos + cd, 1.0));
+            rv = computeCameraMotionVector(prevMVP, pixelCenter, vec4(virtualReflPos + cd, 1.0));
         }
         imageStore(reflectionMvImage, ivec2(pixel), vec4(rv, 0.0, 0.0));
     }

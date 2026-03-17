@@ -92,15 +92,15 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
     uint32_t inputWidth_, inputHeight_;
     uint32_t outputWidth_, outputHeight_;
 
-    // Output Scale 2x: DLSS targets 2x, Lanczos downscales to 1x output
+    // Output Scale 2x: DLSS targets 2x, FSR1 EASU downscales to 1x output
     uint32_t dlssOutputWidth_ = 0;
     uint32_t dlssOutputHeight_ = 0;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> upscaled2xImages_;
-    std::shared_ptr<vk::Shader> lanczosShader_;
-    std::shared_ptr<vk::Sampler> lanczosSampler_;
-    std::vector<std::shared_ptr<vk::DescriptorTable>> lanczosDescriptorTables_;
-    std::shared_ptr<vk::ComputePipeline> lanczosPipeline_;
-    void initLanczosResources();
+    std::shared_ptr<vk::Shader> easuShader_;
+    std::shared_ptr<vk::Sampler> easuSampler_;
+    std::vector<std::shared_ptr<vk::DescriptorTable>> easuDescriptorTables_;
+    std::shared_ptr<vk::ComputePipeline> easuPipeline_;
+    void initEasuResources();
 };
 
 struct DLSSModuleContext : public WorldModuleContext, SharedObject<DLSSModuleContext> {
@@ -133,7 +133,7 @@ struct DLSSModuleContext : public WorldModuleContext, SharedObject<DLSSModuleCon
 
     // output
     std::shared_ptr<vk::DeviceLocalImage> processedImage;          // DLSS writes here (2x when outputScale2x, else 1x)
-    std::shared_ptr<vk::DeviceLocalImage> finalOutputImage;        // Lanczos writes here (shared 1x, only when outputScale2x)
+    std::shared_ptr<vk::DeviceLocalImage> finalOutputImage;        // EASU writes here (shared 1x, only when outputScale2x)
     std::shared_ptr<vk::DeviceLocalImage> upscaledFirstHitDepthImage;
 
     // Per-context frame timer for InFrameTimeDeltaInMsec

@@ -174,9 +174,9 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.manualExposure = std::max(0.0001f, exposure);
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCasEnabled(
-    JNIEnv *, jclass, jboolean enabled, jboolean write) {
-    Renderer::options.casEnabled = enabled;
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharpenerMode(
+    JNIEnv *, jclass, jint mode, jboolean write) {
+    Renderer::options.sharpenerMode = static_cast<uint32_t>(std::clamp(static_cast<int>(mode), 0, 2));
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCasSharpness(
@@ -675,12 +675,17 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineAperture(
     JNIEnv *, jclass, jfloat aperture, jboolean) {
-    Renderer::options.offlineAperture = std::clamp(aperture, 0.0f, 0.1f);
+    Renderer::options.offlineAperture = std::clamp(aperture, 0.0f, 2.0f);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineFocalDistance(
     JNIEnv *, jclass, jfloat dist, jboolean) {
-    Renderer::options.offlineFocalDistance = std::clamp(dist, 1.0f, 256.0f);
+    Renderer::options.offlineFocalDistance = std::clamp(dist, 0.5f, 256.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDofStrength(
+    JNIEnv *, jclass, jfloat strength, jboolean) {
+    Renderer::options.dofStrength = std::clamp(strength, 1.0f, 20.0f);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineNativeRes(

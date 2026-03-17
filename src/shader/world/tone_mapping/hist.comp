@@ -40,6 +40,28 @@ layout(push_constant) uniform PushB {
     float sdrTransferFunction;
     float manualExposureEnabled;
     float manualExposure;
+    // PsychoV (layout parity with exposure.comp)
+    float psychoEnabled;
+    float psychoHighlights;
+    float psychoShadows;
+    float psychoContrast;
+    float psychoPurity;
+    float psychoBleaching;
+    float psychoClipPoint;
+    float psychoHueRestore;
+    float psychoAdaptContrast;
+    float psychoWhiteCurve;
+    float psychoConeExponent;
+    float saturationAdaptive;
+    float tonemapParam0;
+    float tonemapParam1;
+    float tonemapParam2;
+    float tonemapParam3;
+    float tonemapParam4;
+    float tonemapParam5;
+    float tonemapParam6;
+    float tonemapParam7;
+    float preExposure;  // RT pre-exposure — undo before binning for correct metering
 }
 pc;
 
@@ -68,7 +90,10 @@ void main() {
     if (inside) {
         vec3 hdr = texelFetch(uHdrRenderRes, p, 0).rgb;
 
-        float lum = dot(hdr, LUMA);
+        // Undo RT pre-exposure for correct luminance metering.
+        // When DLSS-RR is active, RT output is scaled by 0.1 — without this,
+        // the histogram sees 10x lower luminance and auto-exposure over-corrects.
+        float lum = dot(hdr, LUMA) / max(pc.preExposure, 1e-6);
         float logLum = log2(max(lum, pc.epsilon));
 
         float denom = (pc.log2Max - pc.log2Min);

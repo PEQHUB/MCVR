@@ -223,9 +223,12 @@ EmissionResult evaluateEmission(
     // Extract emissive type from lower 8 bits of packed field
     uint emBlockType = packedBlockType & 0xFFu;
     vec3 emissionTint = tint; // default: texture albedo (BT.2020)
+    bool uniformGlow = false; // non-thermal blocks glow uniformly (skip texture mask)
     if (emBlockType < 50u && albedoEmission > 0.0) {
         vec4 emData = worldUbo.emissionData[emBlockType];
-        albedoEmission *= emData.a; // scalar multiplier
+        // Sign convention: negative multiplier = uniform glow (portals, glowstone, etc.)
+        uniformGlow = (emData.a < 0.0);
+        albedoEmission *= abs(emData.a); // scalar multiplier (sign stripped)
         if (dot(emData.rgb, emData.rgb) > 0.0001) {
             // Flame mask: only bright texture pixels (actual flame) get the spectral color.
             // Dark pixels (wood stick, stone base) keep their texture albedo.
@@ -248,10 +251,13 @@ EmissionResult evaluateEmission(
     float combinedEmission = (albedoEmission != 0.0) ? albedoEmission : (labpbrEmission * EMISSION_REFERENCE_NITS);
     float sceneEmission = combinedEmission / EMISSION_REFERENCE_NITS;
 
-    // Texture-based emission mask: only bright texels (flame head) emit.
-    // Dark texels (wood stick, stone base) get zero emission.
-    float maskLum = dot(tint, vec3(0.2627, 0.6780, 0.0593));
-    sceneEmission *= smoothstep(0.10, 0.40, maskLum);
+    // Texture-based emission mask: only bright texels (flame head) emit strongly.
+    // Dark texels (wood stick, stone base) get reduced emission.
+    // Skip for uniform-glow blocks (portals, glowstone) that emit from all texels.
+    if (!uniformGlow) {
+        float maskLum = dot(tint, vec3(0.2627, 0.6780, 0.0593));
+        sceneEmission *= max(smoothstep(0.10, 0.40, maskLum), 0.05);
+    }
 
     float factor;
     if (bounceIndex == 0u) {

@@ -26,7 +26,7 @@ struct Options {
     bool ommEnabled = false; // Opacity Micro Maps (disabled by default until Phase 1 validated)
     uint32_t ommBakerLevel = 4; // OMM baker max subdivision level (1-8)
     bool simplifiedIndirect = false; // Skip detail textures on indirect bounces + simplify shadow AHS
-    bool outputScale2x = false;     // Render world at 2x display resolution, Lanczos 3 downscale
+    bool outputScale2x = false;     // Render world at 2x display resolution, FSR1 EASU downscale
     bool reflexEnabled = false;     // NVIDIA Reflex low-latency mode (VK_NV_low_latency2)
     bool reflexBoost = false;       // Reflex Boost — raise GPU clocks during latency-sensitive work
     bool vrrMode = false;           // VRR frame cap: 3600*Hz/(Hz+3600) via Reflex frameLimitUs
@@ -40,8 +40,8 @@ struct Options {
     float exposureCompensation = 0.0f; // EV offset (-3 to +3)
     bool manualExposureEnabled = false;  // Auto-exposure on by default (required for physical luminance range)
     float manualExposure = 2.54e-5f;  // EV100=15 (sunny day): 1/(1.2 * 2^15)
-    bool casEnabled = false;
-    float casSharpness = 0.5f;
+    uint32_t sharpenerMode = 0;  // 0=None, 1=CAS, 2=RCAS
+    float casSharpness = 0.5f;   // Sharpness for both CAS and RCAS (0.0-1.0)
     float middleGrey = 0.18f;          // Middle grey point (0.01 to 0.50)
     float Lwhite = 4.0f;               // White point for Reinhard Extended
     bool legacyExposure = false;       // Use legacy exposure algorithm (keeps legacy failure modes)
@@ -168,7 +168,8 @@ struct Options {
     uint32_t offlineBounces = 16;    // ray bounces during accumulation (1-128)
     bool offlineDisableRR = false;
     bool offlineDisableClamp = false;
-    float offlineAperture = 0.0f;    // thin lens aperture (0=pinhole, 0.001-0.1)
+    float offlineAperture = 0.0f;    // thin lens aperture (0=pinhole, 0.001-2.0)
+    float dofStrength = 1.0f;        // artistic DOF multiplier (1.0=physical, up to 20.0 for cinematic)
     float offlineFocalDistance = 10.0f; // focal distance in blocks (1-256)
     bool offlineNativeRes = false;        // force render-res = display-res
     uint32_t offlineDenoised = 0;         // 0=raw, 1=DLSS+Welford, 2=DLSS temporal

@@ -757,9 +757,11 @@ void main() {
     uint emBlockType = packedBlockType & 0xFFu;
     mainRay.emBlockTypeOut = emBlockType;
     vec3 emissionTint = tint; // default: texture albedo (BT.2020)
+    bool uniformGlow = false;
     if (emBlockType < 50u && albedoEmission > 0.0) {
         vec4 emData = worldUbo.emissionData[emBlockType];
-        albedoEmission *= emData.a; // scalar multiplier
+        uniformGlow = (emData.a < 0.0); // negative multiplier = uniform glow flag
+        albedoEmission *= abs(emData.a); // strip sign, apply magnitude
         if (dot(emData.rgb, emData.rgb) > 0.0001) {
             // Flame mask: only bright texture pixels (actual flame) get the spectral color.
             // Dark pixels (wood stick, stone base) keep their texture albedo.
@@ -813,8 +815,11 @@ void main() {
 
     // Texture-based emission mask: only bright texels (flame head) emit.
     // Dark texels (wood stick, stone base) get zero emission.
-    float maskLum = dot(tint, vec3(0.2627, 0.6780, 0.0593));
-    sceneEmission *= smoothstep(0.10, 0.40, maskLum);
+    // Uniform glow blocks skip this mask (emit from all texels equally).
+    if (!uniformGlow) {
+        float maskLum = dot(tint, vec3(0.2627, 0.6780, 0.0593));
+        sceneEmission *= max(smoothstep(0.10, 0.40, maskLum), 0.05);
+    }
 
     float factor;
     if (mainRay.index == 0) {

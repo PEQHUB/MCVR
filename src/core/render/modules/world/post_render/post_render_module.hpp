@@ -86,10 +86,12 @@ class PostRenderModule : public WorldModule, public SharedObject<PostRenderModul
     std::shared_ptr<vk::Shader> worldPostVertShader_;
     std::shared_ptr<vk::Shader> worldPostFragShader_;
     std::shared_ptr<vk::Shader> casShader_;
+    std::shared_ptr<vk::Shader> rcasShader_;
     std::shared_ptr<vk::RenderPass> worldPostRenderPass_;
     std::vector<std::shared_ptr<vk::Framebuffer>> worldPostFramebuffers_;
     std::shared_ptr<vk::GraphicsPipeline> worldPostPipeline_;
     std::shared_ptr<vk::ComputePipeline> casPipeline_;
+    std::shared_ptr<vk::ComputePipeline> rcasPipeline_;
 
     // world star field
     std::shared_ptr<vk::DeviceLocalBuffer> starFieldVertexBuffer;

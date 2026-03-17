@@ -105,6 +105,7 @@ struct ToneMappingModulePushConstant {
     float tonemapParam5;
     float tonemapParam6;
     float tonemapParam7;
+    float preExposure;  // RT pre-exposure value — histogram must undo this for correct metering
 };
 
 class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingModule> {

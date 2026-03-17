@@ -235,7 +235,7 @@ void DLSSModule::build() {
     if (!framework || !worldPipeline) return;
     uint32_t size = framework->swapchain()->imageCount();
 
-    // Output Scale 2x: DLSS targets 2x, Lanczos downscales to 1x
+    // Output Scale 2x: DLSS targets 2x, EASU downscales to 1x
     dlssOutputWidth_ = Renderer::options.outputScale2x ? outputWidth_ * 2 : outputWidth_;
     dlssOutputHeight_ = Renderer::options.outputScale2x ? outputHeight_ * 2 : outputHeight_;
 
@@ -247,7 +247,7 @@ void DLSSModule::build() {
     ngxContext_->initDlssRR(dlssRRInitInfo, framework->mainCommandPool(), dlss_);
 
     if (Renderer::options.outputScale2x) {
-        initLanczosResources();
+        initEasuResources();
     }
 
     contexts_.resize(size);
@@ -258,7 +258,7 @@ void DLSSModule::build() {
         // Output Scale 2x: redirect DLSS output to 2x intermediate
         if (Renderer::options.outputScale2x && upscaled2xImages_[i]) {
             ctx->processedImage = upscaled2xImages_[i];          // DLSS writes to 2x
-            ctx->finalOutputImage = processedImages_[i];          // Lanczos target (shared 1x)
+            ctx->finalOutputImage = processedImages_[i];          // EASU target (shared 1x)
         } else {
             ctx->finalOutputImage = nullptr;
         }
@@ -283,15 +283,36 @@ void DLSSModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
 void DLSSModule::preClose() {
     if (dlss_) dlss_->deinit();
 
-    // Lanczos resources cleanup
-    lanczosPipeline_.reset();
-    lanczosDescriptorTables_.clear();
-    lanczosSampler_.reset();
-    lanczosShader_.reset();
+    // EASU resources cleanup
+    easuPipeline_.reset();
+    easuDescriptorTables_.clear();
+    easuSampler_.reset();
+    easuShader_.reset();
     upscaled2xImages_.clear();
 }
 
-void DLSSModule::initLanczosResources() {
+// Compute EASU constants (mirrors ffxFsrPopulateEasuConstants from ffx_fsr1.h)
+static void computeEasuConstants(uint32_t con0[4], uint32_t con1[4], uint32_t con2[4], uint32_t con3[4],
+                                  float srcW, float srcH, float dstW, float dstH) {
+    auto asUint = [](float f) -> uint32_t { uint32_t u; memcpy(&u, &f, 4); return u; };
+    con0[0] = asUint(srcW / dstW);
+    con0[1] = asUint(srcH / dstH);
+    con0[2] = asUint(0.5f * srcW / dstW - 0.5f);
+    con0[3] = asUint(0.5f * srcH / dstH - 0.5f);
+    con1[0] = asUint(1.0f / srcW);
+    con1[1] = asUint(1.0f / srcH);
+    con1[2] = asUint(1.0f / srcW);
+    con1[3] = asUint(-1.0f / srcH);
+    con2[0] = asUint(-1.0f / srcW);
+    con2[1] = asUint(2.0f / srcH);
+    con2[2] = asUint(1.0f / srcW);
+    con2[3] = asUint(2.0f / srcH);
+    con3[0] = asUint(0.0f / srcW);
+    con3[1] = asUint(4.0f / srcH);
+    con3[2] = 0; con3[3] = 0;
+}
+
+void DLSSModule::initEasuResources() {
     auto fw = framework_.lock();
     if (!fw) return;
     uint32_t size = fw->swapchain()->imageCount();
@@ -304,19 +325,19 @@ void DLSSModule::initLanczosResources() {
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     }
 
-    // Load Lanczos compute shader
-    lanczosShader_ = vk::Shader::create(
+    // Load FSR1 EASU compute shader
+    easuShader_ = vk::Shader::create(
         fw->device(),
-        (Renderer::folderPath / "shaders/world/post_render/lanczos_downscale_comp.spv").string());
+        (Renderer::folderPath / "shaders/world/post_render/fsr1_easu_downscale_comp.spv").string());
 
-    // Sampler (texelFetch bypasses it, but needed for combined image sampler binding)
-    lanczosSampler_ = vk::Sampler::create(
-        fw->device(), VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    // EASU uses textureGather which needs LINEAR sampler
+    easuSampler_ = vk::Sampler::create(
+        fw->device(), VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 
     // Descriptor tables
-    lanczosDescriptorTables_.resize(size);
+    easuDescriptorTables_.resize(size);
     for (uint32_t i = 0; i < size; i++) {
-        lanczosDescriptorTables_[i] = vk::DescriptorTableBuilder{}
+        easuDescriptorTables_[i] = vk::DescriptorTableBuilder{}
             .beginDescriptorLayoutSet()
             .beginDescriptorLayoutSetBinding()
             .defineDescriptorLayoutSetBinding({
@@ -336,15 +357,15 @@ void DLSSModule::initLanczosResources() {
             .definePushConstant(VkPushConstantRange{
                 .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
                 .offset = 0,
-                .size = sizeof(int32_t) * 4,
+                .size = sizeof(uint32_t) * 16,  // 4 x uvec4 = 64 bytes
             })
             .build(fw->device());
     }
 
     // Compute pipeline
-    lanczosPipeline_ = vk::ComputePipelineBuilder{}
-        .defineShader(lanczosShader_)
-        .definePipelineLayout(lanczosDescriptorTables_[0])
+    easuPipeline_ = vk::ComputePipelineBuilder{}
+        .defineShader(easuShader_)
+        .definePipelineLayout(easuDescriptorTables_[0])
         .build(fw->device());
 }
 
@@ -786,14 +807,20 @@ void DLSSModuleContext::render() {
         auto worldUBO = static_cast<vk::Data::WorldUBO *>(worldUBOBuffer->mappedPtr());
         if (worldUBO != nullptr) {
             glm::vec2 jitter = worldUBO->cameraJitter;
-            // DIAGNOSTIC: Force preExposure=1.0 to match RT push constant diagnostic
-            float preExposure = 1.0f; // Renderer::preExposure;
+            // Fixed pre-exposure — must exactly match the constant in ray_tracing_module.cpp.
+            // Using a varying value (e.g., Renderer::preExposure from auto-exposure) causes
+            // DLSS-RR temporal history contamination and visible brightness oscillation.
+            float preExposure = 0.1f;
             // Per-context frame time delta for DLSS temporal motion estimation
             auto now = std::chrono::steady_clock::now();
             float frameTimeDeltaMs = std::chrono::duration<float, std::milli>(now - lastRenderTime_).count();
             lastRenderTime_ = now;
+            // Use cameraEffectedViewMat — must match the matrix used to compute
+            // linearDepthImage and motionVectorImage in world.rgen. Using cameraViewMat
+            // (without view bob/camera effects) causes a depth↔matrix mismatch that
+            // breaks DLSS-RR temporal reprojection.
             module->dlss_->denoise(worldCommandBuffer, glm::uvec2{module->inputWidth_, module->inputHeight_}, jitter,
-                                   worldUBO->cameraViewMat, worldUBO->cameraProjMat, preExposure, false,
+                                   worldUBO->cameraEffectedViewMat, worldUBO->cameraProjMat, preExposure, false,
                                    frameTimeDeltaMs);
         }
     }
@@ -919,11 +946,10 @@ void DLSSModuleContext::render() {
         Renderer::accumFrameCount++;
     }
 
-    // Output Scale 2x: Lanczos downscale from 2x intermediate to 1x shared output
-    if (finalOutputImage && module->lanczosPipeline_) {
-        struct LanczosPushConstant {
-            int32_t srcWidth, srcHeight;
-            int32_t dstWidth, dstHeight;
+    // Output Scale 2x: FSR1 EASU downscale from 2x intermediate to 1x shared output
+    if (finalOutputImage && module->easuPipeline_) {
+        struct EasuPushConstant {
+            uint32_t con0[4], con1[4], con2[4], con3[4];
         };
 
         // Barrier: 2x output → shader read, 1x final → general (for storage write)
@@ -953,26 +979,27 @@ void DLSSModuleContext::render() {
         finalOutputImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
 
         auto frameIndex = context->frameIndex;
-        auto lanczosTable = module->lanczosDescriptorTables_[frameIndex];
-        lanczosTable->bindSamplerImageForShader(module->lanczosSampler_, processedImage, 0, 0);
-        lanczosTable->bindImage(finalOutputImage, VK_IMAGE_LAYOUT_GENERAL, 0, 1);
+        auto easuTable = module->easuDescriptorTables_[frameIndex];
+        easuTable->bindSamplerImageForShader(module->easuSampler_, processedImage, 0, 0);
+        easuTable->bindImage(finalOutputImage, VK_IMAGE_LAYOUT_GENERAL, 0, 1);
 
-        LanczosPushConstant pc{};
-        pc.srcWidth = static_cast<int32_t>(module->dlssOutputWidth_);
-        pc.srcHeight = static_cast<int32_t>(module->dlssOutputHeight_);
-        pc.dstWidth = static_cast<int32_t>(module->outputWidth_);
-        pc.dstHeight = static_cast<int32_t>(module->outputHeight_);
+        EasuPushConstant pc{};
+        computeEasuConstants(pc.con0, pc.con1, pc.con2, pc.con3,
+                             static_cast<float>(module->dlssOutputWidth_),
+                             static_cast<float>(module->dlssOutputHeight_),
+                             static_cast<float>(module->outputWidth_),
+                             static_cast<float>(module->outputHeight_));
 
-        worldCommandBuffer->bindDescriptorTable(lanczosTable, VK_PIPELINE_BIND_POINT_COMPUTE)
-            ->bindComputePipeline(module->lanczosPipeline_);
+        worldCommandBuffer->bindDescriptorTable(easuTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+            ->bindComputePipeline(module->easuPipeline_);
 
-        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), lanczosTable->vkPipelineLayout(),
-                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(LanczosPushConstant), &pc);
+        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), easuTable->vkPipelineLayout(),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(EasuPushConstant), &pc);
 
         vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(),
                       (module->outputWidth_ + 15) / 16, (module->outputHeight_ + 15) / 16, 1);
 
-        // Post-dispatch barrier: Lanczos output visible to downstream
+        // Post-dispatch barrier: EASU output visible to downstream
         worldCommandBuffer->barriersBufferImage(
             {}, {
                 {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,

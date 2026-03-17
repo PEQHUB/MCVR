@@ -99,6 +99,7 @@ layout(push_constant) uniform PushConstant {
     float tonemapParam5;
     float tonemapParam6;
     float tonemapParam7;
+    float preExposure;  // RT pre-exposure (layout parity with hist.comp)
 }
 pc;
 

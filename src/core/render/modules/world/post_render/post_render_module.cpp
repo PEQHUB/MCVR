@@ -652,6 +652,7 @@ void PostRenderModule::initPipeline() {
     worldPostVertShader_ = vk::Shader::create(device, (shaderPath / "world/post_render/world_post_vert.spv").string());
     worldPostFragShader_ = vk::Shader::create(device, (shaderPath / "world/post_render/world_post_frag.spv").string());
     casShader_ = vk::Shader::create(device, (shaderPath / "world/post_render/cas_comp.spv").string());
+    rcasShader_ = vk::Shader::create(device, (shaderPath / "world/post_render/rcas_comp.spv").string());
 
     worldPostPipeline_ = vk::GraphicsPipelineBuilder{}
                              .defineRenderPass(worldPostRenderPass_, 0)
@@ -772,6 +773,11 @@ void PostRenderModule::initPipeline() {
                        .defineShader(casShader_)
                        .definePipelineLayout(casDescriptorTables_[0])
                        .build(device);
+
+    rcasPipeline_ = vk::ComputePipelineBuilder{}
+                        .defineShader(rcasShader_)
+                        .definePipelineLayout(casDescriptorTables_[0])  // Same descriptor layout as CAS
+                        .build(device);
 }
 
 PostRenderModuleContext::PostRenderModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
@@ -1012,8 +1018,8 @@ void PostRenderModuleContext::render() {
         ->endRenderPass();
     worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    // copy input to output (or apply CAS)
-    if (Renderer::options.casEnabled) {
+    // copy input to output (or apply CAS/RCAS sharpening)
+    if (Renderer::options.sharpenerMode != 0) {
         VkPipelineStageFlags2 srcStageLdr = 0;
         VkAccessFlags2 srcAccessLdr = 0;
         chooseSrc(ldrImage->imageLayout(),
@@ -1057,28 +1063,52 @@ void PostRenderModuleContext::render() {
         ldrImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         postRenderedImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
 
-        auto casTable = module->casDescriptorTables_[context->frameIndex];
-        casTable->bindSamplerImageForShader(module->casSampler_, ldrImage, 0, 0);
-        casTable->bindImage(postRenderedImage, VK_IMAGE_LAYOUT_GENERAL, 0, 1);
+        auto sharpTable = module->casDescriptorTables_[context->frameIndex];
+        sharpTable->bindSamplerImageForShader(module->casSampler_, ldrImage, 0, 0);
+        sharpTable->bindImage(postRenderedImage, VK_IMAGE_LAYOUT_GENERAL, 0, 1);
 
-        CasPushConstant casPc = buildCasConstants(
-            Renderer::options.casSharpness,
-            static_cast<float>(ldrImage->width()),
-            static_cast<float>(ldrImage->height()),
-            static_cast<float>(postRenderedImage->width()),
-            static_cast<float>(postRenderedImage->height()));
-
-        vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(),
-                           casTable->vkPipelineLayout(),
-                           VK_SHADER_STAGE_COMPUTE_BIT,
-                           0,
-                           sizeof(CasPushConstant),
-                           &casPc);
-
-        worldCommandBuffer->bindDescriptorTable(casTable, VK_PIPELINE_BIND_POINT_COMPUTE)
-            ->bindComputePipeline(module->casPipeline_);
         uint32_t groupX = (postRenderedImage->width() + 15) / 16;
         uint32_t groupY = (postRenderedImage->height() + 15) / 16;
+
+        if (Renderer::options.sharpenerMode == 1) {
+            // CAS sharpening
+            CasPushConstant casPc = buildCasConstants(
+                Renderer::options.casSharpness,
+                static_cast<float>(ldrImage->width()),
+                static_cast<float>(ldrImage->height()),
+                static_cast<float>(postRenderedImage->width()),
+                static_cast<float>(postRenderedImage->height()));
+
+            vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(),
+                               sharpTable->vkPipelineLayout(),
+                               VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                               sizeof(CasPushConstant), &casPc);
+
+            worldCommandBuffer->bindDescriptorTable(sharpTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+                ->bindComputePipeline(module->casPipeline_);
+        } else {
+            // RCAS sharpening (mode 2)
+            // Map 0..1 UI sharpness to RCAS stops: 1.0 = max sharp (0 stops), 0.0 = least sharp (2 stops)
+            float stops = 2.0f * (1.0f - Renderer::options.casSharpness);
+            float sharpLinear = exp2f(-stops);
+            struct RcasPushConstant { uint32_t const0[4]; uint32_t sample0[4]; };
+            RcasPushConstant rcasPc{};
+            uint32_t uSharp; memcpy(&uSharp, &sharpLinear, 4);
+            rcasPc.const0[0] = uSharp;
+            rcasPc.const0[1] = glm::packHalf2x16(glm::vec2(sharpLinear, sharpLinear));
+            rcasPc.const0[2] = 0;
+            rcasPc.const0[3] = 0;
+            rcasPc.sample0[0] = 0; rcasPc.sample0[1] = 0; rcasPc.sample0[2] = 0; rcasPc.sample0[3] = 0;
+
+            vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(),
+                               sharpTable->vkPipelineLayout(),
+                               VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                               sizeof(RcasPushConstant), &rcasPc);
+
+            worldCommandBuffer->bindDescriptorTable(sharpTable, VK_PIPELINE_BIND_POINT_COMPUTE)
+                ->bindComputePipeline(module->rcasPipeline_);
+        }
+
         vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), groupX, groupY, 1);
     } else {
         VkPipelineStageFlags2 srcStageLdr = 0;
