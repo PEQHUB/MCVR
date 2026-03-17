@@ -90,10 +90,11 @@ void main() {
     if (inside) {
         vec3 hdr = texelFetch(uHdrRenderRes, p, 0).rgb;
 
-        // Undo RT pre-exposure for correct luminance metering.
-        // When DLSS-RR is active, RT output is scaled by 0.1 — without this,
-        // the histogram sees 10x lower luminance and auto-exposure over-corrects.
-        float lum = dot(hdr, LUMA) / max(pc.preExposure, 1e-6);
+        // Do NOT undo pre-exposure here. The tone mapper reads DLSS-RR output
+        // which is still in pre-exposed space (0.1x). Auto-exposure must see
+        // the same pre-exposed values so the computed exposure naturally compensates:
+        // exposure = middleGrey / (avgLum * preExposure) cancels with pixel * preExposure.
+        float lum = dot(hdr, LUMA);
         float logLum = log2(max(lum, pc.epsilon));
 
         float denom = (pc.log2Max - pc.log2Min);
