@@ -819,14 +819,18 @@ void DLSSModuleContext::render() {
             // linearDepthImage and motionVectorImage in world.rgen. Using cameraViewMat
             // (without view bob/camera effects) causes a depth↔matrix mismatch that
             // breaks DLSS-RR temporal reprojection.
+            // DLSS-D Converge: reset temporal history each frame so each output is
+            // an independent spatial denoise. Welford properly averages independent estimates.
+            bool dlssReset = (Renderer::options.offlineState == 2
+                              && Renderer::options.offlineDenoised == 2);
             module->dlss_->denoise(worldCommandBuffer, glm::uvec2{module->inputWidth_, module->inputHeight_}, jitter,
-                                   worldUBO->cameraEffectedViewMat, worldUBO->cameraProjMat, preExposure, false,
+                                   worldUBO->cameraEffectedViewMat, worldUBO->cameraProjMat, preExposure, dlssReset,
                                    frameTimeDeltaMs);
         }
     }
 
-    // P3: Post-DLSS Welford accumulation (DLSS+Welford mode)
-    if (Renderer::options.offlineState == 2 && Renderer::options.offlineDenoised == 1
+    // DLSS-D Converge: Post-DLSS Welford accumulation
+    if (Renderer::options.offlineState == 2 && Renderer::options.offlineDenoised == 2
         && Renderer::accumPipelineReady) {
 
         auto cmd = worldCommandBuffer->vkCommandBuffer();

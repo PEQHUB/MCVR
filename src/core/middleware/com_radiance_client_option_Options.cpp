@@ -643,7 +643,14 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     if (state == 2) {
         Renderer::accumFrameCount = 0;  // reset on entering accumulation
     }
-    // Native resolution override: save upscaler and switch to DLAA on FREE entry
+    // Accumulation always forces native resolution
+    if (state == 2 && !Renderer::options.offlineNativeResActive) {
+        Renderer::options.savedUpscalerMode = Renderer::options.upscalerMode;
+        Renderer::options.upscalerMode = 3;  // DLAA = 1:1
+        Renderer::options.needRecreate = true;
+        Renderer::options.offlineNativeResActive = true;
+    }
+    // FREE: native res if N key toggled on
     if (state == 1 && Renderer::options.offlineNativeRes && !Renderer::options.offlineNativeResActive) {
         Renderer::options.savedUpscalerMode = Renderer::options.upscalerMode;
         Renderer::options.upscalerMode = 3;  // DLAA = 1:1
@@ -695,18 +702,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineDenoised(
     JNIEnv *, jclass, jint mode, jboolean) {
+    // 0=Raw Fast (RR on), 1=Raw Slow (RR off), 2=DLSS-D Converge
     Renderer::options.offlineDenoised = static_cast<uint32_t>(std::clamp(mode, 0, 2));
-    // Auto-enable native res when denoised mode is active
-    if (mode > 0 && !Renderer::options.offlineNativeRes) {
-        Renderer::options.offlineNativeRes = true;
-        // If already in FREE or ACCUMULATING state, apply the override now
-        if (Renderer::options.offlineState >= 1 && !Renderer::options.offlineNativeResActive) {
-            Renderer::options.savedUpscalerMode = Renderer::options.upscalerMode;
-            Renderer::options.upscalerMode = 3;  // DLAA = 1:1
-            Renderer::options.needRecreate = true;
-            Renderer::options.offlineNativeResActive = true;
-        }
-    }
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeResetAccumulation(

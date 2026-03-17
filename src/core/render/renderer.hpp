@@ -171,8 +171,8 @@ struct Options {
     float offlineAperture = 0.0f;    // thin lens aperture (0=pinhole, 0.001-2.0)
     float dofStrength = 1.0f;        // artistic DOF multiplier (1.0=physical, up to 20.0 for cinematic)
     float offlineFocalDistance = 10.0f; // focal distance in blocks (1-256)
-    bool offlineNativeRes = false;        // force render-res = display-res
-    uint32_t offlineDenoised = 0;         // 0=raw, 1=DLSS+Welford, 2=DLSS temporal
+    bool offlineNativeRes = false;        // N key: force render-res = display-res in FREE mode
+    uint32_t offlineDenoised = 0;         // 0=Raw Fast (RR on), 1=Raw Slow (RR off), 2=DLSS-D Converge
     uint32_t savedUpscalerMode = 0;       // saved for restore on exit
     bool offlineNativeResActive = false;  // tracks if resolution was overridden
 

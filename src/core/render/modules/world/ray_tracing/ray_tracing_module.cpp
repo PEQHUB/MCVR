@@ -1521,11 +1521,15 @@ void RayTracingModuleContext::render() {
     }
 
     // Offline accumulation
+    // offlineDenoised: 0=Raw Fast (RR on), 1=Raw Slow (RR off), 2=DLSS-D Converge
+    // Bit 2 (disableRR): auto-set by mode — Raw Slow forces RR off
+    bool disableRR = Renderer::options.offlineDisableRR
+                     || Renderer::options.offlineDenoised == 1;
     pushConstant.offlineFlags = (accumulating ? 1 : 0)
-                              | (Renderer::options.offlineDisableRR ? 2 : 0)
+                              | (disableRR ? 2 : 0)
                               | (Renderer::options.offlineDisableClamp ? 4 : 0)
                               | (Renderer::options.offlineNativeResActive ? 8 : 0)
-                              | (Renderer::options.offlineDenoised > 0 ? 16 : 0);
+                              | (Renderer::options.offlineDenoised == 2 ? 16 : 0);
     pushConstant.accumFrameCount = static_cast<int>(Renderer::accumFrameCount);
     // DOF: active in both FREE (preview) and ACCUMULATING modes
     bool dofEnabled = (accumulating || Renderer::options.offlineState == 1)
@@ -1535,12 +1539,10 @@ void RayTracingModuleContext::render() {
     pushConstant.focalDistance = Renderer::options.offlineFocalDistance;
 
     // Force pre-exposure to 1.0 during accumulation (exposure locked)
-    // For DLSS temporal mode (offlineDenoised==2), keep temporal reuse active
+    // All offline modes disable temporal reuse (each frame is independent)
     if (accumulating) {
         pushConstant.preExposure = 1.0f;
-        if (Renderer::options.offlineDenoised != 2) {
-            pushConstant.temporalMClamp = 0;  // no temporal reuse for raw and DLSS+Welford
-        }
+        pushConstant.temporalMClamp = 0;
     }
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), rayTracingDescriptorTable->vkPipelineLayout(),
@@ -1907,8 +1909,8 @@ void RayTracingModuleContext::render() {
     }
 
     // Offline accumulation: Welford running average into RGBA32F buffer
-    // Only run Welford in RT module for raw mode (denoised modes accumulate in DLSS module)
-    if (accumulating && Renderer::accumPipelineReady && Renderer::options.offlineDenoised == 0) {
+    // Raw Fast (0) and Raw Slow (1) accumulate here; DLSS-D (2) accumulates in DLSS module
+    if (accumulating && Renderer::accumPipelineReady && Renderer::options.offlineDenoised != 2) {
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
         uint32_t frameIdx = context->frameIndex;
 
@@ -1975,8 +1977,5 @@ void RayTracingModuleContext::render() {
         Renderer::accumOutputImage = hdrNoisyOutputImage;  // expose for denoiser/upscaler bypass
     }
 
-    // P4: DLSS temporal only — just count frames for HUD
-    if (accumulating && Renderer::options.offlineDenoised == 2) {
-        Renderer::accumFrameCount++;
-    }
+    // (P4 removed — DLSS temporal mode replaced by DLSS-D Converge with per-frame reset)
 }
