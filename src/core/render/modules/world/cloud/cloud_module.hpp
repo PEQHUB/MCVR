@@ -32,6 +32,10 @@ struct CloudPushConstant {
     uint32_t lightSteps;         // Light march step count
     float temporalBlend;         // History blend factor (0.93-0.97)
     uint32_t shadowMapSize;      // Cloud shadow map resolution
+    float eyePosX;               // Camera world position X (from inverse view matrix)
+    float eyePosY;               // Camera world position Y
+    float eyePosZ;               // Camera world position Z
+    float pad0;                  // Alignment padding
 };
 
 class CloudModule : public WorldModule, public SharedObject<CloudModule> {

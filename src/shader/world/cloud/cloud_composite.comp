@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 
 // Depth-aware cloud composite onto scene radiance.
 // Reads cloud color (at cloud resolution), upsamples to full resolution,
@@ -11,6 +12,7 @@ layout(set = 0, binding = 1, r32f)    uniform readonly image2D uLinearDepth;   /
 layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D uCloudRadiance; // Output composited
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D uCloudColor;    // Cloud color + transmittance
 
+// Only push constants needed (no UBOs for composite)
 layout(push_constant) uniform PushConstants {
     uint renderWidth;
     uint renderHeight;
@@ -28,6 +30,10 @@ layout(push_constant) uniform PushConstants {
     uint lightSteps;
     float temporalBlend;
     uint shadowMapSize;
+    float eyePosX;
+    float eyePosY;
+    float eyePosZ;
+    float pad0;
 } pc;
 
 void main() {
@@ -43,17 +49,13 @@ void main() {
         return;
     }
 
-    // Map full-res texel to cloud-res texel (bilinear via nearest for now)
+    // Map full-res texel to cloud-res texel (nearest-neighbor)
     vec2 cloudUV = (vec2(texel) + 0.5) / vec2(pc.renderWidth, pc.renderHeight);
     ivec2 cloudTexel = ivec2(cloudUV * vec2(pc.cloudWidth, pc.cloudHeight));
     cloudTexel = clamp(cloudTexel, ivec2(0), ivec2(pc.cloudWidth - 1, pc.cloudHeight - 1));
 
     // Load cloud color (rgb = scattered light, a = transmittance)
     vec4 cloud = imageLoad(uCloudColor, cloudTexel);
-
-    // Simple bilateral upsampling: check if cloud-res and full-res depths agree
-    // If large depth discrepancy, reduce cloud contribution to avoid edge bleeding
-    float sceneDepth = imageLoad(uLinearDepth, texel).r;
 
     // Composite: cloud behind geometry
     // sceneColor = cloud.rgb + sceneColor * cloud.a (standard pre-multiplied alpha over)

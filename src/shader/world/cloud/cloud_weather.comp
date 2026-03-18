@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 
 // Cloud weather map generator.
 // Generates a 256x256 RGBA8 weather map each frame.
@@ -11,42 +12,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(set = 0, binding = 5, rgba8) uniform writeonly image2D uWeatherMap;
 
-layout(set = 1, binding = 1) uniform SkyUniform {
-    vec3 baseColor;
-    uint skyType;
-    vec4 horizonColor;
-    vec3 sunDirection;
-    uint isSunRisingOrSetting;
-    vec3 moonDirection;
-    float moonDirPad;
-    uint isSkyDark;
-    uint hasBlindnessOrDarkness;
-    uint cameraSubmersionType;
-    uint moonPhase;
-    float rainGradient;
-    float hdrRadianceScale;
-    float pad1;
-    float pad2;
-} skyUBO;
-
-layout(push_constant) uniform PushConstants {
-    uint renderWidth;
-    uint renderHeight;
-    uint cloudWidth;
-    uint cloudHeight;
-    float cloudBase;
-    float cloudThickness;
-    float coverage;
-    float cloudType;
-    float densityMultiplier;
-    float windSpeed;
-    float windTime;
-    uint frameIndex;
-    uint marchSteps;
-    uint lightSteps;
-    float temporalBlend;
-    uint shadowMapSize;
-} pc;
+#include "cloud_common.glsl"
 
 // Simple hash-based noise for weather map
 vec3 hash33w(vec3 p) {

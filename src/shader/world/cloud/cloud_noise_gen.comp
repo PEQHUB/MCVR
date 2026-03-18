@@ -30,6 +30,10 @@ layout(push_constant) uniform PushConstants {
     uint lightSteps;
     float temporalBlend;
     uint shadowMapSize;
+    float eyePosX;
+    float eyePosY;
+    float eyePosZ;
+    float pad0;
 } pc;
 
 // --- Noise primitives (self-contained for init-time generation) ---

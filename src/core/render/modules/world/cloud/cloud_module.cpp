@@ -4,6 +4,7 @@
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
+#include "core/render/world.hpp"
 
 CloudModule::CloudModule() {}
 
@@ -524,6 +525,14 @@ void CloudModuleContext::render() {
     pc.lightSteps = module->lightSteps_;
     pc.temporalBlend = module->temporalBlend_;
     pc.shadowMapSize = module->shadowMapSize_;
+
+    // Camera world position from World (same source as WorldUBO.cameraPos)
+    auto world = Renderer::instance().world();
+    glm::dvec3 camPos = world->getCameraPos();
+    pc.eyePosX = static_cast<float>(camPos.x);
+    pc.eyePosY = static_cast<float>(camPos.y);
+    pc.eyePosZ = static_cast<float>(camPos.z);
+    pc.pad0 = 0.0f;
 
     // Advance wind time (~16ms per frame at 60fps)
     module->windTime_ += Renderer::options.cloudSpeed * (1.0f / 60.0f);

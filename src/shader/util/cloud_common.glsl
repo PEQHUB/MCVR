@@ -1,0 +1,124 @@
+#ifndef CLOUD_COMMON_GLSL
+#define CLOUD_COMMON_GLSL
+
+// Shared declarations for all cloud compute shaders.
+// UBO layouts must match shared.hpp exactly (field order, types, padding).
+
+// WorldUBO: only declare fields up to what cloud shaders need.
+// The actual WorldUBO is much larger (material data, dvec4 cameraPos, etc.)
+// but uniform blocks can be declared shorter than the actual buffer.
+layout(set = 1, binding = 0) uniform WorldUBO {
+    mat4 cameraViewMat;
+    mat4 cameraEffectedViewMat;
+    mat4 cameraProjMat;
+    mat4 cameraViewMatInv;
+    mat4 cameraEffectedViewMatInv;
+    mat4 cameraProjMatInv;
+    vec2 cameraJitter;
+    float gameTime;
+    uint seed;
+    mat4 textureMat;
+    uint overlayTextureID;
+    uint isFirstPerson;
+    float fogStart;
+    float fogEnd;
+    vec4 fogColor;
+    uint fogType;
+    uint wSkyType;
+    uint rayBounces;
+    float pad3;
+} worldUBO;
+
+// SkyUBO: full layout matching shared.hpp SkyUBO struct.
+layout(set = 1, binding = 1) uniform SkyUniform {
+    vec3 baseColor;
+    uint skyType;
+
+    vec4 horizonColor;
+
+    vec3 sunDirection;
+    uint isSunRisingOrSetting;
+
+    vec3 moonDirection;
+    float moonDirPad;
+
+    uint isSkyDark;
+    uint hasBlindnessOrDarkness;
+    uint cameraSubmersionType;
+    uint moonPhase;
+
+    float rainGradient;
+    float hdrRadianceScale;
+    float pad1;
+    float pad2;
+
+    // AtmosphereParams
+    float Rg;
+    float Rt;
+    float Hr;
+    float Hm;
+
+    vec3 betaR;
+    float mieG;
+
+    vec3 betaM;
+    float minViewCos;
+
+    vec3 sunRadiance;
+    uint sunTextureID;
+
+    vec3 moonRadiance;
+    uint moonTextureID;
+
+    vec4 envCelestial;
+    vec4 envWaterTintFog;
+    vec4 envSky;
+
+    // Cloud-specific fields
+    vec4 envCloud;       // x: base height, y: thickness, z: density scale, w: brightness
+    ivec4 cloudTile;     // x: tex index, y/z: center cell, w: reserved
+    vec4 cloudWrap;      // x/y: intra-cell offset, z: ticks, w: reserved
+    vec4 cloudShape;     // x: puffiness, y: detailScale, z: detailStrength, w: anisotropy
+    vec4 cloudLighting;  // x: shadowStr, y: ambientStr, z: sunOcclStr, w: noiseAffectsShadows
+} skyUBO;
+
+// Previous frame camera matrices (same layout as WorldUBO, only matrices needed).
+layout(set = 1, binding = 2) uniform LastWorldUBO {
+    mat4 prevCameraViewMat;
+    mat4 prevCameraEffectedViewMat;
+    mat4 prevCameraProjMat;
+    mat4 prevCameraViewMatInv;
+    mat4 prevCameraEffectedViewMatInv;
+    mat4 prevCameraProjMatInv;
+} lastWorldUBO;
+
+// Push constant layout — must match CloudPushConstant in cloud_module.hpp exactly.
+layout(push_constant) uniform PushConstants {
+    uint renderWidth;
+    uint renderHeight;
+    uint cloudWidth;
+    uint cloudHeight;
+    float cloudBase;
+    float cloudThickness;
+    float coverage;
+    float cloudType;
+    float densityMultiplier;
+    float windSpeed;
+    float windTime;
+    uint frameIndex;
+    uint marchSteps;
+    uint lightSteps;
+    float temporalBlend;
+    uint shadowMapSize;
+    float eyePosX;
+    float eyePosY;
+    float eyePosZ;
+    float pad0;
+} pc;
+
+// Convenience accessor for camera world position
+vec3 getEyePos() {
+    return vec3(pc.eyePosX, pc.eyePosY, pc.eyePosZ);
+}
+
+#endif // CLOUD_COMMON_GLSL

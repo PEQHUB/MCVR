@@ -14,71 +14,11 @@ layout(set = 0, binding = 3, rgba16f)  uniform writeonly image2D uCloudColor;
 layout(set = 0, binding = 6)           uniform sampler3D uNoise3D;         // 64^3 RGBA8 repeat
 layout(set = 0, binding = 8)           uniform sampler2D uWeatherMap;      // 256x256 RGBA8
 
-// Set 1: UBOs
-layout(set = 1, binding = 0) uniform WorldUniform {
-    mat4 viewMat;
-    mat4 projMat;
-    mat4 viewMatInv;
-    mat4 projMatInv;
-    vec3 eyePos;
-    float pad0;
-} worldUBO;
-
-layout(set = 1, binding = 1) uniform SkyUniform {
-    vec3 baseColor;
-    uint skyType;
-    vec4 horizonColor;
-    vec3 sunDirection;
-    uint isSunRisingOrSetting;
-    vec3 moonDirection;
-    float moonDirPad;
-    uint isSkyDark;
-    uint hasBlindnessOrDarkness;
-    uint cameraSubmersionType;
-    uint moonPhase;
-    float rainGradient;
-    float hdrRadianceScale;
-    float pad1;
-    float pad2;
-    // Atmosphere params
-    float Rg;
-    float Rt;
-    float Hr;
-    float Hm;
-    vec3 betaR;
-    float mieG;
-    vec3 betaM;
-    float minViewCos;
-    vec3 sunRadiance;
-    uint sunTextureID;
-    vec3 moonRadiance;
-    uint moonTextureID;
-} skyUBO;
-
-layout(push_constant) uniform PushConstants {
-    uint renderWidth;
-    uint renderHeight;
-    uint cloudWidth;
-    uint cloudHeight;
-    float cloudBase;
-    float cloudThickness;
-    float coverage;
-    float cloudType;
-    float densityMultiplier;
-    float windSpeed;
-    float windTime;
-    uint frameIndex;
-    uint marchSteps;
-    uint lightSteps;
-    float temporalBlend;
-    uint shadowMapSize;
-} pc;
-
+#include "cloud_common.glsl"
 #include "cloud_density.glsl"
 
 // Constants
 const float NOISE_SCALE = 1.0 / 256.0;  // World-space to noise UV scale
-const float PI = 3.14159265359;
 
 // Golden ratio for temporal blue noise offset
 float goldenRatioJitter(uint frame) {
@@ -89,9 +29,9 @@ float goldenRatioJitter(uint frame) {
 vec3 getViewRay(vec2 uv) {
     vec4 clipPos = vec4(uv * 2.0 - 1.0, 1.0, 1.0);
     clipPos.y = -clipPos.y; // Vulkan Y-flip
-    vec4 viewPos = worldUBO.projMatInv * clipPos;
+    vec4 viewPos = worldUBO.cameraProjMatInv * clipPos;
     viewPos.xyz /= viewPos.w;
-    vec3 worldDir = (worldUBO.viewMatInv * vec4(viewPos.xyz, 0.0)).xyz;
+    vec3 worldDir = (worldUBO.cameraViewMatInv * vec4(viewPos.xyz, 0.0)).xyz;
     return normalize(worldDir);
 }
 
@@ -123,8 +63,9 @@ bool intersectCloudSlab(vec3 origin, vec3 dir, out float tEnter, out float tExit
 
 // Sample weather map (UV = XZ world position mapped to [0,1])
 vec4 sampleWeather(vec3 worldPos) {
+    vec3 eyePos = getEyePos();
     // Map world XZ to weather UV: 512-block coverage area centered on camera
-    vec2 uv = (worldPos.xz - worldUBO.eyePos.xz) / 1024.0 + 0.5;
+    vec2 uv = (worldPos.xz - eyePos.xz) / 1024.0 + 0.5;
     return texture(uWeatherMap, uv);
 }
 
@@ -159,7 +100,7 @@ void main() {
 
     // Reconstruct view ray
     vec3 rayDir = getViewRay(uv);
-    vec3 rayOrigin = worldUBO.eyePos;
+    vec3 rayOrigin = getEyePos();
 
     // Ray-slab intersection
     float tEnter, tExit;
