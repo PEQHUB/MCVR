@@ -8,6 +8,7 @@
 #include "core/render/radiance_logger.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/streamline_context.hpp"
+#include "core/render/modules/world/frame_gen/frame_gen_manager.hpp"
 #include "core/render/textures.hpp"
 #include "core/render/world.hpp"
 
@@ -728,5 +729,37 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_option_Options_native
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssEpochLength(
     JNIEnv *, jclass, jint length, jboolean) {
     Renderer::options.dlssEpochLength = static_cast<uint32_t>(std::clamp(length, 4, 64));
+}
+
+// ═══════════ Frame Generation (DLSS-G) ═══════════
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetFrameGenMode(
+    JNIEnv *, jclass, jint mode, jboolean) {
+    Renderer::options.frameGenMode = static_cast<uint32_t>(std::clamp(mode, 0, 2));
+    Renderer::options.frameGenEnabled = (mode != 0);
+    // Trigger swapchain recreation — FrameGenManager::setMode() will be called
+    // on the render thread during recreate (via beforeSwapchainRecreate/afterSwapchainRecreate).
+    // Don't call slDLSSGSetOptions from the Java thread — it's not thread-safe.
+    Renderer::options.needRecreate = true;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetFrameGenMultiplier(
+    JNIEnv *, jclass, jint multiplier, jboolean) {
+    Renderer::options.frameGenMultiplier = static_cast<uint32_t>(std::clamp(multiplier, 1, 3));
+    // Changing multiplier while active requires re-calling slDLSSGSetOptions.
+    // Trigger recreation to apply on render thread.
+    if (Renderer::options.frameGenEnabled) {
+        Renderer::options.needRecreate = true;
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_option_Options_nativeIsFrameGenSupported(
+    JNIEnv *, jclass) {
+    return FrameGenManager::maxFramesToGenerate() > 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_option_Options_nativeGetFrameGenMaxMultiplier(
+    JNIEnv *, jclass) {
+    return static_cast<jint>(FrameGenManager::maxFramesToGenerate());
 }
 

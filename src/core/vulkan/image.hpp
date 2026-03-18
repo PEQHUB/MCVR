@@ -165,6 +165,9 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
     VkImageLayout &imageLayout();
     void *mappedPtr();
 
+    /// VkDeviceMemory backing this image (from VMA allocation). Needed for Streamline resource tagging.
+    VkDeviceMemory vkDeviceMemory() { return allocationInfo_.deviceMemory; }
+
     void addImageView(VkImageViewCreateInfo info);
 
   private:

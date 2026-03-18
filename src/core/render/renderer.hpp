@@ -177,6 +177,11 @@ struct Options {
     uint32_t savedUpscalerMode = 0;       // saved for restore on exit
     bool offlineNativeResActive = false;  // tracks if resolution was overridden
 
+    // Frame Generation (DLSS-G / FSR3-FG)
+    bool frameGenEnabled = false;        // Master toggle
+    uint32_t frameGenMode = 0;           // 0=Off, 1=On, 2=Auto (dynamic MFG)
+    uint32_t frameGenMultiplier = 1;     // 1=2x, 2=3x, 3=4x (clamped to hardware max)
+
     // Diagnostics
     bool loggingEnabled = false;
 };
@@ -203,9 +208,21 @@ class Renderer : public Singleton<Renderer> {
     static std::vector<VkDescriptorSet> accumDescSets;
     static bool accumPipelineReady;
 
+    // Emission compose pipeline (DLSS-RR: subtract emission before, add after)
+    static VkPipeline emissionComposePipeline;
+    static VkPipelineLayout emissionComposePipelineLayout;
+    static VkDescriptorPool emissionComposeDescPool;
+    static VkDescriptorSetLayout emissionComposeDescSetLayout;
+    static std::vector<VkDescriptorSet> emissionComposeDescSets;
+    static bool emissionComposePipelineReady;
+
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> emissionImages;  // RT emission, read by tone mapping
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> renderResHdrImages;  // DLSS input (render-res HDR), read by tone mapping histogram
     static GpuProfiler gpuProfiler;
+
+    // Frame Generation: images set by pipeline modules, read by render_framework for SL tagging
+    static std::vector<std::shared_ptr<vk::DeviceLocalImage>> frameGenDepthImages;        // Linear depth (render res)
+    static std::vector<std::shared_ptr<vk::DeviceLocalImage>> frameGenMotionVectorImages;  // Motion vectors (render res)
 
     ~Renderer();
 

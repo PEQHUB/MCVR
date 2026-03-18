@@ -113,6 +113,14 @@ bool RayTracingModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::D
     gbufferMaterialIdImages_[frameIndex] = images[24];
     positionViewSpaceImages_[frameIndex] = images[25];
 
+    // Publish depth and motion vectors for frame generation resource tagging
+    if (Renderer::frameGenDepthImages.size() <= frameIndex) {
+        Renderer::frameGenDepthImages.resize(frameIndex + 1);
+        Renderer::frameGenMotionVectorImages.resize(frameIndex + 1);
+    }
+    Renderer::frameGenDepthImages[frameIndex] = linearDepthImages_[frameIndex];
+    Renderer::frameGenMotionVectorImages[frameIndex] = motionVectorImages_[frameIndex];
+
     // Create reservoir images for ReSTIR DI (only once, shared across frames)
     if (!reservoirImages_[0]) {
         for (int r = 0; r < 2; r++) {
@@ -277,6 +285,54 @@ void RayTracingModule::initAccumulationPipeline() {
 
     Renderer::accumPipelineReady = true;
     std::cout << "[Offline] Accumulation pipeline initialized (" << w << "x" << h << " RGBA32F)" << std::endl;
+
+    // --- Emission compose pipeline (DLSS-RR: subtract emission before, add after) ---
+    auto emissionShader = vk::Shader::create(device, (shaderPath / "world/ray_tracing/emission_compose_comp.spv").string());
+    if (!emissionShader) {
+        std::cerr << "[Offline] Failed to load emission_compose_comp.spv — emission preservation disabled" << std::endl;
+        return;
+    }
+
+    // Same descriptor set layout: 2 storage images (target, emission)
+    VkDescriptorSetLayoutCreateInfo ecLayoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    ecLayoutInfo.bindingCount = (uint32_t)bindings.size();
+    ecLayoutInfo.pBindings = bindings.data();
+    vkCreateDescriptorSetLayout(dev, &ecLayoutInfo, nullptr, &Renderer::emissionComposeDescSetLayout);
+
+    // Pipeline layout with push constant: float preExposure + int mode = 8 bytes
+    VkPushConstantRange ecPushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 8};
+    VkPipelineLayoutCreateInfo ecPipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    ecPipelineLayoutInfo.setLayoutCount = 1;
+    ecPipelineLayoutInfo.pSetLayouts = &Renderer::emissionComposeDescSetLayout;
+    ecPipelineLayoutInfo.pushConstantRangeCount = 1;
+    ecPipelineLayoutInfo.pPushConstantRanges = &ecPushRange;
+    vkCreatePipelineLayout(dev, &ecPipelineLayoutInfo, nullptr, &Renderer::emissionComposePipelineLayout);
+
+    VkComputePipelineCreateInfo ecPipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ecPipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    ecPipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    ecPipelineInfo.stage.module = emissionShader->vkShaderModule();
+    ecPipelineInfo.stage.pName = "main";
+    ecPipelineInfo.layout = Renderer::emissionComposePipelineLayout;
+    vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &ecPipelineInfo, nullptr, &Renderer::emissionComposePipeline);
+
+    VkDescriptorPoolSize ecPoolSizes[] = {{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * size}};
+    VkDescriptorPoolCreateInfo ecPoolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    ecPoolInfo.maxSets = size;
+    ecPoolInfo.poolSizeCount = 1;
+    ecPoolInfo.pPoolSizes = ecPoolSizes;
+    vkCreateDescriptorPool(dev, &ecPoolInfo, nullptr, &Renderer::emissionComposeDescPool);
+
+    std::vector<VkDescriptorSetLayout> ecLayouts(size, Renderer::emissionComposeDescSetLayout);
+    VkDescriptorSetAllocateInfo ecAllocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ecAllocInfo.descriptorPool = Renderer::emissionComposeDescPool;
+    ecAllocInfo.descriptorSetCount = size;
+    ecAllocInfo.pSetLayouts = ecLayouts.data();
+    Renderer::emissionComposeDescSets.resize(size);
+    vkAllocateDescriptorSets(dev, &ecAllocInfo, Renderer::emissionComposeDescSets.data());
+
+    Renderer::emissionComposePipelineReady = true;
+    std::cout << "[Offline] Emission compose pipeline initialized" << std::endl;
 }
 
 void RayTracingModule::preClose() {
@@ -298,6 +354,11 @@ void RayTracingModule::preClose() {
         if (Renderer::accumDescSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, Renderer::accumDescSetLayout, nullptr);
         if (Renderer::accumDescPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, Renderer::accumDescPool, nullptr);
         Renderer::accumPipelineReady = false;
+        if (Renderer::emissionComposePipeline != VK_NULL_HANDLE) vkDestroyPipeline(dev, Renderer::emissionComposePipeline, nullptr);
+        if (Renderer::emissionComposePipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, Renderer::emissionComposePipelineLayout, nullptr);
+        if (Renderer::emissionComposeDescSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, Renderer::emissionComposeDescSetLayout, nullptr);
+        if (Renderer::emissionComposeDescPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, Renderer::emissionComposeDescPool, nullptr);
+        Renderer::emissionComposePipelineReady = false;
     }
 }
 
@@ -1538,10 +1599,9 @@ void RayTracingModuleContext::render() {
     pushConstant.focalDistance = Renderer::options.offlineFocalDistance;
 
     // Pre-exposure locked to 1.0 during accumulation (all presets).
-    // The histogram does NOT undo pre-exposure — it relies on histogram and tone mapper
-    // seeing the same scale. DLSS-RR's InExposureScale=1/preExposure undoes pre-exposure
-    // in its output, so using 1.0 means DLSS output stays at scene-referred 1.0x,
-    // matching the histogram's 1.0x RT input. Using 0.1 would cause a 10x mismatch.
+    // Gives full fp16 precision for the Welford accumulator input (DLSS output at
+    // scene-referred scale). DLSS-RR exposure params are neutral (§3.7: not supported),
+    // so output stays in the same pre-exposed space as input — consistent with histogram.
     // All modes disable temporal reuse (each frame is independent).
     if (accumulating) {
         pushConstant.preExposure = 1.0f;

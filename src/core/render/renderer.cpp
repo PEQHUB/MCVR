@@ -20,9 +20,17 @@ VkDescriptorPool Renderer::accumDescPool = VK_NULL_HANDLE;
 VkDescriptorSetLayout Renderer::accumDescSetLayout = VK_NULL_HANDLE;
 std::vector<VkDescriptorSet> Renderer::accumDescSets;
 bool Renderer::accumPipelineReady = false;
+VkPipeline Renderer::emissionComposePipeline = VK_NULL_HANDLE;
+VkPipelineLayout Renderer::emissionComposePipelineLayout = VK_NULL_HANDLE;
+VkDescriptorPool Renderer::emissionComposeDescPool = VK_NULL_HANDLE;
+VkDescriptorSetLayout Renderer::emissionComposeDescSetLayout = VK_NULL_HANDLE;
+std::vector<VkDescriptorSet> Renderer::emissionComposeDescSets;
+bool Renderer::emissionComposePipelineReady = false;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::emissionImages;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::renderResHdrImages;
 GpuProfiler Renderer::gpuProfiler;
+std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::frameGenDepthImages;
+std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::frameGenMotionVectorImages;
 
 Renderer::Renderer(GLFWwindow *window)
     : framework_(Framework::create(window)),

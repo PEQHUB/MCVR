@@ -14,6 +14,7 @@
 
 #include "core/render/crash_ring_buffer.hpp"
 #include "core/render/radiance_logger.hpp"
+#include "core/render/modules/world/frame_gen/frame_gen_manager.hpp"
 
 #include <iostream>
 #include <random>
@@ -248,6 +249,9 @@ void Framework::init(GLFWwindow *window) {
 
     pipeline_ = Pipeline::create(shared_from_this());
 
+    // Initialize DLSS-G frame generation
+    FrameGenManager::init();
+
     // Initialize GPU profiler
     Renderer::gpuProfiler.init(device_, physicalDevice_, 16, imageCount);
 }
@@ -383,6 +387,15 @@ void Framework::submitCommand() {
     }
     pipelineContext->uiModuleContext->end();
 
+    // Tag resources for DLSS-G frame generation (after world render, before composite)
+    if (FrameGenManager::isActive()) {
+        auto worldOutput = pipelineContext->worldPipelineContext
+                             ? pipelineContext->worldPipelineContext->outputImage : nullptr;
+        auto overlayOutput = pipelineContext->uiModuleContext
+                               ? pipelineContext->uiModuleContext->overlayDrawColorImage : nullptr;
+        FrameGenManager::tagFrame(currentContext_, worldOutput, overlayOutput);
+    }
+
     currentContext_->fuseFinal();
 
     currentContext_->uploadCommandBuffer->end();
@@ -476,6 +489,9 @@ void Framework::recreate() {
 
     waitRenderQueueIdle();
 
+    // Notify frame gen manager before swapchain teardown
+    FrameGenManager::beforeSwapchainRecreate();
+
     int width = 0, height = 0;
     GLFW_GetFramebufferSize(window_->window(), &width, &height);
     while (width == 0 || height == 0) {
@@ -515,6 +531,9 @@ void Framework::recreate() {
     for (int i = 0; i < size; i++) { contexts_.push_back(FrameworkContext::create(shared_from_this(), i)); }
 
     pipeline_->recreate(shared_from_this());
+
+    // Notify frame gen manager after swapchain recreation
+    FrameGenManager::afterSwapchainRecreate();
 
     Renderer::instance().textures()->bindAllTextures();
 }

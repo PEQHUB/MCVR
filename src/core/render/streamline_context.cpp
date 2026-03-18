@@ -13,6 +13,7 @@ void *StreamlineContext::interposerModule_ = nullptr;
 bool StreamlineContext::initialized_ = false;
 bool StreamlineContext::vulkanInfoSet_ = false;
 bool StreamlineContext::reflexSupported_ = false;
+bool StreamlineContext::dlssGSupported_ = false;
 uint32_t StreamlineContext::frameIndex_ = 0;
 sl::FrameToken *StreamlineContext::currentFrameToken_ = nullptr;
 
@@ -33,6 +34,13 @@ PFun_slReflexGetState *StreamlineContext::pfnReflexGetState = nullptr;
 
 PFun_slPCLSetMarker *StreamlineContext::pfnPCLSetMarker = nullptr;
 PFun_slPCLGetState *StreamlineContext::pfnPCLGetState = nullptr;
+
+PFun_slDLSSGSetOptions *StreamlineContext::pfnDLSSGSetOptions = nullptr;
+PFun_slDLSSGGetState *StreamlineContext::pfnDLSSGGetState = nullptr;
+
+PFun_slSetConstants *StreamlineContext::pfnSlSetConstants = nullptr;
+PFun_slSetTagForFrame *StreamlineContext::pfnSlSetTagForFrame = nullptr;
+PFun_slSetFeatureLoaded *StreamlineContext::pfnSlSetFeatureLoaded = nullptr;
 
 // ---- file-based logger (stdout doesn't reach Minecraft logs) ----
 
@@ -94,6 +102,10 @@ bool StreamlineContext::loadCoreFunctions() {
     ok &= loadProc(mod, "slGetFeatureRequirements", pfnSlGetFeatureRequirements);
     // slIsFeatureSupported is optional — might not exist in all builds
     loadProc(mod, "slIsFeatureSupported", pfnSlIsFeatureSupported);
+    // Core functions needed for DLSS-G resource tagging and constants
+    loadProc(mod, "slSetConstants", pfnSlSetConstants);
+    loadProc(mod, "slSetTagForFrame", pfnSlSetTagForFrame);
+    loadProc(mod, "slSetFeatureLoaded", pfnSlSetFeatureLoaded);
     return ok;
 }
 
@@ -152,6 +164,42 @@ bool StreamlineContext::loadPCLFunctions() {
     return ok;
 }
 
+bool StreamlineContext::loadDlssGFunctions() {
+    if (!pfnSlGetFeatureFunction) return false;
+
+    auto getFunc = [](sl::Feature feature, const char *name, void *&out) -> bool {
+        sl::Result res = pfnSlGetFeatureFunction(feature, name, out);
+        if (res != sl::Result::eOk) {
+            slCerr() << "failed to load " << name << " (result=" << static_cast<int>(res) << ")" << std::endl;
+            return false;
+        }
+        return true;
+    };
+
+    bool ok = true;
+    ok &= getFunc(sl::kFeatureDLSS_G, "slDLSSGSetOptions", reinterpret_cast<void *&>(pfnDLSSGSetOptions));
+    ok &= getFunc(sl::kFeatureDLSS_G, "slDLSSGGetState", reinterpret_cast<void *&>(pfnDLSSGGetState));
+
+    if (ok) {
+        dlssGSupported_ = true;
+        slCout() << "DLSS-G available (all function pointers resolved)" << std::endl;
+
+        // Query initial state to check hardware support
+        sl::DLSSGState state{};
+        sl::Result res = pfnDLSSGGetState(sl::ViewportHandle(0), state, nullptr);
+        slCout() << "DLSS-G initial state: result=" << static_cast<int>(res)
+                 << " status=" << static_cast<uint32_t>(state.status)
+                 << " maxFrames=" << state.numFramesToGenerateMax
+                 << " vramEstimate=" << state.estimatedVRAMUsageInBytes
+                 << std::endl;
+    } else {
+        slCout() << "DLSS-G NOT available (failed to resolve function pointers — "
+                 << "sl.dlss_g.dll may be missing from plugin directory)" << std::endl;
+    }
+
+    return ok;
+}
+
 void StreamlineContext::queryFeatureRequirements() {
     if (!pfnSlGetFeatureRequirements) {
         slCout() << "slGetFeatureRequirements not available, skipping" << std::endl;
@@ -159,7 +207,7 @@ void StreamlineContext::queryFeatureRequirements() {
     }
 
     // Query requirements for each feature we loaded
-    sl::Feature features[] = {sl::kFeatureReflex, sl::kFeaturePCL};
+    sl::Feature features[] = {sl::kFeatureReflex, sl::kFeaturePCL, sl::kFeatureDLSS_G};
     for (auto feature : features) {
         sl::FeatureRequirements reqs{};
         sl::Result res = pfnSlGetFeatureRequirements(feature, reqs);
@@ -203,7 +251,19 @@ void StreamlineContext::queryFeatureRequirements() {
         }
 
         slCout() << "  queues: " << reqs.vkNumGraphicsQueuesRequired << " graphics, "
-                 << reqs.vkNumComputeQueuesRequired << " compute" << std::endl;
+                 << reqs.vkNumComputeQueuesRequired << " compute"
+                 << " | opticalFlow: " << reqs.vkNumOpticalFlowQueuesRequired << std::endl;
+
+        // Log required buffer tags — reveals what buffers each feature actually consumes
+        if (reqs.numRequiredTags > 0) {
+            slCout() << "  required tags (" << reqs.numRequiredTags << "): ";
+            for (uint32_t i = 0; i < reqs.numRequiredTags; i++) {
+                auto &f = slLogFile();
+                if (i > 0) f << ", ";
+                f << reqs.requiredTags[i];
+            }
+            slLogFile() << std::endl;
+        }
 
         if (reqs.vkNumInstanceExtensions == 0 && reqs.vkNumDeviceExtensions == 0) {
             slCout() << "  (no additional Vulkan extensions required)" << std::endl;
@@ -263,11 +323,13 @@ bool StreamlineContext::init(const wchar_t *pluginPath) {
     // intercepts vkGetInstanceProcAddr and vkCreateDevice, automatically registering the
     // device and initializing plugins during vkCreateDevice. Manual hooking mode prevents
     // some command-level hooks from working properly.
+    // Enable frame-based resource tagging (required for slSetTagForFrame used by DLSS-G).
+    pref.flags = pref.flags | sl::PreferenceFlags::eUseFrameBasedResourceTagging;
 
     // Features to load
-    sl::Feature features[] = {sl::kFeatureReflex, sl::kFeaturePCL};
+    sl::Feature features[] = {sl::kFeatureReflex, sl::kFeaturePCL, sl::kFeatureDLSS_G};
     pref.featuresToLoad = features;
-    pref.numFeaturesToLoad = 2;
+    pref.numFeaturesToLoad = 3;
 
     // Plugin search paths — where to find sl.reflex.dll, sl.pcl.dll, etc.
     pref.pathsToPlugins = &pluginPath;
@@ -338,6 +400,7 @@ bool StreamlineContext::onDeviceCreated() {
 
     loadReflexFunctions();
     loadPCLFunctions();
+    loadDlssGFunctions();
 
     // Per NVIDIA docs: "slReflexSetOptions needs to be called at least once,
     // even when Reflex Low Latency is Off and there is no Reflex UI."
@@ -371,6 +434,13 @@ bool StreamlineContext::onDeviceCreated() {
 void StreamlineContext::shutdown() {
     if (!initialized_) return;
 
+    // Disable DLSS-G before shutdown
+    if (dlssGSupported_ && pfnDLSSGSetOptions) {
+        sl::DLSSGOptions fgOpts{};
+        fgOpts.mode = sl::DLSSGMode::eOff;
+        pfnDLSSGSetOptions(sl::ViewportHandle(0), fgOpts);
+    }
+
     // Disable Reflex before shutdown
     if (reflexSupported_ && pfnReflexSetOptions) {
         sl::ReflexOptions opts{};
@@ -391,6 +461,7 @@ void StreamlineContext::shutdown() {
     initialized_ = false;
     vulkanInfoSet_ = false;
     reflexSupported_ = false;
+    dlssGSupported_ = false;
     currentFrameToken_ = nullptr;
     frameIndex_ = 0;
 
@@ -497,5 +568,72 @@ void StreamlineContext::advanceFrame() {
 }
 
 sl::FrameToken *StreamlineContext::getCurrentFrameToken() { return currentFrameToken_; }
+
+uint32_t StreamlineContext::getFrameIndex() { return frameIndex_; }
+
+bool StreamlineContext::isDlssGSupported() { return isAvailable() && dlssGSupported_; }
+
+bool StreamlineContext::setDlssGOptions(sl::DLSSGMode mode, uint32_t numFramesToGenerate) {
+    if (!dlssGSupported_ || !pfnDLSSGSetOptions) return false;
+
+    sl::DLSSGOptions options{};
+    options.mode = mode;
+    options.numFramesToGenerate = numFramesToGenerate;
+
+    sl::Result result = pfnDLSSGSetOptions(sl::ViewportHandle(0), options);
+    if (result != sl::Result::eOk) {
+        slCerr() << "slDLSSGSetOptions failed (result=" << static_cast<int>(result) << ")" << std::endl;
+        return false;
+    }
+
+    slCout() << "DLSS-G mode set to " << static_cast<int>(mode)
+             << " numFramesToGenerate=" << numFramesToGenerate << std::endl;
+    return true;
+}
+
+bool StreamlineContext::getDlssGState(sl::DLSSGState &state) {
+    if (!dlssGSupported_ || !pfnDLSSGGetState) return false;
+    return pfnDLSSGGetState(sl::ViewportHandle(0), state, nullptr) == sl::Result::eOk;
+}
+
+bool StreamlineContext::setConstants(const sl::Constants &consts) {
+    if (!pfnSlSetConstants || !currentFrameToken_) return false;
+    sl::Result result = pfnSlSetConstants(consts, *currentFrameToken_, sl::ViewportHandle(0));
+    if (result != sl::Result::eOk) {
+        // Log only occasionally to avoid spam
+        if (frameIndex_ % 300 == 1) {
+            slCerr() << "slSetConstants failed (result=" << static_cast<int>(result) << ")" << std::endl;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool StreamlineContext::tagResources(const sl::ResourceTag *tags, uint32_t numTags, void *cmdBuffer) {
+    if (!pfnSlSetTagForFrame || !currentFrameToken_) return false;
+    sl::Result result = pfnSlSetTagForFrame(
+        *currentFrameToken_, sl::ViewportHandle(0), tags, numTags,
+        static_cast<sl::CommandBuffer *>(cmdBuffer));
+    if (result != sl::Result::eOk) {
+        if (frameIndex_ % 300 == 1) {
+            slCerr() << "slSetTagForFrame failed (result=" << static_cast<int>(result) << ")" << std::endl;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool StreamlineContext::setFeatureLoaded(sl::Feature feature, bool loaded) {
+    if (!pfnSlSetFeatureLoaded) return false;
+    sl::Result result = pfnSlSetFeatureLoaded(feature, loaded);
+    if (result != sl::Result::eOk) {
+        slCerr() << "slSetFeatureLoaded(feature=" << static_cast<int>(feature)
+                 << ", loaded=" << loaded << ") failed (result=" << static_cast<int>(result) << ")" << std::endl;
+        return false;
+    }
+    slCout() << "feature " << static_cast<int>(feature)
+             << (loaded ? " loaded" : " unloaded") << std::endl;
+    return true;
+}
 
 #endif // _WIN32
