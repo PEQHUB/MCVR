@@ -185,6 +185,15 @@ struct Options {
     uint32_t frameGenMode = 0;           // 0=Off, 1=On, 2=Auto (dynamic MFG)
     uint32_t frameGenMultiplier = 1;     // 1=2x, 2=3x, 3=4x (clamped to hardware max)
 
+    // Volumetric clouds
+    uint32_t cloudQuality = 3;        // 0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra, 5=Extreme
+    float cloudDensity = 1.0f;        // Density multiplier [0.1 - 3.0]
+    float cloudCoverage = 0.35f;      // Base coverage [0.0 - 1.0]
+    float cloudType = 0.0f;           // 0=Cumulus, 1=Stratus [0.0 - 1.0]
+    float cloudSpeed = 1.0f;          // Wind speed multiplier [0.0 - 5.0]
+    float cloudAltitude = 192.0f;     // Cloud base height in blocks [128 - 320]
+    float cloudThickness = 64.0f;     // Cloud layer thickness [32 - 128]
+
     // Diagnostics
     bool loggingEnabled = false;
 };

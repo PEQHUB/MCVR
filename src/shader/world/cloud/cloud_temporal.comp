@@ -1,0 +1,111 @@
+#version 460
+
+// Cloud temporal reprojection + AABB clamping.
+// Blends current cloud color with history for temporal stability.
+// Aggressive 95-97% blend (Doom TDA style).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 3, rgba16f) uniform image2D uCloudColor;     // Current frame (read/write)
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D uCloudHistory;  // Previous frame
+
+layout(set = 1, binding = 0) uniform WorldUniform {
+    mat4 viewMat;
+    mat4 projMat;
+    mat4 viewMatInv;
+    mat4 projMatInv;
+    vec3 eyePos;
+    float pad0;
+} worldUBO;
+
+layout(set = 1, binding = 2) uniform LastWorldUniform {
+    mat4 viewMat;
+    mat4 projMat;
+    mat4 viewMatInv;
+    mat4 projMatInv;
+    vec3 eyePos;
+    float pad0;
+} lastWorldUBO;
+
+layout(push_constant) uniform PushConstants {
+    uint renderWidth;
+    uint renderHeight;
+    uint cloudWidth;
+    uint cloudHeight;
+    float cloudBase;
+    float cloudThickness;
+    float coverage;
+    float cloudType;
+    float densityMultiplier;
+    float windSpeed;
+    float windTime;
+    uint frameIndex;
+    uint marchSteps;
+    uint lightSteps;
+    float temporalBlend;
+    uint shadowMapSize;
+} pc;
+
+void main() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (texel.x >= int(pc.cloudWidth) || texel.y >= int(pc.cloudHeight)) return;
+
+    vec4 current = imageLoad(uCloudColor, texel);
+
+    // Reproject: compute where this pixel was in the previous frame
+    // For clouds at high altitude, approximate world position for reprojection
+    vec2 uv = (vec2(texel) + 0.5) / vec2(pc.cloudWidth, pc.cloudHeight);
+
+    // Reconstruct approximate world position at cloud mid-height
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, 0.5, 1.0);
+    clipPos.y = -clipPos.y;
+    vec4 viewPos = worldUBO.projMatInv * clipPos;
+    viewPos.xyz /= viewPos.w;
+    vec3 worldDir = normalize((worldUBO.viewMatInv * vec4(viewPos.xyz, 0.0)).xyz);
+
+    // Approximate cloud position at mid-layer
+    float cloudMid = pc.cloudBase + pc.cloudThickness * 0.5;
+    float tCloud = max((cloudMid - worldUBO.eyePos.y) / max(worldDir.y, 0.001), 0.0);
+    vec3 worldPos = worldUBO.eyePos + worldDir * tCloud;
+
+    // Project into previous frame
+    vec4 prevView = lastWorldUBO.viewMat * vec4(worldPos, 1.0);
+    vec4 prevClip = lastWorldUBO.projMat * prevView;
+    vec2 prevUV = prevClip.xy / prevClip.w;
+    prevUV.y = -prevUV.y;
+    prevUV = prevUV * 0.5 + 0.5;
+
+    // Check if reprojected UV is valid
+    bool validReproject = all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThanEqual(prevUV, vec2(1.0)));
+
+    if (!validReproject || pc.frameIndex == 0) {
+        // No valid history — keep current sample
+        return;
+    }
+
+    // Sample history at reprojected location
+    ivec2 historyTexel = ivec2(prevUV * vec2(pc.cloudWidth, pc.cloudHeight));
+    historyTexel = clamp(historyTexel, ivec2(0), ivec2(pc.cloudWidth - 1, pc.cloudHeight - 1));
+    vec4 history = imageLoad(uCloudHistory, historyTexel);
+
+    // Neighborhood AABB clamping (3x3)
+    vec4 minVal = current;
+    vec4 maxVal = current;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 neighbor = texel + ivec2(dx, dy);
+            neighbor = clamp(neighbor, ivec2(0), ivec2(pc.cloudWidth - 1, pc.cloudHeight - 1));
+            vec4 s = imageLoad(uCloudColor, neighbor);
+            minVal = min(minVal, s);
+            maxVal = max(maxVal, s);
+        }
+    }
+
+    // Clamp history to neighborhood AABB (prevents ghosting)
+    vec4 clampedHistory = clamp(history, minVal, maxVal);
+
+    // Blend with aggressive temporal weight
+    vec4 result = mix(current, clampedHistory, pc.temporalBlend);
+
+    imageStore(uCloudColor, texel, result);
+}

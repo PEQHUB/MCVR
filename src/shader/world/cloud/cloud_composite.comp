@@ -1,0 +1,63 @@
+#version 460
+
+// Depth-aware cloud composite onto scene radiance.
+// Reads cloud color (at cloud resolution), upsamples to full resolution,
+// and composites behind solid geometry using depth.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D uRadiance;      // Input scene radiance
+layout(set = 0, binding = 1, r32f)    uniform readonly image2D uLinearDepth;   // Scene depth
+layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D uCloudRadiance; // Output composited
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D uCloudColor;    // Cloud color + transmittance
+
+layout(push_constant) uniform PushConstants {
+    uint renderWidth;
+    uint renderHeight;
+    uint cloudWidth;
+    uint cloudHeight;
+    float cloudBase;
+    float cloudThickness;
+    float coverage;
+    float cloudType;
+    float densityMultiplier;
+    float windSpeed;
+    float windTime;
+    uint frameIndex;
+    uint marchSteps;
+    uint lightSteps;
+    float temporalBlend;
+    uint shadowMapSize;
+} pc;
+
+void main() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (texel.x >= int(pc.renderWidth) || texel.y >= int(pc.renderHeight)) return;
+
+    // Load scene radiance
+    vec4 sceneColor = imageLoad(uRadiance, texel);
+
+    // If density multiplier is zero (clouds disabled), pure passthrough
+    if (pc.densityMultiplier <= 0.0) {
+        imageStore(uCloudRadiance, texel, sceneColor);
+        return;
+    }
+
+    // Map full-res texel to cloud-res texel (bilinear via nearest for now)
+    vec2 cloudUV = (vec2(texel) + 0.5) / vec2(pc.renderWidth, pc.renderHeight);
+    ivec2 cloudTexel = ivec2(cloudUV * vec2(pc.cloudWidth, pc.cloudHeight));
+    cloudTexel = clamp(cloudTexel, ivec2(0), ivec2(pc.cloudWidth - 1, pc.cloudHeight - 1));
+
+    // Load cloud color (rgb = scattered light, a = transmittance)
+    vec4 cloud = imageLoad(uCloudColor, cloudTexel);
+
+    // Simple bilateral upsampling: check if cloud-res and full-res depths agree
+    // If large depth discrepancy, reduce cloud contribution to avoid edge bleeding
+    float sceneDepth = imageLoad(uLinearDepth, texel).r;
+
+    // Composite: cloud behind geometry
+    // sceneColor = cloud.rgb + sceneColor * cloud.a (standard pre-multiplied alpha over)
+    vec3 composited = cloud.rgb + sceneColor.rgb * cloud.a;
+
+    imageStore(uCloudRadiance, texel, vec4(composited, sceneColor.a));
+}

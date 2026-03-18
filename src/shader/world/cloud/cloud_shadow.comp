@@ -1,0 +1,104 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+// Cloud shadow map for VML fog integration.
+// Traces vertical columns through cloud layer along sun direction,
+// outputs transmittance map centered on camera.
+// VolumetricModule's scatter shader reads this instead of hash-based shadow.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 6)          uniform sampler3D uNoise3D;
+layout(set = 0, binding = 7, r16f)    uniform writeonly image2D uCloudShadow;
+layout(set = 0, binding = 8)          uniform sampler2D uWeatherMap;
+
+layout(set = 1, binding = 0) uniform WorldUniform {
+    mat4 viewMat;
+    mat4 projMat;
+    mat4 viewMatInv;
+    mat4 projMatInv;
+    vec3 eyePos;
+    float pad0;
+} worldUBO;
+
+layout(set = 1, binding = 1) uniform SkyUniform {
+    vec3 baseColor;
+    uint skyType;
+    vec4 horizonColor;
+    vec3 sunDirection;
+    uint isSunRisingOrSetting;
+    vec3 moonDirection;
+    float moonDirPad;
+    uint isSkyDark;
+    uint hasBlindnessOrDarkness;
+    uint cameraSubmersionType;
+    uint moonPhase;
+    float rainGradient;
+    float hdrRadianceScale;
+    float pad1;
+    float pad2;
+} skyUBO;
+
+layout(push_constant) uniform PushConstants {
+    uint renderWidth;
+    uint renderHeight;
+    uint cloudWidth;
+    uint cloudHeight;
+    float cloudBase;
+    float cloudThickness;
+    float coverage;
+    float cloudType;
+    float densityMultiplier;
+    float windSpeed;
+    float windTime;
+    uint frameIndex;
+    uint marchSteps;
+    uint lightSteps;
+    float temporalBlend;
+    uint shadowMapSize;
+} pc;
+
+#include "cloud_density.glsl"
+
+const float NOISE_SCALE = 1.0 / 256.0;
+const uint SHADOW_STEPS = 16;
+
+void main() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (texel.x >= int(pc.shadowMapSize) || texel.y >= int(pc.shadowMapSize)) return;
+
+    // Map shadow texel to world XZ position (centered on camera, 1024-block coverage)
+    vec2 uv = (vec2(texel) + 0.5) / float(pc.shadowMapSize);
+    vec2 worldXZ = worldUBO.eyePos.xz + (uv - 0.5) * 1024.0;
+
+    // Trace column through cloud layer along sun direction
+    vec3 sunDir = normalize(skyUBO.sunDirection);
+
+    // Start at cloud base, march upward through thickness
+    float stepSize = pc.cloudThickness / float(SHADOW_STEPS);
+    float opticalDepth = 0.0;
+
+    for (uint i = 0; i < SHADOW_STEPS; i++) {
+        float y = pc.cloudBase + (float(i) + 0.5) * stepSize;
+        vec3 pos = vec3(worldXZ.x, y, worldXZ.y);
+
+        // Offset by sun angle (shadow projection)
+        float sunT = (y - pc.cloudBase) / max(sunDir.y, 0.01);
+        pos.xz += sunDir.xz * sunT;
+
+        vec3 noisePos = pos * NOISE_SCALE + vec3(pc.windTime * 0.02, 0.0, pc.windTime * 0.01);
+        vec4 noise = texture(uNoise3D, noisePos);
+
+        // Weather sample
+        vec2 weatherUV = (pos.xz - worldUBO.eyePos.xz) / 1024.0 + 0.5;
+        vec4 weather = texture(uWeatherMap, weatherUV);
+
+        float density = cloudDensity(pos, weather.r, weather.g, noise,
+                                      pc.cloudBase, pc.cloudThickness, pc.densityMultiplier);
+        opticalDepth += density * stepSize;
+    }
+
+    // Output transmittance
+    float transmittance = exp(-opticalDepth);
+    imageStore(uCloudShadow, texel, vec4(transmittance));
+}
