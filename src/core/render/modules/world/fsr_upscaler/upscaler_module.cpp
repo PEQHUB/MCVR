@@ -5,6 +5,7 @@
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
+#include "core/render/modules/world/frame_gen/fsr_frame_gen_manager.hpp"
 
 #include <iostream>
 
@@ -704,6 +705,28 @@ void UpscalerModuleContext::render() {
     inputColorImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     deviceDepthImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     fsrMotionVectorImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    // FSR FG Prepare: dilate depth + MVs at render res (before upscale)
+    if (FsrFrameGenManager::isActive()) {
+        float fov = 2.0f * atan(1.0f / worldUBO->cameraProjMat[1][1]);
+        float cameraPos[3] = {worldUBO->cameraPos.x, worldUBO->cameraPos.y, worldUBO->cameraPos.z};
+        // Extract camera basis from view matrix (column-major, row 2 = forward)
+        float cameraForward[3] = {-worldUBO->cameraViewMat[0][2], -worldUBO->cameraViewMat[1][2], -worldUBO->cameraViewMat[2][2]};
+        float cameraUp[3]      = { worldUBO->cameraViewMat[0][1],  worldUBO->cameraViewMat[1][1],  worldUBO->cameraViewMat[2][1]};
+        float cameraRight[3]   = { worldUBO->cameraViewMat[0][0],  worldUBO->cameraViewMat[1][0],  worldUBO->cameraViewMat[2][0]};
+
+        FsrFrameGenManager::prepare(
+            worldCommandBuffer->vkCommandBuffer(),
+            inputDepthImage->vkImage(), inputDepthImage->vkFormat(),
+            inputDepthImage->width(), inputDepthImage->height(),
+            inputMotionVectorImage->vkImage(), inputMotionVectorImage->vkFormat(),
+            inputMotionVectorImage->width(), inputMotionVectorImage->height(),
+            -worldUBO->cameraJitter.x, -worldUBO->cameraJitter.y,
+            1.0f, 1.0f,  // pixel-space MVs
+            getSmoothDeltaTime(),
+            0.1f, 10000.0f, fov,
+            cameraPos, cameraUp, cameraRight, cameraForward);
+    }
 
     // FSR3 Dispatch
     mcvr::UpscalerInput input{};

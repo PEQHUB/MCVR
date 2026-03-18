@@ -266,6 +266,9 @@ void vk::Swapchain::reconstruct() {
     createInfo.clipped = VK_TRUE;
     createInfo.oldSwapchain = oldSwapchain;
 
+    // Cache for FSR FG proxy swapchain creation
+    lastCreateInfo_ = createInfo;
+
     VkResult swapResult = vkCreateSwapchainKHR(device_->vkDevice(), &createInfo, nullptr, &swapchain_);
     if (swapResult != VK_SUCCESS) {
         // DLSS-G hooks may reject non-FIFO modes during recreation. Retry with FIFO (guaranteed).

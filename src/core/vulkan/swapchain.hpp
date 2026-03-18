@@ -38,6 +38,13 @@ class Swapchain : public SharedObject<Swapchain> {
     /// Returns true if the current surface supports HDR10 swapchain formats.
     bool isHDRSupported() const;
 
+    /// Cached create info from last reconstruct() — used by FSR FG proxy swapchain.
+    const VkSwapchainCreateInfoKHR& lastCreateInfo() const { return lastCreateInfo_; }
+
+    uint32_t width() const { return extent_.width; }
+    uint32_t height() const { return extent_.height; }
+    VkFormat imageFormat() const { return surfaceFormat_.format; }
+
   private:
     std::shared_ptr<PhysicalDevice> physicalDevice_;
     std::shared_ptr<Device> device_;
@@ -52,6 +59,7 @@ class Swapchain : public SharedObject<Swapchain> {
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     bool hdrActive_ = false;  // true when HDR10 format was successfully selected
     bool transferSrcEnabled_ = false;
+    VkSwapchainCreateInfoKHR lastCreateInfo_{};
 
     std::vector<std::shared_ptr<SwapchainImage>> swapchainImages_;
 };

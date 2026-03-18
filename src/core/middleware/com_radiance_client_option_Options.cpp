@@ -739,13 +739,17 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 // ═══════════ Frame Generation (DLSS-G) ═══════════
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetFrameGenBackend(
+    JNIEnv *, jclass, jint backend, jboolean) {
+    Renderer::options.frameGenBackend = static_cast<uint32_t>(std::clamp(backend, 0, 2));
+    Renderer::options.frameGenEnabled = (Renderer::options.frameGenBackend != 0 && Renderer::options.frameGenMode != 0);
+    Renderer::options.needRecreate = true;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetFrameGenMode(
     JNIEnv *, jclass, jint mode, jboolean) {
     Renderer::options.frameGenMode = static_cast<uint32_t>(std::clamp(mode, 0, 2));
-    Renderer::options.frameGenEnabled = (mode != 0);
-    // Trigger swapchain recreation — FrameGenManager::setMode() will be called
-    // on the render thread during recreate (via beforeSwapchainRecreate/afterSwapchainRecreate).
-    // Don't call slDLSSGSetOptions from the Java thread — it's not thread-safe.
+    Renderer::options.frameGenEnabled = (Renderer::options.frameGenBackend != 0 && mode != 0);
     Renderer::options.needRecreate = true;
 }
 
@@ -760,6 +764,14 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 }
 
 extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_option_Options_nativeIsFrameGenSupported(
+    JNIEnv *, jclass) {
+    // True if EITHER DLSS-G or FSR FG is available
+    bool dlssg = FrameGenManager::maxFramesToGenerate() > 0;
+    bool fsrFg = true;  // FSR FG always available when FFX upscaler is compiled in
+    return (dlssg || fsrFg) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_option_Options_nativeIsDlssFrameGenSupported(
     JNIEnv *, jclass) {
     return FrameGenManager::maxFramesToGenerate() > 0 ? JNI_TRUE : JNI_FALSE;
 }

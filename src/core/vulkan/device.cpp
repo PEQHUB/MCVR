@@ -278,13 +278,18 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     PFN_vkCreateDevice createDeviceFn = slCreateDevice ? slCreateDevice : vkCreateDevice;
 
     // create logical device
+    // Request up to 3 queues from unified family: main (graphics), secondary (compute), present (FSR FG)
+    bool unifiedFamily = physicalDevice_->mainQueueIndex() == physicalDevice_->secondaryQueueIndex();
+    uint32_t unifiedQueueCount = (unifiedFamily && physicalDevice_->mainQueueCount() >= 3) ? 3 : 2;
+
     VkDeviceCreateInfo deviceCreateInfo = {};
-    if (physicalDevice_->mainQueueIndex() == physicalDevice_->secondaryQueueIndex()) {
-        std::vector<float> queuePriorities{{1.0, 0.0}};
+    if (unifiedFamily) {
+        std::vector<float> queuePriorities(unifiedQueueCount, 0.0f);
+        queuePriorities[0] = 1.0f;  // main queue highest priority
         VkDeviceQueueCreateInfo queueCreateInfo = {};
         queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         queueCreateInfo.queueFamilyIndex = physicalDevice_->mainQueueIndex();
-        queueCreateInfo.queueCount = 2;
+        queueCreateInfo.queueCount = unifiedQueueCount;
         queueCreateInfo.pQueuePriorities = queuePriorities.data();
 
         deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -351,8 +356,14 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
 
     vkGetDeviceQueue(device_, physicalDevice_->mainQueueIndex(), 0, &mainQueue_);
     vkGetDeviceQueue(device_, physicalDevice_->secondaryQueueIndex(),
-                     physicalDevice_->mainQueueIndex() == physicalDevice_->secondaryQueueIndex() ? 1 : 0,
+                     unifiedFamily ? 1 : 0,
                      &secondaryQueue_);
+    // Dedicated present queue for FSR FG (index 2 if available, else shares with main)
+    if (unifiedFamily && unifiedQueueCount >= 3) {
+        vkGetDeviceQueue(device_, physicalDevice_->presentQueueIndex(), 2, &presentQueue_);
+    } else {
+        presentQueue_ = mainQueue_;  // fallback: share with main
+    }
 
     loadPipelineCache();
 }
@@ -439,4 +450,8 @@ VkQueue &vk::Device::mainVkQueue() {
 
 VkQueue &vk::Device::secondaryQueue() {
     return secondaryQueue_;
+}
+
+VkQueue &vk::Device::presentVkQueue() {
+    return presentQueue_;
 }
