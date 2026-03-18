@@ -569,8 +569,9 @@ void ToneMappingModuleContext::render() {
     pc.sdrTransferFunction = static_cast<float>(Renderer::options.sdrTransferFunction);
     pc.manualExposureEnabled = Renderer::options.manualExposureEnabled ? 1.0f : 0.0f;
     pc.manualExposure = Renderer::options.manualExposure;
-    // PsychoV tonemapper parameters (HDR only — disable in SDR so legacy tonemappers work)
-    pc.psychoEnabled = (Renderer::options.psychoEnabled && hdrPipelineEnabled) ? 1.0f : 0.0f;
+    // HDR tonemapper mode: 0.0 = PsychoVisual, 1.0 = BT.2390 EETF
+    // SDR uses tonemapMode (0-8) instead; PsychoV params are always sent for both paths.
+    pc.psychoEnabled = static_cast<float>(Renderer::options.hdrTonemapMode);
     pc.psychoHighlights = Renderer::options.psychoHighlights;
     pc.psychoShadows = Renderer::options.psychoShadows;
     pc.psychoContrast = Renderer::options.psychoContrast;

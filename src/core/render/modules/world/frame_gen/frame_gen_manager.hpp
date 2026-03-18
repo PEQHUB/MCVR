@@ -1,10 +1,8 @@
 #pragma once
 
 #include "core/vulkan/all_core_vulkan.hpp"
+#include "core/render/render_framework.hpp"
 #include <memory>
-
-class Framework;
-struct FrameworkContext;
 
 /// Manages DLSS-G frame generation: sets SL constants and tags resources each frame.
 /// Not a WorldModule — operates at the framework/present level, not the pipeline level.
@@ -43,4 +41,5 @@ class FrameGenManager {
     static uint32_t maxFrames_;
     static uint32_t currentMode_;
     static bool needsSwapchainRecreate_;
+    static bool pendingEnable_;  // Deferred slDLSSGSetOptions after swapchain recreate
 };

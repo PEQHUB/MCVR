@@ -32,7 +32,7 @@ struct ToneMappingModuleExposureData {
     float manualExposureEnabled; // 0.0 = auto exposure, 1.0 = manual exposure
     float manualExposure;        // direct exposure multiplier when manual is enabled
     // PsychoV tonemapper parameters
-    float psychoEnabled;         // 0.0 = BT.2390, 1.0 = PsychoV
+    float psychoEnabled;         // HDR tonemapper: 0.0 = PsychoVisual, 1.0 = BT.2390 EETF
     float psychoHighlights;
     float psychoShadows;
     float psychoContrast;

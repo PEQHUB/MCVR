@@ -266,13 +266,20 @@ void vk::Swapchain::reconstruct() {
     createInfo.clipped = VK_TRUE;
     createInfo.oldSwapchain = oldSwapchain;
 
-    if (vkCreateSwapchainKHR(device_->vkDevice(), &createInfo, nullptr, &swapchain_) != VK_SUCCESS) {
-        swapchainCerr() << "failed to create swap chain" << std::endl;
-        exit(EXIT_FAILURE);
-    } else {
-#ifdef DEBUG
-        swapchainCout() << "created swap chain" << std::endl;
-#endif
+    VkResult swapResult = vkCreateSwapchainKHR(device_->vkDevice(), &createInfo, nullptr, &swapchain_);
+    if (swapResult != VK_SUCCESS) {
+        // DLSS-G hooks may reject non-FIFO modes during recreation. Retry with FIFO (guaranteed).
+        if (presentMode_ != VK_PRESENT_MODE_FIFO_KHR) {
+            swapchainCerr() << "swap chain creation failed with mode " << presentMode_
+                            << " (result=" << swapResult << "), retrying with FIFO" << std::endl;
+            presentMode_ = VK_PRESENT_MODE_FIFO_KHR;
+            createInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+            swapResult = vkCreateSwapchainKHR(device_->vkDevice(), &createInfo, nullptr, &swapchain_);
+        }
+        if (swapResult != VK_SUCCESS) {
+            swapchainCerr() << "failed to create swap chain (result=" << swapResult << ")" << std::endl;
+            exit(EXIT_FAILURE);
+        }
     }
 
     if (oldSwapchain != VK_NULL_HANDLE) { vkDestroySwapchainKHR(device_->vkDevice(), oldSwapchain, nullptr); }

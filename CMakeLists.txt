@@ -67,6 +67,13 @@ file(GLOB __SL_DLLS "${PROJECT_SOURCE_DIR}/extern/streamline/bin/*.dll")
 install(FILES ${__SL_DLLS} DESTINATION ${MCVR_INSTALL_BIN_DIR})
 install(FILES ${__SL_DLLS} DESTINATION ${MCVR_INSTALL_LIB_DIR})
 
+# Install nvngx_dlssg.dll (DLSS-G NGX snippet) into JAR resources — small enough to bundle (7.5MB)
+set(__DLSSG_NGX "${PROJECT_SOURCE_DIR}/extern/DLSS/lib/Windows_x86_64/rel/nvngx_dlssg.dll")
+if(EXISTS ${__DLSSG_NGX})
+    install(FILES ${__DLSSG_NGX} DESTINATION ${MCVR_INSTALL_BIN_DIR})
+    install(FILES ${__DLSSG_NGX} DESTINATION ${MCVR_INSTALL_LIB_DIR})
+endif()
+
 # JNI
 find_package(JNI REQUIRED)
 message(STATUS "${JNI_INCLUDE_DIRS}")

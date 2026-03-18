@@ -21,6 +21,7 @@ bool FrameGenManager::active_ = false;
 uint32_t FrameGenManager::maxFrames_ = 0;
 uint32_t FrameGenManager::currentMode_ = 0;
 bool FrameGenManager::needsSwapchainRecreate_ = false;
+bool FrameGenManager::pendingEnable_ = false;
 
 bool FrameGenManager::init() {
 #ifdef _WIN32
@@ -65,8 +66,30 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
                                std::shared_ptr<vk::DeviceLocalImage> worldOutput,
                                std::shared_ptr<vk::DeviceLocalImage> overlayOutput) {
 #ifdef _WIN32
-    if (!active_ || !StreamlineContext::isDlssGSupported()) return;
+    if (!StreamlineContext::isDlssGSupported()) return;
     if (!context) return;
+
+    // Deferred enable: apply slDLSSGSetOptions on the render thread, not during swapchain callback
+    if (pendingEnable_) {
+        pendingEnable_ = false;
+        uint32_t mode = Renderer::options.frameGenMode;
+        uint32_t multiplier = Renderer::options.frameGenMultiplier;
+        if (multiplier > maxFrames_) multiplier = maxFrames_;
+        if (multiplier < 1) multiplier = 1;
+
+        sl::DLSSGMode slMode;
+        switch (mode) {
+        case 1:  slMode = sl::DLSSGMode::eOn; break;
+        case 2:  slMode = sl::DLSSGMode::eAuto; break;
+        default: slMode = sl::DLSSGMode::eOff; break;
+        }
+
+        StreamlineContext::setDlssGOptions(slMode, multiplier);
+        active_ = true;
+        currentMode_ = mode;
+    }
+
+    if (!active_) return;
 
     // Don't tag during offline accumulation — generated frames would corrupt the Welford accumulator
     if (Renderer::options.offlineState == 2) return;
@@ -132,6 +155,9 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
 
     // Jitter offset (pixel space)
     consts.jitterOffset = sl::float2(worldUBO->cameraJitter.x, worldUBO->cameraJitter.y);
+
+    // Camera pinhole offset — (0,0) for standard centered pinhole projection
+    consts.cameraPinholeOffset = sl::float2(0.0f, 0.0f);
 
     // Motion vector scale: our MVs are in pixel space already, normalize to [-1,1]
     // MV format: screen-space pixel offsets at render resolution
@@ -209,15 +235,15 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
         res.arrayLayers = 1;
     };
 
-    // Linear Depth (render resolution) — our RT outputs linear depth, not hardware Z-buffer.
-    // Use kBufferTypeLinearDepth (49), not kBufferTypeDepth (0) which expects non-linear Z.
+    // Depth (render resolution) — DLSS-G requires kBufferTypeDepth. Our RT outputs linear depth;
+    // sl::Constants flags (depthInverted etc.) tell SL how to interpret it.
     if (frameIndex < Renderer::frameGenDepthImages.size() && Renderer::frameGenDepthImages[frameIndex]) {
         auto depthImg = Renderer::frameGenDepthImages[frameIndex];
         sl::Resource depthRes(sl::ResourceType::eTex2d, nullptr, static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL));
         fillResource(depthRes, depthImg, static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL));
 
         sl::Extent renderExtent{0, 0, depthImg->width(), depthImg->height()};
-        sl::ResourceTag depthTag(&depthRes, sl::kBufferTypeLinearDepth,
+        sl::ResourceTag depthTag(&depthRes, sl::kBufferTypeDepth,
                                   sl::ResourceLifecycle::eValidUntilPresent, &renderExtent);
         StreamlineContext::tagResources(&depthTag, 1);
     }
@@ -259,7 +285,7 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
 }
 
 bool FrameGenManager::isActive() {
-    return active_;
+    return active_ || pendingEnable_;
 }
 
 uint32_t FrameGenManager::maxFramesToGenerate() {
@@ -300,24 +326,11 @@ void FrameGenManager::afterSwapchainRecreate() {
     }
 
     if (wantActive) {
-        // (Re-)apply mode + multiplier after swapchain is ready
-        uint32_t mode = Renderer::options.frameGenMode;
-        uint32_t multiplier = Renderer::options.frameGenMultiplier;
-        if (multiplier > maxFrames_) multiplier = maxFrames_;
-        if (multiplier < 1) multiplier = 1;
-
-        sl::DLSSGMode slMode;
-        switch (mode) {
-        case 1:  slMode = sl::DLSSGMode::eOn; break;
-        case 2:  slMode = sl::DLSSGMode::eAuto; break;
-        default: slMode = sl::DLSSGMode::eOff; break;
-        }
-
-        StreamlineContext::setDlssGOptions(slMode, multiplier);
-        active_ = true;
-        currentMode_ = mode;
-        fgCout() << "resumed after swapchain recreate: mode=" << mode
-                 << " multiplier=" << multiplier << std::endl;
+        // Defer the actual slDLSSGSetOptions call to tagFrame() on the render thread.
+        // Calling it here (during swapchain callback) causes GetModuleHandleA failures
+        // because DLSS-G's swapchain hooks haven't finished setting up yet.
+        pendingEnable_ = true;
+        fgCout() << "pending enable after swapchain recreate" << std::endl;
     }
 #endif
 }

@@ -338,7 +338,7 @@ bool StreamlineContext::init(const wchar_t *pluginPath) {
     // Engine identity
     pref.engine = sl::EngineType::eCustom;
     pref.engineVersion = "1.0.0";
-    pref.projectId = "radiance-mcvr";
+    pref.projectId = "a0f57b54-1daf-4934-90ae-c4035c19df04";
 
     // 4. Initialize Streamline
     sl::Result result = pfnSlInit(pref, sl::kSDKVersion);
@@ -415,15 +415,23 @@ bool StreamlineContext::onDeviceCreated() {
         // Reapply saved Reflex settings — Java loadProperties() runs before
         // onDeviceCreated(), so the initial nativeSetReflexEnabled() call is
         // ignored (reflexSupported_ was still false). Reapply now.
+        // Calls applyReflexSettings() via JNI path to get correct VRR frame limit.
         if (Renderer::options.reflexEnabled) {
             sl::ReflexOptions saved{};
             saved.mode = Renderer::options.reflexBoost
                 ? sl::ReflexMode::eLowLatencyWithBoost
                 : sl::ReflexMode::eLowLatency;
-            saved.frameLimitUs = 0;
+
+            // FPS limit via Reflex (0 = unlimited)
+            uint32_t frameLimitUs = 0;
+            uint32_t maxFps = Renderer::options.maxFps;
+            if (maxFps > 0 && maxFps < 1000000) frameLimitUs = 1000000 / maxFps;
+
+            saved.frameLimitUs = frameLimitUs;
             sl::Result r2 = pfnReflexSetOptions(saved);
             slCout() << "reapply saved Reflex mode="
                      << static_cast<int>(saved.mode)
+                     << " frameLimitUs=" << frameLimitUs
                      << " result=" << static_cast<int>(r2) << std::endl;
         }
     }
@@ -511,7 +519,8 @@ bool StreamlineContext::setReflexOptions(sl::ReflexMode mode, uint32_t frameLimi
         return false;
     }
 
-    slCout() << "Reflex mode set to " << static_cast<int>(mode) << std::endl;
+    slCout() << "Reflex mode set to " << static_cast<int>(mode)
+             << " frameLimitUs=" << frameLimitUs << std::endl;
     return true;
 }
 
@@ -532,6 +541,23 @@ bool StreamlineContext::pclSetMarker(sl::PCLMarker marker) {
 
 void StreamlineContext::advanceFrame() {
     if (!initialized_ || !pfnSlGetNewFrameToken) return;
+
+    // Deferred Reflex settings apply — slider sets reflexDirty, we apply once per frame
+    if (Renderer::options.reflexDirty) {
+        Renderer::options.reflexDirty = false;
+        if (reflexSupported_ && pfnReflexSetOptions) {
+            sl::ReflexOptions opts{};
+            if (Renderer::options.reflexEnabled) {
+                opts.mode = Renderer::options.reflexBoost
+                    ? sl::ReflexMode::eLowLatencyWithBoost
+                    : sl::ReflexMode::eLowLatency;
+            }
+            uint32_t maxFps = Renderer::options.maxFps;
+            opts.frameLimitUs = (maxFps > 0 && maxFps < 1000000) ? (1000000 / maxFps) : 0;
+            pfnReflexSetOptions(opts);
+        }
+    }
+
     frameIndex_++;
     sl::Result res = pfnSlGetNewFrameToken(currentFrameToken_, &frameIndex_);
 

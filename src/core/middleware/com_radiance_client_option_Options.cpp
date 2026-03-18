@@ -14,11 +14,21 @@
 
 #include <algorithm>
 
+static void applyReflexSettings(); // forward decl — defined below
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMaxFps(JNIEnv *,
                                                                                jclass,
                                                                                jint maxFps,
                                                                                jboolean write) {
     Renderer::options.maxFps = maxFps;
+    // Don't call applyReflexSettings() here — slider drag fires per-pixel.
+    // Reflex frame limit is applied lazily via Renderer::options.reflexDirty flag.
+    Renderer::options.reflexDirty = true;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeApplyReflexSettings(
+    JNIEnv *, jclass) {
+    applyReflexSettings();
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetInactivityFpsLimit(JNIEnv *,
@@ -302,6 +312,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.psychoEnabled = enabled;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrTonemapMode(
+    JNIEnv *, jclass, jint mode, jboolean write) {
+    Renderer::options.hdrTonemapMode = mode;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoHighlights(
     JNIEnv *, jclass, jfloat v, jboolean write) { Renderer::options.psychoHighlights = v; }
 
@@ -399,21 +414,11 @@ static void applyReflexSettings() {
             : sl::ReflexMode::eLowLatency;
     }
 
+    // FPS limit via Reflex frame limiter (0 = unlimited)
     uint32_t frameLimitUs = 0;
-    if (Renderer::options.vrrMode && Renderer::options.reflexEnabled) {
-        // VRR cap formula: targetFps = 3600 * Hz / (Hz + 3600)
-        // For 240 Hz → 225 fps, for 144 Hz → 138 fps, for 60 Hz → 59 fps
-        int hz = getDisplayRefreshRate();
-        if (hz > 0) {
-            uint32_t targetFps = (3600u * static_cast<uint32_t>(hz)) / (static_cast<uint32_t>(hz) + 3600u);
-            if (targetFps > 0) frameLimitUs = 1000000u / targetFps;
-        }
-    } else {
-        // Fall back to user's maxFps cap (if set)
-        uint32_t maxFps = Renderer::options.maxFps;
-        if (maxFps > 0 && maxFps < 1000000) {
-            frameLimitUs = 1000000 / maxFps;
-        }
+    uint32_t maxFps = Renderer::options.maxFps;
+    if (maxFps > 0 && maxFps < 1000000) {
+        frameLimitUs = 1000000 / maxFps;
     }
 
     StreamlineContext::setReflexOptions(mode, frameLimitUs);
@@ -440,7 +445,8 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_option_Options_na
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetVrrMode(
     JNIEnv *, jclass, jboolean enabled, jboolean write) {
     Renderer::options.vrrMode = enabled;
-    applyReflexSettings();
+    // Don't call applyReflexSettings() — vrrMode is a UI hint only.
+    // Frame limit is controlled solely by maxFps via the deferred reflexDirty path.
 }
 
 extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_option_Options_nativeGetDisplayRefreshRate(

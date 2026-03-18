@@ -207,7 +207,7 @@ vec3 HermiteSplineReinhardToneMap(vec3 color, float Lw, vec3 luma) {
 }
 
 // ============================================================================
-// HDR Mode 2: BT.2390 EETF (ITU-R BT.2390-7)
+// HDR Mode 2: ITU EETF (Hermite spline) — originally BT.2390 Method B, now in BT.2408/BT.2446
 // Electrical-Electrical Transfer Function for HDR display adaptation.
 // Maps scene luminance to display luminance using Hermite spline knee.
 // Input: exposed linear RGB. Output: linear RGB scaled for HDR headroom.
@@ -935,9 +935,11 @@ void main() {
 
         float hdrHeadroom = peak / paperWhite;
 
+        // HDR tonemapper: 0 = PsychoVisual, 1 = BT.2390 EETF (industry standard)
         vec3 mapped;
-        if (gExposure.psychoEnabled > 0.5) {
-            // PsychoV: input is BT.2020, output stays BT.2020 (wideGamutInput=true)
+        float hdrMode = gExposure.psychoEnabled;  // repurposed: 0.0 = PsychoV, 1.0 = BT.2390
+        if (hdrMode < 0.5) {
+            // PsychoVisual: input is BT.2020, output stays BT.2020 (wideGamutInput=true)
             float psychoPeak = peak / paperWhite;
             mapped = psychoTonemap(workingColor, true,
                 psychoPeak,
@@ -952,7 +954,7 @@ void main() {
                 gExposure.psychoWhiteCurve,
                 gExposure.psychoConeExponent);
         } else {
-            // BT.2390 EETF with BT.2020 luma weights
+            // ITU EETF (Hermite spline) with BT.2020 luma weights
             mapped = BT2390EETF(workingColor, hdrHeadroom, LUMA_BT2020);
         }
 
@@ -992,13 +994,25 @@ void main() {
         vec3 mapped;
         float mode = gExposure.tonemapMode;
         if      (mode < 0.5) mapped = PBRNeutralToneMap(workingColor);       // 0: PBR Neutral
-        else if (mode < 1.5) mapped = ReinhardExtToneMap(workingColor); // 1: Reinhard
+        else if (mode < 1.5) mapped = ReinhardExtToneMap(workingColor);      // 1: Reinhard
         else if (mode < 2.5) mapped = ACESHillToneMap(workingColor);         // 2: ACES
         else if (mode < 3.5) mapped = AgXToneMap(workingColor);              // 3: AgX
         else if (mode < 4.5) mapped = LottesToneMap(workingColor);           // 4: Lottes
         else if (mode < 5.5) mapped = FrostbiteToneMap(workingColor);        // 5: Frostbite
         else if (mode < 6.5) mapped = Uncharted2ToneMap(workingColor);       // 6: Uncharted 2
-        else                  mapped = GTToneMap(workingColor);               // 7: GT
+        else if (mode < 7.5) mapped = GTToneMap(workingColor);               // 7: GT
+        else                 mapped = psychoTonemap(workingColor, true,      // 8: PsychoVisual
+            1.0,  // SDR peak = 1.0
+            gExposure.psychoHighlights,
+            gExposure.psychoShadows,
+            gExposure.psychoContrast,
+            gExposure.psychoPurity,
+            gExposure.psychoBleaching,
+            gExposure.psychoClipPoint,
+            gExposure.psychoHueRestore,
+            gExposure.psychoAdaptContrast,
+            gExposure.psychoWhiteCurve,
+            gExposure.psychoConeExponent);
 
         // Convert BT.2020 → BT.709 AFTER tonemapping (preserves wide-gamut processing)
         const mat3 BT2020_TO_BT709 = mat3(

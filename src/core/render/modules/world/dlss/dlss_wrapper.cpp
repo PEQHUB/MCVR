@@ -443,11 +443,8 @@ NVSDK_NGX_Result DlssRR::denoise(std::shared_ptr<vk::CommandBuffer> cmdBuffer,
     evalParams.pInViewToClipMatrix = const_cast<float *>(glm::value_ptr(projection));
 
     evalParams.InReset = reset;
-    // InPreExposure: tell DLSS-RR the actual input scale for internal normalization.
-    // InExposureScale: 1.0 — do NOT rescale output. The engine's auto-exposure handles
-    // exposure entirely; histogram and tone mapper both see the same pre-exposed scale.
-    // DLSS-RR guide §3.7 says exposure features are "not supported," but InPreExposure
-    // is still passed to the backend for input range understanding.
+    // Tell DLSS-RR the actual pre-exposure so it can normalize HDR input internally.
+    // InExposureScale=1.0 keeps output in pre-exposed space (matches histogram).
     evalParams.InPreExposure = preExposure;
     evalParams.InExposureScale = 1.0f;
     // Input is pre-exposed linear HDR — no engine tonemapper applied before DLSS-RR

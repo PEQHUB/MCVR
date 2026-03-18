@@ -31,6 +31,7 @@ struct Options {
     bool reflexBoost = false;       // Reflex Boost — raise GPU clocks during latency-sensitive work
     bool vrrMode = false;           // VRR frame cap: 3600*Hz/(Hz+3600) via Reflex frameLimitUs
     bool needRecreate = false;
+    bool reflexDirty = false;       // Deferred Reflex settings apply (avoids slider spam)
 
     uint32_t chunkBuildingBatchSize = 6;
     uint32_t chunkBuildingTotalBatches = 6;
@@ -67,7 +68,8 @@ struct Options {
     uint32_t sdrTransferFunction = 1;
 
     // PsychoV tonemapper (RenoDX psycho_test11)
-    bool psychoEnabled = true;
+    bool psychoEnabled = true;   // kept for JNI compat — used by SDR tonemapMode==8 visibility
+    int hdrTonemapMode = 0;      // 0 = PsychoVisual, 1 = BT.2390 EETF
     float psychoHighlights = 1.0f;       // 0.0-3.0, default 1.0
     float psychoShadows = 1.0f;          // 0.0-3.0, default 1.0
     float psychoContrast = 1.0f;         // 0.0-3.0, default 1.0
