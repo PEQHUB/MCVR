@@ -642,6 +642,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.offlineState = static_cast<uint32_t>(std::clamp(state, 0, 2));
     if (state == 2) {
         Renderer::accumFrameCount = 0;  // reset on entering accumulation
+        Renderer::dlssEpochFrame = 0;
+        Renderer::dlssEpochCount = 0;
     }
     // Accumulation always forces native resolution
     if (state == 2 && !Renderer::options.offlineNativeResActive) {
@@ -702,17 +704,29 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineDenoised(
     JNIEnv *, jclass, jint mode, jboolean) {
-    // 0=Raw Fast (RR on), 1=Raw Slow (RR off), 2=DLSS-D Converge
+    // 0=Raw Fast (RR on), 1=Raw Accurate (RR off), 2=Denoised (epoch-based DLSS-RR)
     Renderer::options.offlineDenoised = static_cast<uint32_t>(std::clamp(mode, 0, 2));
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeResetAccumulation(
     JNIEnv *, jclass) {
     Renderer::accumFrameCount = 0;
+    Renderer::dlssEpochFrame = 0;
+    Renderer::dlssEpochCount = 0;
 }
 
 extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_option_Options_nativeGetAccumFrameCount(
     JNIEnv *, jclass) {
     return static_cast<jint>(Renderer::accumFrameCount);
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_option_Options_nativeGetDlssEpochCount(
+    JNIEnv *, jclass) {
+    return static_cast<jint>(Renderer::dlssEpochCount);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssEpochLength(
+    JNIEnv *, jclass, jint length, jboolean) {
+    Renderer::options.dlssEpochLength = static_cast<uint32_t>(std::clamp(length, 4, 64));
 }
 

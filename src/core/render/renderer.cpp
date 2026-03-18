@@ -10,6 +10,8 @@ Options Renderer::options{};
 float Renderer::preExposure = 0.00002f;  // Init for physical sun ~100k lux (avoids first-frame FP16 overflow)
 bool Renderer::resetExposureAdaptation = false;
 uint32_t Renderer::accumFrameCount = 0;
+uint32_t Renderer::dlssEpochFrame = 0;
+uint32_t Renderer::dlssEpochCount = 0;
 std::shared_ptr<vk::DeviceLocalImage> Renderer::accumOutputImage;
 VkPipeline Renderer::accumPipeline = VK_NULL_HANDLE;
 VkPipelineLayout Renderer::accumPipelineLayout = VK_NULL_HANDLE;

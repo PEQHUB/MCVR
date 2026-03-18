@@ -409,8 +409,8 @@ void DLSSModuleContext::render() {
     auto module = dLSSModule.lock();
     if (!module) return;
 
-    // Offline accumulation bypass: blit accumulated result to DLSS output
-    if (Renderer::options.offlineState == 2 && Renderer::options.offlineDenoised == 0) {
+    // Raw Fast / Raw Accurate: bypass DLSS, blit accumulated RT output to DLSS output
+    if (Renderer::options.offlineState == 2 && Renderer::options.offlineDenoised != 2) {
         auto cmd = worldCommandBuffer->vkCommandBuffer();
         // Transition images for blit
         worldCommandBuffer->barriersBufferImage({}, {
@@ -808,9 +808,11 @@ void DLSSModuleContext::render() {
         if (worldUBO != nullptr) {
             glm::vec2 jitter = worldUBO->cameraJitter;
             // Fixed pre-exposure — must exactly match the constant in ray_tracing_module.cpp.
-            // Using a varying value (e.g., Renderer::preExposure from auto-exposure) causes
-            // DLSS-RR temporal history contamination and visible brightness oscillation.
-            float preExposure = 0.1f;
+            // Normal: 0.1 compresses HDR for DLSS-RR (fp16 range).
+            // Accumulation: 1.0 for all presets — DLSS-RR's InExposureScale=1/preExposure
+            // undoes pre-exposure in its output, so using 1.0 keeps output at scene-referred
+            // 1.0x, matching the histogram which also sees 1.0x RT input.
+            float preExposure = (Renderer::options.offlineState == 2) ? 1.0f : 0.1f;
             // Per-context frame time delta for DLSS temporal motion estimation
             auto now = std::chrono::steady_clock::now();
             float frameTimeDeltaMs = std::chrono::duration<float, std::milli>(now - lastRenderTime_).count();
@@ -819,135 +821,154 @@ void DLSSModuleContext::render() {
             // linearDepthImage and motionVectorImage in world.rgen. Using cameraViewMat
             // (without view bob/camera effects) causes a depth↔matrix mismatch that
             // breaks DLSS-RR temporal reprojection.
-            // DLSS-D Converge: reset temporal history each frame so each output is
-            // an independent spatial denoise. Welford properly averages independent estimates.
+            //
+            // Denoised mode (epoch-based): reset DLSS temporal history only on the first
+            // frame of each epoch. Within an epoch, DLSS-RR builds temporal history normally.
+            // At epoch end, the converged output is Welford-averaged across epochs.
             bool dlssReset = (Renderer::options.offlineState == 2
-                              && Renderer::options.offlineDenoised == 2);
+                              && Renderer::options.offlineDenoised == 2
+                              && Renderer::dlssEpochFrame == 0);
             module->dlss_->denoise(worldCommandBuffer, glm::uvec2{module->inputWidth_, module->inputHeight_}, jitter,
                                    worldUBO->cameraEffectedViewMat, worldUBO->cameraProjMat, preExposure, dlssReset,
                                    frameTimeDeltaMs);
         }
     }
 
-    // DLSS-D Converge: Post-DLSS Welford accumulation
-    if (Renderer::options.offlineState == 2 && Renderer::options.offlineDenoised == 2
-        && Renderer::accumPipelineReady) {
+    // Denoised mode: epoch-based post-DLSS Welford accumulation
+    // Each epoch = dlssEpochLength frames of DLSS-RR temporal convergence.
+    // At epoch end, snapshot the converged DLSS output into Welford accumulator.
+    // Between epochs, display the Welford result (stable, converging).
+    if (Renderer::options.offlineState == 2 && Renderer::options.offlineDenoised == 2) {
+        bool epochEnd = (Renderer::dlssEpochFrame >= Renderer::options.dlssEpochLength - 1);
 
-        auto cmd = worldCommandBuffer->vkCommandBuffer();
+        if (epochEnd && Renderer::accumPipelineReady) {
+            auto cmd = worldCommandBuffer->vkCommandBuffer();
 
-        // Barrier: processedImage → GENERAL for compute read/write
-        worldCommandBuffer->barriersBufferImage({}, {{
-            .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-            .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-            .oldLayout = processedImage->imageLayout(),
-            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .srcQueueFamilyIndex = mainQueueIndex,
-            .dstQueueFamilyIndex = mainQueueIndex,
-            .image = processedImage,
-            .subresourceRange = vk::wholeColorSubresourceRange,
-        }});
-        processedImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
-
-        // Also ensure accumBufferImage is in GENERAL
-        if (Renderer::accumBufferImage->imageLayout() != VK_IMAGE_LAYOUT_GENERAL) {
+            // Barrier: processedImage → GENERAL for compute read
             worldCommandBuffer->barriersBufferImage({}, {{
                 .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
                 .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-                .oldLayout = Renderer::accumBufferImage->imageLayout(),
+                .oldLayout = processedImage->imageLayout(),
                 .newLayout = VK_IMAGE_LAYOUT_GENERAL,
                 .srcQueueFamilyIndex = mainQueueIndex,
                 .dstQueueFamilyIndex = mainQueueIndex,
-                .image = Renderer::accumBufferImage,
+                .image = processedImage,
                 .subresourceRange = vk::wholeColorSubresourceRange,
             }});
-            Renderer::accumBufferImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            processedImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+
+            // Ensure accumBufferImage is in GENERAL
+            if (Renderer::accumBufferImage->imageLayout() != VK_IMAGE_LAYOUT_GENERAL) {
+                worldCommandBuffer->barriersBufferImage({}, {{
+                    .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                    .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+                    .oldLayout = Renderer::accumBufferImage->imageLayout(),
+                    .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                    .srcQueueFamilyIndex = mainQueueIndex,
+                    .dstQueueFamilyIndex = mainQueueIndex,
+                    .image = Renderer::accumBufferImage,
+                    .subresourceRange = vk::wholeColorSubresourceRange,
+                }});
+                Renderer::accumBufferImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            }
+
+            // Update descriptor set: bind accumBuffer and processedImage (DLSS output)
+            uint32_t frameIdx = context->frameIndex % Renderer::accumDescSets.size();
+            VkDescriptorImageInfo accumInfo{
+                .sampler = VK_NULL_HANDLE,
+                .imageView = Renderer::accumBufferImage->vkImageView(),
+                .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+            };
+            VkDescriptorImageInfo inputInfo{
+                .sampler = VK_NULL_HANDLE,
+                .imageView = processedImage->vkImageView(),
+                .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+            };
+            VkWriteDescriptorSet writes[2] = {
+                {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                 .dstSet = Renderer::accumDescSets[frameIdx],
+                 .dstBinding = 0, .dstArrayElement = 0, .descriptorCount = 1,
+                 .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                 .pImageInfo = &accumInfo},
+                {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                 .dstSet = Renderer::accumDescSets[frameIdx],
+                 .dstBinding = 1, .dstArrayElement = 0, .descriptorCount = 1,
+                 .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                 .pImageInfo = &inputInfo},
+            };
+            vkUpdateDescriptorSets(framework->device()->vkDevice(), 2, writes, 0, nullptr);
+
+            // Dispatch accumulate.comp: Welford average with epoch count as N
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Renderer::accumPipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                Renderer::accumPipelineLayout, 0, 1, &Renderer::accumDescSets[frameIdx], 0, nullptr);
+
+            int32_t ec = static_cast<int32_t>(Renderer::dlssEpochCount);
+            vkCmdPushConstants(cmd, Renderer::accumPipelineLayout,
+                VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int32_t), &ec);
+
+            uint32_t gx = (processedImage->width() + 7) / 8;
+            uint32_t gy = (processedImage->height() + 7) / 8;
+            vkCmdDispatch(cmd, gx, gy, 1);
+
+            Renderer::dlssEpochCount++;
+            Renderer::dlssEpochFrame = 0;  // reset for next epoch
+        } else {
+            Renderer::dlssEpochFrame++;
         }
 
-        // Update descriptor set: bind accumBuffer and processedImage
-        uint32_t frameIdx = context->frameIndex % Renderer::accumDescSets.size();
-        VkDescriptorImageInfo accumInfo{
-            .sampler = VK_NULL_HANDLE,
-            .imageView = Renderer::accumBufferImage->vkImageView(),
-            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        };
-        VkDescriptorImageInfo inputInfo{
-            .sampler = VK_NULL_HANDLE,
-            .imageView = processedImage->vkImageView(),
-            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        };
-        VkWriteDescriptorSet writes[2] = {
-            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-             .dstSet = Renderer::accumDescSets[frameIdx],
-             .dstBinding = 0, .dstArrayElement = 0, .descriptorCount = 1,
-             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-             .pImageInfo = &accumInfo},
-            {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-             .dstSet = Renderer::accumDescSets[frameIdx],
-             .dstBinding = 1, .dstArrayElement = 0, .descriptorCount = 1,
-             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-             .pImageInfo = &inputInfo},
-        };
-        vkUpdateDescriptorSets(framework->device()->vkDevice(), 2, writes, 0, nullptr);
+        // Display: show Welford-averaged result after first epoch completes.
+        // During first epoch (no snapshots yet), live DLSS-RR output passes through.
+        if (Renderer::dlssEpochCount > 0 && Renderer::accumPipelineReady) {
+            auto cmd = worldCommandBuffer->vkCommandBuffer();
 
-        // Dispatch accumulate.comp
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, Renderer::accumPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-            Renderer::accumPipelineLayout, 0, 1, &Renderer::accumDescSets[frameIdx], 0, nullptr);
+            // Barrier: accumBuffer → transfer src, processedImage → transfer dst
+            worldCommandBuffer->barriersBufferImage({}, {
+                {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+                 .oldLayout = Renderer::accumBufferImage->imageLayout(),
+                 .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 .srcQueueFamilyIndex = mainQueueIndex,
+                 .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = Renderer::accumBufferImage,
+                 .subresourceRange = vk::wholeColorSubresourceRange},
+                {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                 .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                 .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 .oldLayout = processedImage->imageLayout(),
+                 .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 .srcQueueFamilyIndex = mainQueueIndex,
+                 .dstQueueFamilyIndex = mainQueueIndex,
+                 .image = processedImage,
+                 .subresourceRange = vk::wholeColorSubresourceRange}
+            });
 
-        int32_t fc = static_cast<int32_t>(Renderer::accumFrameCount);
-        vkCmdPushConstants(cmd, Renderer::accumPipelineLayout,
-            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int32_t), &fc);
+            // Blit Welford average → processedImage (downstream sees converged result)
+            VkImageBlit blitRegion{};
+            blitRegion.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blitRegion.srcOffsets[1] = {(int)Renderer::accumBufferImage->width(),
+                                        (int)Renderer::accumBufferImage->height(), 1};
+            blitRegion.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            blitRegion.dstOffsets[1] = {(int)processedImage->width(),
+                                        (int)processedImage->height(), 1};
+            vkCmdBlitImage(cmd, Renderer::accumBufferImage->vkImage(),
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           processedImage->vkImage(),
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &blitRegion, VK_FILTER_LINEAR);
 
-        uint32_t gx = (processedImage->width() + 7) / 8;
-        uint32_t gy = (processedImage->height() + 7) / 8;
-        vkCmdDispatch(cmd, gx, gy, 1);
+            Renderer::accumBufferImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            processedImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        }
 
-        // Barrier: compute → blit
-        worldCommandBuffer->barriersBufferImage({}, {
-            {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-             .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-             .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-             .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
-             .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-             .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-             .srcQueueFamilyIndex = mainQueueIndex,
-             .dstQueueFamilyIndex = mainQueueIndex,
-             .image = Renderer::accumBufferImage,
-             .subresourceRange = vk::wholeColorSubresourceRange},
-            {.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-             .srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-             .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-             .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-             .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-             .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-             .srcQueueFamilyIndex = mainQueueIndex,
-             .dstQueueFamilyIndex = mainQueueIndex,
-             .image = processedImage,
-             .subresourceRange = vk::wholeColorSubresourceRange}
-        });
-
-        // Blit averaged result back: accumBuffer → processedImage
-        VkImageBlit blitRegion{};
-        blitRegion.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        blitRegion.srcOffsets[1] = {(int)Renderer::accumBufferImage->width(),
-                                    (int)Renderer::accumBufferImage->height(), 1};
-        blitRegion.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        blitRegion.dstOffsets[1] = {(int)processedImage->width(),
-                                    (int)processedImage->height(), 1};
-        vkCmdBlitImage(cmd, Renderer::accumBufferImage->vkImage(),
-                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       processedImage->vkImage(),
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                       1, &blitRegion, VK_FILTER_LINEAR);
-
-        Renderer::accumBufferImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        processedImage->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-
-        Renderer::accumFrameCount++;
+        Renderer::accumFrameCount++;  // total frames for HUD
     }
 
     // Output Scale 2x: FSR1 EASU downscale from 2x intermediate to 1x shared output

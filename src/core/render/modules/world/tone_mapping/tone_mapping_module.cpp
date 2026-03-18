@@ -593,7 +593,7 @@ void ToneMappingModuleContext::render() {
     // Pass RT pre-exposure so the histogram can undo it for correct luminance metering.
     // Must match the value set in ray_tracing_module.cpp push constant.
     float rtPreExposure = (Renderer::options.denoiserMode == 1) ? 0.1f : 1.0f;
-    if (Renderer::options.offlineState == 2) rtPreExposure = 1.0f;  // accumulating: locked to 1.0
+    if (Renderer::options.offlineState == 2) rtPreExposure = 1.0f;  // all presets lock to 1.0
     pc.preExposure = rtPreExposure;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),

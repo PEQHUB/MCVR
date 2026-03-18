@@ -1521,15 +1521,14 @@ void RayTracingModuleContext::render() {
     }
 
     // Offline accumulation
-    // offlineDenoised: 0=Raw Fast (RR on), 1=Raw Slow (RR off), 2=DLSS-D Converge
-    // Bit 2 (disableRR): auto-set by mode — Raw Slow forces RR off
+    // offlineDenoised: 0=Raw Fast (RR on), 1=Raw Accurate (RR off), 2=Denoised (epoch-based DLSS-RR)
+    // Bit 1 (disableRR): auto-set by preset — Raw Accurate forces RR off
     bool disableRR = Renderer::options.offlineDisableRR
                      || Renderer::options.offlineDenoised == 1;
     pushConstant.offlineFlags = (accumulating ? 1 : 0)
                               | (disableRR ? 2 : 0)
                               | (Renderer::options.offlineDisableClamp ? 4 : 0)
-                              | (Renderer::options.offlineNativeResActive ? 8 : 0)
-                              | (Renderer::options.offlineDenoised == 2 ? 16 : 0);
+                              | (Renderer::options.offlineNativeResActive ? 8 : 0);
     pushConstant.accumFrameCount = static_cast<int>(Renderer::accumFrameCount);
     // DOF: active in both FREE (preview) and ACCUMULATING modes
     bool dofEnabled = (accumulating || Renderer::options.offlineState == 1)
@@ -1538,8 +1537,12 @@ void RayTracingModuleContext::render() {
     pushConstant.aperture = dofEnabled ? effectiveAperture : 0.0f;
     pushConstant.focalDistance = Renderer::options.offlineFocalDistance;
 
-    // Force pre-exposure to 1.0 during accumulation (exposure locked)
-    // All offline modes disable temporal reuse (each frame is independent)
+    // Pre-exposure locked to 1.0 during accumulation (all presets).
+    // The histogram does NOT undo pre-exposure — it relies on histogram and tone mapper
+    // seeing the same scale. DLSS-RR's InExposureScale=1/preExposure undoes pre-exposure
+    // in its output, so using 1.0 means DLSS output stays at scene-referred 1.0x,
+    // matching the histogram's 1.0x RT input. Using 0.1 would cause a 10x mismatch.
+    // All modes disable temporal reuse (each frame is independent).
     if (accumulating) {
         pushConstant.preExposure = 1.0f;
         pushConstant.temporalMClamp = 0;

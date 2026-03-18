@@ -236,14 +236,15 @@ void main() {
             irisExposure = targetComp; // no bright content -> relax cap
         }
 
-        // Asymmetric temporal smoothing: fast constriction, slow dilation.
-        // Constriction (cap dropping): ~80ms half-life (speed 8.0)
+        // Asymmetric temporal smoothing: moderate constriction, slow dilation.
+        // Constriction (cap dropping): ~280ms half-life (speed 2.5) — soft enough
+        //   to avoid snapping on a single torch entering/exiting frame.
         // Dilation (cap rising):       ~700ms half-life (speed 1.0)
         float prevCap = expData.capExposureSmoothed;
         if (prevCap <= 0.0) prevCap = irisExposure;
         float prevLog = log2(max(prevCap, 1e-6));
         float rawLog  = log2(max(irisExposure, 1e-6));
-        float capSpeed = (rawLog < prevLog) ? 8.0 : 1.0; // fast down, slow up
+        float capSpeed = (rawLog < prevLog) ? 2.5 : 1.0; // moderate down, slow up
         float kSmooth = 1.0 - exp(-pc.dt * capSpeed);
         irisCap = exp2(mix(prevLog, rawLog, clamp(kSmooth, 0.0, 1.0)));
         expData.capExposureSmoothed = irisCap;
@@ -256,10 +257,11 @@ void main() {
     float prevEV = log2(max(prevComp, 1e-6));
     float targetEV = log2(max(targetComp, 1e-6));
 
-    // Dead zone: ignore EV differences below threshold to prevent shimmer/breathing
-    // 0.05 EV ≈ 3.5% luminance change — below perceptual threshold
+    // Dead zone: ignore EV differences below threshold to prevent shimmer/breathing.
+    // 0.10 EV ≈ 7% luminance change — balances cave pulsing suppression with
+    // low-light tracking. Small enough to follow gradual cave lighting changes.
     float evDiff = targetEV - prevEV;
-    if (abs(evDiff) < 0.05) evDiff = 0.0;
+    if (abs(evDiff) < 0.10) evDiff = 0.0;
 
     // Scale adaptation speed by magnitude of change: large jumps (cave entry) stay fast,
     // subtle changes (turning slightly) become very slow, reducing pumping

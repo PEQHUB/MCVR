@@ -46,7 +46,7 @@ struct Options {
     float Lwhite = 4.0f;               // White point for Reinhard Extended
     bool legacyExposure = false;       // Use legacy exposure algorithm (keeps legacy failure modes)
     float exposureUpSpeed = 0.8f;      // Max EV increase rate (EV/s) — dark adaptation: gradual
-    float exposureDownSpeed = 1.5f;    // Max EV decrease rate (EV/s) — bright adaptation: moderate
+    float exposureDownSpeed = 1.0f;    // Max EV decrease rate (EV/s) — moderate: less pulsing than 1.5, better low-light than 0.7
     float exposureBrightAdaptBoost = 1.0f; // Multiplier on downSpeed entering bright (1.0 = no boost, eliminates 4:1 asymmetry)
     float exposureHighlightProtection = 0.3f; // 0..1, soft nudge only; tonemapper handles clipping
     float exposureHighlightPercentile = 0.98f; // 0..1, less sensitive to emissive surface outliers
@@ -172,7 +172,8 @@ struct Options {
     float dofStrength = 1.0f;        // artistic DOF multiplier (1.0=physical, up to 20.0 for cinematic)
     float offlineFocalDistance = 10.0f; // focal distance in blocks (1-256)
     bool offlineNativeRes = false;        // N key: force render-res = display-res in FREE mode
-    uint32_t offlineDenoised = 0;         // 0=Raw Fast (RR on), 1=Raw Slow (RR off), 2=DLSS-D Converge
+    uint32_t offlineDenoised = 0;         // 0=Raw Fast (RR on), 1=Raw Accurate (RR off), 2=Denoised (epoch-based DLSS-RR)
+    uint32_t dlssEpochLength = 16;        // frames per Denoised epoch (user-configurable, 4-64)
     uint32_t savedUpscalerMode = 0;       // saved for restore on exit
     bool offlineNativeResActive = false;  // tracks if resolution was overridden
 
@@ -189,6 +190,8 @@ class Renderer : public Singleton<Renderer> {
     static float preExposure;  // Set by tone mapping, read by RT + DLSS (1-frame delay)
     static bool resetExposureAdaptation;  // Set by JNI on world load, consumed by tone mapping
     static uint32_t accumFrameCount;
+    static uint32_t dlssEpochFrame;   // current frame within Denoised epoch (0..epochLength-1)
+    static uint32_t dlssEpochCount;   // completed Denoised epochs (= Welford N)
     static std::shared_ptr<vk::DeviceLocalImage> accumOutputImage;
 
     // Offline accumulation pipeline (shared between RT and DLSS modules)
