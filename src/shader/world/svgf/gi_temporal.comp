@@ -8,9 +8,9 @@ layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 // Current frame inputs (demodulated)
 layout(set = 0, binding = 22, rgba16f) uniform readonly image2D demodulatedGiImage;
 layout(set = 0, binding = 19, rg32f) uniform readonly image2D giMomentsIn;
-layout(set = 0, binding = 1, rg16f) uniform readonly image2D motionVectorImage;
-layout(set = 0, binding = 2, r16f) uniform readonly image2D linearDepthImage;
-layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalRoughnessImage;
+layout(set = 0, binding = 1, rg32f) uniform readonly image2D motionVectorImage;
+layout(set = 0, binding = 2, r32f) uniform readonly image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba32f) uniform readonly image2D normalRoughnessImage;
 
 // History (previous frame, demodulated)
 layout(set = 0, binding = 4, rgba16f) uniform readonly image2D giHistoryPrev;

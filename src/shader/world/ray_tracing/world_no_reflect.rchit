@@ -69,9 +69,9 @@ layout(set = 2, binding = 2) uniform SkyUniform {
 
 layout(set = 3, binding = 1, rgba8) uniform image2D diffuseAlbedoImage;
 layout(set = 3, binding = 2, rgba8) uniform image2D specularAlbedoImage;
-layout(set = 3, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
-layout(set = 3, binding = 4, rg16f) uniform image2D motionVectorImage;
-layout(set = 3, binding = 5, r16f) uniform image2D linearDepthImage;
+layout(set = 3, binding = 3, rgba32f) uniform image2D normalRoughnessImage;
+layout(set = 3, binding = 4, rg32f) uniform image2D motionVectorImage;
+layout(set = 3, binding = 5, r32f) uniform image2D linearDepthImage;
 
 layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer VertexBuffer {
     PBRTriangle vertices[];

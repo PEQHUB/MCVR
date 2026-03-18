@@ -3,8 +3,8 @@
 
 #include "common/shared.hpp"
 
-layout(set = 0, binding = 0, rgba16f) uniform image2D iImage0;
-layout(set = 0, binding = 1, rgba16f) uniform image2D oImage;
+layout(set = 0, binding = 0, rgba32f) uniform image2D iImage0;
+layout(set = 0, binding = 1, rgba32f) uniform image2D oImage;
 layout(set = 0, binding = 2) uniform sampler2D iHistory;
 layout(set = 0, binding = 3) uniform sampler2D iMotionVector;
 layout(set = 0, binding = 4) uniform sampler2D iDepth;

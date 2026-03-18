@@ -93,13 +93,13 @@ layout(set = 2, binding = 3) uniform LightMapUniform {
     LightMapUBO lightMapUBO;
 };
 
-layout(set = 3, binding = 0, rgba16f) uniform image2D outputImage;
+layout(set = 3, binding = 0, rgba32f) uniform image2D outputImage;
 layout(set = 3, binding = 1, rgba8) uniform image2D diffuseAlbedoImage;
 layout(set = 3, binding = 2, rgba8) uniform image2D specularAlbedoImage;
-layout(set = 3, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
-layout(set = 3, binding = 4, rg16f) uniform image2D motionVectorImage;
-layout(set = 3, binding = 5, r16f) uniform image2D linearDepthImage;
-layout(set = 3, binding = 6, r16f) uniform image2D specularHitDepthImage;
+layout(set = 3, binding = 3, rgba32f) uniform image2D normalRoughnessImage;
+layout(set = 3, binding = 4, rg32f) uniform image2D motionVectorImage;
+layout(set = 3, binding = 5, r32f) uniform image2D linearDepthImage;
+layout(set = 3, binding = 6, r32f) uniform image2D specularHitDepthImage;
 layout(set = 3, binding = 7, r16f) uniform image2D firstHitDepthImage;
 layout(set = 3, binding = 8, rgba16f) uniform image2D firstHitDiffuseDirectLightImage;
 layout(set = 3, binding = 9, rgba16f) uniform image2D firstHitDiffuseIndirectLightImage;
@@ -109,7 +109,7 @@ layout(set = 3, binding = 12, rgba16f) uniform image2D firstHitBaseEmissionImage
 layout(set = 3, binding = 13, r16f) uniform image2D directLightDepthImage;
 layout(set = 3, binding = 16, rgba16f) uniform image2D diffuseRayDirHitDistImage;
 layout(set = 3, binding = 17, rgba16f) uniform image2D specularRayDirHitDistImage;
-layout(set = 3, binding = 21, rg16f)   uniform image2D reflectionMvImage;
+layout(set = 3, binding = 21, rg32f)   uniform image2D reflectionMvImage;
 layout(set = 3, binding = 22, r16f)    uniform image2D animTexMaskImage;
 layout(set = 3, binding = 23, r16f)    uniform image2D particleMaskImage;
 layout(set = 3, binding = 24, r16f)    uniform image2D biasMaskImage;
@@ -118,7 +118,7 @@ layout(set = 3, binding = 26, rgba16f) uniform image2D motionVectors3DImage;
 layout(set = 3, binding = 27, r16f)    uniform image2D gbufferMetallicImage;
 layout(set = 3, binding = 28, r16f)    uniform image2D gbufferShadingModelIdImage;
 layout(set = 3, binding = 29, r16f)    uniform image2D gbufferMaterialIdImage;
-layout(set = 3, binding = 30, rgba16f) uniform image2D positionViewSpaceImage;
+layout(set = 3, binding = 30, rgba32f) uniform image2D positionViewSpaceImage;
 
 layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer VertexBuffer {
     PBRTriangle vertices[];
@@ -496,9 +496,14 @@ void main() {
         firstHitMat.subSurface = mainRay.subSurface;
         firstHitMat.albedo = mainRay.albedoValue.rgb;
 
-        // BaseColor/Metalness Buffer. DLSS only needs the base color ("Diffuse Albedo")
+        // Diffuse Albedo for DLSS-RR guide. Metals have zero diffuse reflectance —
+        // their color is entirely in specular F0. Detect metals by BOTH the metallic
+        // flag AND F0 magnitude: material overrides may set high F0 without metallic=1.
+        // smoothstep(0.08, 0.20) catches metals (F0 > 0.2) while preserving dielectrics (F0 ≈ 0.04).
+        float maxF0 = max(firstHitMat.f0.r, max(firstHitMat.f0.g, firstHitMat.f0.b));
+        float kD = (1.0 - firstHitMat.metallic) * (1.0 - smoothstep(0.08, 0.20, maxF0));
         imageStore(diffuseAlbedoImage, pixel,
-                   vec4(mainRay.albedoValue.rgb * mainRay.albedoValue.a, firstHitMat.metallic));
+                   vec4(mainRay.albedoValue.rgb * mainRay.albedoValue.a * kD, firstHitMat.metallic));
 
         imageStore(specularAlbedoImage, pixel, vec4(firstHitMat.f0, 0.0));
 

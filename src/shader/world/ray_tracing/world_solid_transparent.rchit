@@ -138,9 +138,9 @@ layout(push_constant) uniform PushConstant {
 #define PHYSICAL_SUN_DISK  ((pc.flags & 2048) != 0)
 #define NO_HAND_AMBIENT    ((pc.flags & 4096) != 0)
 
-layout(set = 3, binding = 3, rgba16f) uniform readonly image2D normalRoughnessImage;
-layout(set = 3, binding = 4, rg16f) uniform readonly image2D motionVectorImage;
-layout(set = 3, binding = 5, r16f) uniform readonly image2D linearDepthImage;
+layout(set = 3, binding = 3, rgba32f) uniform readonly image2D normalRoughnessImage;
+layout(set = 3, binding = 4, rg32f) uniform readonly image2D motionVectorImage;
+layout(set = 3, binding = 5, r32f) uniform readonly image2D linearDepthImage;
 layout(set = 3, binding = 14, rgba32f) uniform image2D reservoirCurrentImage;
 layout(set = 3, binding = 15, rgba32f) uniform image2D reservoirPreviousImage;
 layout(set = 3, binding = 18, rgba32f) uniform image2D bounceReservoirImage1;
@@ -430,6 +430,14 @@ void main() {
             // Apply F0 override if set; for dielectrics with zero F0, derive from IOR
             if (dot(pack0.rgb, pack0.rgb) > 0.0001) {
                 mat.f0 = pack0.rgb;
+                // Auto-detect metals: if F0 is set above dielectric range (> 0.20)
+                // and metallic not explicitly set, infer metallic for correct DLSS-RR
+                // guide buffers (metals need zero diffuse albedo).
+                float overrideMaxF0 = max(pack0.r, max(pack0.g, pack0.b));
+                if (overrideMaxF0 > 0.20 && pack1.x < 0.01) {
+                    mat.metallic = 1.0;
+                    mat.albedo = mat.f0;
+                }
             } else if (pack1.x < 0.5) {
                 // Dielectric: compute F0 from IOR using Fresnel equation
                 float ior = max(pack1.z, 1.0);

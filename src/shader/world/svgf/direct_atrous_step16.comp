@@ -8,7 +8,7 @@ layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 layout(set = 0, binding = 0, rgba16f) uniform image2D giInputImage;
 layout(set = 0, binding = 1, rgba16f) uniform image2D giOutputImage;
 layout(set = 0, binding = 2, r32f) uniform image2D linearDepthImage;
-layout(set = 0, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+layout(set = 0, binding = 3, rgba32f) uniform image2D normalRoughnessImage;
 layout(set = 0, binding = 4, r16f) uniform image2D giVarianceInput;
 layout(set = 0, binding = 5, rgba16f) uniform image2D diffuseAlbedoImage;
 layout(set = 0, binding = 6, r16f) uniform image2D giVarianceOutput;

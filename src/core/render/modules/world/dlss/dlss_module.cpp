@@ -807,16 +807,14 @@ void DLSSModuleContext::render() {
         auto worldUBO = static_cast<vk::Data::WorldUBO *>(worldUBOBuffer->mappedPtr());
         if (worldUBO != nullptr) {
             glm::vec2 jitter = worldUBO->cameraJitter;
-            // Fixed pre-exposure — must exactly match the constant in ray_tracing_module.cpp.
-            // Normal: 0.1 compresses HDR for DLSS-RR (fp16 range).
-            // Accumulation: 1.0 for all presets — DLSS-RR's InExposureScale=1/preExposure
-            // undoes pre-exposure in its output, so using 1.0 keeps output at scene-referred
-            // 1.0x, matching the histogram which also sees 1.0x RT input.
-            float preExposure = (Renderer::options.offlineState == 2) ? 1.0f : 0.1f;
             // Per-context frame time delta for DLSS temporal motion estimation
             auto now = std::chrono::steady_clock::now();
             float frameTimeDeltaMs = std::chrono::duration<float, std::milli>(now - lastRenderTime_).count();
             lastRenderTime_ = now;
+            // Pre-exposure: must match RT push constant. Tells DLSS-RR the input
+            // dynamic range for internal normalization. Output is NOT rescaled
+            // (InExposureScale=1.0 in dlss_wrapper.cpp).
+            float preExposure = (Renderer::options.offlineState == 2) ? 1.0f : 0.1f;
             // Use cameraEffectedViewMat — must match the matrix used to compute
             // linearDepthImage and motionVectorImage in world.rgen. Using cameraViewMat
             // (without view bob/camera effects) causes a depth↔matrix mismatch that

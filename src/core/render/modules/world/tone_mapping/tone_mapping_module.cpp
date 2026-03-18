@@ -590,10 +590,11 @@ void ToneMappingModuleContext::render() {
     pc.tonemapParam5 = Renderer::options.tonemapParams[5];
     pc.tonemapParam6 = Renderer::options.tonemapParams[6];
     pc.tonemapParam7 = Renderer::options.tonemapParams[7];
-    // Pass RT pre-exposure so the histogram can undo it for correct luminance metering.
-    // Must match the value set in ray_tracing_module.cpp push constant.
+    // RT pre-exposure — push constant layout parity with hist/exposure shaders.
+    // Currently unused by shaders (histogram meters raw pre-exposed values; auto-exposure
+    // cancels preExposure naturally). Kept for potential future diagnostic use.
     float rtPreExposure = (Renderer::options.denoiserMode == 1) ? 0.1f : 1.0f;
-    if (Renderer::options.offlineState == 2) rtPreExposure = 1.0f;  // all presets lock to 1.0
+    if (Renderer::options.offlineState == 2) rtPreExposure = 1.0f;
     pc.preExposure = rtPreExposure;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),

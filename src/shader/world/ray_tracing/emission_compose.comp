@@ -1,0 +1,34 @@
+#version 460
+
+// Emission preservation for DLSS-RR: subtract emission before denoising,
+// add it back after. Prevents the neural network from attenuating emissive
+// surfaces (torches, lava, glowstone) which it can't distinguish from noise.
+//
+// NRD already does this in nrd_compose.comp. DLSS-RR processes full radiance
+// by default, so we need this explicit subtract/add step.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0, rgba16f) uniform image2D targetImage;
+layout(binding = 1, rgba16f) uniform readonly image2D emissionImage;
+
+layout(push_constant) uniform PC {
+    float preExposure;
+    int mode;  // 0 = subtract emission, 1 = add emission
+} pc;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(targetImage)))) return;
+
+    vec4 target = imageLoad(targetImage, pixel);
+    vec3 emission = imageLoad(emissionImage, pixel).rgb * pc.preExposure;
+
+    if (pc.mode == 0) {
+        target.rgb = max(target.rgb - emission, vec3(0.0));
+    } else {
+        target.rgb += emission;
+    }
+
+    imageStore(targetImage, pixel, target);
+}

@@ -17,7 +17,7 @@ layout(set = 0, binding = 0, rgba16f) uniform image2D specHistoryIn;
 layout(set = 0, binding = 1, rg32f) uniform image2D specMomentsIn;
 layout(set = 0, binding = 2, r16f) uniform image2D specHistoryLength;
 layout(set = 0, binding = 3, r16f) uniform image2D specVarianceOut;
-layout(set = 0, binding = 4, rgba16f) uniform image2D normalRoughnessImage;
+layout(set = 0, binding = 4, rgba32f) uniform image2D normalRoughnessImage;
 layout(set = 0, binding = 5, r32f) uniform image2D linearDepthImage;
 
 // Specular uses tighter parameters
