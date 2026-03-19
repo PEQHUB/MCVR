@@ -44,7 +44,7 @@ class CloudModule : public WorldModule, public SharedObject<CloudModule> {
   public:
     constexpr static std::string_view NAME = "render_pipeline.module.cloud.name";
     constexpr static uint32_t inputImageNum = 2;   // radiance, linear_depth
-    constexpr static uint32_t outputImageNum = 1;   // cloud_radiance (composited)
+    constexpr static uint32_t outputImageNum = 2;   // cloud_radiance (composited), cloud_shadow_map
 
     CloudModule();
 
@@ -89,6 +89,7 @@ class CloudModule : public WorldModule, public SharedObject<CloudModule> {
 
     // Output images (per frame)
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> cloudRadianceImages_;   // Output 0: cloud-composited radiance
+    // Output 1 (cloud_shadow_map) uses cloudShadowImage_ (shared, not per-frame)
 
     // Descriptor tables (per frame)
     std::vector<std::shared_ptr<vk::DescriptorTable>> descriptorTables_;

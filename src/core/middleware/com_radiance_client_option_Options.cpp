@@ -781,3 +781,41 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_option_Options_native
     return static_cast<jint>(FrameGenManager::maxFramesToGenerate());
 }
 
+// --- Volumetric cloud setters ---
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudQuality(
+    JNIEnv *, jclass, jint quality, jboolean write) {
+    Renderer::options.cloudQuality = static_cast<uint32_t>(std::clamp(quality, 0, 5));
+    if (write) Renderer::options.needRecreate = true;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudDensity(
+    JNIEnv *, jclass, jfloat density, jboolean) {
+    Renderer::options.cloudDensity = std::clamp(density, 0.1f, 3.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudCoverage(
+    JNIEnv *, jclass, jfloat coverage, jboolean) {
+    Renderer::options.cloudCoverage = std::clamp(coverage, 0.0f, 1.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudType(
+    JNIEnv *, jclass, jfloat type, jboolean) {
+    Renderer::options.cloudType = std::clamp(type, 0.0f, 1.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudSpeed(
+    JNIEnv *, jclass, jfloat speed, jboolean) {
+    Renderer::options.cloudSpeed = std::clamp(speed, 0.0f, 5.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudAltitude(
+    JNIEnv *, jclass, jfloat altitude, jboolean) {
+    Renderer::options.cloudAltitude = std::clamp(altitude, 128.0f, 320.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudThicknessVol(
+    JNIEnv *, jclass, jfloat thickness, jboolean) {
+    Renderer::options.cloudThickness = std::clamp(thickness, 32.0f, 128.0f);
+}
+

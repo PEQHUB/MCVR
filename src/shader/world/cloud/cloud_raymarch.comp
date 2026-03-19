@@ -20,9 +20,16 @@ layout(set = 0, binding = 8)           uniform sampler2D uWeatherMap;      // 25
 // Constants
 const float NOISE_SCALE = 1.0 / 256.0;  // World-space to noise UV scale
 
-// Golden ratio for temporal blue noise offset
-float goldenRatioJitter(uint frame) {
-    return fract(float(frame) * 0.6180339887);
+// Per-pixel hash for spatial variation (no external buffer needed)
+float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// Frame-varying hash jitter: golden ratio temporal + spatial hash
+float blueNoiseJitter(uint frame, ivec2 texel) {
+    return fract(float(frame) * 0.6180339887 + hash12(vec2(texel)));
 }
 
 // Reconstruct view ray from screen UV
@@ -96,6 +103,12 @@ void main() {
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
     if (texel.x >= int(pc.cloudWidth) || texel.y >= int(pc.cloudHeight)) return;
 
+    // No clouds in Nether/End (skyType: 0=Overworld, 1=Nether, 2=End)
+    if (skyUBO.skyType != 0) {
+        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
     vec2 uv = (vec2(texel) + 0.5) / vec2(pc.cloudWidth, pc.cloudHeight);
 
     // Reconstruct view ray
@@ -130,8 +143,8 @@ void main() {
     float marchLength = tExit - tEnter;
     float baseStepSize = marchLength / float(pc.marchSteps);
 
-    // Temporal jitter on start position (blue noise pattern)
-    float jitter = goldenRatioJitter(pc.frameIndex + uint(texel.x * 7 + texel.y * 13));
+    // Frame-varying hash jitter (temporal golden ratio + spatial hash)
+    float jitter = blueNoiseJitter(pc.frameIndex, texel);
     float t = tEnter + jitter * baseStepSize;
 
     // Accumulation

@@ -22,6 +22,12 @@ void main() {
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
     if (texel.x >= int(pc.shadowMapSize) || texel.y >= int(pc.shadowMapSize)) return;
 
+    // No cloud shadows in Nether/End
+    if (skyUBO.skyType != 0) {
+        imageStore(uCloudShadow, texel, vec4(1.0));
+        return;
+    }
+
     vec3 eyePos = getEyePos();
 
     // Map shadow texel to world XZ position (centered on camera, 1024-block coverage)

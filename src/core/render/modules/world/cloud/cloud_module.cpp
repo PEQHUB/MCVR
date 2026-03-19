@@ -54,6 +54,12 @@ bool CloudModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::Device
         return false;
     }
 
+    // Output 1: cloud_shadow_map (R16F, shared across frames — created in initImages)
+    // Pipeline may pass nullptr; we create it internally and expose it back.
+    if (images[1] == nullptr && cloudShadowImage_) {
+        images[1] = cloudShadowImage_;
+    }
+
     return true;
 }
 

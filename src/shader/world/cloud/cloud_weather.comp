@@ -51,6 +51,12 @@ void main() {
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(texel, ivec2(256)))) return;
 
+    // No clouds in Nether/End
+    if (skyUBO.skyType != 0) {
+        imageStore(uWeatherMap, texel, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
     vec2 uv = (vec2(texel) + 0.5) / 256.0;
 
     // Wind-driven UV offset (slowly drifting weather patterns)
