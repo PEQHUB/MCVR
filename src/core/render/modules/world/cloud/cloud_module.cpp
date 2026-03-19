@@ -54,11 +54,27 @@ bool CloudModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::Device
         return false;
     }
 
-    // Output 1: cloud_shadow_map (R16F, shared across frames — created in initImages)
-    // Pipeline may pass nullptr; we create it internally and expose it back.
-    if (images[1] == nullptr && cloudShadowImage_) {
-        images[1] = cloudShadowImage_;
+    // Output 1: cloud_shadow_map (R16F, shared across frames).
+    // Pipeline pre-creates this at render resolution, but we need shadowMapSize_ resolution.
+    // Create once (frame 0) at correct size, then reuse for all frames.
+    if (!cloudShadowImage_) {
+        auto framework = framework_.lock();
+        if (framework) {
+            // Derive shadow map size from quality (same logic as build())
+            uint32_t smSize;
+            switch (Renderer::options.cloudQuality) {
+                case 1:  smSize = 128; break;
+                case 5:  smSize = 512; break;
+                default: smSize = 256; break;
+            }
+            cloudShadowImage_ = vk::DeviceLocalImage::create(
+                framework->device(), framework->vma(), false, smSize, smSize, 1,
+                VK_FORMAT_R16_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+        }
     }
+    // Replace the pipeline's pre-created render-res image with our correctly-sized one
+    images[1] = cloudShadowImage_;
 
     return true;
 }
@@ -323,11 +339,14 @@ void CloudModule::initImages() {
         VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
-    // Cloud shadow map (R16F)
-    cloudShadowImage_ = vk::DeviceLocalImage::create(
-        framework->device(), framework->vma(), false, shadowMapSize_, shadowMapSize_, 1,
-        VK_FORMAT_R16_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    // Cloud shadow map (R16F) — already created in setOrCreateOutputImages at correct size.
+    // Only create here as fallback (shouldn't happen in normal flow).
+    if (!cloudShadowImage_) {
+        cloudShadowImage_ = vk::DeviceLocalImage::create(
+            framework->device(), framework->vma(), false, shadowMapSize_, shadowMapSize_, 1,
+            VK_FORMAT_R16_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    }
 
     // Cloud history (single shared, cloud resolution)
     cloudHistoryImage_ = vk::DeviceLocalImage::create(
