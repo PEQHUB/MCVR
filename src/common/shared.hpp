@@ -282,8 +282,8 @@ namespace Data {
 
         T_FLOAT rainGradient;
         T_FLOAT hdrRadianceScale;
-        T_FLOAT pad1;
-        T_FLOAT pad2;
+        T_FLOAT thunderGradient;
+        T_FLOAT wetSurfaceStrength;
 
         // AtmosphereParams
 

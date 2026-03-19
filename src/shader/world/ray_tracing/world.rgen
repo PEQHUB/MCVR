@@ -356,8 +356,30 @@ void main() {
                         0                  // mainRay
             );
 
-            // Clouds are now handled by CloudModule compute pass (cloud_raymarch.comp + cloud_composite.comp).
-            // Inline cloud integration removed — see cloud_module.hpp.
+            // Fancy clouds (volumetric): integrate only on the primary camera ray.
+            // (Fast clouds are geometry-based; OFF disables both.)
+            if (isHand == 0 && psrDepth == 0 && skyUBO.cloudTile.x >= 0) {
+                // Only pay cloud integration for sky / far-horizon rays.
+                // Soft horizon fade: smoothstep 0.0→0.06 eliminates the hard cutoff line at the horizon edge.
+                bool farOrSky = (mainRay.hitT == INF_DISTANCE) || (mainRay.hitT > 256.0);
+                float cloudHorizonWeight = smoothstep(0.0, 0.06, traceDir.y);
+                if (farOrSky && cloudHorizonWeight > 0.0) {
+                    float tMax = len;
+                    if (mainRay.hitT != INF_DISTANCE) {
+                        tMax = min(mainRay.hitT, len);
+                    }
+
+                    CloudSegmentResult seg = integrateCloudSegment(traceOrigin, traceDir, 0.0, tMax, worldUBO, skyUBO,
+                                                                  skyFull, mainRay.seed,
+                                                                  8, 4);
+
+                    vec3 dL = mainRay.radiance - radianceBeforeTrace;
+                    // Blend cloud result by horizon weight: weight=1 → full clouds, weight=0 → no change.
+                    vec3 cloudRadiance = radianceBeforeTrace + seg.L * throughputBeforeTrace + dL * seg.T;
+                    mainRay.radiance = mix(mainRay.radiance, cloudRadiance, cloudHorizonWeight);
+                    mainRay.throughput *= mix(vec3(1.0), seg.T, cloudHorizonWeight);
+                }
+            }
 
             if (!surfaceDepthSampled) {
                 if (isHand == 0) {

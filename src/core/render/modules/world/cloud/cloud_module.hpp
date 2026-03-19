@@ -7,6 +7,8 @@
 
 #include "core/render/modules/world/world_module.hpp"
 
+#include <chrono>
+
 class Framework;
 class FrameworkContext;
 class WorldPipeline;
@@ -15,7 +17,9 @@ struct WorldModuleContext;
 struct CloudModuleContext;
 
 // Push constant shared by all cloud compute passes.
-struct CloudPushConstant {
+// Must match PushConstants layout in cloud_common.glsl exactly.
+// 96 bytes total (within Vulkan guaranteed minimum of 128 bytes).
+struct alignas(16) CloudPushConstant {
     uint32_t renderWidth;        // Render resolution width
     uint32_t renderHeight;       // Render resolution height
     uint32_t cloudWidth;         // Cloud render resolution width
@@ -23,19 +27,23 @@ struct CloudPushConstant {
     float cloudBase;             // Cloud layer base altitude (blocks)
     float cloudThickness;        // Cloud layer thickness (blocks)
     float coverage;              // Base coverage [0-1]
-    float cloudType;             // 0=cumulus, 1=stratus
+    float cloudType;             // [0-1] maps to 4 types: 0=stratus, 0.33=sc, 0.67=cu, 1.0=cb
     float densityMultiplier;     // Density scale
     float windSpeed;             // Wind speed multiplier
-    float windTime;              // Accumulated wind time (seconds)
+    float windTime;              // Accumulated wind time (seconds), wrapped at 86400s
     uint32_t frameIndex;         // For temporal jitter + blue noise
     uint32_t marchSteps;         // Ray march step count
     uint32_t lightSteps;         // Light march step count
     float temporalBlend;         // History blend factor (0.93-0.97)
     uint32_t shadowMapSize;      // Cloud shadow map resolution
-    float eyePosX;               // Camera world position X (from inverse view matrix)
+    float eyePosX;               // Camera world position X
     float eyePosY;               // Camera world position Y
     float eyePosZ;               // Camera world position Z
+    float detailStrength;        // Detail erosion multiplier [0-2]
+    uint32_t scatterOctaves;     // Multi-scatter octave count [1-4] [Wrenninge13]
     float pad0;                  // Alignment padding
+    float pad1;                  // Alignment padding
+    float pad2;                  // Alignment padding
 };
 
 class CloudModule : public WorldModule, public SharedObject<CloudModule> {
@@ -82,10 +90,10 @@ class CloudModule : public WorldModule, public SharedObject<CloudModule> {
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> cloudColorImages_;      // RGBA16F: cloud color + transmittance (cloud res)
     std::shared_ptr<vk::DeviceLocalImage> cloudHistoryImage_;                  // RGBA16F: previous frame cloud (temporal)
     std::shared_ptr<vk::DeviceLocalImage> weatherMapImage_;                    // RGBA8: weather map (256x256)
-    std::shared_ptr<vk::DeviceLocalImage> noiseTexture3D_;                     // RGBA8: 64^3 tiled noise
+    std::shared_ptr<vk::DeviceLocalImage> noiseTexture3D_;                     // RGBA8: 128^3 tiled noise
     std::shared_ptr<vk::DeviceLocalImage> cloudShadowImage_;                   // R16F: cloud shadow map
     std::shared_ptr<vk::Sampler> noiseSampler_;                                // Repeat sampler for 3D noise
-    std::shared_ptr<vk::Sampler> linearSampler_;                               // Clamp sampler for weather/shadow
+    std::shared_ptr<vk::Sampler> weatherSampler_;                               // Repeat sampler for weather map
 
     // Output images (per frame)
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> cloudRadianceImages_;   // Output 0: cloud-composited radiance
@@ -127,9 +135,11 @@ class CloudModule : public WorldModule, public SharedObject<CloudModule> {
     float cloudBase_ = 192.0f;
     float cloudThickness_ = 64.0f;
     float coverage_ = 0.35f;
-    float cloudType_ = 0.0f;
+    float cloudType_ = 0.67f;   // Default: cumulus (0=stratus, 0.33=sc, 0.67=cu, 1.0=cb)
     float densityMultiplier_ = 1.0f;
     float windSpeed_ = 1.0f;
+    float detailStrength_ = 1.0f;
+    uint32_t scatterOctaves_ = 3;
     uint32_t marchSteps_ = 64;
     uint32_t lightSteps_ = 4;
     float temporalBlend_ = 0.95f;
@@ -138,6 +148,7 @@ class CloudModule : public WorldModule, public SharedObject<CloudModule> {
 
     uint32_t frameCounter_ = 0;
     float windTime_ = 0.0f;
+    std::chrono::steady_clock::time_point lastFrameTime_{};
     bool noiseGenerated_ = false;
 };
 

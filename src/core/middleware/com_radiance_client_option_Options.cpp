@@ -799,7 +799,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudSpeed(
     JNIEnv *, jclass, jfloat speed, jboolean) {
-    Renderer::options.cloudSpeed = std::clamp(speed, 0.0f, 5.0f);
+    Renderer::options.cloudSpeed = std::clamp(speed, 0.0f, 6.0f);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudAltitude(
@@ -810,5 +810,20 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudThicknessVol(
     JNIEnv *, jclass, jfloat thickness, jboolean) {
     Renderer::options.cloudThickness = std::clamp(thickness, 32.0f, 128.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudDetailStrength(
+    JNIEnv *, jclass, jfloat strength, jboolean) {
+    Renderer::options.cloudDetailStrength = std::clamp(strength, 0.0f, 2.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudScatterOctaves(
+    JNIEnv *, jclass, jint octaves, jboolean) {
+    Renderer::options.cloudScatterOctaves = static_cast<uint32_t>(std::clamp(octaves, 1, 4));
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetWetSurfaceStrength(
+    JNIEnv *, jclass, jfloat strength, jboolean) {
+    Renderer::options.wetSurfaceStrength = std::clamp(strength, 0.0f, 2.0f);
 }
 

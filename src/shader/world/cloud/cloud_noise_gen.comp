@@ -1,40 +1,23 @@
 #version 460
 #extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
 
-// Cloud noise 3D texture generator.
-// Generates a 64^3 RGBA8 tiled noise texture at init time.
-// R: Perlin-Worley blend (base shape)
-// G: Worley F1 at 2x frequency (shape variation)
-// B: Worley F1 at 4x frequency (edge erosion)
-// A: Value noise (wind distortion)
+// Cloud noise 3D texture generator. [Schneider15 §3.2]
+// Generates a 128^3 RGBA8 tiled noise texture at init time (once).
+//
+// Channel layout (matches cloudDensity() expectations in cloud_density.glsl):
+//   R: Perlin-Worley blend — base cloud shape (connected yet billowy)
+//   G: Worley FBM at freq {2,4,8} — medium erosion (0.625 + 0.25 + 0.125 weights)
+//   B: Worley FBM at freq {4,8,16} — fine erosion
+//   A: Worley FBM at freq {8,16,32} — micro detail
 
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
 layout(set = 0, binding = 9, rgba8) uniform writeonly image3D uNoiseTexture;
 
-// Push constant (reuse CloudPushConstant layout, only frameIndex matters here)
-layout(push_constant) uniform PushConstants {
-    uint renderWidth;
-    uint renderHeight;
-    uint cloudWidth;
-    uint cloudHeight;
-    float cloudBase;
-    float cloudThickness;
-    float coverage;
-    float cloudType;
-    float densityMultiplier;
-    float windSpeed;
-    float windTime;
-    uint frameIndex;
-    uint marchSteps;
-    uint lightSteps;
-    float temporalBlend;
-    uint shadowMapSize;
-    float eyePosX;
-    float eyePosY;
-    float eyePosZ;
-    float pad0;
-} pc;
+// Uses shared push constant layout from cloud_common.glsl.
+// UBOs are declared but unused by this shader — only runs at init.
+#include "cloud_common.glsl"
 
 // --- Noise primitives (self-contained for init-time generation) ---
 
@@ -51,11 +34,11 @@ float hash31(vec3 p) {
     return fract(sin(h) * 43758.5453123);
 }
 
-// 3D Simplex-like value noise
+// 3D value noise with Hermite interpolation
 float valueNoise(vec3 p) {
     vec3 i = floor(p);
     vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f); // Hermite interpolation
+    f = f * f * (3.0 - 2.0 * f); // Hermite smoothstep
 
     return mix(
         mix(mix(hash31(i + vec3(0, 0, 0)), hash31(i + vec3(1, 0, 0)), f.x),
@@ -65,7 +48,7 @@ float valueNoise(vec3 p) {
         f.z);
 }
 
-// Worley (cellular) noise — returns F1 distance
+// Worley (cellular) noise — returns F1 distance (nearest feature point)
 float worleyF1(vec3 p) {
     vec3 i = floor(p);
     vec3 f = fract(p);
@@ -120,28 +103,42 @@ float fbm(vec3 p, int octaves) {
     return value;
 }
 
+// Worley FBM: weighted sum at 3 octaves [Schneider15 §3.2]
+// Weights: 0.625 + 0.25 + 0.125 = 1.0 (normalized amplitude decay 2^-1, 2^-2, 2^-3)
+float worleyFBM3(vec3 p, float baseFreq) {
+    float w0 = 1.0 - worleyF1(p * baseFreq);
+    float w1 = 1.0 - worleyF1(p * baseFreq * 2.0);
+    float w2 = 1.0 - worleyF1(p * baseFreq * 4.0);
+    return 0.625 * w0 + 0.25 * w1 + 0.125 * w2;
+}
+
 void main() {
     ivec3 texel = ivec3(gl_GlobalInvocationID.xyz);
-    if (any(greaterThanEqual(texel, ivec3(64)))) return;
+    if (any(greaterThanEqual(texel, ivec3(128)))) return;
 
-    vec3 uvw = (vec3(texel) + 0.5) / 64.0;
+    vec3 uvw = (vec3(texel) + 0.5) / 128.0;
     vec3 p = uvw * 8.0; // Scale for good tiling frequency
 
-    // R: Perlin-Worley blend (base cloud shape)
+    // R: Perlin-Worley blend (base cloud shape) [Schneider15 §3.2]
+    // Perlin provides connectivity, Worley provides billowy cauliflower shapes.
+    // Schneider remap: remap(perlin, worleyFbm-1, 1, 0, 1) creates a
+    // "connectivity gradient" where Worley cells are bridged by Perlin noise.
     float perlin = fbm(p, 4);
-    float worley = 1.0 - worleyF1(p * 2.0);
-    // Remap: carve Worley into Perlin for natural cloud shapes
-    float perlinWorley = mix(perlin, perlin * worley, 0.5);
+    float worleyFbm = worleyFBM3(p, 2.0);
+
+    // Schneider remap (not linear interpolation — creates continuous connectivity)
+    float perlinWorley = perlin * 0.5 + 0.5;  // Perlin to [0,1]
+    perlinWorley = max(perlinWorley - (1.0 - worleyFbm), 0.0) / max(worleyFbm, 0.001);
     perlinWorley = clamp(perlinWorley, 0.0, 1.0);
 
-    // G: Worley F1 at 2x frequency (shape variation)
-    float worley2x = 1.0 - worleyF1(p * 4.0);
+    // G: Worley FBM at frequencies {2, 4, 8} (medium erosion)
+    float mediumErosion = worleyFBM3(p, 2.0);
 
-    // B: Worley F1 at 4x frequency (edge erosion)
-    float worley4x = 1.0 - worleyF1(p * 8.0);
+    // B: Worley FBM at frequencies {4, 8, 16} (fine erosion)
+    float fineErosion = worleyFBM3(p, 4.0);
 
-    // A: Value noise (wind distortion field)
-    float windNoise = valueNoise(p * 3.0);
+    // A: Worley FBM at frequencies {8, 16, 32} (micro detail)
+    float microDetail = worleyFBM3(p, 8.0);
 
-    imageStore(uNoiseTexture, texel, vec4(perlinWorley, worley2x, worley4x, windNoise));
+    imageStore(uNoiseTexture, texel, vec4(perlinWorley, mediumErosion, fineErosion, microDetail));
 }

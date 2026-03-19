@@ -4,7 +4,8 @@
 // Cloud weather map generator.
 // Generates a 256x256 RGBA8 weather map each frame.
 // R: coverage (modulated by rainGradient + cellular Worley placement)
-// G: cloud type (0=cumulus, 1=stratus, driven by rain)
+// G: cloud type [0,1] mapped to 4 types (see cloud_density.glsl cloudHeightGradient):
+//    0.0=stratus, 0.33=stratocumulus, 0.67=cumulus, 1.0=cumulonimbus
 // B: precipitation (for future use)
 // A: reserved
 
@@ -94,26 +95,38 @@ void main() {
     // Low-frequency FBM for soft variation within cells
     float coverageNoise = fbm2D(windUV * 3.0, 4);
 
-    // Rain gradient drives coverage:
-    // Clear (rain=0): cellular placement with gaps
-    // Heavy rain (rain=1): near-overcast (cells merge)
-    float rain = skyUBO.rainGradient;
-    float baseCoverage = mix(pc.coverage, 0.85, rain);
+    // --- Minecraft weather integration ---
+    // rainGradient: 0=clear → 1=raining (smooth ~1s transition)
+    // thunderGradient: 0=no thunder → 1=thunderstorm (smooth ~1s transition)
+    // Both smoothly interpolated by Minecraft each tick.
+    // Smoothstep for gradual buildup: first 50% of gradient = slow increase, last 50% = rapid
+    float rain = smoothstep(0.0, 1.0, skyUBO.rainGradient);
+    float thunder = smoothstep(0.0, 1.0, skyUBO.thunderGradient);
+
+    // Coverage: clear → overcast (rain), near-total (thunder)
+    float rainCoverage = mix(pc.coverage, 0.80, rain);
+    float baseCoverage = mix(rainCoverage, 0.90, thunder);
 
     // Combine: cellular placement × FBM variation
-    // In clear weather, cellMask dominates (distinct clouds)
-    // In rain, coverage fills gaps between cells
-    float cellInfluence = mix(0.8, 0.2, rain); // Cells matter less in rain
+    // Clear: cells dominate (distinct clouds). Rain: cells merge. Thunder: full overcast.
+    float cellInfluence = mix(0.8, 0.2, rain);
+    cellInfluence = mix(cellInfluence, 0.05, thunder); // Thunder nearly fills gaps
     float coverage = baseCoverage * mix(1.0, cellMask, cellInfluence);
     coverage += (coverageNoise - 0.5) * 0.2 * (1.0 - rain * 0.5);
     coverage = clamp(coverage, 0.0, 1.0);
 
-    // Sharp cutoff for distinct cloud boundaries in clear weather
-    float sharpness = mix(0.15, 0.4, rain); // Sharper edges in clear, softer in rain
+    // Edge sharpness: sharp in clear, soft in rain, moderate in thunder (towering edges)
+    float sharpness = mix(0.15, 0.4, rain);
+    sharpness = mix(sharpness, 0.25, thunder); // Thunder has moderate sharpness (tower edges)
     coverage = smoothstep(sharpness, sharpness + 0.15, coverage);
 
-    // Cloud type: cumulus in clear weather, stratus in rain
-    float type = mix(pc.cloudType, 1.0, rain * 0.8);
+    // Cloud type: meteorologically accurate transitions.
+    // Type mapping: 0=stratus, 0.33=stratocumulus, 0.67=cumulus, 1.0=cumulonimbus
+    // Clear: user-selected type (pc.cloudType, default 0.67 = cumulus)
+    // Rain: stratus overcast (type = 0.0 = lowest, flattest cloud)
+    // Thunder: cumulonimbus towers (type = 1.0 = full-height storm)
+    float rainType = mix(pc.cloudType, 0.0, rain);      // Rain → stratus
+    float type = mix(rainType, 1.0, thunder);            // Thunder → cumulonimbus
 
     // Precipitation intensity
     float precipitation = rain * coverage;

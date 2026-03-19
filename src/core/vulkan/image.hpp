@@ -144,14 +144,13 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
                      VkImageType imageType = VK_IMAGE_TYPE_2D);
     ~DeviceLocalImage();
 
-    /// Create a 3D volume image (VK_IMAGE_TYPE_3D). width/height/depth define the 3D extent.
-    static std::shared_ptr<DeviceLocalImage> create3D(std::shared_ptr<Device> device,
-                                                       std::shared_ptr<VMA> vma,
-                                                       uint32_t width,
-                                                       uint32_t height,
-                                                       uint32_t depth,
-                                                       VkFormat format,
-                                                       VkImageUsageFlags usage);
+    /// Create a 3D image (e.g. for noise textures)
+    static std::shared_ptr<DeviceLocalImage> create3D(
+        std::shared_ptr<Device> device, std::shared_ptr<VMA> vma,
+        uint32_t width, uint32_t height, uint32_t depth,
+        VkFormat format, VkImageUsageFlags usage);
+
+    VkImageType imageType() const { return imageType_; }
 
     // void downloadFromStagingBuffer(size_t size = -1, size_t offset = -1);
     void uploadToStagingBuffer(void *src);
@@ -174,8 +173,6 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
     VkImageView &vkImageView(int index = 0) override;
     VkImageLayout &imageLayout();
     void *mappedPtr();
-
-    VkImageType imageType() const { return imageType_; }
 
     /// VkDeviceMemory backing this image (from VMA allocation). Needed for Streamline resource tagging.
     VkDeviceMemory vkDeviceMemory() { return allocationInfo_.deviceMemory; }

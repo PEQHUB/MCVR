@@ -153,8 +153,8 @@ void CloudModule::build() {
 
     noiseSampler_ = vk::Sampler::create(framework->device(), VK_FILTER_LINEAR,
                                          VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
-    linearSampler_ = vk::Sampler::create(framework->device(), VK_FILTER_LINEAR,
-                                          VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+    weatherSampler_ = vk::Sampler::create(framework->device(), VK_FILTER_LINEAR,
+                                          VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
 
     initDescriptorTables();
     initImages();
@@ -191,7 +191,7 @@ void CloudModule::preClose() {
     noiseGenShader_.reset();
     descriptorTables_.clear();
     noiseSampler_.reset();
-    linearSampler_.reset();
+    weatherSampler_.reset();
     noiseTexture3D_.reset();
     weatherMapImage_.reset();
     cloudShadowImage_.reset();
@@ -327,9 +327,9 @@ void CloudModule::initImages() {
 
     auto buffers = Renderer::instance().buffers();
 
-    // 64^3 RGBA8 3D noise texture (generated once at init)
+    // 128^3 RGBA8 3D noise texture (generated once at init)
     noiseTexture3D_ = vk::DeviceLocalImage::create3D(
-        framework->device(), framework->vma(), 64, 64, 64,
+        framework->device(), framework->vma(), 128, 128, 128,
         VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
@@ -371,7 +371,7 @@ void CloudModule::initImages() {
         descriptorTables_[i]->bindSamplerImage(noiseSampler_, noiseTexture3D_,
                                                 VK_IMAGE_LAYOUT_GENERAL, 0, 6, 0);
         descriptorTables_[i]->bindImage(cloudShadowImage_, VK_IMAGE_LAYOUT_GENERAL, 0, 7);
-        descriptorTables_[i]->bindSamplerImage(linearSampler_, weatherMapImage_,
+        descriptorTables_[i]->bindSamplerImage(weatherSampler_, weatherMapImage_,
                                                 VK_IMAGE_LAYOUT_GENERAL, 0, 8, 0);
         descriptorTables_[i]->bindImage(noiseTexture3D_, VK_IMAGE_LAYOUT_GENERAL, 0, 9);
 
@@ -548,7 +548,7 @@ void CloudModuleContext::render() {
     pc.frameIndex = module->frameCounter_++;
     pc.marchSteps = module->marchSteps_;
     pc.lightSteps = module->lightSteps_;
-    pc.temporalBlend = module->temporalBlend_;
+    pc.temporalBlend = std::clamp(module->temporalBlend_, 0.0f, 1.0f);
     pc.shadowMapSize = module->shadowMapSize_;
 
     // Camera world position from World (same source as WorldUBO.cameraPos)
@@ -557,10 +557,26 @@ void CloudModuleContext::render() {
     pc.eyePosX = static_cast<float>(camPos.x);
     pc.eyePosY = static_cast<float>(camPos.y);
     pc.eyePosZ = static_cast<float>(camPos.z);
+    pc.detailStrength = Renderer::options.cloudDetailStrength;
+    pc.scatterOctaves = Renderer::options.cloudScatterOctaves;
     pc.pad0 = 0.0f;
+    pc.pad1 = 0.0f;
+    pc.pad2 = 0.0f;
 
-    // Advance wind time (~16ms per frame at 60fps)
-    module->windTime_ += Renderer::options.cloudSpeed * (1.0f / 60.0f);
+    // Advance wind time using actual frame delta
+    auto now = std::chrono::steady_clock::now();
+    float deltaSeconds = 1.0f / 60.0f; // fallback for first frame
+    if (module->lastFrameTime_.time_since_epoch().count() > 0) {
+        deltaSeconds = std::chrono::duration<float>(now - module->lastFrameTime_).count();
+        deltaSeconds = std::clamp(deltaSeconds, 0.001f, 0.1f);
+    }
+    module->lastFrameTime_ = now;
+    module->windTime_ += Renderer::options.cloudSpeed * deltaSeconds;
+    // Wrap at 24-hour boundary to prevent FP32 precision loss.
+    // At windSpeed=6.0 and 60fps, windTime reaches ~518400 after 24h.
+    // FP32 has ~7 significant digits, so 518400 + 0.001 = 518400 (frozen wind).
+    // fmod preserves the fractional part that drives noise UV offsets.
+    module->windTime_ = std::fmod(module->windTime_, 86400.0f);
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CloudPushConstant), &pc);
@@ -570,8 +586,8 @@ void CloudModuleContext::render() {
     // --- Pass 0: Noise generation (first frame only) ---
     if (!module->noiseGenerated_) {
         worldCommandBuffer->bindComputePipeline(module->noiseGenPipeline_);
-        // 64^3 / 4^3 = 16^3 = 4096 workgroups
-        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), 64 / 4, 64 / 4, 64 / 4);
+        // 128^3 / 4^3 = 32^3 = 32768 workgroups
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), 128 / 4, 128 / 4, 128 / 4);
 
         // Barrier: noise texture written
         worldCommandBuffer->barriersBufferImage({}, {{
@@ -604,7 +620,7 @@ void CloudModuleContext::render() {
         .srcQueueFamilyIndex = mainQueueIndex,
         .dstQueueFamilyIndex = mainQueueIndex,
         .image = weatherMapImage,
-        .subresourceRange = vk::wholeColorSubresourceRange,
+        .subresourceRange = subresourceFor(weatherMapImage),
     }});
 
     // --- Pass 2: Cloud ray march (cloud resolution) ---
@@ -624,7 +640,7 @@ void CloudModuleContext::render() {
         .srcQueueFamilyIndex = mainQueueIndex,
         .dstQueueFamilyIndex = mainQueueIndex,
         .image = cloudColorImage,
-        .subresourceRange = vk::wholeColorSubresourceRange,
+        .subresourceRange = subresourceFor(cloudColorImage),
     }});
 
     // --- Pass 3: Temporal reprojection (cloud resolution) ---
@@ -642,7 +658,7 @@ void CloudModuleContext::render() {
         .srcQueueFamilyIndex = mainQueueIndex,
         .dstQueueFamilyIndex = mainQueueIndex,
         .image = cloudColorImage,
-        .subresourceRange = vk::wholeColorSubresourceRange,
+        .subresourceRange = subresourceFor(cloudColorImage),
     }});
 
     // Copy current cloudColor → history for next frame's temporal blend
@@ -667,7 +683,7 @@ void CloudModuleContext::render() {
             .srcQueueFamilyIndex = mainQueueIndex,
             .dstQueueFamilyIndex = mainQueueIndex,
             .image = cloudHistoryImage,
-            .subresourceRange = vk::wholeColorSubresourceRange,
+            .subresourceRange = subresourceFor(cloudHistoryImage),
         }});
     }
 
@@ -677,22 +693,36 @@ void CloudModuleContext::render() {
     uint32_t compY = (module->height_ + 7) / 8;
     vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), compX, compY, 1);
 
-    // --- Pass 5: Cloud shadow map ---
-    // Barrier: composite wrote cloudRadiance, shadow is independent
+    // Barrier: cloudRadianceImage written by composite → downstream modules read it
     worldCommandBuffer->barriersBufferImage({}, {{
         .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
         .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = mainQueueIndex,
+        .dstQueueFamilyIndex = mainQueueIndex,
+        .image = cloudRadianceImage,
+        .subresourceRange = subresourceFor(cloudRadianceImage),
+    }});
+
+    // --- Pass 5: Cloud shadow map (independent of composite — parallel-safe) ---
+    worldCommandBuffer->bindComputePipeline(module->shadowPipeline_);
+    uint32_t shadowGroups = (module->shadowMapSize_ + 7) / 8;
+    vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), shadowGroups, shadowGroups, 1);
+
+    // Barrier: cloudShadowImage written → VML or downstream modules read it
+    worldCommandBuffer->barriersBufferImage({}, {{
+        .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
         .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
         .srcQueueFamilyIndex = mainQueueIndex,
         .dstQueueFamilyIndex = mainQueueIndex,
         .image = cloudShadowImage,
-        .subresourceRange = vk::wholeColorSubresourceRange,
+        .subresourceRange = subresourceFor(cloudShadowImage),
     }});
-
-    worldCommandBuffer->bindComputePipeline(module->shadowPipeline_);
-    uint32_t shadowGroups = (module->shadowMapSize_ + 7) / 8;
-    vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), shadowGroups, shadowGroups, 1);
 }

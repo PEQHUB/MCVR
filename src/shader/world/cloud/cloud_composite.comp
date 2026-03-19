@@ -2,7 +2,7 @@
 #extension GL_GOOGLE_include_directive : require
 
 // Depth-aware cloud composite onto scene radiance.
-// Reads cloud color (at cloud resolution), upsamples to full resolution,
+// Reads cloud color (at cloud resolution), bilateral upsamples to full resolution,
 // and composites behind solid geometry using depth.
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -12,29 +12,9 @@ layout(set = 0, binding = 1, r32f)    uniform readonly image2D uLinearDepth;   /
 layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D uCloudRadiance; // Output composited
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D uCloudColor;    // Cloud color + transmittance
 
-// Only push constants needed (no UBOs for composite)
-layout(push_constant) uniform PushConstants {
-    uint renderWidth;
-    uint renderHeight;
-    uint cloudWidth;
-    uint cloudHeight;
-    float cloudBase;
-    float cloudThickness;
-    float coverage;
-    float cloudType;
-    float densityMultiplier;
-    float windSpeed;
-    float windTime;
-    uint frameIndex;
-    uint marchSteps;
-    uint lightSteps;
-    float temporalBlend;
-    uint shadowMapSize;
-    float eyePosX;
-    float eyePosY;
-    float eyePosZ;
-    float pad0;
-} pc;
+// Uses shared push constant layout from cloud_common.glsl.
+// UBOs are declared but unused by this shader — descriptor set binds them regardless.
+#include "cloud_common.glsl"
 
 void main() {
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
@@ -52,7 +32,8 @@ void main() {
     // Load scene depth for bilateral weight
     float sceneDepth = imageLoad(uLinearDepth, texel).r;
 
-    // Bilateral upsampling: 2x2 bilinear weighted by depth similarity
+    // Bilateral upsampling: 2x2 bilinear weighted by depth similarity.
+    // Prevents cloud edges from bleeding across depth discontinuities (e.g. terrain edge).
     vec2 cloudUV = (vec2(texel) + 0.5) / vec2(pc.renderWidth, pc.renderHeight);
     vec2 cloudPos = cloudUV * vec2(pc.cloudWidth, pc.cloudHeight) - 0.5;
     ivec2 baseTexel = ivec2(floor(cloudPos));
@@ -62,7 +43,8 @@ void main() {
     float totalWeight = 0.0;
 
     // Depth threshold for bilateral rejection (scaled by cloud thickness)
-    float depthThreshold = pc.cloudThickness * 2.0;
+    float cloudThick = effectiveThickness();
+    float depthThreshold = cloudThick * 2.0;
 
     for (int dy = 0; dy <= 1; dy++) {
         for (int dx = 0; dx <= 1; dx++) {
@@ -79,7 +61,6 @@ void main() {
             float depthWeight = 1.0;
             if (sceneDepth > 0.0 && sample_.a < 0.999) {
                 // Cloud exists at this sample — weight by depth coherence
-                // Map cloud texel to approximate depth texel
                 vec2 sampleUV = (vec2(st) + 0.5) / vec2(pc.cloudWidth, pc.cloudHeight);
                 ivec2 depthST = clamp(ivec2(sampleUV * vec2(pc.renderWidth, pc.renderHeight)),
                                       ivec2(0), ivec2(pc.renderWidth - 1, pc.renderHeight - 1));

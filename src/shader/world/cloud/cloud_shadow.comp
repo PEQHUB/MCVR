@@ -1,7 +1,7 @@
 #version 460
 #extension GL_GOOGLE_include_directive : require
 
-// Cloud shadow map for VML fog integration.
+// Cloud shadow map for VML fog integration. [Hillaire16 §4.7]
 // Traces vertical columns through cloud layer along sun direction,
 // outputs transmittance map centered on camera.
 // VolumetricModule's scatter shader reads this instead of hash-based shadow.
@@ -12,10 +12,10 @@ layout(set = 0, binding = 6)          uniform sampler3D uNoise3D;
 layout(set = 0, binding = 7, r16f)    uniform writeonly image2D uCloudShadow;
 layout(set = 0, binding = 8)          uniform sampler2D uWeatherMap;
 
+#define CLOUD_HAS_WEATHER_SAMPLER
 #include "cloud_common.glsl"
 #include "cloud_density.glsl"
 
-const float NOISE_SCALE = 1.0 / 256.0;
 const uint SHADOW_STEPS = 16;
 
 void main() {
@@ -37,8 +37,11 @@ void main() {
     // Trace column through cloud layer along sun direction
     vec3 sunDir = normalize(skyUBO.sunDirection);
 
+    // Use shared effectiveThickness() — must match raymarch
+    float cloudThick = effectiveThickness();
+
     // Start at cloud base, march upward through thickness
-    float stepSize = pc.cloudThickness / float(SHADOW_STEPS);
+    float stepSize = cloudThick / float(SHADOW_STEPS);
     float opticalDepth = 0.0;
 
     for (uint i = 0; i < SHADOW_STEPS; i++) {
@@ -49,19 +52,20 @@ void main() {
         float sunT = (y - pc.cloudBase) / max(sunDir.y, 0.01);
         pos.xz += sunDir.xz * sunT;
 
-        vec3 noisePos = pos * NOISE_SCALE + vec3(pc.windTime * 0.02, 0.0, pc.windTime * 0.01);
+        vec3 noisePos = pos * NOISE_SCALE + windOffset(pc.windTime);
         vec4 noise = texture(uNoise3D, noisePos);
-
-        // Weather sample
-        vec2 weatherUV = (pos.xz - eyePos.xz) / 1024.0 + 0.5;
-        vec4 weather = texture(uWeatherMap, weatherUV);
+        vec4 weather = sampleWeather(uWeatherMap, pos);
 
         float density = cloudDensity(pos, weather.r, weather.g, noise,
-                                      pc.cloudBase, pc.cloudThickness, pc.densityMultiplier);
+                                      pc.cloudBase, cloudThick, pc.densityMultiplier,
+                                      pc.detailStrength);
         opticalDepth += density * stepSize;
+
+        // Early termination: fully opaque shadow, remaining steps won't change result
+        if (opticalDepth > 5.0) break;
     }
 
-    // Output transmittance
+    // Output transmittance (Beer's law)
     float transmittance = exp(-opticalDepth);
     imageStore(uCloudShadow, texel, vec4(transmittance));
 }

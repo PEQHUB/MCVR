@@ -192,6 +192,9 @@ struct Options {
     float cloudSpeed = 1.0f;          // Wind speed multiplier [0.0 - 5.0]
     float cloudAltitude = 192.0f;     // Cloud base height in blocks [128 - 320]
     float cloudThickness = 64.0f;     // Cloud layer thickness [32 - 128]
+    float cloudDetailStrength = 1.0f; // Detail erosion multiplier [0.0 - 2.0]
+    uint32_t cloudScatterOctaves = 3; // Multi-scatter octaves [1 - 4]
+    float wetSurfaceStrength = 1.0f;  // Wet surface effect strength [0.0 - 2.0]
 
     // Diagnostics
     bool loggingEnabled = false;

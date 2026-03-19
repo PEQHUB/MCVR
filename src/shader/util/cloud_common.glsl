@@ -3,6 +3,14 @@
 
 // Shared declarations for all cloud compute shaders.
 // UBO layouts must match shared.hpp exactly (field order, types, padding).
+//
+// References:
+//   [Schneider15] A. Schneider, "The Real-time Volumetric Cloudscapes of
+//                 Horizon: Zero Dawn", SIGGRAPH 2015
+//   [Hillaire16]  S. Hillaire, "Physically Based Sky, Atmosphere and Cloud
+//                 Rendering in Frostbite", SIGGRAPH 2016
+//   [Wrenninge13] M. Wrenninge et al., "Art-directable Multiple Volumetric
+//                 Scattering", SIGGRAPH 2013
 
 // WorldUBO: only declare fields up to what cloud shaders need.
 // The actual WorldUBO is much larger (material data, dvec4 cameraPos, etc.)
@@ -49,8 +57,8 @@ layout(set = 1, binding = 1) uniform SkyUniform {
 
     float rainGradient;
     float hdrRadianceScale;
-    float pad1;
-    float pad2;
+    float thunderGradient;
+    float wetSurfaceStrength;
 
     // AtmosphereParams
     float Rg;
@@ -93,6 +101,7 @@ layout(set = 1, binding = 2) uniform LastWorldUBO {
 } lastWorldUBO;
 
 // Push constant layout — must match CloudPushConstant in cloud_module.hpp exactly.
+// ALL cloud shaders must include this file for push constants; never re-declare inline.
 layout(push_constant) uniform PushConstants {
     uint renderWidth;
     uint renderHeight;
@@ -104,7 +113,7 @@ layout(push_constant) uniform PushConstants {
     float cloudType;
     float densityMultiplier;
     float windSpeed;
-    float windTime;
+    float windTime;          // Wrapped at 86400s (24h) to preserve FP32 precision
     uint frameIndex;
     uint marchSteps;
     uint lightSteps;
@@ -113,12 +122,51 @@ layout(push_constant) uniform PushConstants {
     float eyePosX;
     float eyePosY;
     float eyePosZ;
+    float detailStrength;
+    uint scatterOctaves;
     float pad0;
+    float pad1;
+    float pad2;
 } pc;
 
-// Convenience accessor for camera world position
+// --- Shared constants ---
+
+// World-space to noise UV scale. The 128^3 noise texture tiles via repeat
+// sampler; this controls the world-space period. 1/256 = 256-block period,
+// chosen for Minecraft's typical 16-32 chunk render distance to minimize
+// visible tiling while keeping adequate detail within the cloud layer.
+const float NOISE_SCALE = 1.0 / 256.0;
+
+// Wind displacement applied to noise sampling position.
+// X-drift is 2x Z-drift for prevailing-wind asymmetry. [Schneider15 §3.3]
+vec3 windOffset(float windTime) {
+    return vec3(windTime * 0.02, 0.0, windTime * 0.01);
+}
+
+// --- Shared helpers ---
+
+// Camera world position from push constants (avoids dvec4 precision in UBO)
 vec3 getEyePos() {
     return vec3(pc.eyePosX, pc.eyePosY, pc.eyePosZ);
 }
+
+// Thunder-boosted cloud thickness. Cumulonimbus towers grow 50% taller during
+// thunderstorms, clamped so cloud top doesn't exceed Minecraft ceiling (Y=320).
+// MUST be used everywhere that needs effective layer thickness — raymarch,
+// temporal reprojection, shadow, composite depth.
+float effectiveThickness() {
+    float boosted = pc.cloudThickness * mix(1.0, 1.5, skyUBO.thunderGradient);
+    return min(boosted, 320.0 - pc.cloudBase);
+}
+
+// Sample weather map centered on camera. Coverage area is 1024 blocks.
+// uWeatherMap must be declared by the including shader.
+#ifdef CLOUD_HAS_WEATHER_SAMPLER
+vec4 sampleWeather(sampler2D weatherMap, vec3 worldPos) {
+    vec3 eyePos = getEyePos();
+    vec2 uv = (worldPos.xz - eyePos.xz) / 1024.0 + 0.5;
+    return texture(weatherMap, uv);
+}
+#endif
 
 #endif // CLOUD_COMMON_GLSL

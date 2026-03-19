@@ -698,6 +698,24 @@ void main() {
         }
     }
 
+    // --- Wet Surface Effect (Lagarde "Water Drop" model) ---
+    // Rain wets upward-facing porous surfaces: roughness drops, albedo darkens, F0 → water IOR.
+    float wetStrength = skyUBO.wetSurfaceStrength;
+    if (skyUBO.rainGradient > 0.001 && wetStrength > 0.001
+        && mat.metallic < 0.5 && mat.transmission < 0.5) {
+        float rainExposure = max(dot(geometricNormal, vec3(0.0, 1.0, 0.0)), 0.0);
+        float porosity = smoothstep(0.20, 0.85, mat.roughness);
+        float wetness = clamp(skyUBO.rainGradient * rainExposure * porosity * wetStrength, 0.0, 1.0);
+        if (wetness > 0.001) {
+            float wf = (1.0 - wetness);
+            mat.roughness = max(mat.roughness * wf * wf, 0.01);
+            float darken = mix(1.0, 0.3, wetness * porosity);
+            mat.albedo *= darken;
+            albedoValue.rgb *= darken;
+            mat.f0 = mix(mat.f0, vec3(0.02), wetness);
+        }
+    }
+
     // Write post-override material to mainRay for rgen G-buffer / DLSS-RR guide buffers
     mainRay.roughness = mat.roughness;
     mainRay.metallic = mat.metallic;

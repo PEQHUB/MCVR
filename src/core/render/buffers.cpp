@@ -388,6 +388,7 @@ void Buffers::setAndUploadSkyUniformBuffer(vk::Data::SkyUBO &ubo) {
 
     // hdrRadianceScale is no longer used — pre-exposure handles HDR/SDR unification
     ubo.hdrRadianceScale = 1.0f;
+    ubo.wetSurfaceStrength = Renderer::options.wetSurfaceStrength;
 
     if (skyUniformBuffer_[context->frameIndex] == nullptr) {
         skyUniformBuffer_[context->frameIndex] =

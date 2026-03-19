@@ -294,18 +294,14 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
 }
 
 std::shared_ptr<vk::DeviceLocalImage> vk::DeviceLocalImage::create3D(
-    std::shared_ptr<Device> device,
-    std::shared_ptr<VMA> vma,
-    uint32_t width,
-    uint32_t height,
-    uint32_t depth,
-    VkFormat format,
-    VkImageUsageFlags usage) {
+    std::shared_ptr<Device> device, std::shared_ptr<VMA> vma,
+    uint32_t width, uint32_t height, uint32_t depth,
+    VkFormat format, VkImageUsageFlags usage) {
 
     // depth is passed as 'layer' param — constructor handles 3D via imageType
     return std::make_shared<DeviceLocalImage>(
         device, vma, false, 1, width, height, depth, format, usage,
-        0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0, VK_IMAGE_TYPE_3D);
+        0, VMA_MEMORY_USAGE_AUTO, 0, VK_IMAGE_TYPE_3D);
 }
 
 vk::DeviceLocalImage::~DeviceLocalImage() {
