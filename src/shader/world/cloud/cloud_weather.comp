@@ -3,7 +3,7 @@
 
 // Cloud weather map generator.
 // Generates a 256x256 RGBA8 weather map each frame.
-// R: coverage (modulated by rainGradient + low-freq Perlin FBM)
+// R: coverage (modulated by rainGradient + cellular Worley placement)
 // G: cloud type (0=cumulus, 1=stratus, driven by rain)
 // B: precipitation (for future use)
 // A: reserved
@@ -20,6 +20,12 @@ vec3 hash33w(vec3 p) {
              dot(p, vec3(269.5, 183.3, 246.1)),
              dot(p, vec3(113.5, 271.9, 124.6)));
     return fract(sin(p) * 43758.5453123);
+}
+
+vec2 hash22w(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx + p3.yz) * p3.zy);
 }
 
 float gradNoise2D(vec2 p) {
@@ -47,6 +53,23 @@ float fbm2D(vec2 p, int octaves) {
     return value;
 }
 
+// Worley (cellular) noise for distinct cloud placement
+float worley2D(vec2 p) {
+    vec2 cell = floor(p);
+    vec2 frac_ = fract(p);
+    float minDist = 1.0;
+
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            vec2 neighbor = vec2(float(x), float(y));
+            vec2 point = hash22w(cell + neighbor);
+            vec2 diff = neighbor + point - frac_;
+            minDist = min(minDist, dot(diff, diff));
+        }
+    }
+    return sqrt(minDist);
+}
+
 void main() {
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(texel, ivec2(256)))) return;
@@ -62,24 +85,37 @@ void main() {
     // Wind-driven UV offset (slowly drifting weather patterns)
     vec2 windUV = uv + vec2(pc.windTime * 0.01, pc.windTime * 0.003);
 
-    // Low-frequency FBM for natural coverage variation
+    // Cellular structure: Worley noise creates distinct cloud clusters
+    // Scale 2.5 gives ~4-6 cloud formations across the 1024-block coverage area
+    float cellDist = worley2D(windUV * 2.5);
+    // Invert: cloud centers at cell points, gaps between
+    float cellMask = 1.0 - smoothstep(0.0, 0.55, cellDist);
+
+    // Low-frequency FBM for soft variation within cells
     float coverageNoise = fbm2D(windUV * 3.0, 4);
 
     // Rain gradient drives coverage:
-    // Clear (rain=0): base coverage with variation
-    // Heavy rain (rain=1): near-overcast
+    // Clear (rain=0): cellular placement with gaps
+    // Heavy rain (rain=1): near-overcast (cells merge)
     float rain = skyUBO.rainGradient;
     float baseCoverage = mix(pc.coverage, 0.85, rain);
-    float coverage = clamp(baseCoverage + (coverageNoise - 0.5) * 0.3 * (1.0 - rain * 0.5), 0.0, 1.0);
+
+    // Combine: cellular placement × FBM variation
+    // In clear weather, cellMask dominates (distinct clouds)
+    // In rain, coverage fills gaps between cells
+    float cellInfluence = mix(0.8, 0.2, rain); // Cells matter less in rain
+    float coverage = baseCoverage * mix(1.0, cellMask, cellInfluence);
+    coverage += (coverageNoise - 0.5) * 0.2 * (1.0 - rain * 0.5);
+    coverage = clamp(coverage, 0.0, 1.0);
+
+    // Sharp cutoff for distinct cloud boundaries in clear weather
+    float sharpness = mix(0.15, 0.4, rain); // Sharper edges in clear, softer in rain
+    coverage = smoothstep(sharpness, sharpness + 0.15, coverage);
 
     // Cloud type: cumulus in clear weather, stratus in rain
     float type = mix(pc.cloudType, 1.0, rain * 0.8);
 
-    // Add large-scale cellular structure for cloud placement
-    float cellNoise = fbm2D(windUV * 1.5, 3);
-    coverage *= smoothstep(0.2, 0.5, cellNoise + coverage * 0.5);
-
-    // Precipitation intensity (future: rain drops, snow)
+    // Precipitation intensity
     float precipitation = rain * coverage;
 
     imageStore(uWeatherMap, texel, vec4(coverage, type, precipitation, 1.0));

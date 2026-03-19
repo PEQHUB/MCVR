@@ -19,11 +19,18 @@ float stratusGradient(float h) {
     return smoothstep(0.0, 0.05, h) * smoothstep(1.0, 0.8, h);
 }
 
-// Main cloud density function (Simplified Schneider model).
+// Detail erosion scale (sample B channel at higher frequency for turbulent edges)
+const float DETAIL_NOISE_SCALE = 4.0;
+
+// Main cloud density function (Schneider model with detail erosion).
 // pos:       world-space position
 // coverage:  base coverage [0,1] (from weather map)
 // type:      0=cumulus, 1=stratus (blend)
 // noise:     pre-sampled 64^3 noise texture (RGBA)
+//            R = Perlin-Worley blend (base shape)
+//            G = Worley F1 at 2x freq (medium erosion)
+//            B = Worley F1 at 4x freq (fine detail)
+//            A = value noise (wind distortion)
 // cloudBase: bottom of cloud layer (world Y)
 // cloudThickness: height of cloud layer
 // densityMul: density multiplier
@@ -41,9 +48,19 @@ float cloudDensity(vec3 pos, float coverage, float type,
     float shape = cloudRemap(noise.r, 1.0 - coverage, 1.0, 0.0, 1.0) * grad;
     if (shape <= 0.0) return 0.0;
 
-    // Light erosion from G channel (Worley F1 at 2x freq)
-    float erode = noise.g * 0.3 * (1.0 - shape);
-    return max(shape - erode, 0.0) * densityMul;
+    // Medium erosion from G channel (Worley F1 at 2x freq)
+    float erode = noise.g * 0.25 * (1.0 - shape);
+
+    // Fine detail erosion from B channel (Worley F1 at 4x freq)
+    // Stronger at cloud edges (where shape is small), weaker in core
+    float edgeFactor = 1.0 - smoothstep(0.0, 0.5, shape);
+    float detail = noise.b * 0.15 * edgeFactor;
+
+    // Height-dependent detail: more breakup at cloud base and top
+    float heightDetail = 1.0 - smoothstep(0.0, 0.3, abs(h - 0.5) * 2.0 - 0.4);
+    detail *= mix(1.0, 0.5, heightDetail);
+
+    return max(shape - erode - detail, 0.0) * densityMul;
 }
 
 // Beer-Lambert transmittance

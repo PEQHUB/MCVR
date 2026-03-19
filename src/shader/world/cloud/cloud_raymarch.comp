@@ -19,6 +19,7 @@ layout(set = 0, binding = 8)           uniform sampler2D uWeatherMap;      // 25
 
 // Constants
 const float NOISE_SCALE = 1.0 / 256.0;  // World-space to noise UV scale
+const float ATMO_FADE_DIST = 2000.0;    // Blocks at which clouds fully fade to horizon
 
 // Per-pixel hash for spatial variation (no external buffer needed)
 float hash12(vec2 p) {
@@ -71,7 +72,7 @@ bool intersectCloudSlab(vec3 origin, vec3 dir, out float tEnter, out float tExit
 // Sample weather map (UV = XZ world position mapped to [0,1])
 vec4 sampleWeather(vec3 worldPos) {
     vec3 eyePos = getEyePos();
-    // Map world XZ to weather UV: 512-block coverage area centered on camera
+    // Map world XZ to weather UV: 1024-block coverage area centered on camera
     vec2 uv = (worldPos.xz - eyePos.xz) / 1024.0 + 0.5;
     return texture(uWeatherMap, uv);
 }
@@ -97,6 +98,14 @@ float lightMarch(vec3 pos, vec3 sunDir, uint steps) {
     }
 
     return opticalDepth;
+}
+
+// Atmospheric perspective: compute extinction over distance through lower atmosphere
+// Returns blend factor [0,1] — 0 = full cloud color, 1 = fully faded to horizon
+float atmosphericFade(float dist) {
+    // Exponential falloff tuned for Minecraft scale
+    // At 500 blocks: ~18% faded, at 1000: ~63%, at 2000: ~98%
+    return 1.0 - exp(-dist / ATMO_FADE_DIST * 2.0);
 }
 
 void main() {
@@ -139,6 +148,21 @@ void main() {
         tExit = sceneDepth;
     }
 
+    // --- Zero-skip: check weather at ray midpoint before marching ---
+    vec3 midPos = rayOrigin + rayDir * ((tEnter + tExit) * 0.5);
+    vec4 midWeather = sampleWeather(midPos);
+    if (midWeather.r < 0.01) {
+        // No coverage at ray center — check entry and exit too
+        vec3 enterPos = rayOrigin + rayDir * tEnter;
+        vec3 exitPos = rayOrigin + rayDir * tExit;
+        vec4 enterWeather = sampleWeather(enterPos);
+        vec4 exitWeather = sampleWeather(exitPos);
+        if (enterWeather.r < 0.01 && exitWeather.r < 0.01) {
+            imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0));
+            return;
+        }
+    }
+
     // March parameters
     float marchLength = tExit - tEnter;
     float baseStepSize = marchLength / float(pc.marchSteps);
@@ -150,6 +174,8 @@ void main() {
     // Accumulation
     vec3 scatteredLight = vec3(0.0);
     float transmittance = 1.0;
+    float weightedDist = 0.0;  // Distance-weighted accumulator for atmospheric perspective
+    float totalWeight = 0.0;
 
     // Sun direction and phase function
     vec3 sunDir = normalize(skyUBO.sunDirection);
@@ -157,10 +183,12 @@ void main() {
     // Dual-lobe HG: strong forward scatter + mild back scatter
     float phase = phaseDualHG(cosAngle, 0.8, -0.3, 0.2);
 
-    // Sun color (use sky's sun radiance, attenuated for cloud altitude)
+    // Sun color
     vec3 sunColor = skyUBO.sunRadiance;
-    // Ambient sky light (rough approximation from sky base color)
-    vec3 ambientLight = skyUBO.baseColor * 0.3 + vec3(0.05);
+
+    // Height-dependent sky ambient: blue at top, warm horizon color at base
+    vec3 skyTop = skyUBO.baseColor * 0.4;
+    vec3 skyHorizon = skyUBO.horizonColor.rgb * 0.3 + vec3(0.03);
 
     // Adaptive stepping state
     bool inCloud = false;
@@ -186,18 +214,25 @@ void main() {
                 stepSize = baseStepSize;
             }
 
-            // Light march toward sun
-            float lightOD = lightMarch(pos, sunDir, pc.lightSteps);
-
-            // Beer-Powder multi-scatter approximation
-            float lightTransmittance = beerPowder(lightOD);
+            // Conditional light march: skip when transmittance is already low
+            // (deep inside cloud, light contribution is negligible)
+            float lightTransmittance;
+            if (transmittance > 0.05) {
+                float lightOD = lightMarch(pos, sunDir, pc.lightSteps);
+                lightTransmittance = beerPowder(lightOD);
+            } else {
+                // Deep inside cloud — approximate with simple extinction
+                lightTransmittance = 0.02;
+            }
 
             // Normalized height for ambient gradient
             float h = (pos.y - pc.cloudBase) / pc.cloudThickness;
 
-            // Direct sun lighting + ambient
+            // Height-dependent ambient: sky color at top, horizon at base
+            vec3 ambient = mix(skyHorizon, skyTop, h) * mix(0.5, 1.2, h);
+
+            // Direct sun lighting
             vec3 directLight = sunColor * lightTransmittance * phase;
-            vec3 ambient = ambientLight * mix(0.4, 1.0, h); // Brighter at cloud top
 
             vec3 luminance = (directLight + ambient) * density;
 
@@ -207,6 +242,11 @@ void main() {
             vec3 integScatter = luminance * (1.0 - sampleTransmittance) / max(density, 0.0001);
             scatteredLight += transmittance * integScatter;
             transmittance *= sampleTransmittance;
+
+            // Track distance for atmospheric perspective
+            float sampleWeight = (1.0 - sampleTransmittance) * transmittance;
+            weightedDist += t * sampleWeight;
+            totalWeight += sampleWeight;
 
             // Early termination
             if (transmittance < 0.003) {
@@ -223,6 +263,16 @@ void main() {
 
         t += stepSize;
         stepSize = baseStepSize; // Reset for next iteration (adaptive handled above)
+    }
+
+    // --- Atmospheric perspective ---
+    // Fade distant clouds toward horizon color based on average sample distance
+    if (totalWeight > 0.001) {
+        float avgDist = weightedDist / totalWeight;
+        float fade = atmosphericFade(avgDist);
+        // Blend cloud scattered light toward attenuated horizon color
+        vec3 horizonFog = skyUBO.horizonColor.rgb * 0.5;
+        scatteredLight = mix(scatteredLight, horizonFog * (1.0 - transmittance), fade);
     }
 
     // Output: RGB = scattered light, A = transmittance

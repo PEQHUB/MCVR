@@ -3,7 +3,7 @@
 
 // Cloud temporal reprojection + AABB clamping.
 // Blends current cloud color with history for temporal stability.
-// Aggressive 95-97% blend (Doom TDA style).
+// Motion-adaptive: aggressive blend when static, reduced during camera turns.
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -71,8 +71,36 @@ void main() {
     // Clamp history to neighborhood AABB (prevents ghosting)
     vec4 clampedHistory = clamp(history, minVal, maxVal);
 
-    // Blend with aggressive temporal weight
-    vec4 result = mix(current, clampedHistory, pc.temporalBlend);
+    // --- Motion-adaptive blend factor ---
+    // Compare current and previous camera forward vectors to detect rotation
+    vec3 currForward = normalize(worldUBO.cameraViewMat[2].xyz);
+    vec3 prevForward = normalize(lastWorldUBO.prevCameraViewMat[2].xyz);
+    float rotationDelta = 1.0 - abs(dot(currForward, prevForward));
+
+    // Also detect translation by comparing camera positions
+    vec3 prevEyePos = lastWorldUBO.prevCameraViewMatInv[3].xyz;
+    float translationDelta = length(eyePos - prevEyePos);
+
+    // Motion magnitude: rotation contributes more than translation for clouds
+    // (clouds are far away, so translation barely shifts them)
+    float motion = rotationDelta * 50.0 + translationDelta * 0.01;
+    motion = clamp(motion, 0.0, 1.0);
+
+    // Reduce temporal blend when camera is moving (more responsive, less ghosting)
+    // Static: use pc.temporalBlend (0.93-0.97). Fast motion: drop to 0.5
+    float adaptiveBlend = mix(pc.temporalBlend, 0.5, motion);
+
+    // Reprojection confidence: reduce blend near UV edges (stretched reprojection)
+    vec2 uvDist = abs(prevUV - 0.5) * 2.0; // [0,1] distance from center
+    float edgeFalloff = 1.0 - smoothstep(0.8, 1.0, max(uvDist.x, uvDist.y));
+    adaptiveBlend *= edgeFalloff;
+
+    // Also reduce blend when AABB clamping was aggressive (history was far from current)
+    float clampDist = length(history - clampedHistory);
+    float clampPenalty = smoothstep(0.0, 0.5, clampDist);
+    adaptiveBlend *= (1.0 - clampPenalty * 0.5);
+
+    vec4 result = mix(current, clampedHistory, adaptiveBlend);
 
     imageStore(uCloudColor, texel, result);
 }
