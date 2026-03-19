@@ -22,6 +22,7 @@ uint32_t FrameGenManager::maxFrames_ = 0;
 uint32_t FrameGenManager::currentMode_ = 0;
 bool FrameGenManager::needsSwapchainRecreate_ = false;
 bool FrameGenManager::pendingEnable_ = false;
+bool FrameGenManager::featureLoaded_ = false;
 
 bool FrameGenManager::init() {
 #ifdef _WIN32
@@ -69,9 +70,23 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
     if (!StreamlineContext::isDlssGSupported()) return;
     if (!context) return;
 
-    // Deferred enable: apply slDLSSGSetOptions on the render thread, not during swapchain callback
+    // Deferred enable: load feature + apply slDLSSGSetOptions on the render thread,
+    // not during swapchain callback. Loading the feature hooks the swapchain — must
+    // not happen until the world is rendering and sl::Constants are being set.
     if (pendingEnable_) {
         pendingEnable_ = false;
+
+        if (!featureLoaded_) {
+            StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, true);
+            featureLoaded_ = true;
+            fgCout() << "feature loaded (deferred to first render frame)" << std::endl;
+            // Feature just loaded — need a swapchain recreate for DLSS-G hooks to attach.
+            // Set pendingEnable_ again so we enable after the recreate.
+            Renderer::options.needRecreate = true;
+            pendingEnable_ = true;
+            return;
+        }
+
         uint32_t mode = Renderer::options.frameGenMode;
         uint32_t multiplier = Renderer::options.frameGenMultiplier;
         if (multiplier > maxFrames_) multiplier = maxFrames_;
@@ -80,7 +95,6 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
         sl::DLSSGMode slMode;
         switch (mode) {
         case 1:  slMode = sl::DLSSGMode::eOn; break;
-        case 2:  slMode = sl::DLSSGMode::eAuto; break;
         default: slMode = sl::DLSSGMode::eOff; break;
         }
 
@@ -309,6 +323,7 @@ void FrameGenManager::beforeSwapchainRecreate() {
     if (active_ && !wantActive) {
         StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, false);
         active_ = false;
+        featureLoaded_ = false;
         fgCout() << "unloaded (user disabled)" << std::endl;
     }
 #endif
@@ -319,11 +334,6 @@ void FrameGenManager::afterSwapchainRecreate() {
     if (!initialized_ || !StreamlineContext::isDlssGSupported()) return;
 
     bool wantActive = Renderer::options.frameGenEnabled;
-
-    if (wantActive && !active_) {
-        // First enable: load the DLSS-G feature
-        StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, true);
-    }
 
     if (wantActive) {
         // Defer the actual slDLSSGSetOptions call to tagFrame() on the render thread.

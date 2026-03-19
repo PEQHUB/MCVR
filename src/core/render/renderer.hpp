@@ -180,8 +180,7 @@ struct Options {
     bool offlineNativeResActive = false;  // tracks if resolution was overridden
 
     // Frame Generation (DLSS-G / FSR3-FG)
-    bool frameGenEnabled = false;        // Master toggle (derived from backend + mode)
-    uint32_t frameGenBackend = 0;        // 0=Off, 1=DLSS-G, 2=FSR-FG
+    bool frameGenEnabled = false;        // Master toggle
     uint32_t frameGenMode = 0;           // 0=Off, 1=On, 2=Auto (dynamic MFG)
     uint32_t frameGenMultiplier = 1;     // 1=2x, 2=3x, 3=4x (clamped to hardware max)
 

@@ -17,7 +17,6 @@ class Device : public SharedObject<Device> {
     VkDevice &vkDevice();
     VkQueue &mainVkQueue();
     VkQueue &secondaryQueue();
-    VkQueue &presentVkQueue();
     VkPipelineCache pipelineCache() const { return pipelineCache_; }
 
     void savePipelineCache();
@@ -33,7 +32,6 @@ class Device : public SharedObject<Device> {
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue mainQueue_ = VK_NULL_HANDLE;
     VkQueue secondaryQueue_ = VK_NULL_HANDLE;
-    VkQueue presentQueue_ = VK_NULL_HANDLE;  // Dedicated present queue for FSR FG
     VkPipelineCache pipelineCache_ = VK_NULL_HANDLE;
 
     bool extendedDynamicState2LogicOp_ = false;

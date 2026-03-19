@@ -42,4 +42,5 @@ class FrameGenManager {
     static uint32_t currentMode_;
     static bool needsSwapchainRecreate_;
     static bool pendingEnable_;  // Deferred slDLSSGSetOptions after swapchain recreate
+    static bool featureLoaded_;  // Whether sl::kFeatureDLSS_G has been loaded
 };

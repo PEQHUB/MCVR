@@ -14,8 +14,6 @@ class PhysicalDevice : public SharedObject<PhysicalDevice> {
     VkPhysicalDevice &vkPhysicalDevice();
     uint32_t mainQueueIndex();
     uint32_t secondaryQueueIndex();
-    uint32_t presentQueueIndex();
-    uint32_t mainQueueCount();       // Number of queues available in the main family
 
     void findPhysicalDevice();
     void findQueueFamilies();
@@ -31,8 +29,6 @@ class PhysicalDevice : public SharedObject<PhysicalDevice> {
     VkPhysicalDevice physicalDevice_ = VK_NULL_HANDLE;
     uint32_t mainQueueIndex_ = -1;
     uint32_t secondaryQueueIndex_ = -1;
-    uint32_t presentQueueIndex_ = -1;    // Dedicated present queue family (for FSR FG)
-    uint32_t mainQueueCount_ = 0;        // Queue count in main family
 
     VkPhysicalDeviceProperties properties_;
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingProperties_;

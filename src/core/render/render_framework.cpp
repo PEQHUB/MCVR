@@ -15,7 +15,6 @@
 #include "core/render/crash_ring_buffer.hpp"
 #include "core/render/radiance_logger.hpp"
 #include "core/render/modules/world/frame_gen/frame_gen_manager.hpp"
-#include "core/render/modules/world/frame_gen/fsr_frame_gen_manager.hpp"
 
 #include <iostream>
 #include <random>
@@ -250,9 +249,8 @@ void Framework::init(GLFWwindow *window) {
 
     pipeline_ = Pipeline::create(shared_from_this());
 
-    // Initialize frame generation backends
+    // Initialize DLSS-G frame generation
     FrameGenManager::init();
-    FsrFrameGenManager::init(device_, physicalDevice_);
 
     // Initialize GPU profiler
     Renderer::gpuProfiler.init(device_, physicalDevice_, 16, imageCount);
@@ -389,27 +387,13 @@ void Framework::submitCommand() {
     }
     pipelineContext->uiModuleContext->end();
 
-    // Tag resources for frame generation (after world render, before composite)
-    if (Renderer::options.frameGenBackend == 1 && FrameGenManager::isActive()) {
+    // Tag resources for DLSS-G frame generation (after world render, before composite)
+    if (FrameGenManager::isActive()) {
         auto worldOutput = pipelineContext->worldPipelineContext
                              ? pipelineContext->worldPipelineContext->outputImage : nullptr;
         auto overlayOutput = pipelineContext->uiModuleContext
                                ? pipelineContext->uiModuleContext->overlayDrawColorImage : nullptr;
         FrameGenManager::tagFrame(currentContext_, worldOutput, overlayOutput);
-    } else if (Renderer::options.frameGenBackend == 2 && FsrFrameGenManager::isActive()) {
-        auto worldOutput = pipelineContext->worldPipelineContext
-                             ? pipelineContext->worldPipelineContext->outputImage : nullptr;
-        auto overlayOutput = pipelineContext->uiModuleContext
-                               ? pipelineContext->uiModuleContext->overlayDrawColorImage : nullptr;
-        if (worldOutput) {
-            FsrFrameGenManager::configureFrame(currentContext_,
-                worldOutput->vkImage(), worldOutput->vkFormat(),
-                worldOutput->width(), worldOutput->height(),
-                overlayOutput ? overlayOutput->vkImage() : VK_NULL_HANDLE,
-                overlayOutput ? overlayOutput->vkFormat() : VK_FORMAT_UNDEFINED,
-                overlayOutput ? overlayOutput->width() : 0,
-                overlayOutput ? overlayOutput->height() : 0);
-        }
     }
 
     currentContext_->fuseFinal();
@@ -479,12 +463,7 @@ void Framework::present() {
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentStart);
 #endif
     g_crashRing.record("present");
-    VkResult result;
-    if (FsrFrameGenManager::isActive()) {
-        result = FsrFrameGenManager::present(device_->mainVkQueue(), &presentInfo);
-    } else {
-        result = vkQueuePresentKHR(device_->mainVkQueue(), &presentInfo);
-    }
+    VkResult result = vkQueuePresentKHR(device_->mainVkQueue(), &presentInfo);
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentEnd);
 #endif
@@ -510,9 +489,8 @@ void Framework::recreate() {
 
     waitRenderQueueIdle();
 
-    // Notify frame gen managers before swapchain teardown
+    // Notify frame gen manager before swapchain teardown
     FrameGenManager::beforeSwapchainRecreate();
-    FsrFrameGenManager::beforeSwapchainRecreate();
 
     int width = 0, height = 0;
     GLFW_GetFramebufferSize(window_->window(), &width, &height);
@@ -554,9 +532,8 @@ void Framework::recreate() {
 
     pipeline_->recreate(shared_from_this());
 
-    // Notify frame gen managers after swapchain recreation
+    // Notify frame gen manager after swapchain recreation
     FrameGenManager::afterSwapchainRecreate();
-    FsrFrameGenManager::afterSwapchainRecreate(swapchain_, device_, physicalDevice_);
 
     Renderer::instance().textures()->bindAllTextures();
 }
@@ -576,7 +553,6 @@ void Framework::waitBackendQueueIdle() {
 void Framework::close() {
     if (running_) { pipeline_->close(); }
     running_ = false;
-    FsrFrameGenManager::shutdown();
     // Shutdown Streamline before Vulkan device destruction
     StreamlineContext::shutdown();
 }
