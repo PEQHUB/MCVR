@@ -106,6 +106,10 @@ class BLASBuilder : public SharedObject<BLASBuilder> {
 
         BLASGeometryBuilder &definePlaceholderGeometry();
 
+        BLASGeometryBuilder &defineAABBGeometry(std::shared_ptr<DeviceLocalBuffer> aabbBuffer,
+                                                 uint32_t aabbCount,
+                                                 bool isOpaque);
+
         std::shared_ptr<BLASBuilder> endGeometries();
     };
 

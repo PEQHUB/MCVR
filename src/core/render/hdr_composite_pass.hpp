@@ -83,6 +83,9 @@ class HdrCompositePass : public SharedObject<HdrCompositePass> {
     // Fallback 1x1 black image used when no world output exists yet.
     std::shared_ptr<vk::DeviceLocalImage> blackWorldImage_;
 
+    // Fallback 1x1 transparent image used when overlay is null (FG world-only composite).
+    std::shared_ptr<vk::DeviceLocalImage> transparentOverlayImage_;
+
     // Descriptor sets — one per swapchain image
     std::vector<std::shared_ptr<vk::DescriptorTable>> descriptorTables_;
 

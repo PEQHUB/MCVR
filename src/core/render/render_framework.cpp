@@ -63,7 +63,14 @@ void FrameworkContext::fuseFinal() {
     auto worldOutput = hasWorldOutput ? pipelineContext->worldPipelineContext->outputImage : nullptr;
 
     auto overlayOutput = pipelineContext->uiModuleContext ? pipelineContext->uiModuleContext->overlayDrawColorImage : nullptr;
-    bool canComposite = f->pipeline_->hdrCompositePass() && overlayOutput;
+
+    // When Frame Generation is active, DLSS-G composites UI internally via tagged
+    // kBufferTypeUIColorAndAlpha buffer (per NVIDIA §5.0). We must NOT bake UI into
+    // the swapchain — pass null overlay so the composite shader writes world-only.
+    bool fgActive = FrameGenManager::isActive();
+    auto compositeOverlay = fgActive ? nullptr : overlayOutput;
+
+    bool canComposite = f->pipeline_->hdrCompositePass() && (compositeOverlay || fgActive);
 
     if (hdrOutputActive && canComposite) {
         // ═══════════ HDR path: composite shader ═══════════
@@ -77,7 +84,7 @@ void FrameworkContext::fuseFinal() {
             HdrCompositePass::OutputMode::Hdr10,
             Renderer::options.hdrUiBrightnessNits,
             worldOutput,
-            overlayOutput,
+            compositeOverlay,
             swapchainImage,
             mainQueueIndex);
 
@@ -90,7 +97,7 @@ void FrameworkContext::fuseFinal() {
             HdrCompositePass::OutputMode::Sdr,
             0.0f,
             worldOutput,
-            overlayOutput,
+            compositeOverlay,
             swapchainImage,
             mainQueueIndex);
 

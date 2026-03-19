@@ -252,15 +252,6 @@ namespace Data {
 
         T_VEC4 emissiveGamut[13]; // Per-emissive-block gamut boost, indexed as [i/4][i%4], 1.0 = neutral
 
-        // Principled BSDF material overrides: 7 vec4 per block × 160 blocks = 1120 vec4
-        // Pack 0 [idx+0]:   (f0.r, f0.g, f0.b, roughness)
-        // Pack 1 [idx+160]: (metallic, transmission, ior, subsurface)
-        // Pack 2 [idx+320]: (anisotropic, sheenWeight, sheenTint, coatWeight)
-        // Pack 3 [idx+480]: (coatRoughness, noiseScale, noiseStrength, noisePacked)
-        // Pack 4 [idx+640]: (channelR, channelG, channelB, textureBlend)
-        // Pack 5 [idx+800]: (gamutBoost, noiseMaskThreshold, noiseMaskPacked, normalStrength)
-        // Pack 6 [idx+960]: (noiseRotation, noiseAspect, noiseLacunarity, noiseContrast)
-        T_VEC4 materialData[1120];
     };
 
     struct SkyUBO {
@@ -341,41 +332,105 @@ namespace Data {
         T_VEC4 cloudLighting;
     };
 
-    // Hot path: 16 bytes per entry, read by every ray hit (unchanged from original)
+    // Hot path: 20 bytes per entry, read by every ray hit
     struct TextureMapEntry {
         T_INT specular;
         T_INT normal;
         T_INT flag;
-        T_INT properties;    // bit 0: has height map, bit 2: has Blender PBR channel(s)
-    };
-
-    // Cold path: 32 bytes per entry, only read when TEX_PROP_DIRECT_PBR is set
-    struct BlenderPBREntry {
-        T_INT roughnessTex;  // R8/R16 UNORM, perceptual roughness [0,1]
-        T_INT metallicTex;   // R8 UNORM, continuous [0,1]
-        T_INT emissionTex;   // R8 UNORM, emission intensity [0,1] (0=none)
-        T_INT normalBPTex;   // RG8/RG16 UNORM, OpenGL Y+ convention XY
-        T_INT heightTex;     // R8/R16 UNORM, displacement height [0,1]
-        T_INT aoTex;         // R8 UNORM, ambient occlusion [0,1] (1=no occlusion)
-        T_INT extraTex;      // RGBA8: R=subsurface, G=transmission, B=coatWeight, A=anisotropic
-        T_INT _reserved;
+        T_INT properties;    // bit 0: has height map
+        T_INT maskTexture;   // bindless index of R8_UNORM material class mask, -1 = none
     };
 
 #ifdef __cplusplus
     static constexpr int TEX_PROP_HAS_HEIGHT_MAP = 1;
-    static constexpr int TEX_PROP_DIRECT_PBR     = 4;
 #else
     #define TEX_PROP_HAS_HEIGHT_MAP 1
-    #define TEX_PROP_DIRECT_PBR     4
 #endif
 
     struct TextureMapping {
         TextureMapEntry entries[4096];
     };
 
-    struct BlenderPBRMapping {
-        BlenderPBREntry entries[4096];
-    };
+    // Unified material class: full Disney BRDF parameters for a material category.
+    // ~32 classes (IRON, GOLD, DIAMOND, WOOD, GLASS, etc.), 128 bytes each.
+    // Indexed by material class ID from the material mask atlas.
+    struct MaterialClassEntry {
+        // Pack 0: base BRDF
+        T_VEC3 f0;              // Fresnel reflectance at normal incidence (RGB)
+        T_FLOAT roughness;      // Perceptual roughness [0,1] (squared in shader for GGX alpha)
+
+        // Pack 1: extended BRDF
+        T_FLOAT metallic;       // [0,1]
+        T_FLOAT transmission;   // [0,1], -1.0 = keep LabPBR value
+        T_FLOAT ior;            // Index of refraction (>= 1.0)
+        T_FLOAT subsurface;     // [0,1]
+
+        // Pack 2: Disney extended
+        T_FLOAT anisotropic;    // [0,1]
+        T_FLOAT sheenWeight;    // [0,1]
+        T_FLOAT sheenTint;      // [0,1]
+        T_FLOAT coatWeight;     // [0,1]
+
+        // Pack 3: coat + noise base
+        T_FLOAT coatRoughness;  // [0,1]
+        T_FLOAT noiseScale;     // World-space noise scale
+        T_FLOAT noiseStrength;  // [0,1]
+        T_UINT  noisePacked;    // Bit-packed: octaves(0-3), type(4-8), seed(9-17), target(20-23)
+
+        // Pack 4: texture roughness routing
+        T_FLOAT channelR;       // [0,1] weight
+        T_FLOAT channelG;       // [0,1] weight
+        T_FLOAT channelB;       // [0,1] weight
+        T_FLOAT textureBlend;   // [0,1]
+
+        // Pack 5: gamut + noise mask + normal strength
+        T_FLOAT gamutBoost;     // Oklab chroma scale (1.0 = neutral)
+        T_FLOAT noiseMaskThreshold; // [0,1]
+        T_UINT  noiseMaskPacked;    // Bit-packed mask params
+        T_FLOAT normalStrength; // Normal map intensity (1.0 = neutral)
+
+        // Pack 6: noise transform
+        T_FLOAT noiseRotation;  // Radians
+        T_FLOAT noiseAspect;    // Y/X ratio
+        T_FLOAT noiseLacunarity;// FBM lacunarity
+        T_FLOAT noiseContrast;  // S-curve contrast
+
+        // Pack 7: emission + classification
+        T_FLOAT emissionNits;   // Surface luminance in nits (0 = no emission)
+        T_UINT  emissionType;   // EmissiveBlock ordinal (255 = none)
+        T_UINT  classId;        // Material class ID (for cross-reference)
+        T_UINT  flags;          // Bit 0: has override, Bit 1: area light, Bit 2: vivid color
+    }; // 128 bytes (8 x vec4), std430 aligned
+
+#ifdef __cplusplus
+    static constexpr int MAX_MATERIAL_CLASSES = 256;
+#else
+    #define MAX_MATERIAL_CLASSES 256
+#endif
+
+    struct MaterialClassMapping {
+        MaterialClassEntry entries[MAX_MATERIAL_CLASSES];
+    }; // 32 KB
+
+    // Displacement mapping: per-face data for intersection shader DDA.
+    // One entry per displaced AABB in the displaced BLAS, indexed by gl_PrimitiveID.
+    struct DisplacedFaceData {
+        T_VEC3 corner;        // object-space corner of quad (min UV corner)
+        T_UINT faceAxis;      // 0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z
+        T_VEC3 edgeU;         // object-space edge along U direction
+        T_FLOAT heightScale;  // displacement depth in world units
+        T_VEC3 edgeV;         // object-space edge along V direction
+        T_UINT textureID;     // bindless texture index (albedo)
+        T_INT normalTexID;    // normal texture (height in alpha), -1 = none
+        T_INT specularTexID;  // specular texture, -1 = none
+        T_VEC2 uvMin;         // atlas UV tile min
+        T_VEC2 uvMax;         // atlas UV tile max
+        T_VEC4 colorLayer;    // vertex color tint (RGBA)
+        T_UINT emissiveBlockType; // EmissiveBlock ordinal (255 = none)
+        T_UINT properties;    // TextureMapEntry.properties (bit 0: has height map)
+        T_UINT _pad0;
+        T_UINT _pad1;
+    }; // 96 bytes, 6 × vec4, std430 aligned
 
     struct ExposureData {
         T_INT width;

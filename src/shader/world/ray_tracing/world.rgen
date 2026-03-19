@@ -10,6 +10,7 @@
 #extension GL_EXT_shader_16bit_storage : enable
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_opacity_micromap : require
+#extension GL_NV_shader_invocation_reorder : enable
 
 #define SHARC_ENABLE_GLSL 1
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
@@ -165,10 +166,14 @@ layout(push_constant) uniform PushConstant {
     int accumFrameCount;
     float aperture;
     float focalDistance;
+    // Material SSBO BDA (offset 128)
+    uint64_t materialClassAddr;
 }
 pc;
 
 #define SHARC_ENABLED ((pc.flags & 32) != 0)
+#define SER_ENABLED   ((pc.flags & 8192) != 0)
+#define SER_HINTS     ((pc.flags & 16384) != 0)
 #define NO_EMISSION_CLAMP  ((pc.flags & 1024) != 0)
 #define OFFLINE_ACCUMULATING  ((pc.offlineFlags & 1) != 0)
 #define OFFLINE_DISABLE_RR    ((pc.offlineFlags & 2) != 0)
@@ -308,11 +313,16 @@ void main() {
                 missId = 0;
                 if (psrDepth == 0) {
                     len = 1000;
-                    if (worldUBO.isFirstPerson > 0) {
+                    if (worldUBO.isFirstPerson == 1) {
+                        // Regular first person: hide player entirely
                         mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    } else if (worldUBO.isFirstPerson == 2) {
+                        // FPV: show body but hide head from direct rays
+                        mask = WORLD_MASK | PLAYER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                     } else {
+                        // Third person: show both body and head
                         mask =
-                            WORLD_MASK | PLAYER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                            WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                     }
                 } else if (psrDepth <= 1) {
                     len = 1000;
@@ -343,18 +353,29 @@ void main() {
             vec3 radianceBeforeTrace = mainRay.radiance;
             vec3 throughputBeforeTrace = mainRay.throughput;
 
-            traceRayEXT(topLevelAS,        // topLevel
-                        rayFlags,          // rayFlags
-                        mask,              // cullMask
-                        1,                 // sbtRecordOffset
-                        1,                 // sbtRecordStride
-                        missId,            // missIndex
-                        mainRay.origin,    // offset
-                        0.0,               // Tmin (offset_ray in CHS handles self-intersection)
-                        mainRay.direction, // direction
-                        len,               // Tmax
-                        0                  // mainRay
-            );
+            // SER: reorder PSR traces by hit geometry for material coherence
+            if (SER_ENABLED) {
+                hitObjectNV hitObject;
+                hitObjectTraceRayNV(hitObject, topLevelAS, rayFlags, mask,
+                                    1, 1, missId,
+                                    mainRay.origin, 0.0, mainRay.direction, len, 0);
+                if (SER_HINTS && hitObjectIsHitNV(hitObject)) {
+                    // Coherence hint: geometry index within BLAS correlates with block material.
+                    // Chunks pack different block types into separate geometries, so grouping
+                    // by geometry index groups threads hitting similar materials (iron, glass, etc.)
+                    // 8 hint bits → 256 buckets, more than enough for geometry diversity per chunk.
+                    uint geoIdx = hitObjectGetGeometryIndexNV(hitObject);
+                    uint hint = geoIdx & 0xFFu;
+                    reorderThreadNV(hitObject, hint, 8);
+                } else {
+                    reorderThreadNV(hitObject);
+                }
+                hitObjectExecuteShaderNV(hitObject, 0);
+            } else {
+                traceRayEXT(topLevelAS, rayFlags, mask,
+                            1, 1, missId,
+                            mainRay.origin, 0.0, mainRay.direction, len, 0);
+            }
 
             // Fancy clouds (volumetric): integrate only on the primary camera ray.
             // (Fast clouds are geometry-based; OFF disables both.)
@@ -734,10 +755,12 @@ void main() {
             uint len;
             if (b == 0) {
                 len = 1000;
-                if (worldUBO.isFirstPerson > 0) {
+                if (worldUBO.isFirstPerson == 1) {
                     mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
-                } else {
+                } else if (worldUBO.isFirstPerson == 2) {
                     mask = WORLD_MASK | PLAYER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                } else {
+                    mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                 }
             } else if (b <= 1) {
                 len = 1000;
@@ -761,11 +784,31 @@ void main() {
             vec3 radianceBeforeBounce = mainRay.radiance;
             vec3 throughputBeforeBounce = mainRay.throughput;
 
-            traceRayEXT(topLevelAS, bounceFlags, mask,
-                        1,                          // sbtRecordOffset
-                        1,                          // sbtRecordStride
-                        0,                          // missIndex
-                        mainRay.origin, 0.0, mainRay.direction, len, 0);
+            // SER: Shader Execution Reordering for material coherence.
+            // Hit object separates traversal from shader execution, allowing the GPU
+            // to regroup threads by hit shader + geometry before CHS invocation.
+            // 24-47% RT cost reduction in production titles (Indiana Jones, Black Myth Wukong).
+            if (SER_ENABLED) {
+                hitObjectNV hitObject;
+                hitObjectTraceRayNV(hitObject, topLevelAS, bounceFlags, mask,
+                                    1, 1, 0,
+                                    mainRay.origin, 0.0, mainRay.direction, len, 0);
+                // Reorder threads for material coherence
+                if (SER_HINTS && hitObjectIsHitNV(hitObject)) {
+                    // Bounce rays diverge heavily — hints by geometry index recover coherence.
+                    // Indiana Jones showed 24% GPU savings from hint-based reordering.
+                    uint geoIdx = hitObjectGetGeometryIndexNV(hitObject);
+                    uint hint = geoIdx & 0xFFu;
+                    reorderThreadNV(hitObject, hint, 8);
+                } else {
+                    reorderThreadNV(hitObject);
+                }
+                hitObjectExecuteShaderNV(hitObject, 0);
+            } else {
+                traceRayEXT(topLevelAS, bounceFlags, mask,
+                            1, 1, 0,
+                            mainRay.origin, 0.0, mainRay.direction, len, 0);
+            }
 
             if (b == psrDepth) {
                 distFirstToSecond = mainRay.hitT;

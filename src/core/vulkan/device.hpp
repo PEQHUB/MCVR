@@ -23,6 +23,8 @@ class Device : public SharedObject<Device> {
 
     bool hasExtendedDynamicState2LogicOp() const { return extendedDynamicState2LogicOp_; }
     bool hasOMM() const { return ommSupported_; }
+    bool hasSER() const { return serSupported_; }
+    bool hasShaderClock() const { return shaderClockSupported_; }
 
   private:
     std::shared_ptr<Instance> instance_;
@@ -36,6 +38,8 @@ class Device : public SharedObject<Device> {
 
     bool extendedDynamicState2LogicOp_ = false;
     bool ommSupported_ = false;
+    bool serSupported_ = false;
+    bool shaderClockSupported_ = false;
 
     void loadPipelineCache();
     static std::string pipelineCachePath();

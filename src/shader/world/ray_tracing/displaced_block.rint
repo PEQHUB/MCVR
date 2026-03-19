@@ -1,0 +1,143 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+#include "common/shared.hpp"
+
+layout(set = 0, binding = 0) uniform sampler2D textures[];
+
+layout(set = 1, binding = 12) readonly buffer DisplacedFaceDataBuffer {
+    DisplacedFaceData faces[];
+} displacedFaces;
+
+hitAttributeEXT vec2 faceUV;
+
+// Bilinear height sampling from normal map alpha (same as pom.glsl)
+float sampleHeight(vec2 uv, int texID) {
+    vec2 texSize = vec2(textureSize(textures[nonuniformEXT(texID)], 0));
+    vec2 texelCoord = uv * texSize - 0.5;
+    vec2 f = fract(texelCoord);
+    ivec2 i = ivec2(floor(texelCoord));
+    ivec2 size = ivec2(texSize);
+    ivec2 i00 = clamp(i, ivec2(0), size - 1);
+    ivec2 i10 = clamp(i + ivec2(1, 0), ivec2(0), size - 1);
+    ivec2 i01 = clamp(i + ivec2(0, 1), ivec2(0), size - 1);
+    ivec2 i11 = clamp(i + ivec2(1, 1), ivec2(0), size - 1);
+    float h00 = texelFetch(textures[nonuniformEXT(texID)], i00, 0).w;
+    float h10 = texelFetch(textures[nonuniformEXT(texID)], i10, 0).w;
+    float h01 = texelFetch(textures[nonuniformEXT(texID)], i01, 0).w;
+    float h11 = texelFetch(textures[nonuniformEXT(texID)], i11, 0).w;
+    return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+}
+
+void main() {
+    DisplacedFaceData face = displacedFaces.faces[gl_PrimitiveID];
+
+    if (face.normalTexID < 0) return; // no height data
+
+    // Ray in object space
+    vec3 rayOrigin = gl_ObjectRayOriginEXT;
+    vec3 rayDir = gl_ObjectRayDirectionEXT;
+
+    // Face-local coordinate system: corner + u*edgeU + v*edgeV
+    // Transform ray to face UV space
+    vec3 localOrigin = rayOrigin - face.corner;
+
+    // Compute UV coordinates along face edges
+    // For axis-aligned faces, edgeU and edgeV are along two of the three axes
+    float edgeULenSq = dot(face.edgeU, face.edgeU);
+    float edgeVLenSq = dot(face.edgeV, face.edgeV);
+    if (edgeULenSq < 1e-8 || edgeVLenSq < 1e-8) return;
+
+    // Face normal (cross product of edges)
+    vec3 faceNormal = normalize(cross(face.edgeU, face.edgeV));
+
+    // Ensure normal points outward based on faceAxis
+    // faceAxis: 0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z
+    vec3 axisNormals[6] = vec3[6](
+        vec3(1, 0, 0), vec3(-1, 0, 0),
+        vec3(0, 1, 0), vec3(0, -1, 0),
+        vec3(0, 0, 1), vec3(0, 0, -1)
+    );
+    vec3 expectedNormal = axisNormals[face.faceAxis];
+    if (dot(faceNormal, expectedNormal) < 0) faceNormal = -faceNormal;
+
+    // Ray-slab intersection for the displacement depth volume
+    // The volume extends from the face surface (height=1) inward (height=0)
+    // Surface plane: dot(P - corner, faceNormal) = 0
+    // Inner plane: dot(P - corner, faceNormal) = -heightScale
+    float denom = dot(rayDir, faceNormal);
+    if (abs(denom) < 1e-8) return; // ray parallel to face
+
+    float tSurface = dot(-localOrigin, faceNormal) / denom;
+    float tInner = dot(-localOrigin - faceNormal * face.heightScale, faceNormal) / denom;
+
+    float tEntry = min(tSurface, tInner);
+    float tExit = max(tSurface, tInner);
+
+    // Clamp to ray range
+    tEntry = max(tEntry, gl_RayTminEXT);
+    tExit = min(tExit, gl_RayTmaxEXT);
+    if (tEntry >= tExit) return;
+
+    // DDA through the height field
+    // Convert to face UV space for height sampling
+    const int MAX_STEPS = 32;
+    float stepT = (tExit - tEntry) / float(MAX_STEPS);
+
+    float prevU = 0, prevV = 0, prevHeight = 0, prevLayerH = 0;
+    bool prevValid = false;
+    float hitT = -1.0;
+    vec2 hitUV = vec2(0);
+
+    for (int step = 0; step <= MAX_STEPS; step++) {
+        float t = tEntry + stepT * float(step);
+        vec3 hitPos = localOrigin + rayDir * t;
+
+        // Project onto face to get UV [0,1]
+        float u = dot(hitPos, face.edgeU) / edgeULenSq;
+        float v = dot(hitPos, face.edgeV) / edgeVLenSq;
+
+        // Check UV bounds
+        if (u < -0.01 || u > 1.01 || v < -0.01 || v > 1.01) {
+            prevValid = false;
+            continue;
+        }
+        u = clamp(u, 0.0, 1.0);
+        v = clamp(v, 0.0, 1.0);
+
+        // Height along normal from surface (1.0 = surface, 0.0 = max depth)
+        float normalDist = dot(hitPos, faceNormal);
+        float layerH = 1.0 + normalDist / face.heightScale;
+
+        // Sample height map
+        vec2 atlasUV = mix(face.uvMin, face.uvMax, vec2(u, v));
+        float texHeight = sampleHeight(atlasUV, face.normalTexID);
+
+        // Check intersection: ray layer drops below height field
+        if (prevValid && prevLayerH >= prevHeight && layerH <= texHeight) {
+            // Secant refinement between previous and current step
+            float d1 = prevLayerH - prevHeight;
+            float d2 = layerH - texHeight;
+            float denom2 = d1 - d2;
+            float frac = (abs(denom2) > 1e-6) ? d1 / denom2 : 0.5;
+            frac = clamp(frac, 0.0, 1.0);
+
+            hitT = mix(tEntry + stepT * float(step - 1), t, frac);
+            hitUV = mix(vec2(prevU, prevV), vec2(u, v), frac);
+            break;
+        }
+
+        prevU = u;
+        prevV = v;
+        prevHeight = texHeight;
+        prevLayerH = layerH;
+        prevValid = true;
+    }
+
+    if (hitT > 0 && hitT >= gl_RayTminEXT && hitT <= gl_RayTmaxEXT) {
+        faceUV = hitUV;
+        reportIntersectionEXT(hitT, 0);
+    }
+}

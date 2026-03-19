@@ -61,6 +61,14 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     std::shared_ptr<vk::BLAS> blas;
     std::shared_ptr<vk::BLASBuilder> blasBuilder;
 
+    // Displacement Tier 1: separate BLAS for AABB procedural geometry
+    std::vector<VkAabbPositionsKHR> displacedAABBs;
+    std::vector<vk::Data::DisplacedFaceData> displacedFaceData;
+    std::shared_ptr<vk::DeviceLocalBuffer> displacedAABBBuffer;
+    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
+    std::shared_ptr<vk::BLAS> displacedBlas;
+    std::shared_ptr<vk::BLASBuilder> displacedBlasBuilder;
+
     ChunkBuildData(int64_t id,
                    int x,
                    int y,
@@ -132,6 +140,10 @@ struct ChunkRenderData : public SharedObject<ChunkRenderData> {
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
     std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>> vertices;
     std::shared_ptr<std::vector<std::vector<uint32_t>>> indices;
+    // Displacement
+    std::shared_ptr<vk::BLAS> displacedBlas;
+    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
+    uint32_t displacedFaceCount = 0;
 };
 
 struct ChunkLightEntry {
@@ -162,6 +174,12 @@ struct Chunk1 : public SharedObject<Chunk1> {
     std::shared_ptr<std::vector<World::GeometryTypes>> geometryTypes;
     std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>> vertices;
     std::shared_ptr<std::vector<std::vector<uint32_t>>> indices;
+
+    // Displacement
+    std::shared_ptr<vk::BLAS> displacedBlas;
+    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
+    std::shared_ptr<std::vector<vk::Data::DisplacedFaceData>> displacedFaceDataCPU; // CPU copy for SSBO upload
+    uint32_t displacedFaceCount = 0;
 
     std::vector<ChunkLightEntry> lightSources;
 

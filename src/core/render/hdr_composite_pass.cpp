@@ -50,6 +50,7 @@ void HdrCompositePass::destroy() {
     descriptorTables_.clear();
     sampler_.reset();
     blackWorldImage_.reset();
+    transparentOverlayImage_.reset();
     fragShaderSdr_.reset();
     fragShaderHdr_.reset();
     vertShader_.reset();
@@ -286,6 +287,51 @@ void HdrCompositePass::initFallbackBlackImage() {
             }});
     blackWorldImage_->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
+    // ── Transparent 1x1 overlay fallback (alpha=0, for FG world-only composite) ──
+    transparentOverlayImage_ = vk::DeviceLocalImage::create(
+        framework->device(), framework->vma(), false,
+        1, 1, 1,
+        VK_FORMAT_R8G8B8A8_SRGB,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+
+    cmd->barriersBufferImage(
+        {}, {{
+                .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                .srcAccessMask = 0,
+                .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .srcQueueFamilyIndex = mainQueueIndex,
+                .dstQueueFamilyIndex = mainQueueIndex,
+                .image = transparentOverlayImage_,
+                .subresourceRange = vk::wholeColorSubresourceRange,
+            }});
+    transparentOverlayImage_->imageLayout() = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    VkClearColorValue clearTransparent{};
+    clearTransparent.float32[0] = 0.0f;
+    clearTransparent.float32[1] = 0.0f;
+    clearTransparent.float32[2] = 0.0f;
+    clearTransparent.float32[3] = 0.0f;
+    vkCmdClearColorImage(cmd->vkCommandBuffer(), transparentOverlayImage_->vkImage(),
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearTransparent, 1, &range);
+
+    cmd->barriersBufferImage(
+        {}, {{
+                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                .srcQueueFamilyIndex = mainQueueIndex,
+                .dstQueueFamilyIndex = mainQueueIndex,
+                .image = transparentOverlayImage_,
+                .subresourceRange = vk::wholeColorSubresourceRange,
+            }});
+    transparentOverlayImage_->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
     cmd->end();
     cmd->submitMainQueueIndividual(framework->device());
     vkQueueWaitIdle(framework->device()->mainVkQueue());
@@ -304,12 +350,19 @@ void HdrCompositePass::record(std::shared_ptr<vk::CommandBuffer> cmd,
 
     auto pipeline = (mode == OutputMode::Hdr10) ? pipelineHdr_ : pipelineSdr_;
 
-    if (!overlayImage || !swapchainImage) return;
+    if (!swapchainImage) return;
 
     if (!worldImage) {
         worldImage = blackWorldImage_;
     }
     if (!worldImage) return;
+
+    // When overlay is null (FG world-only composite), use transparent fallback.
+    // The composite shader sees alpha=0 and passes through world unchanged.
+    if (!overlayImage) {
+        overlayImage = transparentOverlayImage_;
+    }
+    if (!overlayImage) return;
 
     VkImageLayout oldWorldLayout = worldImage->imageLayout();
     VkImageLayout oldOverlayLayout = overlayImage->imageLayout();

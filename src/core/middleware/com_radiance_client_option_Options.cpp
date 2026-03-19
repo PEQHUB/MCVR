@@ -96,6 +96,16 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.simplifiedIndirect = enabled;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSEREnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.serEnabled = (enabled == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSERHintsEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    Renderer::options.serHintsEnabled = (enabled == JNI_TRUE);
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharcEnabled(
     JNIEnv *, jclass, jboolean enabled, jboolean write) {
     Renderer::options.sharcEnabled = (enabled == JNI_TRUE);
@@ -607,6 +617,12 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMFadeDistance(
     JNIEnv *, jclass, jfloat v, jboolean) {
     Renderer::options.pomFadeDistance = std::clamp(v, 8.0f, 256.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDisplacementQuality(
+    JNIEnv *, jclass, jint v, jboolean) {
+    Renderer::options.displacementQuality = std::clamp(v, 0, 3);
+    Renderer::options.needRecreate = true;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetLoggingEnabled(

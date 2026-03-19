@@ -60,9 +60,7 @@ layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
     TextureMapping mapping;
 };
 
-layout(set = 1, binding = 10) readonly buffer BlenderPBRMappingBuffer {
-    BlenderPBRMapping blenderPBR;
-};
+#include "../util/material_properties.glsl"
 
 layout(set = 1, binding = 8) readonly buffer AreaLightBuffer {
     AreaLight lights[];
@@ -126,6 +124,11 @@ layout(push_constant) uniform PushConstant {
     int _sharcPad9;
     // Offline accumulation fields (offset 120)
     int offlineFlags;
+    int accumFrameCount;
+    float aperture;
+    float focalDistance;
+    // Material SSBO BDA (offset 128)
+    uint64_t materialClassAddr;
 } pc;
 #define SIMPLIFIED_INDIRECT ((pc.flags & 1) != 0)
 #define AREA_LIGHTS_ON ((pc.flags & 2) != 0)
@@ -301,12 +304,10 @@ void main() {
                 int effectiveSteps = max(int(float(pc.pomSteps) * pomFade), 4);
                 int effectiveRefinement = (pomFade > 0.5) ? pc.pomRefinement : 0;
 
-                int bpHeightTex = blenderPBR.entries[textureID].heightTex;
-
                 textureUV = parallaxOcclusionMapping(
                     textureUV, viewDirTS, normalTextureID,
                     pc.pomHeightScale, effectiveSteps, effectiveRefinement,
-                    uvMin, uvMax, bpHeightTex);
+                    uvMin, uvMax);
             }
         }
 
@@ -369,30 +370,6 @@ void main() {
     albedoValue = vec4(tint, albedoValue.a);
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
 
-    // Blender PBR per-channel overlay: sample individual textures if present
-    int texProps = mapping.entries[textureID].properties;
-    bool hasBlenderNormal = false;
-    if ((texProps & TEX_PROP_DIRECT_PBR) != 0 && useTexture > 0) {
-        int rTex  = blenderPBR.entries[textureID].roughnessTex;
-        int mTex  = blenderPBR.entries[textureID].metallicTex;
-        int eTex  = blenderPBR.entries[textureID].emissionTex;
-        int nTex  = blenderPBR.entries[textureID].normalBPTex;
-        int hTex  = blenderPBR.entries[textureID].heightTex;
-        int aeTex = blenderPBR.entries[textureID].aoTex;
-        int xTex  = blenderPBR.entries[textureID].extraTex;
-
-        float bpR  = (rTex  >= 0) ? textureLod(textures[nonuniformEXT(rTex)],  textureUV, 0).r : -1.0;
-        float bpM  = (mTex  >= 0) ? textureLod(textures[nonuniformEXT(mTex)],  textureUV, 0).r : -1.0;
-        float bpE  = (eTex  >= 0) ? textureLod(textures[nonuniformEXT(eTex)],  textureUV, 0).r : -1.0;
-        vec2  bpN  = (nTex  >= 0) ? textureLod(textures[nonuniformEXT(nTex)],  textureUV, 0).rg : vec2(-1.0);
-        float bpH  = (hTex  >= 0) ? textureLod(textures[nonuniformEXT(hTex)],  textureUV, 0).r : -1.0;
-        float bpAO = (aeTex >= 0) ? textureLod(textures[nonuniformEXT(aeTex)], textureUV, 0).r : -1.0;
-        vec4  bpX  = (xTex  >= 0) ? textureLod(textures[nonuniformEXT(xTex)],  textureUV, 0)   : vec4(-1.0);
-
-        mat = overlayDirectPBR(albedoValue, mat, bpR, bpM, bpE, bpN, bpH, bpAO, bpX);
-        hasBlenderNormal = (nTex >= 0);
-    }
-
     // Save original texture properties before material overrides (for masks + Tex Roughness blend)
     float texSourceRoughness = mat.roughness;
     float texSourceLuminance = dot(mat.albedo, vec3(0.2126, 0.7152, 0.0722));
@@ -416,15 +393,34 @@ void main() {
     float matGamutBoost = 1.0;
     uint packedBlockType = v0.emissiveBlockType;
     uint materialType = (packedBlockType >> 8u) & 0xFFu;
+
+    // Material class resolution: vertex materialType → mask texture → SSBO lookup via BDA
+    // Priority: vertex materialType (fast, no texture fetch) > mask texture (per-texel) > skip
+    uint materialClassIdx = 0u;
+    bool hasMaterialClass = false;
     if (materialType > 0u && materialType <= 160u) {
-        uint idx = materialType - 1u;
-        vec4 pack0 = worldUbo.materialData[idx];          // F0.rgb, roughness
-        vec4 pack1 = worldUbo.materialData[idx + 160u];   // metallic, transmission, ior, subsurface
-        vec4 pack2 = worldUbo.materialData[idx + 320u];   // anisotropic, sheenWeight, sheenTint, coatWeight
-        vec4 pack3 = worldUbo.materialData[idx + 480u];   // coatRoughness, noiseScale, noiseStrength, noiseOctaves
-        vec4 pack4 = worldUbo.materialData[idx + 640u];   // channelR, channelG, channelB, textureBlend
-        vec4 pack5 = worldUbo.materialData[idx + 800u];   // gamutBoost, noiseMaskThreshold, noiseMaskPacked, normalStrength
-        vec4 pack6 = worldUbo.materialData[idx + 960u];   // noiseRotation, noiseAspect, noiseLacunarity, noiseContrast
+        materialClassIdx = materialType - 1u;
+        hasMaterialClass = true;
+    } else {
+        // Fallback: per-texel mask texture (R8_UNORM, value = MaterialBlock ordinal)
+        int maskTexID = mapping.entries[textureID].maskTexture;
+        if (maskTexID >= 0) {
+            materialClassIdx = uint(texture(textures[nonuniformEXT(maskTexID)], textureUV).r * 255.0 + 0.5);
+            hasMaterialClass = (materialClassIdx < 160u);
+        }
+    }
+
+    if (hasMaterialClass && pc.materialClassAddr != 0) {
+        uint idx = materialClassIdx;
+        MaterialClassBufferRef matBuf = MaterialClassBufferRef(pc.materialClassAddr);
+        MaterialClassEntry mc = matBuf.materialClassMapping.entries[idx];
+        vec4 pack0 = vec4(mc.f0, mc.roughness);
+        vec4 pack1 = vec4(mc.metallic, mc.transmission, mc.ior, mc.subsurface);
+        vec4 pack2 = vec4(mc.anisotropic, mc.sheenWeight, mc.sheenTint, mc.coatWeight);
+        vec4 pack3 = vec4(mc.coatRoughness, mc.noiseScale, mc.noiseStrength, 0.0);
+        vec4 pack4 = vec4(mc.channelR, mc.channelG, mc.channelB, mc.textureBlend);
+        vec4 pack5 = vec4(mc.gamutBoost, mc.noiseMaskThreshold, 0.0, mc.normalStrength);
+        vec4 pack6 = vec4(mc.noiseRotation, mc.noiseAspect, mc.noiseLacunarity, mc.noiseContrast);
 
         {
             // Apply F0 override if set; for dielectrics with zero F0, derive from IOR
@@ -480,8 +476,8 @@ void main() {
             // Extract noise parameters from pack3
             matNoiseScale = pack3.y;
             matNoiseStrength = pack3.z;
-            // pack3.w packs: octaves (bits 0-3) | noiseType (bits 4-8) | seed (bits 9-17) | noiseTarget (bits 20-23)
-            int noisePacked = int(pack3.w);
+            // noisePacked: octaves (bits 0-3) | noiseType (bits 4-8) | seed (bits 9-17) | noiseTarget (bits 20-23)
+            int noisePacked = int(mc.noisePacked);
             matNoiseOctaves = noisePacked & 0xF;
             matNoiseType = (noisePacked >> 4) & 0x1F;  // 5 bits = 0-31
             matNoiseSeed = (noisePacked >> 9) & 0x1FF;  // 9 bits = 0-511
@@ -489,7 +485,7 @@ void main() {
 
             matGamutBoost = pack5.x;
             matNoiseMaskThreshold = pack5.y;
-            int maskPacked = int(pack5.z);
+            int maskPacked = int(mc.noiseMaskPacked);
             matNoiseMaskMode = maskPacked & 0x7;       // bits 0-2
             matNoiseMaskInvert = ((maskPacked >> 3) & 0x1) != 0; // bit 3
             matNoiseWrap = (maskPacked >> 4) & 0x7;    // bits 4-6
@@ -561,7 +557,7 @@ void main() {
     // calculate on the fly for now
     vec3 geometricNormal;
     vec3 normal =
-        calculateNormal(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, mat.normal, viewDir, geometricNormal, hasBlenderNormal);
+        calculateNormal(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, mat.normal, viewDir, geometricNormal, false);
 
     // Procedural noise modulation — gated by noiseTarget bits
     // bit 0 = roughness, bit 1 = normal perturbation, bit 2 = metallic, bit 3 = roughness additive only

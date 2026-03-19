@@ -85,6 +85,26 @@ vk::BLASBuilder::BLASGeometryBuilder &vk::BLASBuilder::BLASGeometryBuilder::defi
     return *this;
 }
 
+vk::BLASBuilder::BLASGeometryBuilder &vk::BLASBuilder::BLASGeometryBuilder::defineAABBGeometry(
+    std::shared_ptr<DeviceLocalBuffer> aabbBuffer,
+    uint32_t aabbCount,
+    bool isOpaque) {
+    VkAccelerationStructureGeometryKHR geom{};
+    geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geom.geometryType = VK_GEOMETRY_TYPE_AABBS_KHR;
+    geom.flags = isOpaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
+
+    auto &aabbs = geom.geometry.aabbs;
+    aabbs.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR;
+    aabbs.data.deviceAddress = aabbBuffer->bufferAddress();
+    aabbs.stride = sizeof(VkAabbPositionsKHR);
+
+    geometries.push_back(geom);
+    primitiveCounts.push_back(aabbCount);
+
+    return *this;
+}
+
 std::shared_ptr<vk::BLASBuilder> vk::BLASBuilder::BLASGeometryBuilder::endGeometries() {
     return parent.shared_from_this();
 }

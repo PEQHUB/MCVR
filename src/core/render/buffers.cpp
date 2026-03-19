@@ -31,7 +31,7 @@ Buffers::Buffers(std::shared_ptr<Framework> framework) {
     lastWorldUniformBuffer_.resize(size);
     skyUniformBuffer_.resize(size);
     textureMappingBuffer_.resize(size);
-    blenderPBRMappingBuffer_.resize(size);
+    materialClassMappingBuffer_.resize(size);
     exposureDataBuffer_.resize(size);
     lightMapUniformBuffer_.resize(size);
 }
@@ -413,19 +413,20 @@ void Buffers::setAndUploadTextureMappingBuffer(vk::Data::TextureMapping &mapping
     textureMappingBuffer_[context->frameIndex]->uploadToBuffer(&mapping);
 }
 
-void Buffers::setAndUploadBlenderPBRMappingBuffer(vk::Data::BlenderPBRMapping &mapping) {
+void Buffers::setAndUploadMaterialClassMappingBuffer(vk::Data::MaterialClassMapping &mapping) {
     auto framework = Renderer::instance().framework();
     auto context = framework->safeAcquireCurrentContext();
     auto vma = framework->vma();
     auto device = framework->device();
 
-    if (blenderPBRMappingBuffer_[context->frameIndex] == nullptr) {
-        blenderPBRMappingBuffer_[context->frameIndex] =
-            vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::BlenderPBRMapping),
-                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    if (materialClassMappingBuffer_[context->frameIndex] == nullptr) {
+        materialClassMappingBuffer_[context->frameIndex] =
+            vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::MaterialClassMapping),
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
     }
 
-    blenderPBRMappingBuffer_[context->frameIndex]->uploadToBuffer(&mapping);
+    materialClassMappingBuffer_[context->frameIndex]->uploadToBuffer(&mapping);
 }
 
 void Buffers::setAndUploadExposureDataBuffer(vk::Data::ExposureData &exposureData) {
@@ -533,32 +534,36 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::textureMappingBuffer() {
     }
 }
 
-std::shared_ptr<vk::HostVisibleBuffer> Buffers::blenderPBRMappingBuffer() {
+std::shared_ptr<vk::HostVisibleBuffer> Buffers::materialClassMappingBuffer() {
     auto framework = Renderer::instance().framework();
     auto context = framework->safeAcquireCurrentContext();
 
-    // Always return a valid buffer — create a minimal dummy if no Blender PBR data uploaded yet
-    if (!blenderPBRMappingBuffer_[context->frameIndex]) {
+    // Always return a valid buffer — create with GENERIC defaults if never uploaded.
+    // CRITICAL: must be full MaterialClassMapping size (256 entries), not single entry,
+    // because setAndUploadMaterialClassMappingBuffer skips creation if non-null
+    // and uploadToBuffer copies min(src, buffer.size_) bytes.
+    if (!materialClassMappingBuffer_[context->frameIndex]) {
         auto vma = framework->vma();
         auto device = framework->device();
-        // Allocate minimum viable size (one entry = 32 bytes) to satisfy descriptor binding
-        blenderPBRMappingBuffer_[context->frameIndex] =
-            vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::BlenderPBREntry),
-                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        // Initialize to -1 (no textures)
-        vk::Data::BlenderPBREntry dummy{};
-        dummy.roughnessTex = -1;
-        dummy.metallicTex = -1;
-        dummy.emissionTex = -1;
-        dummy.normalBPTex = -1;
-        dummy.heightTex = -1;
-        dummy.aoTex = -1;
-        dummy.extraTex = -1;
-        dummy._reserved = 0;
-        blenderPBRMappingBuffer_[context->frameIndex]->uploadToBuffer(&dummy);
+        materialClassMappingBuffer_[context->frameIndex] =
+            vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::MaterialClassMapping),
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        // Zero-init all 256 entries, then set safe defaults
+        vk::Data::MaterialClassMapping dummy{};
+        for (int i = 0; i < 256; i++) {
+            dummy.entries[i].f0 = {0.04f, 0.04f, 0.04f};
+            dummy.entries[i].roughness = 0.5f;
+            dummy.entries[i].metallic = 0.0f;
+            dummy.entries[i].transmission = -1.0f; // keep LabPBR
+            dummy.entries[i].ior = 1.5f;
+            dummy.entries[i].subsurface = 0.0f;
+            dummy.entries[i].flags = 0; // no override
+        }
+        materialClassMappingBuffer_[context->frameIndex]->uploadToBuffer(&dummy);
     }
 
-    return blenderPBRMappingBuffer_[context->frameIndex];
+    return materialClassMappingBuffer_[context->frameIndex];
 }
 
 std::shared_ptr<vk::HostVisibleBuffer> Buffers::exposureDataBuffer() {

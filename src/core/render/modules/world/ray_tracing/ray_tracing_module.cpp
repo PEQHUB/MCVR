@@ -477,6 +477,19 @@ void RayTracingModule::initDescriptorTables() {
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
                 })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 11, // binding 11: Material class mapping (unified material system)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                                  VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 12, // binding 12: Displaced face data SSBO (intersection shader DDA)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
+                })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
                 .beginDescriptorLayoutSet() // set 2
@@ -1049,6 +1062,14 @@ void RayTracingModule::initPipeline() {
     endGatewayAnyHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/end_gateway_rahit.spv").string());
 
+    // Displacement: procedural intersection + closest-hit shaders
+    displacedBlockIntersectionShader_ =
+        vk::Shader::create(device, (shaderPath / "world/ray_tracing/displaced_block_rint.spv").string());
+    displacedBlockClosestHitShader_ =
+        vk::Shader::create(device, (shaderPath / "world/ray_tracing/displaced_block_rchit.spv").string());
+    displacedShadowClosestHitShader_ =
+        vk::Shader::create(device, (shaderPath / "world/ray_tracing/displaced_shadow_rchit.spv").string());
+
     rayTracingPipeline_ =
         vk::RayTracingPipelineBuilder{}
             .beginShaderStage()
@@ -1070,7 +1091,10 @@ void RayTracingModule::initPipeline() {
             .defineShaderStage(endPortalAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                     // 15
             .defineShaderStage(endGatewayClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)            // 16
             .defineShaderStage(endGatewayAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                    // 17
-            .defineShaderStage(pointLightShadowMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                // 18
+            .defineShaderStage(pointLightShadowMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                   // 18
+            .defineShaderStage(displacedBlockIntersectionShader_, VK_SHADER_STAGE_INTERSECTION_BIT_KHR)      // 19
+            .defineShaderStage(displacedBlockClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)         // 20
+            .defineShaderStage(displacedShadowClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)        // 21
             .endShaderStage()
             .beginShaderGroup()
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 0, VK_SHADER_UNUSED_KHR,
@@ -1083,6 +1107,7 @@ void RayTracingModule::initPipeline() {
                                VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR)
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 18, VK_SHADER_UNUSED_KHR,
                                VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR) // point light shadow miss
+            // Hit groups 0-7: triangle groups (existing)
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 10, 11,
                                VK_SHADER_UNUSED_KHR) // shadow
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 4,
@@ -1100,6 +1125,11 @@ void RayTracingModule::initPipeline() {
                                VK_SHADER_UNUSED_KHR) // end portal
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 16, 17,
                                VK_SHADER_UNUSED_KHR) // end gateway
+            // Hit groups 8-9: procedural groups for displacement
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 21,
+                               VK_SHADER_UNUSED_KHR, 19) // displaced shadow (CHS=21, intersection=19)
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 20,
+                               VK_SHADER_UNUSED_KHR, 19) // displaced primary (CHS=20, intersection=19)
             .endShaderGroup()
             .definePipelineLayout(rayTracingDescriptorTables_[0])
             .build(device);
@@ -1109,10 +1139,11 @@ void RayTracingModule::initSBT() {
     auto framework = framework_.lock();
     if (!framework) return;
 
+    // 4 miss groups, 10 hit groups (8 triangle + 2 procedural displacement)
     sbts_.resize(framework->swapchain()->imageCount());
     for (int i = 0; i < framework->swapchain()->imageCount(); i++) {
         sbts_[i] = vk::SBT::create(framework->physicalDevice(), framework->device(), framework->vma(),
-                                   rayTracingPipeline_, 4, 8);
+                                   rayTracingPipeline_, 4, 10);
     }
 }
 
@@ -1305,6 +1336,9 @@ void RayTracingModule::initSharcUpdatePipeline() {
             .defineShaderStage(endGatewayClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)             // 16
             .defineShaderStage(endGatewayAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                     // 17
             .defineShaderStage(pointLightShadowMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                    // 18
+            .defineShaderStage(displacedBlockIntersectionShader_, VK_SHADER_STAGE_INTERSECTION_BIT_KHR)      // 19
+            .defineShaderStage(displacedBlockClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)         // 20
+            .defineShaderStage(displacedShadowClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)        // 21
             .endShaderStage()
             .beginShaderGroup()
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 0, VK_SHADER_UNUSED_KHR,
@@ -1334,6 +1368,11 @@ void RayTracingModule::initSharcUpdatePipeline() {
                                VK_SHADER_UNUSED_KHR) // end portal
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 16, 17,
                                VK_SHADER_UNUSED_KHR) // end gateway
+            // Procedural hit groups for displacement (same as main pipeline)
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 21,
+                               VK_SHADER_UNUSED_KHR, 19) // displaced shadow
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 20,
+                               VK_SHADER_UNUSED_KHR, 19) // displaced primary
             .endShaderGroup()
             .definePipelineLayout(rayTracingDescriptorTables_[0])
             .build(device);
@@ -1343,11 +1382,11 @@ void RayTracingModule::initSharcUpdatePipeline() {
         return;
     }
 
-    // Create SBTs for the update pipeline (same structure as main: 4 miss, 8 hit groups)
+    // Create SBTs for the update pipeline (same structure as main: 4 miss, 10 hit groups)
     sharcUpdateSbts_.resize(framework->swapchain()->imageCount());
     for (int i = 0; i < framework->swapchain()->imageCount(); i++) {
         sharcUpdateSbts_[i] = vk::SBT::create(framework->physicalDevice(), framework->device(), framework->vma(),
-                                               sharcUpdatePipeline_, 4, 8);
+                                               sharcUpdatePipeline_, 4, 10);
     }
 }
 
@@ -1469,10 +1508,14 @@ void RayTracingModuleContext::render() {
     if (module->tileLightBuffer_) {
         rayTracingDescriptorTable->bindBuffer(module->tileLightBuffer_, 1, 9);
     }
-    // Always bind Blender PBR buffer (may be real data or dummy) to avoid unbound descriptor
-    auto bpBuffer = buffers->blenderPBRMappingBuffer();
-    if (bpBuffer) {
-        rayTracingDescriptorTable->bindBuffer(bpBuffer, 1, 10);
+    // Always bind Material Class Mapping buffer (may be real data or dummy)
+    auto mcBuffer = buffers->materialClassMappingBuffer();
+    if (mcBuffer) {
+        rayTracingDescriptorTable->bindBuffer(mcBuffer, 1, 11);
+    }
+    // Displaced face data SSBO (set 1, binding 12)
+    if (worldPrepareContext->displacedFaceDataBuffer) {
+        rayTracingDescriptorTable->bindBuffer(worldPrepareContext->displacedFaceDataBuffer, 1, 12);
     }
     rayTracingDescriptorTable->bindBuffer(worldBuffer, 2, 0);
     rayTracingDescriptorTable->bindBuffer(buffers->lastWorldUniformBuffer(), 2, 1);
@@ -1524,7 +1567,9 @@ void RayTracingModuleContext::render() {
                        | (Renderer::options.beerLawShadows ? 512 : 0)
                        | (Renderer::options.noEmissionClamp ? 1024 : 0)
                        | (Renderer::options.physicalSunDisk ? 2048 : 0)
-                       | (Renderer::options.noHandAmbient ? 4096 : 0);
+                       | (Renderer::options.noHandAmbient ? 4096 : 0)
+                       | ((framework->device()->hasSER() && Renderer::options.serEnabled) ? 8192 : 0)
+                       | ((framework->device()->hasSER() && Renderer::options.serEnabled && Renderer::options.serHintsEnabled) ? 16384 : 0);
     pushConstant.areaLightCount = worldPrepareContext->areaLightCount;
     pushConstant.shadowSoftness = Renderer::options.shadowSoftness;
     pushConstant.risCandidates = Renderer::options.restirCandidates;
@@ -1607,6 +1652,9 @@ void RayTracingModuleContext::render() {
         pushConstant.preExposure = 1.0f;
         pushConstant.temporalMClamp = 0;
     }
+
+    // Material SSBO BDA: pass buffer address via push constant (avoids descriptor lookup overhead)
+    pushConstant.materialClassAddr = mcBuffer ? mcBuffer->bufferAddress() : 0;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), rayTracingDescriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |

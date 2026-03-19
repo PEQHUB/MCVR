@@ -119,49 +119,4 @@ LabPBRMat convertLabPBRMaterial(vec4 texAlbedo, vec4 texSpecular, vec4 texNormal
     return mat;
 }
 
-// Overlay per-channel Blender PBR textures on top of a LabPBR-decoded material.
-// Each channel is independent: -1.0 sentinel means "keep LabPBR value".
-// This gives per-channel hybrid fallback: Blender tex > LabPBR atlas > WorldUBO > default.
-LabPBRMat overlayDirectPBR(
-    vec4 texAlbedo,
-    LabPBRMat mat,
-    float bpRoughness,    // perceptual [0,1], -1 = use LabPBR
-    float bpMetallic,     // continuous [0,1], -1 = use LabPBR
-    float bpEmission,     // [0,1] 0=none, -1 = use LabPBR
-    vec2  bpNormalXY,     // OpenGL Y+, vec2(-1) = use LabPBR
-    float bpHeight,       // [0,1], -1 = use LabPBR
-    float bpAO,           // [0,1] 1=no occlusion, -1 = use LabPBR
-    vec4  bpExtra         // R=sub G=trans B=coat A=aniso, vec4(-1) = use LabPBR
-) {
-    if (bpRoughness >= 0.0) {
-        mat.roughness = bpRoughness * bpRoughness;  // perceptual → GGX alpha
-    }
-    if (bpMetallic >= 0.0) {
-        mat.metallic = bpMetallic;
-        mat.f0 = mix(vec3(0.04), texAlbedo.rgb, bpMetallic);
-        if (bpMetallic > 0.5) mat.albedo = mat.f0;
-    }
-    if (bpEmission >= 0.0) {
-        mat.emission = bpEmission;
-    }
-    if (bpNormalXY.x >= 0.0) {
-        vec2 xy = bpNormalXY * 2.0 - 1.0;
-        // OpenGL Y+ convention — NO flip (LabPBR's DirectX Y- flip is NOT applied)
-        mat.normal = vec3(xy, sqrt(max(0.0, 1.0 - dot(xy, xy))));
-    }
-    if (bpHeight >= 0.0) {
-        mat.height = bpHeight;
-    }
-    if (bpAO >= 0.0) {
-        mat.ao = bpAO;
-    }
-    if (bpExtra.r >= 0.0) {
-        mat.subSurface   = bpExtra.r;
-        mat.transmission  = bpExtra.g;
-        mat.coatWeight    = bpExtra.b;
-        mat.anisotropic   = bpExtra.a;
-    }
-    return mat;
-}
-
 #endif

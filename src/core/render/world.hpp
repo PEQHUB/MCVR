@@ -41,6 +41,8 @@ class World : public SharedObject<World> {
         BOAT_WATER_MASK,
         END_PORTAL,
         END_GATE_WAY,
+        WORLD_DISPLACED_SHADOW,  // procedural shadow hit group (AABB intersection)
+        WORLD_DISPLACED,         // procedural primary hit group (AABB intersection)
         NUM_GEOMETRY_TYPES,
     };
 

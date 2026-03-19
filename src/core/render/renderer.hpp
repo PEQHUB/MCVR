@@ -141,6 +141,10 @@ struct Options {
     };
     int blockLightMode[50] = {};         // Per-block light mode: 0=Auto, 1=ForceAreaLight, 2=ForceEmissive
 
+    // SER: Shader Execution Reordering
+    bool serEnabled = true;       // hit-object reordering (disable for A/B testing)
+    bool serHintsEnabled = true;  // explicit geometry-based coherence hints (on top of driver reorder)
+
     // SHARC radiance cache
     bool sharcEnabled = true;
     float sharcSceneScale = 4.0f;           // Grid voxel size (1.0-20.0)
@@ -158,6 +162,9 @@ struct Options {
     int   pomSteps        = 64;     // Linear search steps (8–512)
     int   pomRefinement   = 4;      // Binary refinement iterations (0–8)
     float pomFadeDistance = 64.0f;  // Distance in blocks to fade POM out (8–256)
+
+    // Displacement mapping (replaces POM for proper RT integration)
+    uint32_t displacementQuality = 0;  // 0=Off, 1=Intersection DDA, 2=Micro-Tessellation, 3=CLAS (RTX 5090+)
 
     // Offline accumulation mode
     uint32_t offlineState = 0;       // 0=NORMAL, 1=FREE, 2=ACCUMULATING

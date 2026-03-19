@@ -58,6 +58,8 @@ struct RayTracingPushConstant {
     int accumFrameCount;           // frame index for jitter sequence during accumulation
     float aperture;                // thin lens aperture radius (0 = pinhole)
     float focalDistance;           // focal distance in blocks
+    // Material SSBO BDA (offset 128, 8 bytes) — avoids descriptor lookup for material reads
+    uint64_t materialClassAddr;    // BDA of MaterialClassMapping buffer
 };
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {
@@ -135,6 +137,11 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
 
     std::shared_ptr<vk::Shader> endGatewayClosestHitShader_;
     std::shared_ptr<vk::Shader> endGatewayAnyHitShader_;
+
+    // Displacement: procedural intersection + hit shaders
+    std::shared_ptr<vk::Shader> displacedBlockIntersectionShader_;
+    std::shared_ptr<vk::Shader> displacedBlockClosestHitShader_;
+    std::shared_ptr<vk::Shader> displacedShadowClosestHitShader_;
 
     std::shared_ptr<vk::Shader> worldPostColorToDepthVertShader_;
     std::shared_ptr<vk::Shader> worldPostColorToDepthFragShader_;

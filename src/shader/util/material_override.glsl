@@ -1,21 +1,18 @@
-// material_override.glsl — Extracted from world_solid_transparent.rchit (Phase 2A)
+// material_override.glsl — Unified material system (AutoPBR + SSBO overrides)
 //
-// THREE-TIER MATERIAL OVERRIDE CONTRACT
+// TWO-TIER MATERIAL CONTRACT
 // Tier 1 (LabPBR): convertLabPBRMaterial() in labpbr.glsl
-//   Source: resource pack _s/_n textures or Auto-PBR equivalents
+//   Source: resource pack _s/_n textures or Auto-PBR generated equivalents
 //   Sets: roughness, metallic, emission, f0, normal, ao, height
 //
-// Tier 2 (Blender PBR): overlayDirectPBR() in labpbr.glsl
-//   Gate: TEX_PROP_DIRECT_PBR flag (bit 2) in TextureMapEntry.properties
-//   Protocol: per-channel -1.0 sentinel = "keep Tier 1 value"
-//
-// Tier 3 (UBO overrides): applyMaterialOverride() below
+// Tier 2 (SSBO overrides): applyMaterialOverride() below
 //   Gate: materialType > 0 (vertex emissiveBlockType bits 8-15)
+//   Source: MaterialClassMapping SSBO (set 1, binding 11) — contiguous 128-byte entries
 //   Protocol per property:
 //     F0: override if dot(pack0.rgb) > 0.0001, else derive from IOR (dielectric) or albedo (metal)
 //     Roughness: additive offset if specular texture exists, else direct or texture-blend
-//     Transmission: override if pack1.y >= 0.0 (sentinel -1 = keep Tier 1)
-//     All others: direct replacement from UBO
+//     Transmission: override if >= 0.0 (sentinel -1 = keep Tier 1)
+//     All others: direct replacement from SSBO
 
 #ifndef MATERIAL_OVERRIDE_GLSL
 #define MATERIAL_OVERRIDE_GLSL
@@ -77,8 +74,8 @@ vec3 applyGamutBoost(vec3 colorBT2020, float boostFactor) {
     return result;
 }
 
-// Tier 3: UBO material overrides (5 x vec4 per block from worldUbo.materialData[])
-// Requires: worldUbo (set 2 binding 0) in scope
+// Tier 3: SSBO material overrides (contiguous MaterialClassEntry from unified SSBO)
+// Requires: materialClassMapping (set 1 binding 11) in scope
 void applyMaterialOverride(
     inout LabPBRMat mat,
     uint materialType,       // block ordinal (bits 8-15 of emissiveBlockType)
@@ -88,13 +85,12 @@ void applyMaterialOverride(
     out float gamutBoost     // extracted gamut boost factor
 ) {
         uint idx = materialType - 1u;
-        vec4 pack0 = worldUbo.materialData[idx];          // F0.rgb, roughness
+        MaterialClassEntry mc = materialClassMapping.entries[idx];
+        vec4 pack0 = vec4(mc.f0, mc.roughness);
         {
-        vec4 pack1 = worldUbo.materialData[idx + 160u];   // metallic, transmission, ior, subsurface
-        vec4 pack2 = worldUbo.materialData[idx + 320u];   // anisotropic, sheenWeight, sheenTint, coatWeight
-        vec4 pack3 = worldUbo.materialData[idx + 480u];   // coatRoughness, noiseScale, noiseStrength, noiseOctaves
-        vec4 pack4 = worldUbo.materialData[idx + 640u];   // channelR, channelG, channelB, textureBlend
-        vec4 pack5 = worldUbo.materialData[idx + 800u];   // gamutBoost, pomDepth, reserved, reserved
+        vec4 pack1 = vec4(mc.metallic, mc.transmission, mc.ior, mc.subsurface);
+        vec4 pack2 = vec4(mc.anisotropic, mc.sheenWeight, mc.sheenTint, mc.coatWeight);
+        vec4 pack4 = vec4(mc.channelR, mc.channelG, mc.channelB, mc.textureBlend);
 
         {
             // Apply F0 override if set; for dielectrics with zero F0, derive from IOR
@@ -126,8 +122,8 @@ void applyMaterialOverride(
 
             mat.metallic = pack1.x;
             // Transmission override protocol:
-            // pack1.y >= 0.0 -> explicit override value (0.0 = opaque, 1.0 = fully transmissive)
-            // pack1.y < 0.0  -> sentinel: keep LabPBR auto-detected value (set by Java for unregistered blocks)
+            // mc.transmission >= 0.0 -> explicit override value (0.0 = opaque, 1.0 = fully transmissive)
+            // mc.transmission < 0.0  -> sentinel: keep LabPBR auto-detected value
             if (pack1.y >= 0.0) mat.transmission = pack1.y;
             mat.ior = max(pack1.z, 1.0);
             mat.subSurface = pack1.w;
@@ -135,26 +131,20 @@ void applyMaterialOverride(
             mat.sheenWeight = pack2.y;
             mat.sheenTint = pack2.z;
             mat.coatWeight = pack2.w;
-            mat.coatRoughness = pack3.x;
+            mat.coatRoughness = mc.coatRoughness;
 
-            // Extract noise parameters from pack3
-            noise.scale = pack3.y;
-            noise.strength = pack3.z;
-            // pack3.w packs: octaves (bits 0-3) | noiseType (bits 4-7) | seed (bits 8-17) | noiseTarget (bits 20-22)
-            // Use floatBitsToInt to preserve exact bit pattern (Java side uses Float.intBitsToFloat)
-            int noisePacked = floatBitsToInt(pack3.w);
+            // Extract noise parameters from SSBO uint field
+            noise.scale = mc.noiseScale;
+            noise.strength = mc.noiseStrength;
+            int noisePacked = int(mc.noisePacked);
             noise.octaves = noisePacked & 0xF;
             noise.type = (noisePacked >> 4) & 0xF;
             noise.seed = (noisePacked >> 8) & 0x3FF;
             noise.target = (noisePacked >> 20) & 0x7;
 
-            gamutBoost = pack5.x; // per-material gamut boost
+            gamutBoost = mc.gamutBoost; // per-material gamut boost
 
             if (mat.metallic > 0.5) {
-                // Sync albedo to F0 for metals. Required because Disney BRDF uses
-                // mat.albedo (not mat.f0) for the metal Fresnel term. When the user
-                // explicitly overrides F0 via pack0.rgb (line ~465), albedo must be
-                // updated to match. Redundant but harmless when F0 wasn't overridden.
                 mat.albedo = mat.f0;
             }
         }

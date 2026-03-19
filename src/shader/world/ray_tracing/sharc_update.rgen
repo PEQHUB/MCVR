@@ -144,10 +144,12 @@ void main() {
 
     // Primary mask: match world.rgen PSR primary (first-person exclusion + BOAT_WATER_MASK)
     uint mask;
-    if (worldUBO.isFirstPerson > 0) {
+    if (worldUBO.isFirstPerson == 1) {
         mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
-    } else {
+    } else if (worldUBO.isFirstPerson == 2) {
         mask = WORLD_MASK | PLAYER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+    } else {
+        mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
     }
     traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, 0,
                 mainRay.origin, 0.0, mainRay.direction, 1000.0, 0);
