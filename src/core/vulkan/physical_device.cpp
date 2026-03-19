@@ -146,14 +146,6 @@ uint32_t vk::PhysicalDevice::secondaryQueueIndex() {
     return secondaryQueueIndex_;
 }
 
-uint32_t vk::PhysicalDevice::presentQueueIndex() {
-    return presentQueueIndex_;
-}
-
-uint32_t vk::PhysicalDevice::mainQueueCount() {
-    return mainQueueCount_;
-}
-
 void vk::PhysicalDevice::findQueueFamilies() {
     uint32_t queueFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &queueFamilyCount, nullptr);
@@ -194,7 +186,6 @@ void vk::PhysicalDevice::findQueueFamilies() {
             mainQueueIndex_ = i;
             // TODO: add more condition
             secondaryQueueIndex_ = i;
-            mainQueueCount_ = queueFamilies[i].queueCount;
             break;
         }
     }
@@ -233,14 +224,6 @@ void vk::PhysicalDevice::findQueueFamilies() {
     if (secondaryQueueIndex_ == -1) {
         physicalDeviceCerr() << "No queue family that supports graphics, compute and transfer found." << std::endl;
         exit(EXIT_FAILURE);
-    }
-
-    // Dedicated present queue for FSR FG proxy swapchain.
-    // Prefer a 3rd queue from the main family (present-capable). Falls back to main queue.
-    if (mainQueueIndex_ == secondaryQueueIndex_ && mainQueueCount_ >= 3) {
-        presentQueueIndex_ = mainQueueIndex_;  // same family, queue index 2
-    } else {
-        presentQueueIndex_ = mainQueueIndex_;  // fallback: share with main
     }
 }
 
