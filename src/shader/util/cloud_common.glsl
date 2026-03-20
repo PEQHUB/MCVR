@@ -124,9 +124,9 @@ layout(push_constant) uniform PushConstants {
     float eyePosZ;
     float detailStrength;
     uint scatterOctaves;
+    float powderStrength;    // Beer-powder dark edge intensity [0-2]
+    float ambientStrength;   // Density-based ambient occlusion [0-2]
     float pad0;
-    float pad1;
-    float pad2;
 } pc;
 
 // --- Shared constants ---

@@ -561,7 +561,9 @@ void CloudModuleContext::render() {
     pc.frameIndex = module->frameCounter_++;
     pc.marchSteps = module->marchSteps_;
     pc.lightSteps = module->lightSteps_;
-    pc.temporalBlend = std::clamp(module->temporalBlend_, 0.0f, 1.0f);
+    pc.temporalBlend = Renderer::options.cloudTemporalBlend >= 0.0f
+        ? std::clamp(Renderer::options.cloudTemporalBlend, 0.0f, 1.0f)
+        : std::clamp(module->temporalBlend_, 0.0f, 1.0f);
     pc.shadowMapSize = module->shadowMapSize_;
 
     // Camera world position from World (same source as WorldUBO.cameraPos)
@@ -572,9 +574,9 @@ void CloudModuleContext::render() {
     pc.eyePosZ = static_cast<float>(camPos.z);
     pc.detailStrength = Renderer::options.cloudDetailStrength;
     pc.scatterOctaves = Renderer::options.cloudScatterOctaves;
+    pc.powderStrength = Renderer::options.cloudPowderStrength;
+    pc.ambientStrength = Renderer::options.cloudAmbientStrength;
     pc.pad0 = 0.0f;
-    pc.pad1 = 0.0f;
-    pc.pad2 = 0.0f;
 
     // Advance wind time using actual frame delta
     auto now = std::chrono::steady_clock::now();

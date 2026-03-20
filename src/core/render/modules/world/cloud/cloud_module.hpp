@@ -41,9 +41,9 @@ struct alignas(16) CloudPushConstant {
     float eyePosZ;               // Camera world position Z
     float detailStrength;        // Detail erosion multiplier [0-2]
     uint32_t scatterOctaves;     // Multi-scatter octave count [1-4] [Wrenninge13]
+    float powderStrength;        // Beer-powder dark edge intensity [0-2] [Schneider15]
+    float ambientStrength;       // Density-based ambient occlusion [0-2] [Nubis³]
     float pad0;                  // Alignment padding
-    float pad1;                  // Alignment padding
-    float pad2;                  // Alignment padding
 };
 
 class CloudModule : public WorldModule, public SharedObject<CloudModule> {

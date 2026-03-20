@@ -194,6 +194,9 @@ struct Options {
     float cloudThickness = 40.0f;     // Cloud layer thickness [32 - 128]
     float cloudDetailStrength = 1.0f; // Detail erosion multiplier [0.0 - 2.0]
     uint32_t cloudScatterOctaves = 3; // Multi-scatter octaves [1 - 4]
+    float cloudPowderStrength = 1.0f; // Beer-powder dark edge [0.0 - 2.0]
+    float cloudAmbientStrength = 1.0f;// Ambient occlusion [0.0 - 2.0]
+    float cloudTemporalBlend = -1.0f; // Temporal blend override (-1 = use quality default)
     float wetSurfaceStrength = 1.0f;  // Wet surface effect strength [0.0 - 2.0]
 
     // Diagnostics

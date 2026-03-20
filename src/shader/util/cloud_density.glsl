@@ -154,7 +154,7 @@ float phaseDualHG(float cosTheta, float g1, float g2, float blend) {
 //
 // These produce the characteristic soft, bright interior ("silver lining")
 // that single-scatter Beer's law cannot achieve.
-float multiScatterEnergy(float opticalDepth, float cosTheta, uint octaves) {
+float multiScatterEnergy(float opticalDepth, float cosTheta, uint octaves, float powderStr) {
     // Isotropic phase (uniform sphere): 1/(4π)
     const float ISOTROPIC_PHASE = 1.0 / (4.0 * PI);
 
@@ -167,7 +167,7 @@ float multiScatterEnergy(float opticalDepth, float cosTheta, uint octaves) {
     // bright silver lining when facing sun [Schneider15 §3.4, Nubis³ p136]
     // cosTheta > 0 = looking toward sun → less powder (silver lining)
     // cosTheta < 0 = sun behind camera → more powder (dark edges)
-    float powderBlend = clamp(-cosTheta * 0.5 + 0.5, 0.0, 1.0);
+    float powderBlend = clamp(-cosTheta * 0.5 + 0.5, 0.0, 1.0) * powderStr;
 
     float energy = 0.0;
     float a = 1.0;  // attenuation multiplier (decreases per bounce)

@@ -236,7 +236,7 @@ void main() {
             if (transmittance > 0.05) {
                 float lightOD = lightMarch(pos, lightDir, pc.lightSteps, cloudThick);
                 // Wrenninge multi-scatter energy [Wrenninge13 §4, Hillaire16 §4.6.3]
-                lightEnergy = multiScatterEnergy(lightOD, cosAngle, pc.scatterOctaves);
+                lightEnergy = multiScatterEnergy(lightOD, cosAngle, pc.scatterOctaves, pc.powderStrength);
             } else {
                 // Below perceptual threshold — use minimal ambient contribution
                 lightEnergy = 0.02;
@@ -247,7 +247,7 @@ void main() {
 
             // Ambient occlusion: light can't penetrate dense cloud interiors [Nubis³ p141]
             // pow(1 - density_factor, 0.5) — bright at cloud surface, dark inside
-            float ambientOcclusion = pow(max(1.0 - density * 4.0, 0.0), 0.5);
+            float ambientOcclusion = pow(max(1.0 - density * 4.0 * pc.ambientStrength, 0.0), 0.5);
 
             // Height-dependent ambient: sky color at top, horizon at base
             vec3 ambient = mix(skyHorizon, skyTop, h) * mix(0.5, 1.2, h) * ambientOcclusion;
