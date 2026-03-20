@@ -22,7 +22,7 @@ bool FrameGenManager::active_ = false;
 uint32_t FrameGenManager::maxFrames_ = 0;
 uint32_t FrameGenManager::currentMode_ = 0;
 bool FrameGenManager::needsSwapchainRecreate_ = false;
-bool FrameGenManager::pendingEnable_ = false;
+bool FrameGenManager::deferredActivation_ = false;
 bool FrameGenManager::featureLoaded_ = false;
 
 bool FrameGenManager::init() {
@@ -71,46 +71,31 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
     if (!StreamlineContext::isDlssGSupported()) return;
     if (!context) return;
 
-    // Deferred enable: load feature + apply slDLSSGSetOptions on the render thread,
-    // not during swapchain callback. Loading the feature hooks the swapchain — must
-    // not happen until the world is rendering and sl::Constants are being set.
-    // Gate: skip during loading screen when shouldRender()=false — the SL interposer
-    // would process vkQueuePresentKHR with DLSS-G=ON but zero tagged resources, hanging.
-    if (pendingEnable_) {
-        if (!Renderer::instance().world()->shouldRender()) {
-            // Keep pendingEnable_ true — we'll retry once the world starts rendering.
-            return;
-        }
-        pendingEnable_ = false;
+    bool shouldRender = Renderer::instance().world()->shouldRender();
 
-        if (!featureLoaded_) {
-            StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, true);
-            featureLoaded_ = true;
-            fgCout() << "feature loaded (deferred to first render frame)" << std::endl;
-            // Feature just loaded — need a swapchain recreate for DLSS-G hooks to attach.
-            // Set pendingEnable_ again so we enable after the recreate.
-            Renderer::options.needRecreate = true;
-            pendingEnable_ = true;
-            return;
-        }
-
-        uint32_t mode = Renderer::options.frameGenMode;
+    // Deferred activation: feature is loaded, waiting for shouldRender to go true
+    if (deferredActivation_ && shouldRender) {
         uint32_t multiplier = Renderer::options.frameGenMultiplier;
         if (multiplier > maxFrames_) multiplier = maxFrames_;
         if (multiplier < 1) multiplier = 1;
-
-        sl::DLSSGMode slMode;
-        switch (mode) {
-        case 1:  slMode = sl::DLSSGMode::eOn; break;
-        default: slMode = sl::DLSSGMode::eOff; break;
-        }
-
-        StreamlineContext::setDlssGOptions(slMode, multiplier);
+        StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOn, multiplier);
         active_ = true;
-        currentMode_ = mode;
+        deferredActivation_ = false;
+        currentMode_ = Renderer::options.frameGenMode;
+        fgCout() << "activated (deferred, shouldRender became true)" << std::endl;
     }
 
     if (!active_) return;
+
+    // §0.0 auto-pause: when world stops rendering (menu/loading transition),
+    // pause FG so the SL interposer doesn't process presents with zero tagged resources.
+    if (!shouldRender) {
+        StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOff, 1);
+        active_ = false;
+        deferredActivation_ = true;  // will re-activate when shouldRender returns
+        fgCout() << "auto-paused (shouldRender=false)" << std::endl;
+        return;
+    }
 
     // Don't tag during offline accumulation — generated frames would corrupt the Welford accumulator
     if (Renderer::options.offlineState == 2) return;
@@ -320,23 +305,37 @@ void FrameGenManager::beforeSwapchainRecreate() {
 #ifdef _WIN32
     if (!initialized_ || !StreamlineContext::isDlssGSupported()) return;
 
-    // DLSS-G programming guide: "DLSS-G must be turned off (eOff) before any
-    // resolution or fullscreen/windowed mode change to prevent deadlocks in
-    // vkQueuePresentKHR." Always disable before swapchain teardown.
+    bool wantActive = Renderer::options.frameGenEnabled;
+    bool wasActive = active_;
+
+    // §19.0: DLSS-G must be eOff before swapchain teardown to prevent deadlocks.
     if (active_) {
         StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOff, 1);
         active_ = false;
-        fgCout() << "paused before swapchain recreate" << std::endl;
+        deferredActivation_ = false;
+        fgCout() << "eOff before swapchain recreate" << std::endl;
     }
 
-    // If turning off permanently, also unload the feature
-    bool wantActive = Renderer::options.frameGenEnabled;
+    // Feature unload when disabling FG — safe before swapchain destroy.
     if (!wantActive && featureLoaded_) {
         StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, false);
-        active_ = false;
         featureLoaded_ = false;
-        fgCout() << "unloaded (user disabled)" << std::endl;
+        deferredActivation_ = false;
+        fgCout() << "feature unloaded" << std::endl;
     }
+
+    // Crash guard: if the feature was loaded but never configured (wasActive=false),
+    // the SL interposer's vkDestroySwapchainKHR hook accesses uninitialized DLSS-G
+    // state → null deref crash at sl.dlss_g.dll+0x3428d. Unload to detach hooks
+    // cleanly. afterSwapchainRecreate() will re-load after swapchain create.
+    if (featureLoaded_ && !wasActive) {
+        StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, false);
+        featureLoaded_ = false;
+        fgCout() << "unloaded unconfigured feature before swapchain destroy" << std::endl;
+    }
+
+    // NEVER load feature here — must happen after swapchain reconstruct so the
+    // new swapchain is created with SL hooks active from the start.
 #endif
 }
 
@@ -346,12 +345,36 @@ void FrameGenManager::afterSwapchainRecreate() {
 
     bool wantActive = Renderer::options.frameGenEnabled;
 
-    if (wantActive) {
-        // Defer the actual slDLSSGSetOptions call to tagFrame() on the render thread.
-        // Calling it here (during swapchain callback) causes GetModuleHandleA failures
-        // because DLSS-G's swapchain hooks haven't finished setting up yet.
-        pendingEnable_ = true;
-        fgCout() << "pending enable after swapchain recreate" << std::endl;
+    // Feature load happens here — AFTER swapchain reconstruct (new swapchain exists).
+    // The old swapchain was destroyed without the feature loaded, avoiding the
+    // sl.dlss_g.dll crash. SL hooks now attach to future swapchain operations,
+    // so we need one more recreate for hooks to be active on a fresh swapchain.
+    if (wantActive && !featureLoaded_) {
+        StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, true);
+        featureLoaded_ = true;
+        // Initialize DLSS-G state immediately (eOff) so that the NEXT recreate's
+        // vkDestroySwapchainKHR hook won't crash on uninitialized state.
+        StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOff, 1);
+        Renderer::options.needRecreate = true;
+        deferredActivation_ = true;
+        fgCout() << "feature loaded + initialized, triggering second recreate" << std::endl;
+        return;
+    }
+
+    if (wantActive && featureLoaded_) {
+        // Second recreate (or subsequent): feature loaded, hooks active on this swapchain.
+        if (Renderer::instance().world()->shouldRender()) {
+            uint32_t multiplier = Renderer::options.frameGenMultiplier;
+            if (multiplier > maxFrames_) multiplier = maxFrames_;
+            if (multiplier < 1) multiplier = 1;
+            StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOn, multiplier);
+            active_ = true;
+            currentMode_ = Renderer::options.frameGenMode;
+            fgCout() << "activated after swapchain recreate" << std::endl;
+        } else {
+            deferredActivation_ = true;
+            fgCout() << "deferred activation (waiting for shouldRender)" << std::endl;
+        }
     }
 #endif
 }

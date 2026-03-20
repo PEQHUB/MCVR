@@ -174,38 +174,49 @@ void PresentThread::threadFunc() {
         }
         if (!running_) break;
 
-        // Wait for a frame from the render thread
-        ptDiag("waitAndConsume...");
+        // ═══════════ Overlay mode: render-coupled ═══════════
+        // One present per render frame — no free-running re-presentation.
+        // The render thread publishes to the ring after GPU submit; we wait
+        // for the slot, wait for the GPU fence, then present once.
+        auto *compositor = overlayCompositor_.load();
+        if (overlayMode_.load() && compositor) {
+            // Block until render thread publishes a frame (16ms timeout to check pause/stop)
+            FrameSlot *slot = ring_->waitAndConsume(std::chrono::milliseconds(16));
+            if (!slot || !running_ || paused_.load()) continue;
+            if (slot->renderDoneFence == VK_NULL_HANDLE) continue;  // shutdown sentinel
+
+            // Wait for GPU to finish rendering this frame
+            vkWaitForFences(device_->vkDevice(), 1,
+                            &slot->renderDoneFence, VK_TRUE, UINT64_MAX);
+
+            // Present the premultiplied overlay via D3D11/DComp
+            compositor->present();
+
+            // Error recovery: if compositor deactivated (DXGI device lost),
+            // trigger swapchain recreate to rebuild it.
+            if (!compositor->isActive()) {
+                Renderer::options.needRecreate = true;
+            }
+            continue;
+        }
+
+        // ═══════════ Vulkan swapchain mode: render-rate coupled ═══════════
         FrameSlot *slot = ring_->waitAndConsume();
-        if (!slot || !running_) { ptDiag("  no slot or !running"); continue; }
-        if (!slot->worldImage && !slot->overlayImage) { ptDiag("  shutdown sentinel"); continue; }
+        if (!slot || !running_) continue;
+        if (!slot->worldImage && !slot->overlayImage) continue;
 
         auto fw = framework_.lock();
         if (!fw || !fw->isRunning()) continue;
 
-        // Lock recreate mutex -- blocks during swapchain recreation
-        ptDiag("locking recreateMtx_...");
         std::unique_lock<std::recursive_mutex> recreateLk(fw->recreateMtx());
-        ptDiag("recreateMtx_ locked");
-        if (!running_ || paused_) { ptDiag("  !running||paused after lock"); continue; }
+        if (!running_ || paused_) continue;
 
         auto swapchain = fw->swapchain();
         if (!swapchain) continue;
 
-        // CPU-wait for render GPU to complete (full memory barrier)
+        // CPU-wait for render GPU to complete
         if (slot->renderDoneFence != VK_NULL_HANDLE) {
-            ptDiag("vkWaitForFences...");
             vkWaitForFences(device_->vkDevice(), 1, &slot->renderDoneFence, VK_TRUE, UINT64_MAX);
-            ptDiag("vkWaitForFences done");
-        }
-
-        // Overlay-only mode: D3D11 copy + DXGI present. No Vulkan swapchain interaction.
-        // Game swapchain is owned by Streamline (FG mode).
-        if (overlayMode_.load() && overlayCompositor_.load()) {
-            ptDiag("overlayCompositor->present()...");
-            overlayCompositor_.load()->present();
-            ptDiag("overlayCompositor->present() done");
-            continue;
         }
 
         // Acquire swapchain image

@@ -399,18 +399,26 @@ namespace Data {
         T_FLOAT emissionNits;   // Surface luminance in nits (0 = no emission)
         T_UINT  emissionType;   // EmissiveBlock ordinal (255 = none)
         T_UINT  classId;        // Material class ID (for cross-reference)
-        T_UINT  flags;          // Bit 0: has override, Bit 1: area light, Bit 2: vivid color
-    }; // 128 bytes (8 x vec4), std430 aligned
+        T_UINT  flags;          // Bit 0: has override, Bit 1: area light, Bit 2: vivid color,
+                                // Bit 3: AutoPBR (shader-side roughness+normal from albedo),
+                                // Bit 4: invertRoughness, Bit 5: invertNormal, Bit 6: invertHeight
+
+        // Pack 8: AutoPBR shader-side params (GPU-computed roughness + normal from albedo)
+        T_FLOAT lumMin;         // Precomputed per-block min luminance [0,1] (linear)
+        T_FLOAT lumMax;         // Precomputed per-block max luminance [0,1] (linear)
+        T_UINT  autoPBRPacked0; // rMin_u8 | rMax_u8<<8 | center_u8<<16 | spread_u8<<24
+        T_UINT  autoPBRPacked1; // normalStrength_u16 | heightGamma_u16<<16
+    }; // 144 bytes (9 x vec4), std430 aligned
 
 #ifdef __cplusplus
-    static constexpr int MAX_MATERIAL_CLASSES = 256;
+    static constexpr int MAX_MATERIAL_CLASSES = 512;
 #else
-    #define MAX_MATERIAL_CLASSES 256
+    #define MAX_MATERIAL_CLASSES 512
 #endif
 
     struct MaterialClassMapping {
         MaterialClassEntry entries[MAX_MATERIAL_CLASSES];
-    }; // 32 KB
+    }; // 72 KB (512 × 144 bytes)
 
     // Displacement mapping: per-face data for intersection shader DDA.
     // One entry per displaced AABB in the displaced BLAS, indexed by gl_PrimitiveID.

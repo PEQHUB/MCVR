@@ -195,7 +195,7 @@ void main() {
     uint materialType = (packedBlockType >> 8u) & 0xFFu;
     uint materialClassIdx = 0u;
     bool hasMaterialClass = false;
-    if (materialType > 0u && materialType <= 160u) {
+    if (materialType > 0u) {
         materialClassIdx = materialType - 1u;
         hasMaterialClass = true;
     } else {

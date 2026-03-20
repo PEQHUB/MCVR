@@ -427,6 +427,7 @@ bool OverlayCompositor::createDxgiSwapChain() {
     desc.BufferCount = 2;
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+    desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
     hr = factory2->CreateSwapChainForComposition(d3dDevice_, &desc, nullptr, &dxgiSwapChain_);
     factory2->Release();
@@ -435,6 +436,19 @@ bool OverlayCompositor::createDxgiSwapChain() {
     if (FAILED(hr)) {
         ocCerr() << "CreateSwapChainForComposition failed: 0x" << std::hex << hr << std::endl;
         return false;
+    }
+
+    // Set up waitable swapchain for display-rate pacing.
+    // The waitable object signals when the swapchain is ready for the next frame,
+    // perfectly matching the display refresh rate (e.g., 240Hz = every ~4.17ms).
+    IDXGISwapChain2 *sc2 = nullptr;
+    if (SUCCEEDED(dxgiSwapChain_->QueryInterface(IID_PPV_ARGS(&sc2)))) {
+        sc2->SetMaximumFrameLatency(1);
+        frameLatencyWaitable_ = sc2->GetFrameLatencyWaitableObject();
+        sc2->Release();
+        diagLog("waitable swapchain enabled");
+    } else {
+        diagLog("IDXGISwapChain2 not available, falling back to timed present");
     }
 
     ocCout() << "DXGI swapchain created " << width_ << "x" << height_
@@ -867,14 +881,26 @@ void OverlayCompositor::present() {
     // Release keyed mutex after D3D11 access
     sharedMutexes_[readIdx]->ReleaseSync(0);
 
-    // DXGI: Present (VSync=1 -> sync to display refresh)
+    // DXGI: Present without VSync — DComp+DWM composites at display refresh rate
+    // regardless of SyncInterval. VSync=1 would add a redundant VBlank wait on top
+    // of the Vulkan swapchain's own FIFO VSync, halving the effective UI update rate.
     DXGI_PRESENT_PARAMETERS params = {};
-    hr = dxgiSwapChain_->Present1(1, 0, &params);
+    hr = dxgiSwapChain_->Present1(0, 0, &params);
 
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
         ocCerr() << "DXGI device lost, deactivating overlay compositor" << std::endl;
         active_ = false;
     }
+}
+
+bool OverlayCompositor::waitForDisplayReady(uint32_t timeoutMs) {
+    if (frameLatencyWaitable_) {
+        DWORD result = WaitForSingleObject(frameLatencyWaitable_, timeoutMs);
+        return result == WAIT_OBJECT_0;
+    }
+    // Fallback: sleep ~4ms (approximate 240Hz)
+    Sleep(4);
+    return true;
 }
 
 // ─── Resize ───────────────────────────────────────────────────────────────

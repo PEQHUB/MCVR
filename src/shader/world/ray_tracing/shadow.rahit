@@ -185,7 +185,7 @@ void main() {
         uint materialType = (packedBlockType >> 8u) & 0xFFu;
         uint shadowMatIdx = 0u;
         bool shadowHasMat = false;
-        if (materialType > 0u && materialType <= 160u) {
+        if (materialType > 0u) {
             shadowMatIdx = materialType - 1u;
             shadowHasMat = true;
         } else {

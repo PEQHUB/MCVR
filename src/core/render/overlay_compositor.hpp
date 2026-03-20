@@ -20,6 +20,7 @@ struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
 struct IDXGISwapChain1;
+struct IDXGISwapChain2;
 struct IDCompositionDevice;
 struct IDCompositionTarget;
 struct IDCompositionVisual;
@@ -45,8 +46,12 @@ class OverlayCompositor {
                            uint32_t queueFamilyIndex);
 
     /// Present the shared image content via D3D11 -> DXGI -> DComp.
-    /// Called by PresentThread after CPU-waiting the render fence.
+    /// Called by PresentThread (may re-present the same frame at display rate).
     void present();
+
+    /// Wait for the DXGI swapchain to be ready for the next frame.
+    /// Returns true if ready, false on timeout. Paces to display refresh rate.
+    bool waitForDisplayReady(uint32_t timeoutMs = 8);
 
     /// Handle game window resize. Recreates DXGI swapchain + shared image.
     void resize(uint32_t width, uint32_t height);
@@ -82,6 +87,7 @@ class OverlayCompositor {
     ID3D11Device *d3dDevice_ = nullptr;
     ID3D11DeviceContext *d3dContext_ = nullptr;
     IDXGISwapChain1 *dxgiSwapChain_ = nullptr;
+    void *frameLatencyWaitable_ = nullptr;  // HANDLE from GetFrameLatencyWaitableObject
     IDCompositionDevice *dcompDevice_ = nullptr;
     IDCompositionTarget *dcompTarget_ = nullptr;
     IDCompositionVisual *dcompVisual_ = nullptr;

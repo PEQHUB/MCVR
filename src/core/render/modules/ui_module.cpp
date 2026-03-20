@@ -998,8 +998,10 @@ void UIModuleContext::setOverlayClearColor(float red, float green, float blue, f
 
     bool hdrActive = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
 
-    // In HDR mode, force fully transparent overlay to prevent tinted compositing.
-    if (hdrActive) {
+    // When overlay compositor is active, always pass through Minecraft's clear color
+    // (backgrounds must be opaque in the DComp surface). Otherwise in HDR mode,
+    // force transparent overlay to prevent tinted compositing onto the world.
+    if (hdrActive && !framework->isOverlayCompositorActive()) {
         overlayClearColors[0] = 0.0f;
         overlayClearColors[1] = 0.0f;
         overlayClearColors[2] = 0.0f;
@@ -1010,7 +1012,7 @@ void UIModuleContext::setOverlayClearColor(float red, float green, float blue, f
     overlayClearColors[0] = red;
     overlayClearColors[1] = green;
     overlayClearColors[2] = blue;
-    overlayClearColors[3] = 1.0f;
+    overlayClearColors[3] = alpha > 0.0f ? alpha : 1.0f;
 }
 
 void UIModuleContext::setOverlayClearDepth(double depth) {
@@ -1184,12 +1186,20 @@ void UIModuleContext::clearOverlayEntireColorAttachment() {
     VkClearAttachment clearAttachment{};
     clearAttachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     clearAttachment.colorAttachment = 0;
-    // Always clear to transparent black.
-    // World (SDR/HDR) is composited later in FrameworkContext::fuseFinal().
-    clearAttachment.clearValue.color.float32[0] = 0.0f;
-    clearAttachment.clearValue.color.float32[1] = 0.0f;
-    clearAttachment.clearValue.color.float32[2] = 0.0f;
-    clearAttachment.clearValue.color.float32[3] = 0.0f;
+    // When overlay compositor is active (DComp), use Minecraft's clear color so backgrounds
+    // (dirt texture, panorama) appear in the overlay surface. Otherwise, clear to transparent
+    // black so the world shows through during compositing in fuseFinal().
+    if (framework->isOverlayCompositorActive()) {
+        clearAttachment.clearValue.color.float32[0] = overlayClearColors[0];
+        clearAttachment.clearValue.color.float32[1] = overlayClearColors[1];
+        clearAttachment.clearValue.color.float32[2] = overlayClearColors[2];
+        clearAttachment.clearValue.color.float32[3] = overlayClearColors[3];
+    } else {
+        clearAttachment.clearValue.color.float32[0] = 0.0f;
+        clearAttachment.clearValue.color.float32[1] = 0.0f;
+        clearAttachment.clearValue.color.float32[2] = 0.0f;
+        clearAttachment.clearValue.color.float32[3] = 0.0f;
+    }
 
     VkClearRect clearRect{};
     clearRect.rect.offset = {0, 0};

@@ -89,11 +89,12 @@ void FrameworkContext::fuseFinal() {
 
     auto overlayOutput = pipelineContext->uiModuleContext ? pipelineContext->uiModuleContext->overlayDrawColorImage : nullptr;
 
-    // When overlay compositor is active (FG + DComp), composite world-only to swapchain.
-    // UI goes through the DComp overlay instead of the game swapchain.
-    // nullptr overlay -> HdrCompositePass uses transparentOverlayImage_ fallback.
+    // When FG is active AND overlay compositor is operational, composite world-only
+    // to swapchain. UI goes through the DComp overlay instead.
+    // When FG auto-pauses (menu/loading), overlayActive=false, UI composites normally.
     auto overlayCompositor = f->overlayCompositor_.get();
-    bool overlayActive = overlayCompositor && overlayCompositor->isActive();
+    bool overlayActive = FrameGenManager::isActive() &&
+                         overlayCompositor && overlayCompositor->isActive();
     auto compositeOverlay = overlayActive ? nullptr : overlayOutput;
 
     bool canComposite = f->pipeline_->hdrCompositePass() && (compositeOverlay || overlayActive);
@@ -331,9 +332,17 @@ void Framework::acquireContext() {
     // Streamline: advance frame token and sleep at the very top of the frame.
     // Per NVIDIA QA checklist: "slReflexSleep is called regardless of Reflex Low Latency mode state."
     // SL handles the mode internally — always call sleep when Reflex is available.
+    //
+    // Skip Reflex sleep ONLY when both conditions are true:
+    //   1. Not rendering world (menu/loading) — UI-only frames are trivially fast
+    //   2. DLSS-G is not active — Reflex sleep coordinates with FG's frame cadence;
+    //      skipping it while FG is on would overwhelm the SL interposer with 300+ FPS
+    //      of untagged presents. Once FG activates (world entered), always respect sleep.
     if (StreamlineContext::isAvailable()) {
         StreamlineContext::advanceFrame();
-        if (StreamlineContext::isReflexAvailable()) {
+        bool shouldSleep = Renderer::instance().world()->shouldRender() ||
+                           FrameGenManager::isActive();
+        if (StreamlineContext::isReflexAvailable() && shouldSleep) {
             StreamlineContext::reflexSleep();
         }
     }
@@ -687,9 +696,10 @@ void Framework::recreate() {
     }
 
     // Overlay compositor lifecycle: create when FG enabled, destroy when disabled.
-    // When active, PresentThread runs in overlay-only mode (D3D11 copy + DXGI present).
+    // Must exist before FG activates (tagFrame deferred activation needs the overlay ready).
+    // Overlay idles when FG is auto-paused (menu/loading) — not destroyed.
     bool wantOverlay = Renderer::options.frameGenEnabled;
-    renderDiag("  overlay: want=%d exists=%d active=%d", (int)wantOverlay,
+    renderDiag("  overlay: want=%d exists=%d compositorActive=%d", (int)wantOverlay,
                (int)(overlayCompositor_ != nullptr),
                (int)(overlayCompositor_ && overlayCompositor_->isActive()));
     renderFrameworkCout() << "recreate: frameGenEnabled=" << wantOverlay
@@ -710,6 +720,18 @@ void Framework::recreate() {
         }
     } else if (wantOverlay && overlayCompositor_ && overlayCompositor_->isActive()) {
         overlayCompositor_->resize(swapchain_->vkExtent().width, swapchain_->vkExtent().height);
+    } else if (wantOverlay && overlayCompositor_ && !overlayCompositor_->isActive()) {
+        // Overlay exists but became inactive (DXGI device lost, resize failure, etc.)
+        renderDiag("  overlay inactive, recreating...");
+        overlayCompositor_->destroy();
+        overlayCompositor_.reset();
+        overlayCompositor_ = std::make_unique<OverlayCompositor>();
+        if (!overlayCompositor_->init(shared_from_this())) {
+            overlayCompositor_.reset();
+            renderDiag("  overlay recreate FAILED");
+        } else {
+            renderDiag("  overlay recreate SUCCESS");
+        }
     } else if (!wantOverlay && overlayCompositor_) {
         overlayCompositor_->destroy();
         overlayCompositor_.reset();
