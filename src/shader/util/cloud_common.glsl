@@ -166,7 +166,15 @@ float effectiveThickness() {
 vec4 sampleWeather(sampler2D weatherMap, vec3 worldPos) {
     vec3 eyePos = getEyePos();
     vec2 uv = (worldPos.xz - eyePos.xz) / 1024.0 + 0.5;
-    return texture(weatherMap, uv);
+
+    // Fade coverage to zero near weather map edges — prevents solid cloud walls
+    // at the 1024-block boundary where CLAMP_TO_EDGE repeats edge texels.
+    vec2 edgeDist = min(uv, 1.0 - uv);  // Distance from nearest edge [0, 0.5]
+    float edgeFade = smoothstep(0.0, 0.1, min(edgeDist.x, edgeDist.y));
+
+    vec4 weather = texture(weatherMap, uv);
+    weather.r *= edgeFade;  // Fade coverage only, preserve cloud type
+    return weather;
 }
 #endif
 

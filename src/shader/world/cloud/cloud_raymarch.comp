@@ -189,24 +189,21 @@ void main() {
     vec3 lightColor;
     if (sunDir.y > 0.0) {
         lightDir = sunDir;
-        // Normalize raw physical radiance (~100k lux) to perceptual cloud brightness.
-        // 5e-5 maps 100k → 5.0, balanced against pre-exposed RT scene (~0.1 scale).
-        lightColor = skyUBO.sunRadiance * 5e-5;
-        // Horizon fade: golden hour falloff, warm tint at low angles
-        float hFade = smoothstep(0.0, 0.25, sunDir.y);
-        lightColor *= hFade;
+        lightColor = skyUBO.sunRadiance;  // Raw value — tone mapping handles HDR
+        // Only kill light below horizon
+        lightColor *= smoothstep(-0.05, 0.1, sunDir.y);
+        // Golden hour warm tint at low sun angles
         lightColor *= mix(vec3(1.0, 0.7, 0.4), vec3(1.0), smoothstep(0.0, 0.15, sunDir.y));
     } else {
         lightDir = normalize(skyUBO.moonDirection);
-        lightColor = skyUBO.moonRadiance * 0.5;
+        lightColor = skyUBO.moonRadiance;
         lightColor *= smoothstep(0.0, 0.2, abs(lightDir.y));
     }
     float cosAngle = dot(rayDir, lightDir);
 
-    // Ambient: proportional to light, always visible (30-50% of direct)
-    float ambientFraction = mix(0.35, 0.5, skyUBO.rainGradient);
-    vec3 skyTop = lightColor * ambientFraction * vec3(0.7, 0.8, 1.0);    // Blue tint at top
-    vec3 skyHorizon = lightColor * ambientFraction * vec3(1.0, 0.9, 0.8); // Warm at base
+    // Ambient: sky colors directly (not proportional to direct light)
+    vec3 skyTop = skyUBO.baseColor * 0.4;
+    vec3 skyHorizon = skyUBO.horizonColor.rgb * 0.3 + vec3(0.03);
 
     // Adaptive stepping state
     bool inCloud = false;
@@ -248,8 +245,12 @@ void main() {
             // Normalized height for ambient gradient
             float h = (pos.y - pc.cloudBase) / cloudThick;
 
+            // Ambient occlusion: light can't penetrate dense cloud interiors [Nubis³ p141]
+            // pow(1 - density_factor, 0.5) — bright at cloud surface, dark inside
+            float ambientOcclusion = pow(max(1.0 - density * 4.0, 0.0), 0.5);
+
             // Height-dependent ambient: sky color at top, horizon at base
-            vec3 ambient = mix(skyHorizon, skyTop, h) * mix(0.5, 1.2, h);
+            vec3 ambient = mix(skyHorizon, skyTop, h) * mix(0.5, 1.2, h) * ambientOcclusion;
 
             // Direct lighting with multi-scatter energy
             vec3 directLight = lightColor * lightEnergy;

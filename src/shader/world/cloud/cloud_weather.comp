@@ -74,9 +74,9 @@ float worley2D(vec2 p) {
 // Multi-octave Worley FBM — breaks single-frequency grid regularity [Schneider15 §3.1]
 // Higher base frequencies produce more, smaller cloud clusters (fair-weather cumulus)
 float worleyFBM2D(vec2 p) {
-    float w0 = 1.0 - worley2D(p * 5.0);   // ~8-12 clusters across weather map
-    float w1 = 1.0 - worley2D(p * 10.0);  // Medium detail
-    float w2 = 1.0 - worley2D(p * 20.0);  // Fine breakup
+    float w0 = 1.0 - worley2D(p * 3.0);   // ~3-5 large clusters (340 blocks each)
+    float w1 = 1.0 - worley2D(p * 7.0);   // Medium detail
+    float w2 = 1.0 - worley2D(p * 14.0);  // Fine breakup
     return w0 * 0.625 + w1 * 0.25 + w2 * 0.125;
 }
 
@@ -95,26 +95,20 @@ void main() {
     // Slow evolution via time-varying domain warp gives natural forming/dissipating.
     vec2 worldUV = worldXZ / 1024.0;
 
-    // Two-pass domain warping: breaks Worley grid into organic shapes [Schneider15 §3.3]
+    // Single-pass domain warping: breaks Worley grid into organic shapes [Schneider15 §3.3]
     float evolveTime = pc.windTime * 0.0001; // Very slow evolution (minutes, not seconds)
-    vec2 warp1 = vec2(
+    vec2 warp = vec2(
         gradNoise2D(worldUV * 2.0 + vec2(evolveTime, 3.7)),
         gradNoise2D(worldUV * 2.0 + vec2(5.2, evolveTime + 1.3))
     );
-    vec2 warpedUV = worldUV + warp1 * 0.35;
-    // Second-order warp (warp the warped coords — adds extra irregularity)
-    vec2 warp2 = vec2(
-        gradNoise2D(warpedUV * 3.0 + vec2(7.1, 2.3)),
-        gradNoise2D(warpedUV * 3.0 + vec2(1.7, 8.9))
-    );
-    vec2 finalUV = warpedUV + warp2 * 0.15;
+    vec2 finalUV = worldUV + warp * 0.2;
 
     // Multi-octave Worley FBM for natural cloud cluster placement
     float cellMask = worleyFBM2D(finalUV);
 
     // Blend with Perlin FBM for soft variation that breaks hexagonal regularity
     float perlinMask = fbm2D(finalUV * 3.0, 3);
-    float placementNoise = cellMask * 0.7 + perlinMask * 0.3;
+    float placementNoise = cellMask * 0.55 + perlinMask * 0.45;
 
     // Low-frequency FBM for additional soft variation within cells
     float coverageNoise = fbm2D(finalUV * 4.0, 4);
