@@ -163,6 +163,12 @@ float multiScatterEnergy(float opticalDepth, float cosTheta, uint octaves) {
     const float B_DECAY = 0.5;  // contribution per bounce
     const float C_DECAY = 0.5;  // eccentricity per bounce
 
+    // Beer-powder balance: dark edges when sun is behind viewer,
+    // bright silver lining when facing sun [Schneider15 §3.4, Nubis³ p136]
+    // cosTheta > 0 = looking toward sun → less powder (silver lining)
+    // cosTheta < 0 = sun behind camera → more powder (dark edges)
+    float powderBlend = clamp(-cosTheta * 0.5 + 0.5, 0.0, 1.0);
+
     float energy = 0.0;
     float a = 1.0;  // attenuation multiplier (decreases per bounce)
     float b = 1.0;  // contribution multiplier (decreases per bounce)
@@ -178,7 +184,16 @@ float multiScatterEnergy(float opticalDepth, float cosTheta, uint octaves) {
         // Blend toward isotropic as c decays
         phase = mix(ISOTROPIC_PHASE, phase, c);
 
-        energy += b * phase * exp(-opticalDepth * a);
+        // Beer-powder: replaces plain Beer's law exp(-od) [Schneider15]
+        // powder ≈ 0 at cloud surface (od→0) → dark edge
+        // powder ≈ 1 deep inside → normal Beer attenuation
+        float od = opticalDepth * a;
+        float beer = exp(-od);
+        float powder = 1.0 - exp(-od * 2.0);
+        // Blend: full powder for back-lit, pure beer for forward-lit
+        float transmittance = beer * mix(1.0, powder * 2.0, powderBlend);
+
+        energy += b * phase * transmittance;
         a *= A_DECAY;
         b *= B_DECAY;
         c *= C_DECAY;
