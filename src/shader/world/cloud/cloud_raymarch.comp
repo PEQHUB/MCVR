@@ -224,15 +224,15 @@ void main() {
         vec4 noise = texture(uNoise3D, noisePos);
         vec4 weather = sampleWeather(uWeatherMap, pos);
 
+        float dimProfile;
         float density = cloudDensity(pos, weather.r, weather.g, noise,
                                       pc.cloudBase, cloudThick, pc.densityMultiplier,
-                                      pc.detailStrength);
+                                      pc.detailStrength, dimProfile);
 
         if (density > 0.001) {
             // Adaptive: backstep and resample when re-entering cloud from empty space
             if (!inCloud) {
                 inCloud = true;
-                // Retreat half the previous large step to refine the entry point
                 t -= stepSize * 0.5;
                 pos = rayOrigin + rayDir * t;
                 noisePos = pos * NOISE_SCALE + windOffset(pc.windTime);
@@ -240,7 +240,7 @@ void main() {
                 weather = sampleWeather(uWeatherMap, pos);
                 density = cloudDensity(pos, weather.r, weather.g, noise,
                                         pc.cloudBase, cloudThick, pc.densityMultiplier,
-                                        pc.detailStrength);
+                                        pc.detailStrength, dimProfile);
                 stepSize = baseStepSize;
                 if (density <= 0.001) { t += stepSize; continue; }
             }
@@ -257,24 +257,19 @@ void main() {
                 lightEnergy = 0.02;
             }
 
-            // Normalized height for ambient gradient
+            // Nubis ambient scattering [Nubis³ p141, p144]:
+            // pow(1 - dimensional_profile, 0.5) — bright at cloud tops/edges,
+            // dark in dense core. Profile-based, not transmittance-based.
             float h = (pos.y - pc.cloudBase) / cloudThick;
+            float ambientScatter = pow(max(1.0 - dimProfile, 0.0), 0.5);
 
-            // Height-dependent ambient: sky color at top, horizon at base
-            vec3 ambient = mix(skyHorizon, skyTop, h) * mix(0.5, 1.2, h);
+            // Height-dependent ambient color: sky at top, horizon at base
+            vec3 ambient = mix(skyHorizon, skyTop, h) * ambientScatter;
 
             // Direct lighting with multi-scatter energy
             vec3 directLight = lightColor * lightEnergy;
 
-            // Ambient occlusion from accumulated optical depth [Nubis³ p141]
-            // transmittance decays 1→0 as we march deeper into the cloud.
-            // ao = pow(transmittance, strength): 1.0 at surface, →0 deep inside.
-            // strength=0 → no AO, strength=1 → default, strength=2 → exaggerated.
-            // Applied to total luminance so it visibly darkens cloud interiors,
-            // but NOT to the Beer's-law integration — preserves silver-lining energy.
-            float ao = pow(transmittance, pc.ambientStrength);
-
-            vec3 luminance = (directLight + ambient) * ao * density;
+            vec3 luminance = (directLight + ambient) * density;
 
             // Accumulate with Beer's law
             float sampleTransmittance = exp(-density * stepSize);
