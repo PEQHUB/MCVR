@@ -1,18 +1,19 @@
 #ifndef CLOUD_DENSITY_GLSL
 #define CLOUD_DENSITY_GLSL
 
-// Nubis³ cloud density and lighting model.
+// Nubis cloud density and lighting model.
 //
-// Core equation: density = ValueErosion(dimensional_profile, noise_composite)
+// Core equation [Nubis³ p24]:
+//   cloud_density = saturate(noise_composite - (1.0 - dimensional_profile))
 //
-// dimensional_profile encodes height shape × coverage into [0,1].
-// It drives density thresholding, noise blending, and ambient scattering.
+// Noise is the shape source; dimensional_profile sets the threshold.
+// High profile + high noise = density. Low profile = sparse/no clouds.
 //
 // References:
-//   [Nubis³]       Schneider, "Nubis, Cubed", SIGGRAPH 2023
+//   [Nubis³]        Schneider, "Nubis, Cubed", SIGGRAPH 2023
 //   [NubisEvolved]  Schneider, "Nubis, Evolved", SIGGRAPH 2022
 //   [Wrenninge13]   Multi-scatter octave approximation
-//   [Hillaire16]    Frostbite decay parameters (a=0.2, b=0.5, c=0.5)
+//   [Hillaire16]    Frostbite decay parameters
 //
 // Used by: cloud_raymarch.comp, cloud_shadow.comp
 
@@ -20,66 +21,53 @@ const float PI = 3.14159265358979;
 
 // --- Utility ---
 
-// Unclamped remap [Nubis³ p9 "Remap"]
 float cloudRemap(float value, float low1, float high1, float low2, float high2) {
     return low2 + (value - low1) / (high1 - low1) * (high2 - low2);
 }
 
-// Nubis ValueErosion [Nubis³ p118]: erodes profile by noise.
-// Where noise is high, more profile is removed → creates detail holes.
-// saturate((profile - noise) / (1 - noise))
-float valueErosion(float profile, float noise) {
-    return clamp((profile - noise) / max(1.0 - noise, 0.0001), 0.0, 1.0);
-}
-
-// --- Dimensional Profile [NubisEvolved p97, Nubis³ p82-86] ---
+// --- Dimensional Profile [NubisEvolved p97, Nubis³ p29] ---
 //
-// Height envelope × coverage. Type controls vertical extent:
-//   type=0   (stratus):        thin layer, cloud lives in h=[0, ~0.25]
-//   type=0.33 (stratocumulus):  medium,    h=[0, ~0.5]
-//   type=0.67 (cumulus):        tall,      h=[0, ~0.8]
-//   type=1.0  (cumulonimbus):   full,      h=[0, 1.0]
+// Height profile × coverage. The profile controls cloud vertical extent
+// per type; coverage controls what fraction of the noise produces density.
 //
-// Coverage scales the profile, controlling the noise threshold:
-//   low coverage  → sparse isolated clouds (only strongest noise features)
-//   high coverage → dense overcast (most noise produces density)
+// type [0,1] controls vertical extent:
+//   0 = stratus (thin, h=[0, ~0.25])
+//   0.33 = stratocumulus (medium, h=[0, ~0.5])
+//   0.67 = cumulus (tall, h=[0, ~0.8])
+//   1.0 = cumulonimbus (full height)
 
 float dimensionalProfile(float h, float coverage, float type) {
-    // Base: sharp condensation level at cloud bottom [NubisEvolved p97]
+    // Base: quick ramp from condensation level [NubisEvolved p97]
     float base = smoothstep(0.0, 0.1, h);
 
-    // Top: type-dependent fade. Stratus fades early, Cb uses full height.
+    // Top: type-dependent fade height
     float topFade = mix(0.25, 1.0, type);
     float top = smoothstep(topFade, topFade * 0.35, h);
 
+    // Profile peaks at ~1.0 through most of the cloud body.
+    // Coverage scales it: low coverage = high threshold = sparse clouds.
     return base * top * coverage;
 }
 
 // --- Noise Composite [Nubis³ p99, p104, p108] ---
 //
 // Noise channels (from cloud_noise_gen.comp):
-//   R = Perlin-Worley  → wispy low-freq  (connected shapes)
-//   G = Worley freq 4  → billowy low-freq (cell boundaries)
-//   B = Worley freq 8  → billowy high-freq (fine cells)
-//   A = Curl noise     → wispy high-freq  (tendrils)
+//   R = Perlin-Worley  (connected, flowing shapes)
+//   G = Worley freq 4  (medium cellular)
+//   B = Worley freq 8  (fine cellular)
+//   A = Curl noise     (wispy tendrils)
 //
-// Wispy noise: blends low→high freq wisps using dimensional_profile.
-//   Low density edges → more base PW, dense core → more curl detail. [p99]
-//
-// Billowy noise: blends low→high freq Worley using profile^0.25.
-//   The 0.3 scale matches Nubis³ — billowy channels are stronger,
-//   so less erosion → denser, puffier shapes. [p104]
-//
-// Cloud type blends wispy↔billowy character. [p108]
-//   type=0 (stratus) → wispy (thin, curly), type=1 (cb) → billowy (round, puffy)
+// Wispy (type=0): PW base → curl detail. Connected flowing shapes.
+// Billowy (type=1): PW base → Worley detail. Rounded cellular shapes.
+// Both channels use full [0,1] range (no 0.3 scaling — that was calibrated
+// for Nubis's Alligator noise, not our Worley).
 
 float noiseComposite(vec4 noise, float dimProfile, float type) {
-    // Wispy: PW base + curl detail [Nubis³ p99]
+    // Wispy: PW → curl, blended by profile [Nubis³ p99]
     float wispy = mix(noise.r, noise.a, dimProfile);
 
-    // Billowy: Worley cells, profile^0.25 gradient [Nubis³ p104]
-    float billowyGrad = pow(dimProfile, 0.25);
-    float billowy = mix(noise.g * 0.3, noise.b * 0.3, billowyGrad);
+    // Billowy: PW → Worley, blended by profile [Nubis³ p104]
+    float billowy = mix(noise.r, noise.g, dimProfile);
 
     // Type blend [Nubis³ p108]
     return mix(wispy, billowy, type);
@@ -87,8 +75,8 @@ float noiseComposite(vec4 noise, float dimProfile, float type) {
 
 // --- Main Cloud Density [Nubis³ p24, p118] ---
 //
-// Returns density and writes out dimensional_profile for ambient scattering.
-// Pipeline: dimProfile → noiseComposite → valueErosion → scale → sharpen
+// Pipeline: dimProfile → noiseComposite → density threshold → detail erosion → sharpen
+// Returns density; writes dimensional_profile for ambient scattering.
 
 float cloudDensity(vec3 pos, float coverage, float type,
                    vec4 noise, float cloudBase, float cloudThickness,
@@ -97,22 +85,28 @@ float cloudDensity(vec3 pos, float coverage, float type,
     float h = (pos.y - cloudBase) / cloudThickness;
     if (h < 0.0 || h > 1.0) { outDimProfile = 0.0; return 0.0; }
 
-    // Dimensional profile [NubisEvolved p97]
+    // Dimensional profile [NubisEvolved p97, Nubis³ p29]
     float dimProfile = dimensionalProfile(h, coverage, type);
     outDimProfile = dimProfile;
     if (dimProfile < 0.001) return 0.0;
 
-    // Noise composite [Nubis³ p99-108]
+    // Noise composite: type blends wispy↔billowy [Nubis³ p99-108]
     float nc = noiseComposite(noise, dimProfile, type);
 
-    // ValueErosion [Nubis³ p118]: noise erodes the profile
-    // detailStr scales erosion: 0=solid, 1.0=standard, 2.0=extra detail
-    float density = valueErosion(dimProfile, nc * clamp(detailStr, 0.0, 2.0));
+    // Core Nubis density [p24]: noise exceeds threshold set by profile.
+    // High noise + high profile = density. Coverage controls sparseness.
+    float density = clamp(nc - (1.0 - dimProfile), 0.0, 1.0);
+    if (density <= 0.0) return 0.0;
+
+    // Detail erosion: secondary noise breaks up edges
+    // Wispy detail (curl) for stratus, billowy detail (fine Worley) for cumulus
+    float detailNoise = mix(noise.a, noise.b, type);
+    density = max(density - detailNoise * 0.35 * detailStr, 0.0);
 
     // Density multiplier
     density *= densityMul;
 
-    // Sharpening [Nubis³ p118]: pow(density, exponent)
+    // Sharpening [Nubis³ p118]: pow pushes low values toward zero for crisp edges
     float sharp = clamp(pc.sharpening, 0.1, 1.0);
     return pow(max(density, 0.0), sharp);
 }
@@ -128,22 +122,17 @@ float cloudDensity(vec3 pos, float coverage, float type,
 
 // --- Phase Functions ---
 
-// Henyey-Greenstein phase function [Henyey41]
 float phaseHG(float cosTheta, float g) {
     float g2 = g * g;
     float denom = 1.0 + g2 - 2.0 * g * cosTheta;
     return (1.0 - g2) / (4.0 * PI * denom * sqrt(denom));
 }
 
-// Dual-lobe HG phase (forward + back scatter blend)
 float phaseDualHG(float cosTheta, float g1, float g2, float blend) {
     return mix(phaseHG(cosTheta, g1), phaseHG(cosTheta, g2), blend);
 }
 
-// --- Multi-scatter octave approximation [Wrenninge13 §4, Hillaire16 §4.6.3] ---
-//
-// Each bounce: extinction decays by a, contribution by b, anisotropy by c.
-// Produces soft bright interior ("silver lining") that single-scatter Beer's law misses.
+// --- Multi-scatter octave approximation [Wrenninge13, Hillaire16] ---
 
 float multiScatterEnergy(float opticalDepth, float cosTheta, uint octaves, float powderStr) {
     const float ISOTROPIC_PHASE = 1.0 / (4.0 * PI);
