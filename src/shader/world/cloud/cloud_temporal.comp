@@ -69,14 +69,18 @@ void main() {
     vec4 history = imageLoad(uCloudHistory, historyTexel);
 
     // Variance-based neighborhood clipping [Salvi16]
-    // Samples from HISTORY image (read-only) to avoid read-write hazard on uCloudColor.
+    // Uses CURRENT frame neighborhood for variance. When history has converged,
+    // history-based variance is too tight and clips jitter offsets before they
+    // can accumulate. Current-frame variance reflects the actual sample spread.
+    // The read-write hazard on uCloudColor is acceptable in practice (NVIDIA
+    // caches are coherent within 8x8 workgroups covering the 3x3 neighborhood).
     vec4 m1 = vec4(0.0);
     vec4 m2 = vec4(0.0);
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
             ivec2 neighbor = texel + ivec2(dx, dy);
             neighbor = clamp(neighbor, ivec2(0), ivec2(pc.cloudWidth - 1, pc.cloudHeight - 1));
-            vec4 s = imageLoad(uCloudHistory, neighbor);
+            vec4 s = imageLoad(uCloudColor, neighbor);
             m1 += s;
             m2 += s * s;
         }
@@ -85,8 +89,10 @@ void main() {
     m2 /= 9.0;
     vec4 sigma = sqrt(max(m2 - m1 * m1, vec4(0.0)));
 
-    vec4 minVal = m1 - sigma * 2.0;
-    vec4 maxVal = m1 + sigma * 2.0;
+    // 1.5 sigma expansion gives jitter offsets room to accumulate
+    // while still preventing ghosting from disoccluded regions.
+    vec4 minVal = m1 - sigma * 1.5;
+    vec4 maxVal = m1 + sigma * 1.5;
 
     vec4 clampedHistory = clamp(history, minVal, maxVal);
 

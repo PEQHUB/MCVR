@@ -205,12 +205,17 @@ void main() {
     coverage = clamp(coverage, 0.0, 1.0);
 
     // --- Cloud type ---
-    // Clear: user-selected type (pc.cloudType, default 0.67 = cumulus)
-    // Rain: stratus overcast (type = 0.0 = lowest, flattest cloud)
-    // Thunder: cumulonimbus towers (type = 1.0 = full-height storm)
-    // Per-cell variation: slight random offset for natural variety
-    float typeVariation = (hash12w(cellID * 3.17 + vec2(11.3, 7.9)) - 0.5) * 0.15;
-    float rainType = mix(pc.cloudType + typeVariation, 0.0, rain);
+    // Per-cell FBM noise gives ±0.33 variation around pc.cloudType.
+    // At default 0.67, produces types spanning ~0.34-1.0 (stratocumulus→cumulonimbus).
+    // Coverage-dependent bias: isolated cells → taller (cumulus/cb),
+    // merged overcast → flatter (stratus/sc). Meteorologically accurate.
+    float typeNoise = fbm2D(worldUV * 1.5 + vec2(7.31, 13.17), 2);
+    float typeVariation = (typeNoise - 0.5) * 0.66; // ±0.33 range
+    float coverageBias = mix(0.1, -0.15, coverage); // Isolated→tall, merged→flat
+    float clearType = clamp(pc.cloudType + typeVariation + coverageBias, 0.0, 1.0);
+
+    // Rain: push toward stratus (flat overcast). Thunder: push toward cumulonimbus.
+    float rainType = mix(clearType, 0.0, rain);
     float type = mix(rainType, 1.0, thunder);
     type = clamp(type, 0.0, 1.0);
 

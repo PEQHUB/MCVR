@@ -18,56 +18,91 @@ float cloudRemap(float value, float low1, float high1, float low2, float high2) 
     return low2 + (value - low1) / (high1 - low1) * (high2 - low2);
 }
 
-// --- 4 Cloud Type Height Gradients [Schneider15 §3.1] ---
-// Trapezoid profiles defining density vs normalized height [0,1].
-// Ordered by increasing meteorological altitude:
-//   0 = stratus (low, flat)
-//   1 = stratocumulus (low-mid, lumpy)
-//   2 = cumulus (mid, billowing towers)
-//   3 = cumulonimbus (full-height storm towers)
-
-// Stratus: thin flat layer, very low (fog-like ceiling)
-float stratusGradient(float h) {
-    return smoothstep(0.0, 0.07, h) * smoothstep(0.15, 0.08, h);
-}
-
-// Stratocumulus: moderate lumpy layer (overcast with texture)
-float stratocumulusGradient(float h) {
-    return smoothstep(0.0, 0.2, h) * smoothstep(0.6, 0.42, h);
-}
-
-// Cumulus: tall billowing towers (fair weather puffy clouds)
-// Dome profile — peak density at 25-35%, tapering above for rounded tops [Nubis³]
-float cumulusGradient(float h) {
-    float base = smoothstep(0.0, 0.07, h);            // Flat condensation base
-    float rampUp = smoothstep(0.0, 0.25, h);          // Density ramp up to 25%
-    float roundTop = smoothstep(1.0, 0.4, h);         // Dome taper from 40% to top
-    return base * rampUp * roundTop;
-}
-
-// Cumulonimbus: full-height storm towers (anvil-shaped thunderheads)
-float cumulonimbusGradient(float h) {
-    return smoothstep(0.0, 0.10, h) * smoothstep(1.0, 0.7, h);
-}
-
-// Evaluate height gradient by interpolating between 4 cloud types.
+// --- Two-Step Height Gradients [Schneider15 §3.1, Nubis³] ---
+//
+// Split into ENVELOPE (wide plateau) and DOME (shape modulation):
+//   Envelope: applied BEFORE coverage remap — keeps baseShape above threshold
+//             across most of the cloud height, preventing flat-top clipping.
+//   Dome:     applied AFTER coverage remap — sculpts rounded tops without
+//             creating hard density cutoffs at the remap threshold.
+//
 // type [0,1] maps: 0=stratus → 0.33=stratocumulus → 0.67=cumulus → 1.0=cumulonimbus
-// This ordering follows meteorological altitude (low → high).
-float cloudHeightGradient(float h, float type) {
+
+// --- Envelope gradients (wide plateaus, survive remap threshold) ---
+
+float stratusEnvelope(float h) {
+    return smoothstep(0.0, 0.05, h) * smoothstep(0.25, 0.15, h);
+}
+
+float stratocumulusEnvelope(float h) {
+    return smoothstep(0.0, 0.10, h) * smoothstep(0.65, 0.45, h);
+}
+
+float cumulusEnvelope(float h) {
+    return smoothstep(0.0, 0.07, h) * smoothstep(0.95, 0.75, h);
+}
+
+float cumulonimbusEnvelope(float h) {
+    return smoothstep(0.0, 0.05, h) * smoothstep(1.0, 0.85, h);
+}
+
+// --- Dome gradients (shape modulation, applied after remap) ---
+
+float stratusDome(float h) {
+    return 1.0; // Flat — shape comes entirely from tight envelope
+}
+
+float stratocumulusDome(float h) {
+    return 1.0 - 0.6 * pow(smoothstep(0.10, 0.55, h), 1.5);
+}
+
+float cumulusDome(float h) {
+    return 1.0 - pow(smoothstep(0.25, 0.95, h), 2.0);
+}
+
+float cumulonimbusDome(float h) {
+    // Dense column to 0.7, anvil flare above
+    float column = 1.0 - 0.3 * smoothstep(0.3, 0.7, h);
+    float anvil = smoothstep(0.65, 0.8, h) * 0.4;
+    return column + anvil;
+}
+
+// Interpolate envelope across 4 cloud types
+float cloudEnvelope(float h, float type) {
     float t = type * 3.0;
     int lo = int(floor(t));
     float blend = fract(t);
 
     float g0, g1;
     if (lo == 0) {
-        g0 = stratusGradient(h);
-        g1 = stratocumulusGradient(h);
+        g0 = stratusEnvelope(h);
+        g1 = stratocumulusEnvelope(h);
     } else if (lo == 1) {
-        g0 = stratocumulusGradient(h);
-        g1 = cumulusGradient(h);
+        g0 = stratocumulusEnvelope(h);
+        g1 = cumulusEnvelope(h);
     } else {
-        g0 = cumulusGradient(h);
-        g1 = cumulonimbusGradient(h);
+        g0 = cumulusEnvelope(h);
+        g1 = cumulonimbusEnvelope(h);
+    }
+    return mix(g0, g1, blend);
+}
+
+// Interpolate dome across 4 cloud types
+float cloudDome(float h, float type) {
+    float t = type * 3.0;
+    int lo = int(floor(t));
+    float blend = fract(t);
+
+    float g0, g1;
+    if (lo == 0) {
+        g0 = stratusDome(h);
+        g1 = stratocumulusDome(h);
+    } else if (lo == 1) {
+        g0 = stratocumulusDome(h);
+        g1 = cumulusDome(h);
+    } else {
+        g0 = cumulusDome(h);
+        g1 = cumulonimbusDome(h);
     }
     return mix(g0, g1, blend);
 }
@@ -86,32 +121,32 @@ float cloudDensity(vec3 pos, float coverage, float type,
     float h = (pos.y - cloudBase) / cloudThickness;
     if (h < 0.0 || h > 1.0) return 0.0;
 
-    // 4-type height gradient [Schneider15 §3.1]
-    float grad = cloudHeightGradient(h, type);
-
     // --- Base shape [Schneider15 §3.2] ---
-    // G channel: single-octave Worley (medium scale) for base erosion.
-    // Using one channel instead of G+B+A avoids frequency overlap with base shape.
-    // Multi-frequency erosion: Schneider 3-octave Worley FBM [Schneider15 §3.2]
+    // Multi-frequency erosion: Schneider 3-octave Worley FBM
     float baseErosion = noise.g * 0.625 + noise.b * 0.25 + noise.a * 0.125;
 
     // Erode base shape: positive threshold creates actual holes (Schneider remap trick)
     float baseShape = cloudRemap(noise.r, baseErosion * 0.5, 1.0, 0.0, 1.0);
     baseShape = max(baseShape, 0.0);
 
-    // --- Schneider coverage remap with coverage^2 boost [Schneider15 §3.3] ---
-    // Threshold by coverage: low coverage → small isolated clouds, high → continuous
-    // Height gradient applied AFTER remap to avoid creating hard horizontal cutoffs
-    // where grad * baseShape falls below the threshold.
-    float threshold = 1.0 - sqrt(coverage);  // Softer threshold at low coverage
+    // Envelope: wide plateau that keeps baseShape above remap threshold.
+    // Applied BEFORE remap so the cloud extends to full height without flat-top clipping.
+    float envelope = cloudEnvelope(h, type);
+    baseShape *= envelope;
+
+    // --- Schneider coverage remap [Schneider15 §3.3] ---
+    float threshold = 1.0 - sqrt(coverage);
     float coverageShape = cloudRemap(baseShape, threshold, 1.0, 0.0, 1.0);
     coverageShape *= coverage;               // Energy conservation [Schneider15]
-    coverageShape *= grad;                   // Height gradient — smooth vertical profile
+
+    // Dome: sculpts rounded tops AFTER remap — no hard density cutoffs.
+    float dome = cloudDome(h, type);
+    coverageShape *= dome;
     if (coverageShape <= 0.0) return 0.0;
 
     // --- Dual-character detail erosion [Nubis³] ---
     // Height-dependent transition: wispy at base, billowy at top.
-    float heightFraction = smoothstep(0.0, 0.3, h);
+    float heightFraction = smoothstep(0.0, 0.5, h);
 
     // Wispy (curl noise) vs billowy (single-octave Worley)
     float wispy = noise.a;                            // Curl noise: tendrils
