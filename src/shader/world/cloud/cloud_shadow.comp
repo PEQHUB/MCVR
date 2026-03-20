@@ -22,20 +22,15 @@ void main() {
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
     if (texel.x >= int(pc.shadowMapSize) || texel.y >= int(pc.shadowMapSize)) return;
 
-    // No cloud shadows in Nether/End
-    if (skyUBO.skyType != 0) {
-        imageStore(uCloudShadow, texel, vec4(1.0));
-        return;
-    }
-
     vec3 eyePos = getEyePos();
 
     // Map shadow texel to world XZ position (centered on camera, 1024-block coverage)
     vec2 uv = (vec2(texel) + 0.5) / float(pc.shadowMapSize);
     vec2 worldXZ = eyePos.xz + (uv - 0.5) * 1024.0;
 
-    // Trace column through cloud layer along sun direction
+    // Light direction: sun or moon (matches raymarch)
     vec3 sunDir = normalize(skyUBO.sunDirection);
+    vec3 lightDir = sunDir.y > 0.0 ? sunDir : normalize(skyUBO.moonDirection);
 
     // Use shared effectiveThickness() — must match raymarch
     float cloudThick = effectiveThickness();
@@ -48,9 +43,9 @@ void main() {
         float y = pc.cloudBase + (float(i) + 0.5) * stepSize;
         vec3 pos = vec3(worldXZ.x, y, worldXZ.y);
 
-        // Offset by sun angle (shadow projection)
-        float sunT = (y - pc.cloudBase) / max(sunDir.y, 0.01);
-        pos.xz += sunDir.xz * sunT;
+        // Offset by light angle (shadow projection)
+        float lightT = (y - pc.cloudBase) / max(lightDir.y, 0.05);
+        pos.xz += lightDir.xz * lightT;
 
         vec3 noisePos = pos * NOISE_SCALE + windOffset(pc.windTime);
         vec4 noise = texture(uNoise3D, noisePos);

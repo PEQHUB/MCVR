@@ -154,7 +154,7 @@ void CloudModule::build() {
     noiseSampler_ = vk::Sampler::create(framework->device(), VK_FILTER_LINEAR,
                                          VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
     weatherSampler_ = vk::Sampler::create(framework->device(), VK_FILTER_LINEAR,
-                                          VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+                                          VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 
     initDescriptorTables();
     initImages();
@@ -325,8 +325,6 @@ void CloudModule::initImages() {
     if (!framework) return;
     uint32_t size = framework->swapchain()->imageCount();
 
-    auto buffers = Renderer::instance().buffers();
-
     // 128^3 RGBA8 3D noise texture (generated once at init)
     noiseTexture3D_ = vk::DeviceLocalImage::create3D(
         framework->device(), framework->vma(), 128, 128, 128,
@@ -375,11 +373,9 @@ void CloudModule::initImages() {
                                                 VK_IMAGE_LAYOUT_GENERAL, 0, 8, 0);
         descriptorTables_[i]->bindImage(noiseTexture3D_, VK_IMAGE_LAYOUT_GENERAL, 0, 9);
 
-        // Set 1: bind UBOs
-        descriptorTables_[i]->bindBuffer(buffers->worldUniformBuffer(), 1, 0);
-        descriptorTables_[i]->bindBuffer(buffers->skyUniformBuffer(), 1, 1);
-        auto lastWorldUBO = buffers->lastWorldUniformBuffer();
-        descriptorTables_[i]->bindBuffer(lastWorldUBO ? lastWorldUBO : buffers->worldUniformBuffer(), 1, 2);
+        // UBO binding deferred to render() — during build(), the per-frame UBO buffers
+        // may not be available yet (pipeline recreation happens before first frame upload).
+        // Each frame's render() binds its own UBO via the deferred path.
     }
 }
 
@@ -460,6 +456,23 @@ void CloudModuleContext::render() {
 
     auto module = cloudModule.lock();
     if (!module) return;
+
+    // Bind UBOs every frame — vkUpdateDescriptorSets is cheap, and deferring
+    // until all frame indices have rendered is fragile (frame 0 may never run).
+    {
+        auto buffers = Renderer::instance().buffers();
+        if (!buffers) return;
+
+        auto worldUBO = buffers->worldUniformBuffer();
+        auto skyUBO = buffers->skyUniformBuffer();
+        if (!worldUBO || !skyUBO) return;
+
+        uint32_t fi = context->frameIndex;
+        module->descriptorTables_[fi]->bindBuffer(worldUBO, 1, 0);
+        module->descriptorTables_[fi]->bindBuffer(skyUBO, 1, 1);
+        auto lastWorldUBO = buffers->lastWorldUniformBuffer();
+        module->descriptorTables_[fi]->bindBuffer(lastWorldUBO ? lastWorldUBO : worldUBO, 1, 2);
+    }
 
     // --- Helper lambdas (same pattern as VolumetricModule) ---
     auto chooseSrc = [](VkImageLayout oldLayout,

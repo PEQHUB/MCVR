@@ -139,8 +139,9 @@ const float NOISE_SCALE = 1.0 / 256.0;
 
 // Wind displacement applied to noise sampling position.
 // X-drift is 2x Z-drift for prevailing-wind asymmetry. [Schneider15 §3.3]
+// Tuned for Minecraft scale: ~1 block/sec at windSpeed=1.0.
 vec3 windOffset(float windTime) {
-    return vec3(windTime * 0.02, 0.0, windTime * 0.01);
+    return vec3(windTime * 0.004, 0.0, windTime * 0.002);
 }
 
 // --- Shared helpers ---

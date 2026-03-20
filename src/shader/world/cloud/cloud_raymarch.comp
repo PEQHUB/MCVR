@@ -36,13 +36,15 @@ float blueNoiseJitter(uint frame, ivec2 texel) {
     return fract(float(frame) * GOLDEN_RATIO_FRAC + hash12(vec2(texel)));
 }
 
-// Reconstruct view ray from screen UV
+// Reconstruct view ray from screen UV — matches world.rgen ray generation exactly.
+// cameraProjMatInv already contains the Vulkan Y-flip (no manual negate needed).
+// z=0 = near plane in Vulkan [0,1] depth range.
+// cameraEffectedViewMatInv includes view bobbing/effects (same as RT rays).
 vec3 getViewRay(vec2 uv) {
-    vec4 clipPos = vec4(uv * 2.0 - 1.0, 1.0, 1.0);
-    clipPos.y = -clipPos.y; // Vulkan Y-flip
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
     vec4 viewPos = worldUBO.cameraProjMatInv * clipPos;
     viewPos.xyz /= viewPos.w;
-    vec3 worldDir = (worldUBO.cameraViewMatInv * vec4(viewPos.xyz, 0.0)).xyz;
+    vec3 worldDir = (worldUBO.cameraEffectedViewMatInv * vec4(viewPos.xyz, 0.0)).xyz;
     return normalize(worldDir);
 }
 
@@ -72,20 +74,22 @@ bool intersectCloudSlab(vec3 origin, vec3 dir, float thickness, out float tEnter
     return tExit > tEnter;
 }
 
-// Light march toward sun to compute optical depth for shadow term.
-// Returns total optical depth along sun ray from sample point to cloud top.
-float lightMarch(vec3 pos, vec3 sunDir, uint steps, float cloudThick) {
-    // Sun below horizon — no shadow casting, fully lit from below
-    if (sunDir.y < 0.01) return 0.0;
+// Light march toward light source to compute optical depth for shadow term.
+// Returns total optical depth along light ray from sample point to cloud top.
+float lightMarch(vec3 pos, vec3 lightDir, uint steps, float cloudThick) {
+    // Light below horizon — minimal shadow (ambient-only region)
+    if (lightDir.y < 0.001) return 0.0;
 
     float cloudTop = pc.cloudBase + cloudThick;
-    float stepSize = (cloudTop - pos.y) / (sunDir.y * float(steps));
+    // Clamp vertical component to avoid enormous steps at low sun angles
+    float safeY = max(lightDir.y, 0.05);
+    float stepSize = (cloudTop - pos.y) / (safeY * float(steps));
 
     float opticalDepth = 0.0;
     vec3 samplePos = pos;
 
     for (uint i = 0; i < steps; i++) {
-        samplePos += sunDir * stepSize;
+        samplePos += lightDir * stepSize;
 
         vec3 noisePos = samplePos * NOISE_SCALE + windOffset(pc.windTime);
         vec4 noise = texture(uNoise3D, noisePos);
@@ -113,12 +117,6 @@ void main() {
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
     if (texel.x >= int(pc.cloudWidth) || texel.y >= int(pc.cloudHeight)) return;
 
-    // No clouds in Nether/End (skyType: 0=Overworld, 1=Nether, 2=End)
-    if (skyUBO.skyType != 0) {
-        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0));
-        return;
-    }
-
     vec2 uv = (vec2(texel) + 0.5) / vec2(pc.cloudWidth, pc.cloudHeight);
 
     // Reconstruct view ray
@@ -131,25 +129,29 @@ void main() {
     // Ray-slab intersection
     float tEnter, tExit;
     if (!intersectCloudSlab(rayOrigin, rayDir, cloudThick, tEnter, tExit)) {
-        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0)); // Fully transparent
+        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0)); // transparent
         return;
     }
 
-    // Check scene depth — don't render clouds behind solid geometry
-    // Map cloud texel to full-res depth texel
+    // Check scene depth — don't render clouds behind solid geometry.
+    // Linear depth stores view-space Z: -(viewMat * worldPos).z.
+    // Convert to ray parametric t: t = viewZ / dot(rayDir, cameraForward).
     ivec2 depthTexel = ivec2(uv * vec2(pc.renderWidth, pc.renderHeight));
     depthTexel = clamp(depthTexel, ivec2(0), ivec2(pc.renderWidth - 1, pc.renderHeight - 1));
-    float sceneDepth = imageLoad(uLinearDepth, depthTexel).r;
+    float viewZ = imageLoad(uLinearDepth, depthTexel).r;
+    vec3 cameraForward = normalize(worldUBO.cameraEffectedViewMatInv[2].xyz);
+    float viewCos = abs(dot(rayDir, cameraForward));
+    float sceneT = (viewCos > 1e-4) ? viewZ / viewCos : 1e6;
 
     // If scene is closer than cloud entry, skip
-    if (sceneDepth > 0.0 && sceneDepth < tEnter) {
-        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0));
+    if (viewZ > 0.0 && sceneT < tEnter) {
+        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0)); // transparent
         return;
     }
 
     // Clamp exit to scene depth (clouds occluded by geometry)
-    if (sceneDepth > 0.0 && sceneDepth < tExit) {
-        tExit = sceneDepth;
+    if (viewZ > 0.0 && sceneT < tExit) {
+        tExit = sceneT;
     }
 
     // --- Zero-skip: check weather at ray midpoint before marching ---
@@ -162,7 +164,7 @@ void main() {
         vec4 enterWeather = sampleWeather(uWeatherMap, enterPos);
         vec4 exitWeather = sampleWeather(uWeatherMap, exitPos);
         if (enterWeather.r < 0.01 && exitWeather.r < 0.01) {
-            imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0));
+            imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0)); // transparent
             return;
         }
     }
@@ -181,16 +183,30 @@ void main() {
     float weightedDist = 0.0;  // Distance-weighted accumulator for atmospheric perspective
     float totalWeight = 0.0;
 
-    // Sun direction and view-sun angle for phase function
+    // Light source selection: sun during day, moon at night [Hillaire16 §4.6]
     vec3 sunDir = normalize(skyUBO.sunDirection);
-    float cosAngle = dot(rayDir, sunDir);
+    vec3 lightDir;
+    vec3 lightColor;
+    if (sunDir.y > 0.0) {
+        lightDir = sunDir;
+        // Normalize raw physical radiance (~100k lux) to perceptual cloud brightness.
+        // 5e-5 maps 100k → 5.0, balanced against pre-exposed RT scene (~0.1 scale).
+        lightColor = skyUBO.sunRadiance * 5e-5;
+        // Horizon fade: golden hour falloff, warm tint at low angles
+        float hFade = smoothstep(0.0, 0.25, sunDir.y);
+        lightColor *= hFade;
+        lightColor *= mix(vec3(1.0, 0.7, 0.4), vec3(1.0), smoothstep(0.0, 0.15, sunDir.y));
+    } else {
+        lightDir = normalize(skyUBO.moonDirection);
+        lightColor = skyUBO.moonRadiance * 0.5;
+        lightColor *= smoothstep(0.0, 0.2, abs(lightDir.y));
+    }
+    float cosAngle = dot(rayDir, lightDir);
 
-    // Sun color
-    vec3 sunColor = skyUBO.sunRadiance;
-
-    // Height-dependent sky ambient: blue at top, warm horizon color at base
-    vec3 skyTop = skyUBO.baseColor * 0.4;
-    vec3 skyHorizon = skyUBO.horizonColor.rgb * 0.3 + vec3(0.03);
+    // Ambient: proportional to light, always visible (30-50% of direct)
+    float ambientFraction = mix(0.35, 0.5, skyUBO.rainGradient);
+    vec3 skyTop = lightColor * ambientFraction * vec3(0.7, 0.8, 1.0);    // Blue tint at top
+    vec3 skyHorizon = lightColor * ambientFraction * vec3(1.0, 0.9, 0.8); // Warm at base
 
     // Adaptive stepping state
     bool inCloud = false;
@@ -221,7 +237,7 @@ void main() {
             // (contribution would be negligible — energy conservation)
             float lightEnergy;
             if (transmittance > 0.05) {
-                float lightOD = lightMarch(pos, sunDir, pc.lightSteps, cloudThick);
+                float lightOD = lightMarch(pos, lightDir, pc.lightSteps, cloudThick);
                 // Wrenninge multi-scatter energy [Wrenninge13 §4, Hillaire16 §4.6.3]
                 lightEnergy = multiScatterEnergy(lightOD, cosAngle, pc.scatterOctaves);
             } else {
@@ -235,8 +251,8 @@ void main() {
             // Height-dependent ambient: sky color at top, horizon at base
             vec3 ambient = mix(skyHorizon, skyTop, h) * mix(0.5, 1.2, h);
 
-            // Direct sun lighting with multi-scatter energy
-            vec3 directLight = sunColor * lightEnergy;
+            // Direct lighting with multi-scatter energy
+            vec3 directLight = lightColor * lightEnergy;
 
             vec3 luminance = (directLight + ambient) * density;
 
@@ -276,6 +292,12 @@ void main() {
         float fade = atmosphericFade(avgDist);
         vec3 horizonFog = skyUBO.horizonColor.rgb * 0.5;
         scatteredLight = mix(scatteredLight, horizonFog * (1.0 - transmittance), fade);
+    }
+
+    // No density found — output transparent
+    if (transmittance > 0.999) {
+        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0)); // transparent
+        return;
     }
 
     // Output: RGB = scattered light, A = transmittance

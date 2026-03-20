@@ -18,7 +18,6 @@
 #include "core/render/gpu_profiler.hpp"
 
 #include <cstdlib>
-#include <iomanip>
 #include <set>
 
 WorldPipelineBlueprint::WorldPipelineBlueprint(WorldPipelineBuildParams *params) {
@@ -60,19 +59,6 @@ WorldPipelineBlueprint::WorldPipelineBlueprint(WorldPipelineBuildParams *params)
 
 WorldPipeline::WorldPipeline() {}
 
-void WorldPipeline::dumpSharedImages(const char *label) const {
-    std::cerr << label << std::endl;
-    for (size_t frameIndex = 0; frameIndex < sharedImages_.size(); frameIndex++) {
-        for (size_t idx = 0; idx < sharedImages_[frameIndex].size(); idx++) {
-            auto &img = sharedImages_[frameIndex][idx];
-            if (!img) continue;
-            std::cerr << "  frame=" << frameIndex << " idx=" << idx << " size=" << img->width() << "x" << img->height()
-                      << " fmt=" << img->vkFormat() << " image=0x" << std::hex << (uint64_t)img->vkImage() << std::dec
-                      << std::endl;
-        }
-    }
-}
-
 void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<Pipeline> pipeline) {
     auto blueprint = pipeline->worldPipelineBlueprint();
     uint32_t frameNum = framework->swapchain()->imageCount();
@@ -90,7 +76,8 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
     size_t upscalerIndex = std::numeric_limits<size_t>::max();
     UpscalerModule::QualityMode upscalerMode = UpscalerModule::QualityMode::NativeAA;
     for (size_t i = 0; i < blueprint->moduleNames_.size(); i++) {
-        if (blueprint->moduleNames_[i] != UpscalerModule::NAME) continue;
+        if (blueprint->moduleNames_[i] != UpscalerModule::NAME &&
+            blueprint->moduleNames_[i] != DLSSModule::NAME) continue;
         upscalerIndex = i;
         const auto &kvs = blueprint->attributeKVs_[i];
         for (size_t k = 0; k + 1 < kvs.size(); k += 2) {

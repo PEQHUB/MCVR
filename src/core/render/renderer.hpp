@@ -187,11 +187,11 @@ struct Options {
     // Volumetric clouds
     uint32_t cloudQuality = 3;        // 0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra, 5=Extreme
     float cloudDensity = 1.0f;        // Density multiplier [0.1 - 3.0]
-    float cloudCoverage = 0.35f;      // Base coverage [0.0 - 1.0]
-    float cloudType = 0.0f;           // 0=Cumulus, 1=Stratus [0.0 - 1.0]
+    float cloudCoverage = 0.5f;       // Base coverage [0.0 - 1.0]
+    float cloudType = 0.67f;          // 0=Stratus, 0.33=Stratocumulus, 0.67=Cumulus, 1.0=Cumulonimbus
     float cloudSpeed = 1.0f;          // Wind speed multiplier [0.0 - 5.0]
     float cloudAltitude = 192.0f;     // Cloud base height in blocks [128 - 320]
-    float cloudThickness = 64.0f;     // Cloud layer thickness [32 - 128]
+    float cloudThickness = 40.0f;     // Cloud layer thickness [32 - 128]
     float cloudDetailStrength = 1.0f; // Detail erosion multiplier [0.0 - 2.0]
     uint32_t cloudScatterOctaves = 3; // Multi-scatter octaves [1 - 4]
     float wetSurfaceStrength = 1.0f;  // Wet surface effect strength [0.0 - 2.0]

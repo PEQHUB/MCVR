@@ -1,90 +1,37 @@
 #version 460
 #extension GL_GOOGLE_include_directive : require
 
-// Depth-aware cloud composite onto scene radiance.
-// Reads cloud color (at cloud resolution), bilateral upsamples to full resolution,
-// and composites behind solid geometry using depth.
-
 layout(local_size_x = 8, local_size_y = 8) in;
 
-layout(set = 0, binding = 0, rgba32f) uniform readonly image2D uRadiance;      // Input scene radiance
-layout(set = 0, binding = 1, r32f)    uniform readonly image2D uLinearDepth;   // Scene depth
-layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D uCloudRadiance; // Output composited
-layout(set = 0, binding = 3, rgba16f) uniform readonly image2D uCloudColor;    // Cloud color + transmittance
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D uRadiance;
+layout(set = 0, binding = 1, r32f)    uniform readonly image2D uLinearDepth;
+layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D uCloudRadiance;
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D uCloudColor;
 
-// Uses shared push constant layout from cloud_common.glsl.
-// UBOs are declared but unused by this shader — descriptor set binds them regardless.
 #include "cloud_common.glsl"
 
 void main() {
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
     if (texel.x >= int(pc.renderWidth) || texel.y >= int(pc.renderHeight)) return;
 
-    // Load scene radiance
-    vec4 sceneColor = imageLoad(uRadiance, texel);
+    vec4 scene = imageLoad(uRadiance, texel);
 
-    // If density multiplier is zero (clouds disabled), pure passthrough
-    if (pc.densityMultiplier <= 0.0) {
-        imageStore(uCloudRadiance, texel, sceneColor);
-        return;
-    }
+    // Nearest-neighbor sample from cloud resolution to render resolution
+    ivec2 cloudTexel = clamp(
+        ivec2(vec2(texel) * vec2(pc.cloudWidth, pc.cloudHeight) / vec2(pc.renderWidth, pc.renderHeight)),
+        ivec2(0), ivec2(pc.cloudWidth - 1, pc.cloudHeight - 1));
+    vec4 cloud = imageLoad(uCloudColor, cloudTexel);
 
-    // Load scene depth for bilateral weight
-    float sceneDepth = imageLoad(uLinearDepth, texel).r;
-
-    // Bilateral upsampling: 2x2 bilinear weighted by depth similarity.
-    // Prevents cloud edges from bleeding across depth discontinuities (e.g. terrain edge).
-    vec2 cloudUV = (vec2(texel) + 0.5) / vec2(pc.renderWidth, pc.renderHeight);
-    vec2 cloudPos = cloudUV * vec2(pc.cloudWidth, pc.cloudHeight) - 0.5;
-    ivec2 baseTexel = ivec2(floor(cloudPos));
-    vec2 frac = cloudPos - vec2(baseTexel);
-
-    vec4 cloud = vec4(0.0);
-    float totalWeight = 0.0;
-
-    // Depth threshold for bilateral rejection (scaled by cloud thickness)
-    float cloudThick = effectiveThickness();
-    float depthThreshold = cloudThick * 2.0;
-
-    for (int dy = 0; dy <= 1; dy++) {
-        for (int dx = 0; dx <= 1; dx++) {
-            ivec2 st = clamp(baseTexel + ivec2(dx, dy), ivec2(0),
-                             ivec2(pc.cloudWidth - 1, pc.cloudHeight - 1));
-            vec4 sample_ = imageLoad(uCloudColor, st);
-
-            // Bilinear weight
-            float bw = mix(1.0 - frac.x, frac.x, float(dx))
-                      * mix(1.0 - frac.y, frac.y, float(dy));
-
-            // Depth-aware weight: reject samples from very different depths
-            // Use transmittance as proxy — fully transparent samples have no cloud depth
-            float depthWeight = 1.0;
-            if (sceneDepth > 0.0 && sample_.a < 0.999) {
-                // Cloud exists at this sample — weight by depth coherence
-                vec2 sampleUV = (vec2(st) + 0.5) / vec2(pc.cloudWidth, pc.cloudHeight);
-                ivec2 depthST = clamp(ivec2(sampleUV * vec2(pc.renderWidth, pc.renderHeight)),
-                                      ivec2(0), ivec2(pc.renderWidth - 1, pc.renderHeight - 1));
-                float sampleDepth = imageLoad(uLinearDepth, depthST).r;
-                depthWeight = exp(-abs(sampleDepth - sceneDepth) / depthThreshold);
-            }
-
-            float w = bw * depthWeight;
-            cloud += sample_ * w;
-            totalWeight += w;
-        }
-    }
-
-    if (totalWeight > 0.0) {
-        cloud /= totalWeight;
+    // cloud.rgb = scattered light, cloud.a = transmittance
+    // Front-to-back compositing: result = cloud_color + scene * transmittance.
+    // Guard: when transmittance ≈ 0 (fully opaque cloud), skip scene multiply
+    // to avoid NaN from INF * 0 (sky pixels store extreme radiance values).
+    vec3 result;
+    if (cloud.a > 0.001) {
+        result = cloud.rgb + scene.rgb * cloud.a;
     } else {
-        // Fallback to nearest
-        ivec2 nearest = clamp(ivec2(cloudPos + 0.5), ivec2(0),
-                              ivec2(pc.cloudWidth - 1, pc.cloudHeight - 1));
-        cloud = imageLoad(uCloudColor, nearest);
+        result = cloud.rgb;
     }
 
-    // Composite: cloud behind geometry (pre-multiplied alpha over)
-    vec3 composited = cloud.rgb + sceneColor.rgb * cloud.a;
-
-    imageStore(uCloudRadiance, texel, vec4(composited, sceneColor.a));
+    imageStore(uCloudRadiance, texel, vec4(result, 1.0));
 }
