@@ -819,7 +819,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudScatterOctaves(
     JNIEnv *, jclass, jint octaves, jboolean) {
-    Renderer::options.cloudScatterOctaves = static_cast<uint32_t>(std::clamp(octaves, 1, 4));
+    Renderer::options.cloudScatterOctaves = static_cast<uint32_t>(std::clamp(octaves, 1, 8));
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudPowderStrength(
@@ -835,6 +835,26 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudTemporalBlend(
     JNIEnv *, jclass, jfloat blend, jboolean) {
     Renderer::options.cloudTemporalBlend = blend < 0.0f ? -1.0f : std::clamp(blend, 0.8f, 0.99f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudSharpening(
+    JNIEnv *, jclass, jfloat sharpening, jboolean) {
+    Renderer::options.cloudSharpening = std::clamp(sharpening, 0.2f, 1.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudNoiseScale(
+    JNIEnv *, jclass, jfloat scale, jboolean) {
+    Renderer::options.cloudNoiseScale = std::clamp(scale, 128.0f, 512.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudCellFrequency(
+    JNIEnv *, jclass, jfloat freq, jboolean) {
+    Renderer::options.cloudCellFrequency = std::clamp(freq, 2.0f, 16.0f);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudAtmosphereFadeDist(
+    JNIEnv *, jclass, jfloat dist, jboolean) {
+    Renderer::options.cloudAtmosphereFadeDist = std::clamp(dist, 200.0f, 2000.0f);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetWetSurfaceStrength(

@@ -447,15 +447,32 @@ void Framework::submitCommand() {
 }
 
 void Framework::present() {
-    if (!running_) return;
+    if (!running_) { return; }
+    if (!currentContext_) { fprintf(stderr, "[present] currentContext_ null\n"); return; }
+    if (!currentContext_->commandProcessedSemaphore) { fprintf(stderr, "[present] semaphore null\n"); return; }
+    if (!swapchain_) { fprintf(stderr, "[present] swapchain null\n"); return; }
+    if (!device_) { fprintf(stderr, "[present] device null\n"); return; }
+
+    VkSemaphore waitSem = currentContext_->commandProcessedSemaphore->vkSemaphore();
+    VkSwapchainKHR swapchainHandle = swapchain_->vkSwapchain();
+    VkQueue queue = device_->mainVkQueue();
+
+    if (waitSem == VK_NULL_HANDLE) { fprintf(stderr, "[present] waitSem null handle\n"); return; }
+    if (swapchainHandle == VK_NULL_HANDLE) { fprintf(stderr, "[present] swapchain null handle\n"); return; }
+    if (queue == VK_NULL_HANDLE) { fprintf(stderr, "[present] queue null handle\n"); return; }
+
+    fprintf(stderr, "[present] OK ctx=%p sem=%p swap=%p queue=%p fi=%u\n",
+            (void*)currentContext_.get(), (void*)waitSem, (void*)swapchainHandle,
+            (void*)queue, currentContext_->frameIndex);
+    fflush(stderr);
 
     VkPresentInfoKHR presentInfo = {};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &currentContext_->commandProcessedSemaphore->vkSemaphore();
+    presentInfo.pWaitSemaphores = &waitSem;
 
     presentInfo.swapchainCount = 1;
-    presentInfo.pSwapchains = &swapchain_->vkSwapchain();
+    presentInfo.pSwapchains = &swapchainHandle;
     presentInfo.pImageIndices = &currentContext_->frameIndex;
 
     // PCL: bracket the present call
@@ -463,7 +480,9 @@ void Framework::present() {
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentStart);
 #endif
     g_crashRing.record("present");
+    fprintf(stderr, "[present] calling vkQueuePresentKHR\n"); fflush(stderr);
     VkResult result = vkQueuePresentKHR(device_->mainVkQueue(), &presentInfo);
+    fprintf(stderr, "[present] vkQueuePresentKHR returned %d\n", result); fflush(stderr);
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentEnd);
 #endif

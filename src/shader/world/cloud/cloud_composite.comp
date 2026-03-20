@@ -16,11 +16,18 @@ void main() {
 
     vec4 scene = imageLoad(uRadiance, texel);
 
-    // Nearest-neighbor sample from cloud resolution to render resolution
-    ivec2 cloudTexel = clamp(
-        ivec2(vec2(texel) * vec2(pc.cloudWidth, pc.cloudHeight) / vec2(pc.renderWidth, pc.renderHeight)),
-        ivec2(0), ivec2(pc.cloudWidth - 1, pc.cloudHeight - 1));
-    vec4 cloud = imageLoad(uCloudColor, cloudTexel);
+    // Bilinear interpolation from cloud resolution to render resolution.
+    // Nearest-neighbor creates blocky artifacts at half/quarter res.
+    vec2 cloudUV = (vec2(texel) + 0.5) / vec2(pc.renderWidth, pc.renderHeight)
+                 * vec2(pc.cloudWidth, pc.cloudHeight) - 0.5;
+    ivec2 base = ivec2(floor(cloudUV));
+    vec2 f = cloudUV - vec2(base);
+    base = clamp(base, ivec2(0), ivec2(pc.cloudWidth - 2, pc.cloudHeight - 2));
+    vec4 c00 = imageLoad(uCloudColor, base);
+    vec4 c10 = imageLoad(uCloudColor, base + ivec2(1, 0));
+    vec4 c01 = imageLoad(uCloudColor, base + ivec2(0, 1));
+    vec4 c11 = imageLoad(uCloudColor, base + ivec2(1, 1));
+    vec4 cloud = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 
     // cloud.rgb = scattered light, cloud.a = transmittance
     // Front-to-back compositing: result = cloud_color + scene * transmittance.

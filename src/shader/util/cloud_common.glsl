@@ -126,16 +126,19 @@ layout(push_constant) uniform PushConstants {
     uint scatterOctaves;
     float powderStrength;    // Beer-powder dark edge intensity [0-2]
     float ambientStrength;   // Density-based ambient occlusion [0-2]
-    float pad0;
+    float sharpening;        // Density sharpening exponent [0.2-1.0]
+    float noiseScale;        // Noise texture period in blocks [128-512]
+    float cellFrequency;     // Voronoi cell count across weather map [2-16]
+    float atmosphereFadeDist; // Cloud atmospheric fade distance in blocks [200-2000]
 } pc;
 
 // --- Shared constants ---
 
 // World-space to noise UV scale. The 128^3 noise texture tiles via repeat
-// sampler; this controls the world-space period. 1/256 = 256-block period,
-// chosen for Minecraft's typical 16-32 chunk render distance to minimize
-// visible tiling while keeping adequate detail within the cloud layer.
-const float NOISE_SCALE = 1.0 / 256.0;
+// sampler; this controls the world-space period. Configurable via push constant
+// noiseScale (period in blocks). Default 192 for more vertical detail in
+// Minecraft's typical 40-block cloud layer.
+#define NOISE_SCALE (1.0 / max(pc.noiseScale, 1.0))
 
 // Wind displacement applied to noise sampling position.
 // X-drift is 2x Z-drift for prevailing-wind asymmetry. [Schneider15 §3.3]

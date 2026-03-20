@@ -18,9 +18,8 @@ layout(set = 0, binding = 8)           uniform sampler2D uWeatherMap;      // 25
 #include "cloud_common.glsl"
 #include "cloud_density.glsl"
 
-// Distance at which clouds fully fade to horizon via atmospheric extinction.
-// Tuned for Minecraft's 16-32 chunk render distance (256-512 blocks).
-const float ATMO_FADE_DIST = 500.0;
+// Atmospheric fade distance now driven by push constant pc.atmosphereFadeDist.
+// Default 800 blocks. Controls both march clamp and atmospheric extinction.
 
 // Per-pixel hash for spatial variation (no external buffer needed)
 float hash12(vec2 p) {
@@ -57,7 +56,7 @@ bool intersectCloudSlab(vec3 origin, vec3 dir, float thickness, out float tEnter
         // Horizontal ray — inside layer?
         if (origin.y >= yBot && origin.y <= yTop) {
             tEnter = 0.0;
-            tExit = 10000.0;
+            tExit = pc.atmosphereFadeDist;
             return true;
         }
         return false;
@@ -81,9 +80,9 @@ float lightMarch(vec3 pos, vec3 lightDir, uint steps, float cloudThick) {
     if (lightDir.y < 0.001) return 0.0;
 
     float cloudTop = pc.cloudBase + cloudThick;
-    // Clamp vertical component to avoid enormous steps at low sun angles
-    float safeY = max(lightDir.y, 0.05);
-    float stepSize = (cloudTop - pos.y) / (safeY * float(steps));
+    // Trace actual light ray to cloud top, capped to avoid extreme horizontal traversal
+    float tMax = min((cloudTop - pos.y) / lightDir.y, 200.0);
+    float stepSize = tMax / float(steps);
 
     float opticalDepth = 0.0;
     vec3 samplePos = pos;
@@ -110,7 +109,7 @@ float lightMarch(vec3 pos, vec3 lightDir, uint steps, float cloudThick) {
 // Atmospheric perspective: exponential extinction over distance.
 // Returns blend factor [0,1] — 0 = full cloud color, 1 = fully faded to horizon.
 float atmosphericFade(float dist) {
-    return 1.0 - exp(-dist / ATMO_FADE_DIST * 2.0);
+    return 1.0 - exp(-dist / pc.atmosphereFadeDist);
 }
 
 void main() {
@@ -133,6 +132,9 @@ void main() {
         return;
     }
 
+    // Clamp march length — prevents massive step sizes for shallow rays inside cloud layer.
+    tExit = min(tExit, tEnter + pc.atmosphereFadeDist);
+
     // Check scene depth — don't render clouds behind solid geometry.
     // Linear depth stores view-space Z: -(viewMat * worldPos).z.
     // Convert to ray parametric t: t = viewZ / dot(rayDir, cameraForward).
@@ -154,16 +156,16 @@ void main() {
         tExit = sceneT;
     }
 
-    // --- Zero-skip: check weather at ray midpoint before marching ---
-    vec3 midPos = rayOrigin + rayDir * ((tEnter + tExit) * 0.5);
-    vec4 midWeather = sampleWeather(uWeatherMap, midPos);
-    if (midWeather.r < 0.01) {
-        // No coverage at ray center — check entry and exit too
-        vec3 enterPos = rayOrigin + rayDir * tEnter;
-        vec3 exitPos = rayOrigin + rayDir * tExit;
-        vec4 enterWeather = sampleWeather(uWeatherMap, enterPos);
-        vec4 exitWeather = sampleWeather(uWeatherMap, exitPos);
-        if (enterWeather.r < 0.01 && exitWeather.r < 0.01) {
+    // --- Zero-skip: check weather at 5 points along ray before marching ---
+    {
+        bool anyCloud = false;
+        for (int probe = 0; probe <= 4; probe++) {
+            float pt = mix(tEnter, tExit, float(probe) / 4.0);
+            vec3 probePos = rayOrigin + rayDir * pt;
+            vec4 probeWeather = sampleWeather(uWeatherMap, probePos);
+            if (probeWeather.r >= 0.01) { anyCloud = true; break; }
+        }
+        if (!anyCloud) {
             imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0)); // transparent
             return;
         }
@@ -224,10 +226,20 @@ void main() {
                                       pc.detailStrength);
 
         if (density > 0.001) {
-            // Adaptive: switch to fine stepping inside cloud
+            // Adaptive: backstep and resample when re-entering cloud from empty space
             if (!inCloud) {
                 inCloud = true;
+                // Retreat half the previous large step to refine the entry point
+                t -= stepSize * 0.5;
+                pos = rayOrigin + rayDir * t;
+                noisePos = pos * NOISE_SCALE + windOffset(pc.windTime);
+                noise = texture(uNoise3D, noisePos);
+                weather = sampleWeather(uWeatherMap, pos);
+                density = cloudDensity(pos, weather.r, weather.g, noise,
+                                        pc.cloudBase, cloudThick, pc.densityMultiplier,
+                                        pc.detailStrength);
                 stepSize = baseStepSize;
+                if (density <= 0.001) { t += stepSize; continue; }
             }
 
             // Conditional light march: skip when transmittance is already low
@@ -245,17 +257,21 @@ void main() {
             // Normalized height for ambient gradient
             float h = (pos.y - pc.cloudBase) / cloudThick;
 
-            // Ambient occlusion: light can't penetrate dense cloud interiors [Nubis³ p141]
-            // pow(1 - density_factor, 0.5) — bright at cloud surface, dark inside
-            float ambientOcclusion = pow(max(1.0 - density * 4.0 * pc.ambientStrength, 0.0), 0.5);
-
             // Height-dependent ambient: sky color at top, horizon at base
-            vec3 ambient = mix(skyHorizon, skyTop, h) * mix(0.5, 1.2, h) * ambientOcclusion;
+            vec3 ambient = mix(skyHorizon, skyTop, h) * mix(0.5, 1.2, h);
 
             // Direct lighting with multi-scatter energy
             vec3 directLight = lightColor * lightEnergy;
 
-            vec3 luminance = (directLight + ambient) * density;
+            // Ambient occlusion from accumulated optical depth [Nubis³ p141]
+            // transmittance decays 1→0 as we march deeper into the cloud.
+            // ao = pow(transmittance, strength): 1.0 at surface, →0 deep inside.
+            // strength=0 → no AO, strength=1 → default, strength=2 → exaggerated.
+            // Applied to total luminance so it visibly darkens cloud interiors,
+            // but NOT to the Beer's-law integration — preserves silver-lining energy.
+            float ao = pow(transmittance, pc.ambientStrength);
+
+            vec3 luminance = (directLight + ambient) * ao * density;
 
             // Accumulate with Beer's law
             float sampleTransmittance = exp(-density * stepSize);
@@ -283,7 +299,6 @@ void main() {
         }
 
         t += stepSize;
-        stepSize = baseStepSize; // Reset for next iteration
     }
 
     // --- Atmospheric perspective ---

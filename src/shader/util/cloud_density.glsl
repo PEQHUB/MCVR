@@ -37,8 +37,12 @@ float stratocumulusGradient(float h) {
 }
 
 // Cumulus: tall billowing towers (fair weather puffy clouds)
+// Dome profile — peak density at 25-35%, tapering above for rounded tops [Nubis³]
 float cumulusGradient(float h) {
-    return smoothstep(0.0, 0.08, h) * smoothstep(0.98, 0.75, h);
+    float base = smoothstep(0.0, 0.07, h);            // Flat condensation base
+    float rampUp = smoothstep(0.0, 0.25, h);          // Density ramp up to 25%
+    float roundTop = smoothstep(1.0, 0.4, h);         // Dome taper from 40% to top
+    return base * rampUp * roundTop;
 }
 
 // Cumulonimbus: full-height storm towers (anvil-shaped thunderheads)
@@ -72,9 +76,9 @@ float cloudHeightGradient(float h, float type) {
 //
 // noise: 128^3 RGBA8 texture sample (see cloud_noise_gen.comp for channel layout)
 //   R = Perlin-Worley (base shape — connected yet billowy)
-//   G = Worley FBM {2,4,8} (medium erosion)
-//   B = Worley FBM {4,8,16} (fine erosion)
-//   A = Worley FBM {8,16,32} (micro detail)
+//   G = Single-octave Worley freq 4 (medium erosion, sharp cell edges)
+//   B = Single-octave Worley freq 8 (fine erosion)
+//   A = Curl noise (wispy tendrils for cloud edges)
 float cloudDensity(vec3 pos, float coverage, float type,
                    vec4 noise, float cloudBase, float cloudThickness,
                    float densityMul, float detailStr) {
@@ -85,39 +89,45 @@ float cloudDensity(vec3 pos, float coverage, float type,
     // 4-type height gradient [Schneider15 §3.1]
     float grad = cloudHeightGradient(h, type);
 
-    // --- Schneider base shape [Schneider15 §3.2] ---
-    // Build low-frequency FBM from G,B,A channels for base erosion
-    // Weights: 2^-1 = 0.625 (normalized), 2^-2 = 0.25, 2^-3 = 0.125
-    float lowFreqFBM = noise.g * 0.625 + noise.b * 0.25 + noise.a * 0.125;
+    // --- Base shape [Schneider15 §3.2] ---
+    // G channel: single-octave Worley (medium scale) for base erosion.
+    // Using one channel instead of G+B+A avoids frequency overlap with base shape.
+    // Multi-frequency erosion: Schneider 3-octave Worley FBM [Schneider15 §3.2]
+    float baseErosion = noise.g * 0.625 + noise.b * 0.25 + noise.a * 0.125;
 
-    // Erode base shape with low-freq FBM (Schneider remap trick)
-    float baseShape = cloudRemap(noise.r, lowFreqFBM - 1.0, 1.0, 0.0, 1.0);
+    // Erode base shape: positive threshold creates actual holes (Schneider remap trick)
+    float baseShape = cloudRemap(noise.r, baseErosion * 0.5, 1.0, 0.0, 1.0);
     baseShape = max(baseShape, 0.0);
-
-    // Apply height gradient
-    baseShape *= grad;
 
     // --- Schneider coverage remap with coverage^2 boost [Schneider15 §3.3] ---
     // Threshold by coverage: low coverage → small isolated clouds, high → continuous
-    float coverageShape = cloudRemap(baseShape, 1.0 - coverage, 1.0, 0.0, 1.0);
-    coverageShape *= coverage;
+    // Height gradient applied AFTER remap to avoid creating hard horizontal cutoffs
+    // where grad * baseShape falls below the threshold.
+    float threshold = 1.0 - sqrt(coverage);  // Softer threshold at low coverage
+    float coverageShape = cloudRemap(baseShape, threshold, 1.0, 0.0, 1.0);
+    coverageShape *= coverage;               // Energy conservation [Schneider15]
+    coverageShape *= grad;                   // Height gradient — smooth vertical profile
     if (coverageShape <= 0.0) return 0.0;
 
-    // --- Height-inverted erosion [Schneider15 §3.2] ---
-    // Wispy/shredded at cloud base, billowy/puffy at top.
-    // smoothstep(0,0.3,h): gradual transition across bottom 30% of cloud layer.
-    // At base (h≈0): use inverted detail (1 - worley) → turbulent breakup
-    // At top (h≈1): use direct detail → smooth rounded billows
+    // --- Dual-character detail erosion [Nubis³] ---
+    // Height-dependent transition: wispy at base, billowy at top.
     float heightFraction = smoothstep(0.0, 0.3, h);
 
-    // Build detail erosion from B + A channels (fine + micro)
-    float detailFBM = noise.b * 0.5 + noise.a * 0.5;
-    float erosion = mix(1.0 - detailFBM, detailFBM, heightFraction);
+    // Wispy (curl noise) vs billowy (single-octave Worley)
+    float wispy = noise.a;                            // Curl noise: tendrils
+    float billowy = noise.b;                          // Fine Worley only (G consumed by base erosion)
+    float detailNoise = mix(wispy, billowy, heightFraction);
 
-    // Erode edges: detail only affects low-density regions (preserves dense core)
-    float finalDensity = cloudRemap(coverageShape, erosion * 0.2 * detailStr, 1.0, 0.0, 1.0);
+    // Height-inverted erosion: turbulent breakup at base, smooth billows at top
+    float erosion = mix(1.0 - detailNoise, detailNoise, heightFraction);
 
-    return max(finalDensity, 0.0) * densityMul;
+    // Erode edges: 50% erosion strength (Schneider/Nubis use 50-80%)
+    float finalDensity = cloudRemap(coverageShape, erosion * 0.5 * detailStr, 1.0, 0.0, 1.0);
+
+    // Density sharpening — pushes low densities toward zero for crisp edges [Nubis³]
+    finalDensity = max(finalDensity, 0.0) * densityMul;
+    float sharp = clamp(pc.sharpening, 0.1, 1.0);
+    return pow(finalDensity, sharp);
 }
 
 // Beer-Lambert transmittance

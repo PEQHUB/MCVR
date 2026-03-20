@@ -68,51 +68,45 @@ void main() {
     historyTexel = clamp(historyTexel, ivec2(0), ivec2(pc.cloudWidth - 1, pc.cloudHeight - 1));
     vec4 history = imageLoad(uCloudHistory, historyTexel);
 
-    // Neighborhood AABB clamping (3x3) [Karis14]
-    // Constrains history to the range of current frame's local neighborhood,
-    // preventing ghosting from stale reprojected data.
-    vec4 minVal = current;
-    vec4 maxVal = current;
+    // Variance-based neighborhood clipping [Salvi16]
+    // Samples from HISTORY image (read-only) to avoid read-write hazard on uCloudColor.
+    vec4 m1 = vec4(0.0);
+    vec4 m2 = vec4(0.0);
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
             ivec2 neighbor = texel + ivec2(dx, dy);
             neighbor = clamp(neighbor, ivec2(0), ivec2(pc.cloudWidth - 1, pc.cloudHeight - 1));
-            vec4 s = imageLoad(uCloudColor, neighbor);
-            minVal = min(minVal, s);
-            maxVal = max(maxVal, s);
+            vec4 s = imageLoad(uCloudHistory, neighbor);
+            m1 += s;
+            m2 += s * s;
         }
     }
+    m1 /= 9.0;
+    m2 /= 9.0;
+    vec4 sigma = sqrt(max(m2 - m1 * m1, vec4(0.0)));
 
-    // Clamp history to neighborhood AABB (prevents ghosting)
+    vec4 minVal = m1 - sigma * 2.0;
+    vec4 maxVal = m1 + sigma * 2.0;
+
     vec4 clampedHistory = clamp(history, minVal, maxVal);
 
     // --- Motion-adaptive blend factor [Salvi16] ---
-    // Compare current and previous camera forward vectors to detect rotation
     vec3 currForward = normalize(worldUBO.cameraViewMat[2].xyz);
     vec3 prevForward = normalize(lastWorldUBO.prevCameraViewMat[2].xyz);
     float rotationDelta = 1.0 - abs(dot(currForward, prevForward));
 
-    // Also detect translation by comparing camera positions
     vec3 prevEyePos = lastWorldUBO.prevCameraViewMatInv[3].xyz;
     float translationDelta = length(eyePos - prevEyePos);
 
-    // Motion magnitude: rotation contributes more than translation for clouds
-    // (clouds are far away, so camera translation barely shifts their screen position)
-    // Weights: 50× rotation sensitivity (radians → significant at ~0.02 rad/frame)
-    //          0.01× translation (blocks — negligible unless flying fast)
     float motion = rotationDelta * 50.0 + translationDelta * 0.01;
     motion = clamp(motion, 0.0, 1.0);
 
-    // Reduce temporal blend when camera is moving (more responsive, less ghosting)
-    // Static: use pc.temporalBlend (0.93-0.97). Fast motion: drop to 0.5
     float adaptiveBlend = mix(pc.temporalBlend, 0.5, motion);
 
-    // Reprojection confidence: reduce blend near UV edges (stretched reprojection)
-    vec2 uvDist = abs(prevUV - 0.5) * 2.0; // [0,1] distance from center
+    vec2 uvDist = abs(prevUV - 0.5) * 2.0;
     float edgeFalloff = 1.0 - smoothstep(0.8, 1.0, max(uvDist.x, uvDist.y));
     adaptiveBlend *= edgeFalloff;
 
-    // Also reduce blend when AABB clamping was aggressive (history was far from current)
     float clampDist = length(history - clampedHistory);
     float clampPenalty = smoothstep(0.0, 0.5, clampDist);
     adaptiveBlend *= (1.0 - clampPenalty * 0.5);

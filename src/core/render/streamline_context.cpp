@@ -326,10 +326,13 @@ bool StreamlineContext::init(const wchar_t *pluginPath) {
     // Enable frame-based resource tagging (required for slSetTagForFrame used by DLSS-G).
     pref.flags = pref.flags | sl::PreferenceFlags::eUseFrameBasedResourceTagging;
 
-    // Features to load
-    sl::Feature features[] = {sl::kFeatureReflex, sl::kFeaturePCL, sl::kFeatureDLSS_G};
+    // Features to load at init time.
+    // DLSS-G is NOT loaded here — its sl.dlss_g.dll hooks vkQueuePresentKHR at init,
+    // which crashes if the feature isn't fully configured. DLSS-G is loaded later via
+    // FrameGenManager::setFeatureLoaded() when the user explicitly enables frame gen.
+    sl::Feature features[] = {sl::kFeatureReflex, sl::kFeaturePCL};
     pref.featuresToLoad = features;
-    pref.numFeaturesToLoad = 3;
+    pref.numFeaturesToLoad = 2;
 
     // Plugin search paths — where to find sl.reflex.dll, sl.pcl.dll, etc.
     pref.pathsToPlugins = &pluginPath;

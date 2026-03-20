@@ -576,7 +576,10 @@ void CloudModuleContext::render() {
     pc.scatterOctaves = Renderer::options.cloudScatterOctaves;
     pc.powderStrength = Renderer::options.cloudPowderStrength;
     pc.ambientStrength = Renderer::options.cloudAmbientStrength;
-    pc.pad0 = 0.0f;
+    pc.sharpening = std::clamp(Renderer::options.cloudSharpening, 0.2f, 1.0f);
+    pc.noiseScale = std::max(Renderer::options.cloudNoiseScale, 16.0f);
+    pc.cellFrequency = std::clamp(Renderer::options.cloudCellFrequency, 2.0f, 16.0f);
+    pc.atmosphereFadeDist = std::clamp(Renderer::options.cloudAtmosphereFadeDist, 200.0f, 2000.0f);
 
     // Advance wind time using actual frame delta
     auto now = std::chrono::steady_clock::now();
