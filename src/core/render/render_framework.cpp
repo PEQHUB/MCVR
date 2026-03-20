@@ -550,10 +550,27 @@ void Framework::submitCommand() {
         crashExit(submitResult, "vkQueueSubmit failed");
     }
 
-    // Publish to FrameSlotRing for PresentThread (decoupled or overlay compositor mode)
-    bool shouldPublish = decoupledPresent_ ||
-                         (overlayCompositor_ && overlayCompositor_->isActive());
-    if (shouldPublish && frameSlotRing_) {
+    // Overlay present on render thread: wait for GPU, then D3D11 copy + DXGI present.
+    // This eliminates the PresentThread garbage-data race — shared images are guaranteed
+    // written by the time we present.
+    bool overlayActive = FrameGenManager::isActive() &&
+                         overlayCompositor_ && overlayCompositor_->isActive();
+    if (overlayActive) {
+        VkResult waitResult = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+        if (waitResult != VK_SUCCESS) {
+            waitDeviceIdle();
+            crashExit(waitResult, "vkWaitForFences failed (overlay present)");
+        }
+        overlayCompositor_->present();
+        if (!overlayCompositor_->isActive()) {
+            Renderer::options.needRecreate = true; // DXGI device lost recovery
+            renderDiag("  overlay lost during present, triggering recreate");
+        }
+        renderDiag("  overlay present on render thread");
+    }
+
+    // Publish to FrameSlotRing for PresentThread (decoupled mode only)
+    if (decoupledPresent_ && frameSlotRing_) {
         auto worldOut = pipelineContext->worldPipelineContext
                           ? pipelineContext->worldPipelineContext->outputImage : nullptr;
         auto overlayOut = pipelineContext->uiModuleContext
@@ -737,20 +754,9 @@ void Framework::recreate() {
         overlayCompositor_.reset();
     }
 
-    // PresentThread mode: overlay compositor uses it for DXGI present
-    if (overlayCompositor_ && overlayCompositor_->isActive()) {
-        if (presentThread_) {
-            renderDiag("  setting PresentThread overlay mode, starting/resuming...");
-            presentThread_->setOverlayMode(true, overlayCompositor_.get());
-            if (!presentThread_->isRunning()) {
-                presentThread_->start();
-                renderDiag("  PresentThread started");
-            } else if (presentThread_->isPaused()) {
-                presentThread_->resume();
-                renderDiag("  PresentThread resumed");
-            }
-        }
-    } else if (presentThread_ && !decoupledPresent_) {
+    // Overlay present is handled on the render thread (submitCommand), not PresentThread.
+    // PresentThread is only for future decoupled present mode.
+    if (presentThread_ && !decoupledPresent_) {
         presentThread_->setOverlayMode(false, nullptr);
     }
     renderDiag("recreate() END");

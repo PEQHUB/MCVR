@@ -324,18 +324,11 @@ void FrameGenManager::beforeSwapchainRecreate() {
         fgCout() << "feature unloaded" << std::endl;
     }
 
-    // Crash guard: if the feature was loaded but never configured (wasActive=false),
-    // the SL interposer's vkDestroySwapchainKHR hook accesses uninitialized DLSS-G
-    // state → null deref crash at sl.dlss_g.dll+0x3428d. Unload to detach hooks
-    // cleanly. afterSwapchainRecreate() will re-load after swapchain create.
-    if (featureLoaded_ && !wasActive) {
-        StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, false);
-        featureLoaded_ = false;
-        fgCout() << "unloaded unconfigured feature before swapchain destroy" << std::endl;
-    }
-
     // NEVER load feature here — must happen after swapchain reconstruct so the
     // new swapchain is created with SL hooks active from the start.
+    // Note: crash guard removed — afterSwapchainRecreate() calls setDlssGOptions(eOff,1)
+    // immediately after loading, so the state is always initialized before the next
+    // swapchain destroy. The guard caused an infinite unload/reload loop.
 #endif
 }
 
