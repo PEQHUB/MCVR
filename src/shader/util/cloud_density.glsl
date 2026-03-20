@@ -36,7 +36,10 @@ float cloudRemap(float value, float low1, float high1, float low2, float high2) 
 //   0.67 = cumulus (tall, h=[0, ~0.8])
 //   1.0 = cumulonimbus (full height)
 
-float dimensionalProfile(float h, float coverage, float type) {
+// Height profile: vertical shape of the cloud. Peaks at ~1.0 in the cloud body,
+// tapers at base (condensation level) and top (type-dependent).
+// Coverage is NOT included here — it controls the threshold separately.
+float heightProfile(float h, float type) {
     // Base: quick ramp from condensation level [NubisEvolved p97]
     float base = smoothstep(0.0, 0.1, h);
 
@@ -44,9 +47,7 @@ float dimensionalProfile(float h, float coverage, float type) {
     float topFade = mix(0.25, 1.0, type);
     float top = smoothstep(topFade, topFade * 0.35, h);
 
-    // Profile peaks at ~1.0 through most of the cloud body.
-    // Coverage scales it: low coverage = high threshold = sparse clouds.
-    return base * top * coverage;
+    return base * top;
 }
 
 // --- Noise Composite [Nubis³ p99, p104, p108] ---
@@ -62,14 +63,19 @@ float dimensionalProfile(float h, float coverage, float type) {
 // Both channels use full [0,1] range (no 0.3 scaling — that was calibrated
 // for Nubis's Alligator noise, not our Worley).
 
-float noiseComposite(vec4 noise, float dimProfile, float type) {
-    // Wispy: PW → curl, blended by profile [Nubis³ p99]
-    float wispy = mix(noise.r, noise.a, dimProfile);
+float noiseComposite(vec4 noise, float hProfile, float type) {
+    // Wispy: curl-dominated with PW connectivity [Nubis³ p99]
+    // Curl provides thin flowing tendrils; PW adds large-scale connectivity.
+    float wispy = noise.r * 0.4 + noise.a * 0.6;
 
-    // Billowy: PW → Worley, blended by profile [Nubis³ p104]
-    float billowy = mix(noise.r, noise.g, dimProfile);
+    // Billowy: Worley-dominated with PW connectivity [Nubis³ p104]
+    // Worley provides round puffy cells; PW fills gaps for connected shapes.
+    // Height-dependent blend: more PW at base, more Worley at top [p104]
+    float billowyGrad = pow(max(hProfile, 0.001), 0.25);
+    float billowy = mix(noise.r * 0.5 + noise.g * 0.5,
+                        noise.g * 0.7 + noise.b * 0.3, billowyGrad);
 
-    // Type blend [Nubis³ p108]
+    // Type blend [Nubis³ p108]: stratus=wispy, cumulus/cb=billowy
     return mix(wispy, billowy, type);
 }
 
@@ -85,28 +91,34 @@ float cloudDensity(vec3 pos, float coverage, float type,
     float h = (pos.y - cloudBase) / cloudThickness;
     if (h < 0.0 || h > 1.0) { outDimProfile = 0.0; return 0.0; }
 
-    // Dimensional profile [NubisEvolved p97, Nubis³ p29]
-    float dimProfile = dimensionalProfile(h, coverage, type);
+    // Height profile: vertical cloud shape [NubisEvolved p97]
+    float hProfile = heightProfile(h, type);
+    if (hProfile < 0.001) { outDimProfile = 0.0; return 0.0; }
+
+    // Dimensional profile for ambient scattering: height × coverage [Nubis³ p29]
+    float dimProfile = hProfile * coverage;
     outDimProfile = dimProfile;
-    if (dimProfile < 0.001) return 0.0;
 
     // Noise composite: type blends wispy↔billowy [Nubis³ p99-108]
-    float nc = noiseComposite(noise, dimProfile, type);
+    float nc = noiseComposite(noise, hProfile, type);
 
-    // Core Nubis density [p24]: noise exceeds threshold set by profile.
-    // High noise + high profile = density. Coverage controls sparseness.
-    float density = clamp(nc - (1.0 - dimProfile), 0.0, 1.0);
-    if (density <= 0.0) return 0.0;
+    // Coverage threshold [Nubis³ p24, Schneider15 §3.3]:
+    // Coverage DIRECTLY sets the noise threshold — NOT multiplied by height.
+    // This ensures visible clouds at moderate coverage (0.3-0.5).
+    // Height profile shapes the cloud AFTER thresholding.
+    float threshold = 1.0 - coverage;
+    float density = clamp(cloudRemap(nc, threshold, 1.0, 0.0, 1.0), 0.0, 1.0);
+    density *= coverage;    // Energy conservation [Schneider15]
+    density *= hProfile;    // Height shaping AFTER threshold — creates dome tops
 
-    // Detail erosion: secondary noise breaks up edges
-    // Wispy detail (curl) for stratus, billowy detail (fine Worley) for cumulus
+    // Detail erosion: secondary noise breaks up edges [Nubis³ p104]
     float detailNoise = mix(noise.a, noise.b, type);
-    density = max(density - detailNoise * 0.35 * detailStr, 0.0);
+    density = max(density - detailNoise * 0.3 * detailStr, 0.0);
 
     // Density multiplier
     density *= densityMul;
 
-    // Sharpening [Nubis³ p118]: pow pushes low values toward zero for crisp edges
+    // Sharpening [Nubis³ p118]: pow pushes low densities toward zero
     float sharp = clamp(pc.sharpening, 0.1, 1.0);
     return pow(max(density, 0.0), sharp);
 }

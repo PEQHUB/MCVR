@@ -191,7 +191,7 @@ struct Options {
     float cloudType = 0.67f;          // 0=Stratus, 0.33=Stratocumulus, 0.67=Cumulus, 1.0=Cumulonimbus
     float cloudSpeed = 1.0f;          // Wind speed multiplier [0.0 - 5.0]
     float cloudAltitude = 192.0f;     // Cloud base height in blocks [128 - 320]
-    float cloudThickness = 40.0f;     // Cloud layer thickness [32 - 128]
+    float cloudThickness = 64.0f;     // Cloud layer thickness [32 - 128]
     float cloudDetailStrength = 1.0f; // Detail erosion multiplier [0.0 - 2.0]
     uint32_t cloudScatterOctaves = 3; // Multi-scatter octaves [1 - 8]
     float cloudPowderStrength = 1.0f; // Beer-powder dark edge [0.0 - 2.0]
@@ -200,7 +200,7 @@ struct Options {
     float cloudSharpening = 0.45f;    // Density sharpening exponent [0.2 - 1.0] (lower = crisper edges)
     float cloudNoiseScale = 192.0f;   // Noise texture period in blocks [128 - 512]
     float cloudCellFrequency = 8.0f;  // Voronoi cell count across weather map [2 - 16]
-    float cloudAtmosphereFadeDist = 200.0f; // Cloud atmospheric fade distance [200 - 2000]
+    float cloudAtmosphereFadeDist = 800.0f; // Cloud atmospheric fade distance [200 - 2000]
     float wetSurfaceStrength = 1.0f;  // Wet surface effect strength [0.0 - 2.0]
 
     // Diagnostics
