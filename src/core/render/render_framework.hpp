@@ -13,6 +13,8 @@
 class Framework;
 class UIModule;
 struct UIModuleContext;
+class FrameSlotRing;
+class PresentThread;
 
 class GarbageCollector : public SharedObject<GarbageCollector> {
   public:
@@ -76,6 +78,10 @@ class Framework : public SharedObject<Framework> {
     void close();
     bool isRunning();
 
+    void enableDecoupledPresent();
+    void disableDecoupledPresent();
+    bool isDecoupledPresent() const;
+
     void takeScreenshot(bool withUI, int width, int height, int channel, void *dstPointer);
     VkFormat takeScreenshotRawHdrPacked(bool withUI, int width, int height, void *dstPointer, int dstByteSize);
 
@@ -136,6 +142,12 @@ class Framework : public SharedObject<Framework> {
     std::recursive_mutex recreateMtx_;
 
     bool running_ = true;
+
+    // Decoupled presentation (PresentThread + FrameSlotRing)
+    std::unique_ptr<FrameSlotRing> frameSlotRing_;
+    std::unique_ptr<PresentThread> presentThread_;
+    bool decoupledPresent_ = false;
+    uint32_t decoupledFrameIndex_ = 0;
 
     std::shared_ptr<GarbageCollector> gc_;
 };

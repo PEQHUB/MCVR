@@ -166,6 +166,83 @@ layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
 layout(location = 1) rayPayloadEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
 
+// GPU-side AutoPBR: derives roughness from albedo luminance via percentile mapping
+// and normals via central differences, using precomputed histogram bounds from SSBO pack 8.
+void applyAutoPBR(
+    inout LabPBRMat mat,
+    MaterialClassEntry mc,
+    vec3 rawAlbedoLinear,
+    uint texID,
+    vec2 texUV,
+    vec2 uvMin,
+    vec2 uvMax
+) {
+    float lumMin = mc.lumMin;
+    float lumMax = mc.lumMax;
+    float lumSpan = max(lumMax - lumMin, 0.001);
+
+    uint p0 = mc.autoPBRPacked0;
+    float rMin = float(p0 & 0xFFu) / 100.0;
+    float rMax = float((p0 >> 8u) & 0xFFu) / 100.0;
+    float centerPct = float((p0 >> 16u) & 0xFFu);
+    float spreadPct = float((p0 >> 24u) & 0xFFu);
+
+    // Safety: skip if no valid AutoPBR data (packed params all zero)
+    if (p0 == 0u) return;
+
+    uint p1 = mc.autoPBRPacked1;
+    float normalStrength = float(p1 & 0xFFFFu) / 100.0;
+    float heightGamma = max(float((p1 >> 16u) & 0xFFFFu) / 100.0, 0.01);
+
+    bool invertRoughness = (mc.flags & 0x10u) != 0u;
+    bool invertNormal    = (mc.flags & 0x20u) != 0u;
+
+    vec3 channelWeights = vec3(mc.channelR, mc.channelG, mc.channelB);
+    float weightSum = channelWeights.x + channelWeights.y + channelWeights.z;
+    if (weightSum < 0.001) channelWeights = vec3(0.2126, 0.7152, 0.0722);
+    else channelWeights /= weightSum;
+
+    // Roughness from luminance percentile mapping
+    float lum = dot(rawAlbedoLinear, channelWeights);
+    float normLum = clamp((lum - lumMin) / lumSpan, 0.0, 1.0);
+    float windowStart = (centerPct - spreadPct * 0.5) / 100.0;
+    float windowSize = max(spreadPct / 100.0, 0.01);
+    float t = clamp((normLum - windowStart) / windowSize, 0.0, 1.0);
+    float roughness = mix(rMax, rMin, t);
+    if (invertRoughness) roughness = rMin + rMax - roughness;
+    mat.roughness = max(roughness * roughness, 0.01);
+
+    // Normal from central differences on albedo luminance
+    if (normalStrength > 0.001) {
+        vec2 texelStep = 1.0 / vec2(textureSize(textures[nonuniformEXT(texID)], 0));
+        vec2 uvRight = clamp(texUV + vec2(texelStep.x, 0.0), uvMin, uvMax);
+        vec2 uvUp    = clamp(texUV + vec2(0.0, texelStep.y), uvMin, uvMax);
+
+        vec3 albRight = textureLod(textures[nonuniformEXT(texID)], uvRight, 0).rgb;
+        vec3 albUp    = textureLod(textures[nonuniformEXT(texID)], uvUp,    0).rgb;
+
+        float lumRight = dot(albRight, channelWeights);
+        float lumUp    = dot(albUp,    channelWeights);
+
+        float hCenter = clamp((lum      - lumMin) / lumSpan, 0.0, 1.0);
+        float hRight  = clamp((lumRight - lumMin) / lumSpan, 0.0, 1.0);
+        float hUp     = clamp((lumUp    - lumMin) / lumSpan, 0.0, 1.0);
+
+        if (heightGamma != 1.0) {
+            hCenter = pow(hCenter, heightGamma);
+            hRight  = pow(hRight,  heightGamma);
+            hUp     = pow(hUp,     heightGamma);
+        }
+
+        float gx = (hRight - hCenter) * normalStrength;
+        float gy = (hUp    - hCenter) * normalStrength;
+        vec3 localNormal = vec3(-gx, gy, 1.0);
+        if (invertNormal) localNormal.xy = -localNormal.xy;
+        mat.normal = normalize(localNormal);
+        mat.height = hCenter;
+    }
+}
+
 vec3 calculateNormal(vec3 p0, vec3 p1, vec3 p2, vec2 uv0, vec2 uv1, vec2 uv2, vec3 matNormal, vec3 viewDir, out vec3 geometricNormal, bool openglNormal) {
     vec3 edge1 = p1 - p0;
     vec3 edge2 = p2 - p0;
@@ -258,9 +335,15 @@ void main() {
     vec4 normalValue;
     ivec4 flagValue;
     vec2 textureUV;
+    vec2 uvMin = vec2(0.0);
+    vec2 uvMax = vec2(1.0);
     vec3 rawAlbedoLinear = vec3(1.0); // raw albedo before tinting, for texture roughness derivation
     if (useTexture > 0) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
+
+        // Tile boundaries from vertex UVs (used by POM and AutoPBR neighbor clamping)
+        uvMin = min(min(v0.textureUV, v1.textureUV), v2.textureUV);
+        uvMax = max(max(v0.textureUV, v1.textureUV), v2.textureUV);
 
         // POM: offset UVs using height field (primary ray only, with normal texture + height data)
         // Only runs when global pomEnabled=true (pomHeightScale > 0 in push constant)
@@ -270,9 +353,6 @@ void main() {
             float pomDist = gl_HitTEXT;
             float pomFade = 1.0 - smoothstep(pc.pomFadeDistance * 0.5, pc.pomFadeDistance, pomDist);
             if (pomFade > 0.001) {
-                // Tile boundaries from vertex UVs
-                vec2 uvMin = min(min(v0.textureUV, v1.textureUV), v2.textureUV);
-                vec2 uvMax = max(max(v0.textureUV, v1.textureUV), v2.textureUV);
 
                 // TBN in object space → world space
                 vec3 edge1 = v1.pos - v0.pos;
@@ -398,7 +478,7 @@ void main() {
     // Priority: vertex materialType (fast, no texture fetch) > mask texture (per-texel) > skip
     uint materialClassIdx = 0u;
     bool hasMaterialClass = false;
-    if (materialType > 0u && materialType <= 160u) {
+    if (materialType > 0u) {
         materialClassIdx = materialType - 1u;
         hasMaterialClass = true;
     } else {
@@ -440,28 +520,30 @@ void main() {
                 float f0 = ((ior - 1.0) * (ior - 1.0)) / ((ior + 1.0) * (ior + 1.0));
                 mat.f0 = vec3(f0);
             }
-            float matRoughness = pack0.a * pack0.a;  // perceptual → GGX alpha
-
-            // Tex Roughness: blend between slider roughness and AutoPBR/LabPBR per-pixel roughness
-            // AutoPBR controls (gamma, variance, edge, min/max) shape texSourceRoughness
             float textureBlend = pack4.w;
+
+            // GPU-side AutoPBR: derive roughness + normal from albedo when enabled
+            if ((mc.flags & 0x8u) != 0u) {
+                applyAutoPBR(mat, mc, rawAlbedoLinear, textureID, textureUV, uvMin, uvMax);
+            }
+
+            // Tex Roughness: blend between slider roughness and albedo-derived per-pixel roughness
+            // Composes with AutoPBR — textureBlend modulates the AutoPBR result toward albedo signal
+            float matRoughness = pack0.a * pack0.a;  // perceptual → GGX alpha
             if (textureBlend > 0.001) {
-                // Use AutoPBR roughness from specular texture if available,
-                // fall back to albedo-channel derivation if no specular texture
                 float texRoughness;
                 if (specularTextureID >= 0) {
-                    texRoughness = texSourceRoughness;  // AutoPBR/resource pack roughness
+                    texRoughness = texSourceRoughness;
                 } else {
                     float weightSum = pack4.x + pack4.y + pack4.z;
                     float signal = dot(rawAlbedoLinear, pack4.xyz) / max(weightSum, 0.001);
                     texRoughness = (1.0 - signal) * (1.0 - signal);
                 }
                 mat.roughness = max(mix(matRoughness, texRoughness, textureBlend), 0.01);
-            } else if (specularTextureID < 0 || mat.transmission > 0.0) {
-                // No specular texture, OR transmissive block → slider roughness
+            } else {
+                // No textureBlend → slider roughness always takes priority
                 mat.roughness = max(matRoughness, 0.01);
             }
-            // else: opaque with specular texture → keep LabPBR/AutoPBR roughness from texture
 
             mat.metallic = pack1.x;
             if (pack1.y >= 0.0) mat.transmission = pack1.y;
@@ -490,12 +572,13 @@ void main() {
             matNoiseMaskInvert = ((maskPacked >> 3) & 0x1) != 0; // bit 3
             matNoiseWrap = (maskPacked >> 4) & 0x7;    // bits 4-6
 
-            // Normal strength: amplify/attenuate Auto-PBR/LabPBR normal map
-            // 0 = no override (default), >0 = scale factor (1.0 = unchanged, 2.0 = 2x stronger)
-            float matNormalStrength = pack5.w;
-            if (matNormalStrength > 0.01 && matNormalStrength != 1.0 && length(mat.normal) > 0.01) {
-                mat.normal.xy *= matNormalStrength;
-                mat.normal = normalize(mat.normal);
+            // Normal strength: amplify/attenuate LabPBR normal map (skip for AutoPBR — already applied)
+            if ((mc.flags & 0x8u) == 0u) {
+                float matNormalStrength = pack5.w;
+                if (matNormalStrength > 0.01 && matNormalStrength != 1.0 && length(mat.normal) > 0.01) {
+                    mat.normal.xy *= matNormalStrength;
+                    mat.normal = normalize(mat.normal);
+                }
             }
 
             matNoiseRotation = pack6.x;

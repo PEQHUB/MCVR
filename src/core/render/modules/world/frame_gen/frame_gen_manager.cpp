@@ -299,7 +299,7 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
 }
 
 bool FrameGenManager::isActive() {
-    return active_ || pendingEnable_;
+    return active_;
 }
 
 uint32_t FrameGenManager::maxFramesToGenerate() {
@@ -315,12 +315,13 @@ void FrameGenManager::beforeSwapchainRecreate() {
     // vkQueuePresentKHR." Always disable before swapchain teardown.
     if (active_) {
         StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOff, 1);
+        active_ = false;
         fgCout() << "paused before swapchain recreate" << std::endl;
     }
 
     // If turning off permanently, also unload the feature
     bool wantActive = Renderer::options.frameGenEnabled;
-    if (active_ && !wantActive) {
+    if (!wantActive && featureLoaded_) {
         StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, false);
         active_ = false;
         featureLoaded_ = false;

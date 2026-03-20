@@ -418,7 +418,9 @@ static void applyReflexSettings() {
     if (!StreamlineContext::isReflexAvailable()) return;
 
     sl::ReflexMode mode = sl::ReflexMode::eOff;
-    if (Renderer::options.reflexEnabled) {
+    // DLSS-G requires Reflex — force at least LowLatency when FG is enabled
+    bool reflexOn = Renderer::options.reflexEnabled || Renderer::options.frameGenEnabled;
+    if (reflexOn) {
         mode = Renderer::options.reflexBoost
             ? sl::ReflexMode::eLowLatencyWithBoost
             : sl::ReflexMode::eLowLatency;

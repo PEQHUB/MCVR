@@ -15,6 +15,8 @@
 #include "core/render/crash_ring_buffer.hpp"
 #include "core/render/radiance_logger.hpp"
 #include "core/render/modules/world/frame_gen/frame_gen_manager.hpp"
+#include "core/render/frame_slot_ring.hpp"
+#include "core/render/present_thread.hpp"
 
 #include <iostream>
 #include <random>
@@ -64,13 +66,12 @@ void FrameworkContext::fuseFinal() {
 
     auto overlayOutput = pipelineContext->uiModuleContext ? pipelineContext->uiModuleContext->overlayDrawColorImage : nullptr;
 
-    // When Frame Generation is active, DLSS-G composites UI internally via tagged
-    // kBufferTypeUIColorAndAlpha buffer (per NVIDIA §5.0). We must NOT bake UI into
-    // the swapchain — pass null overlay so the composite shader writes world-only.
-    bool fgActive = FrameGenManager::isActive();
-    auto compositeOverlay = fgActive ? nullptr : overlayOutput;
+    // Always composite world+UI into the swapchain. When DLSS-G is active, the game
+    // presents the full composited frame; Streamline decomposes via tagged
+    // kBufferTypeHUDLessColor + kBufferTypeUIColorAndAlpha for generated frames (§5.0).
+    auto compositeOverlay = overlayOutput;
 
-    bool canComposite = f->pipeline_->hdrCompositePass() && (compositeOverlay || fgActive);
+    bool canComposite = f->pipeline_->hdrCompositePass() && compositeOverlay;
 
     if (hdrOutputActive && canComposite) {
         // ═══════════ HDR path: composite shader ═══════════
@@ -261,6 +262,16 @@ void Framework::init(GLFWwindow *window) {
 
     // Initialize GPU profiler
     Renderer::gpuProfiler.init(device_, physicalDevice_, 16, imageCount);
+
+    // Initialize decoupled presentation (PresentThread + FrameSlotRing)
+    frameSlotRing_ = std::make_unique<FrameSlotRing>();
+    presentThread_ = std::make_unique<PresentThread>();
+    presentThread_->init(shared_from_this(), frameSlotRing_.get());
+
+    // Decoupled present is initialized but NOT started by default.
+    // The secondary queue may not support graphics/presentation on all GPUs.
+    // TODO: Add queue family capability check before enabling.
+    // To enable: call enableDecoupledPresent() after verifying queue support.
 }
 
 Framework::~Framework() {
@@ -289,30 +300,48 @@ void Framework::acquireContext() {
 
     std::shared_ptr<FrameworkContext> lastContext;
     if (currentContext_) lastContext = currentContext_;
-    VkResult result;
 
-    std::shared_ptr<vk::Semaphore> imageAcquiredSemaphore = acquireSemaphore();
     uint32_t imageIndex;
-    g_crashRing.record("acquireImage");
-    result = vkAcquireNextImageKHR(device_->vkDevice(), swapchain_->vkSwapchain(), UINT64_MAX,
-                                   imageAcquiredSemaphore->vkSemaphore(), VK_NULL_HANDLE, &imageIndex);
-    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-        recycleSemaphore(imageAcquiredSemaphore);
-        recreate();
-        return;
-    } else if (result != VK_SUCCESS) {
-        recycleSemaphore(imageAcquiredSemaphore);
-        waitDeviceIdle();
-        crashExit(result, "vkAcquireNextImageKHR failed");
+    std::shared_ptr<vk::Semaphore> imageAcquiredSemaphore;
+
+    if (decoupledPresent_) {
+        // Decoupled: round-robin through contexts without swapchain acquire.
+        // PresentThread owns swapchain acquire/present.
+        decoupledFrameIndex_ = (decoupledFrameIndex_ + 1) % static_cast<uint32_t>(contexts_.size());
+        imageIndex = decoupledFrameIndex_;
+
+        std::shared_ptr<vk::Fence> fence = contexts_[imageIndex]->commandFinishedFence;
+        g_crashRing.record("waitFence");
+        VkResult fenceResult = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+        if (fenceResult != VK_SUCCESS) {
+            waitDeviceIdle();
+            crashExit(fenceResult, "vkWaitForFences failed (decoupled)");
+        }
+    } else {
+        // Standard: acquire swapchain image
+        imageAcquiredSemaphore = acquireSemaphore();
+        g_crashRing.record("acquireImage");
+        VkResult result = vkAcquireNextImageKHR(device_->vkDevice(), swapchain_->vkSwapchain(), UINT64_MAX,
+                                       imageAcquiredSemaphore->vkSemaphore(), VK_NULL_HANDLE, &imageIndex);
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            recycleSemaphore(imageAcquiredSemaphore);
+            recreate();
+            return;
+        } else if (result != VK_SUCCESS) {
+            recycleSemaphore(imageAcquiredSemaphore);
+            waitDeviceIdle();
+            crashExit(result, "vkAcquireNextImageKHR failed");
+        }
+
+        std::shared_ptr<vk::Fence> fence = contexts_[imageIndex]->commandFinishedFence;
+        g_crashRing.record("waitFence");
+        VkResult fenceResult = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+        if (fenceResult != VK_SUCCESS) {
+            waitDeviceIdle();
+            crashExit(fenceResult, "vkWaitForFences failed");
+        }
     }
 
-    std::shared_ptr<vk::Fence> fence = contexts_[imageIndex]->commandFinishedFence;
-    g_crashRing.record("waitFence");
-    result = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
-    if (result != VK_SUCCESS) {
-        waitDeviceIdle();
-        crashExit(result, "vkWaitForFences failed");
-    }
     currentContextIndex_ = imageIndex;
     currentContext_ = contexts_[imageIndex];
     indexHistory_.push(imageIndex);
@@ -325,7 +354,9 @@ void Framework::acquireContext() {
         recycleSemaphore(currentContext_->imageAcquiredSemaphore);
         currentContext_->imageAcquiredSemaphore = VK_NULL_HANDLE;
     }
-    currentContext_->imageAcquiredSemaphore = imageAcquiredSemaphore;
+    if (imageAcquiredSemaphore) {
+        currentContext_->imageAcquiredSemaphore = imageAcquiredSemaphore;
+    }
 
     // PCL: mark simulation start AFTER blocking sync waits (acquire + fence) complete.
     // Placing it before would inflate simulation time with driver stalls,
@@ -394,8 +425,10 @@ void Framework::submitCommand() {
     }
     pipelineContext->uiModuleContext->end();
 
-    // Tag resources for DLSS-G frame generation (after world render, before composite)
-    if (FrameGenManager::isActive()) {
+    // Tag resources for DLSS-G frame generation (after world render, before composite).
+    // Called unconditionally — tagFrame() has internal guards and processes
+    // pendingEnable_ to activate FG on the first frame after swapchain recreate.
+    {
         auto worldOutput = pipelineContext->worldPipelineContext
                              ? pipelineContext->worldPipelineContext->outputImage : nullptr;
         auto overlayOutput = pipelineContext->uiModuleContext
@@ -403,16 +436,27 @@ void Framework::submitCommand() {
         FrameGenManager::tagFrame(currentContext_, worldOutput, overlayOutput);
     }
 
-    currentContext_->fuseFinal();
+    // Composite world+UI to swapchain (standard mode only).
+    // In decoupled mode, PresentThread handles compositing.
+    if (!decoupledPresent_) {
+        currentContext_->fuseFinal();
+    }
 
     currentContext_->uploadCommandBuffer->end();
     currentContext_->worldCommandBuffer->end();
     currentContext_->overlayCommandBuffer->end();
     currentContext_->fuseCommandBuffer->end();
 
-    std::vector<VkSemaphore> waitSemaphores = {currentContext_->imageAcquiredSemaphore->vkSemaphore()};
-    std::vector<VkPipelineStageFlags> waitStageMasks = {VK_PIPELINE_STAGE_ALL_COMMANDS_BIT};
-    std::vector<VkSemaphore> signalSemaphores = {currentContext_->commandProcessedSemaphore->vkSemaphore()};
+    // Standard mode: wait on acquire semaphore, signal processed semaphore.
+    // Decoupled mode: no semaphores — fence handles sync with PresentThread.
+    std::vector<VkSemaphore> waitSemaphores;
+    std::vector<VkPipelineStageFlags> waitStageMasks;
+    std::vector<VkSemaphore> signalSemaphores;
+    if (!decoupledPresent_) {
+        waitSemaphores.push_back(currentContext_->imageAcquiredSemaphore->vkSemaphore());
+        waitStageMasks.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        signalSemaphores.push_back(currentContext_->commandProcessedSemaphore->vkSemaphore());
+    }
     std::vector<VkCommandBuffer> commandbuffers = {
         currentContext_->uploadCommandBuffer->vkCommandBuffer(),
         currentContext_->worldCommandBuffer->vkCommandBuffer(),
@@ -451,10 +495,32 @@ void Framework::submitCommand() {
         waitDeviceIdle();
         crashExit(submitResult, "vkQueueSubmit failed");
     }
+
+    // Publish to FrameSlotRing for PresentThread (decoupled mode only)
+    if (decoupledPresent_ && frameSlotRing_) {
+        auto worldOut = pipelineContext->worldPipelineContext
+                          ? pipelineContext->worldPipelineContext->outputImage : nullptr;
+        auto overlayOut = pipelineContext->uiModuleContext
+                            ? pipelineContext->uiModuleContext->overlayDrawColorImage : nullptr;
+        bool hdr = Renderer::options.hdrEnabled && swapchain_->isHDR();
+        frameSlotRing_->publish(
+            worldOut, overlayOut,
+            currentContext_->commandFinishedFence->vkFence(),
+            hdr, Renderer::options.hdrUiBrightnessNits);
+    }
 }
 
 void Framework::present() {
     if (!running_) return;
+
+    // Decoupled mode: PresentThread handles presenting.
+    // Still check for recreation triggers.
+    if (decoupledPresent_) {
+        if (vk::Window::framebufferResized || Renderer::options.needRecreate || pipeline_->needRecreate) {
+            recreate();
+        }
+        return;
+    }
 
     VkPresentInfoKHR presentInfo = {};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -494,7 +560,13 @@ void Framework::recreate() {
     vk::Window::framebufferResized = false;
     pipeline_->needRecreate = false;
 
+    // Pause present thread during swapchain recreation
+    if (presentThread_ && presentThread_->isRunning() && !presentThread_->isPaused()) {
+        presentThread_->pause();
+    }
+
     waitRenderQueueIdle();
+    waitBackendQueueIdle();
 
     // Notify frame gen manager before swapchain teardown
     FrameGenManager::beforeSwapchainRecreate();
@@ -542,6 +614,30 @@ void Framework::recreate() {
     // Notify frame gen manager after swapchain recreation
     FrameGenManager::afterSwapchainRecreate();
 
+    // Recreate present thread resources for new swapchain
+    if (presentThread_) {
+        presentThread_->onSwapchainRecreate();
+    }
+    if (frameSlotRing_) {
+        frameSlotRing_->reset();
+    }
+
+    // Presentation strategy: FG uses standard (Streamline interposer),
+    // non-FG uses decoupled (PresentThread at display rate).
+    if (Renderer::options.frameGenEnabled) {
+        // FG needs standard present — Streamline intercepts vkQueuePresentKHR
+        if (decoupledPresent_) {
+            disableDecoupledPresent();
+        }
+    } else {
+        // No FG — enable decoupled present for display-rate UI
+        if (!decoupledPresent_) {
+            enableDecoupledPresent();
+        } else if (presentThread_ && presentThread_->isPaused()) {
+            presentThread_->resume();
+        }
+    }
+
     Renderer::instance().textures()->bindAllTextures();
 }
 
@@ -558,6 +654,13 @@ void Framework::waitBackendQueueIdle() {
 }
 
 void Framework::close() {
+    // Stop present thread before GPU teardown
+    if (presentThread_) {
+        presentThread_->stop();
+        presentThread_.reset();
+    }
+    frameSlotRing_.reset();
+
     if (running_) { pipeline_->close(); }
     running_ = false;
     // Shutdown Streamline before Vulkan device destruction
@@ -964,6 +1067,31 @@ std::shared_ptr<vk::Semaphore> Framework::acquireSemaphore() {
 
 void Framework::recycleSemaphore(std::shared_ptr<vk::Semaphore> semaphore) {
     recycledImageAcquiredSemaphores_.push(semaphore);
+}
+
+void Framework::enableDecoupledPresent() {
+    if (decoupledPresent_) return;
+    decoupledPresent_ = true;
+    decoupledFrameIndex_ = 0;
+    if (presentThread_) {
+        if (!presentThread_->isRunning()) {
+            presentThread_->start();
+        } else if (presentThread_->isPaused()) {
+            presentThread_->resume();
+        }
+    }
+}
+
+void Framework::disableDecoupledPresent() {
+    if (!decoupledPresent_) return;
+    if (presentThread_ && presentThread_->isRunning() && !presentThread_->isPaused()) {
+        presentThread_->pause();
+    }
+    decoupledPresent_ = false;
+}
+
+bool Framework::isDecoupledPresent() const {
+    return decoupledPresent_;
 }
 
 GarbageCollector::GarbageCollector(std::shared_ptr<Framework> framework) : framework_(framework) {
