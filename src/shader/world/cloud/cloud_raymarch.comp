@@ -18,8 +18,10 @@ layout(set = 0, binding = 8)           uniform sampler2D uWeatherMap;      // 25
 #include "cloud_common.glsl"
 #include "cloud_density.glsl"
 
-// Atmospheric fade distance now driven by push constant pc.atmosphereFadeDist.
-// Default 800 blocks. Controls both march clamp and atmospheric extinction.
+// March clamp: fixed geometric limit to prevent horizontal slab artifacts when
+// camera is inside the cloud layer. Independent of atmospheric fade.
+// Atmospheric fade: exponential extinction driven by pc.atmosphereFadeDist (default 800).
+const float MARCH_CLAMP = 200.0;
 
 // Per-pixel hash for spatial variation (no external buffer needed)
 float hash12(vec2 p) {
@@ -56,7 +58,7 @@ bool intersectCloudSlab(vec3 origin, vec3 dir, float thickness, out float tEnter
         // Horizontal ray — inside layer?
         if (origin.y >= yBot && origin.y <= yTop) {
             tEnter = 0.0;
-            tExit = pc.atmosphereFadeDist;
+            tExit = MARCH_CLAMP;
             return true;
         }
         return false;
@@ -132,8 +134,9 @@ void main() {
         return;
     }
 
-    // Clamp march length — prevents massive step sizes for shallow rays inside cloud layer.
-    tExit = min(tExit, tEnter + pc.atmosphereFadeDist);
+    // Clamp march length — prevents horizontal slab artifacts for shallow rays.
+    // Fixed at 200 blocks (proven value). Atmospheric fade is separate.
+    tExit = min(tExit, tEnter + MARCH_CLAMP);
 
     // Check scene depth — don't render clouds behind solid geometry.
     // Linear depth stores view-space Z: -(viewMat * worldPos).z.
