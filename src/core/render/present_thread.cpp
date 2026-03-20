@@ -1,9 +1,32 @@
 #include "core/render/present_thread.hpp"
 #include "core/render/hdr_composite_pass.hpp"
+#include "core/render/overlay_compositor.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
 #include <iostream>
+#include <fstream>
+#include <filesystem>
+#include <cstdarg>
+
+// ── Diagnostic file logger (writes to same dir as overlay_diag.log) ──
+static std::ofstream sPtDiag;
+static void ptDiag(const char *fmt, ...) {
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    if (sPtDiag.is_open()) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        char ts[32];
+        snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%03d",
+                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+        sPtDiag << ts << " " << buf << std::endl;
+        sPtDiag.flush();
+    }
+}
 
 static std::ostream &ptCout() { return std::cout << "[PresentThread] "; }
 static std::ostream &ptCerr() { return std::cerr << "[PresentThread] "; }
@@ -18,6 +41,12 @@ void PresentThread::init(std::shared_ptr<Framework> framework, FrameSlotRing *ri
     ring_ = ring;
     device_ = framework->device();
     createVulkanResources();
+
+    auto logDir = Renderer::folderPath / "logs";
+    std::filesystem::create_directories(logDir);
+    sPtDiag.open((logDir / "present_thread_diag.log").string(), std::ios::trunc);
+    ptDiag("init complete");
+
     ptCout() << "initialized" << std::endl;
 }
 
@@ -80,8 +109,15 @@ void PresentThread::start() {
 
 void PresentThread::pause() {
     if (!running_ || paused_) return;
+    pauseAcknowledged_ = false;
     paused_ = true;
-    ptCout() << "paused" << std::endl;
+    // Wait until the thread actually enters its pause wait (so it is NOT holding
+    // recreateMtx_ inside a blocking call like AcquireSync or vkWaitForFences).
+    {
+        std::unique_lock<std::mutex> lk(pauseMtx_);
+        pauseCv_.wait(lk, [this] { return pauseAcknowledged_.load() || !running_; });
+    }
+    ptCout() << "paused (acknowledged)" << std::endl;
 }
 
 void PresentThread::resume() {
@@ -95,7 +131,7 @@ void PresentThread::stop() {
     if (!running_) return;
     running_ = false;
     paused_ = false;
-    pauseCv_.notify_one();
+    pauseCv_.notify_all();  // wake both pause() caller and thread's pause wait
     // Wake up waitAndConsume with a dummy publish
     if (ring_) {
         ring_->publish(nullptr, nullptr, VK_NULL_HANDLE, false, 0.0f);
@@ -110,33 +146,66 @@ void PresentThread::onSwapchainRecreate() {
     createVulkanResources();
 }
 
+void PresentThread::setOverlayMode(bool enabled, OverlayCompositor *compositor) {
+    // Store compositor before enabling the flag (reader checks flag first, then deref).
+    // When disabling, clear flag first to prevent use-after-free.
+    if (enabled) {
+        overlayCompositor_.store(compositor);
+        overlayMode_.store(true);
+    } else {
+        overlayMode_.store(false);
+        overlayCompositor_.store(nullptr);
+    }
+    if (enabled) {
+        ptCout() << "overlay mode enabled" << std::endl;
+    } else {
+        ptCout() << "overlay mode disabled" << std::endl;
+    }
+}
+
 void PresentThread::threadFunc() {
     while (running_) {
-        // Check pause -- block until resumed
-        {
+        // Check pause -- signal acknowledgment then block until resumed
+        if (paused_.load()) {
             std::unique_lock<std::mutex> lk(pauseMtx_);
+            pauseAcknowledged_ = true;
+            pauseCv_.notify_all();  // wake pause() caller
             pauseCv_.wait(lk, [this] { return !paused_ || !running_; });
         }
         if (!running_) break;
 
         // Wait for a frame from the render thread
+        ptDiag("waitAndConsume...");
         FrameSlot *slot = ring_->waitAndConsume();
-        if (!slot || !running_) continue;
-        if (!slot->worldImage && !slot->overlayImage) continue; // shutdown sentinel
+        if (!slot || !running_) { ptDiag("  no slot or !running"); continue; }
+        if (!slot->worldImage && !slot->overlayImage) { ptDiag("  shutdown sentinel"); continue; }
 
         auto fw = framework_.lock();
         if (!fw || !fw->isRunning()) continue;
 
         // Lock recreate mutex -- blocks during swapchain recreation
+        ptDiag("locking recreateMtx_...");
         std::unique_lock<std::recursive_mutex> recreateLk(fw->recreateMtx());
-        if (!running_ || paused_) continue; // Recheck after acquiring lock
+        ptDiag("recreateMtx_ locked");
+        if (!running_ || paused_) { ptDiag("  !running||paused after lock"); continue; }
 
         auto swapchain = fw->swapchain();
         if (!swapchain) continue;
 
         // CPU-wait for render GPU to complete (full memory barrier)
         if (slot->renderDoneFence != VK_NULL_HANDLE) {
+            ptDiag("vkWaitForFences...");
             vkWaitForFences(device_->vkDevice(), 1, &slot->renderDoneFence, VK_TRUE, UINT64_MAX);
+            ptDiag("vkWaitForFences done");
+        }
+
+        // Overlay-only mode: D3D11 copy + DXGI present. No Vulkan swapchain interaction.
+        // Game swapchain is owned by Streamline (FG mode).
+        if (overlayMode_.load() && overlayCompositor_.load()) {
+            ptDiag("overlayCompositor->present()...");
+            overlayCompositor_.load()->present();
+            ptDiag("overlayCompositor->present() done");
+            continue;
         }
 
         // Acquire swapchain image

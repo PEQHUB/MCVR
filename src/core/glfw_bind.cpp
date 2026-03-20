@@ -18,4 +18,7 @@ PFN_glfwGetVideoMode p_glfwGetVideoMode = nullptr;
 PFN_glfwGetWindowPos p_glfwGetWindowPos = nullptr;
 PFN_glfwSetWindowPos p_glfwSetWindowPos = nullptr;
 PFN_glfwSetWindowSize p_glfwSetWindowSize = nullptr;
+#ifdef _WIN32
+PFN_glfwGetWin32Window p_glfwGetWin32Window = nullptr;
+#endif
 #endif

@@ -10,6 +10,7 @@
 #include "core/vulkan/all_core_vulkan.hpp"
 
 class Framework;
+class OverlayCompositor;
 
 /// Dedicated thread for presenting frames at display rate.
 /// Active when frame generation is OFF. Paused when FG is ON
@@ -30,6 +31,9 @@ class PresentThread {
     /// Recreate Vulkan resources after swapchain recreation. Must be called while paused.
     void onSwapchainRecreate();
 
+    /// Enable overlay-only mode: PresentThread does D3D11 copy + DXGI present (no Vulkan swapchain).
+    void setOverlayMode(bool enabled, OverlayCompositor *compositor);
+
   private:
     void threadFunc();
     void createVulkanResources();
@@ -42,8 +46,13 @@ class PresentThread {
     std::thread thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> paused_{false};
+    std::atomic<bool> pauseAcknowledged_{false};
     std::mutex pauseMtx_;
     std::condition_variable pauseCv_;
+
+    // Overlay compositor mode (atomic: written by render thread, read by present thread)
+    std::atomic<OverlayCompositor *> overlayCompositor_{nullptr};
+    std::atomic<bool> overlayMode_{false};
 
     // Vulkan resources (used exclusively by present thread)
     std::shared_ptr<vk::CommandPool> commandPool_;

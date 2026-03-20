@@ -139,13 +139,13 @@ void UIModule::initOverlayDrawRenderPass() {
     overlayDrawRenderPass_ = vk::RenderPassBuilder{}
                                  .beginAttachmentDescription()
                                  .defineAttachmentDescription(VkAttachmentDescription{
-                                     // color
+                                     // color — CLEAR to transparent so DLSS-G UI tag has correct alpha
                                      .format = overlayDrawColorImages_[0]->vkFormat(),
                                      .samples = VK_SAMPLE_COUNT_1_BIT,
-                                     .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+                                     .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
                                      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                                     .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-                                     .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
+                                     .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                     .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
 #ifdef USE_AMD
                                      .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                      .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1092,7 +1092,7 @@ void UIModuleContext::switchOverlayDraw() {
             .renderPass = module->overlayDrawRenderPass_,
             .framebuffer = overlayDrawFramebuffer,
             .renderAreaExtent = {overlayDrawColorImage->width(), overlayDrawColorImage->height()},
-            .clearValues = {{.color = {0.1f, 0.1f, 0.1f, 1.0f}}, {.depthStencil = {.depth = 1.0f}}},
+            .clearValues = {{.color = {0.0f, 0.0f, 0.0f, 0.0f}}, {.depthStencil = {.depth = 1.0f}}},
         });
 
         overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1165,7 +1165,7 @@ void UIModuleContext::switchOverlayPost() {
             .renderPass = module->overlayPostRenderPass_,
             .framebuffer = overlayPostFramebuffer,
             .renderAreaExtent = {overlayPostColorImage->width(), overlayPostColorImage->height()},
-            .clearValues = {{.color = {0.1f, 0.1f, 0.1f, 1.0f}}, {.depthStencil = {.depth = 1.0f}}},
+            .clearValues = {{.color = {0.0f, 0.0f, 0.0f, 0.0f}}, {.depthStencil = {.depth = 1.0f}}},
         });
         overlayPostColorImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }

@@ -25,6 +25,7 @@ endif ()
 if (MSVC)
     target_compile_definitions(core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(core PRIVATE /utf-8)
+    target_link_libraries(core PRIVATE d3d11 dxgi dcomp dwmapi)
 endif ()
 
 set_target_properties(core PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF)

@@ -1,6 +1,7 @@
 #include "core/render/modules/world/frame_gen/frame_gen_manager.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/render_framework.hpp"
+#include "core/render/world.hpp"
 #include "core/render/streamline_context.hpp"
 #include "core/render/buffers.hpp"
 #include "common/shared.hpp"
@@ -73,7 +74,13 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
     // Deferred enable: load feature + apply slDLSSGSetOptions on the render thread,
     // not during swapchain callback. Loading the feature hooks the swapchain — must
     // not happen until the world is rendering and sl::Constants are being set.
+    // Gate: skip during loading screen when shouldRender()=false — the SL interposer
+    // would process vkQueuePresentKHR with DLSS-G=ON but zero tagged resources, hanging.
     if (pendingEnable_) {
+        if (!Renderer::instance().world()->shouldRender()) {
+            // Keep pendingEnable_ true — we'll retry once the world starts rendering.
+            return;
+        }
         pendingEnable_ = false;
 
         if (!featureLoaded_) {
@@ -285,8 +292,11 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
         StreamlineContext::tagResources(&hudlessTag, 1);
     }
 
-    // UI Color and Alpha (display resolution — overlay with alpha channel)
-    if (overlayOutput) {
+    // UI Color and Alpha (display resolution — overlay with alpha channel).
+    // Skip when overlay compositor handles UI separately via DComp.
+    // DLSS-G sees a world-only swapchain — no UI to decompose.
+    bool overlayCompositorActive = Renderer::instance().framework()->isOverlayCompositorActive();
+    if (overlayOutput && !overlayCompositorActive) {
         sl::Resource uiRes(sl::ResourceType::eTex2d, nullptr, UINT_MAX);
         fillResource(uiRes, overlayOutput);
 

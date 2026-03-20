@@ -4,6 +4,7 @@
 #include "core/render/buffers.hpp"
 #include "core/render/modules/ui_module.hpp"
 #include "core/render/pipeline.hpp"
+#include "core/render/overlay_compositor.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/textures.hpp"
@@ -109,6 +110,9 @@ static void bind_symbols(DYNLIB_HANDLE h) {
     p_glfwGetWindowPos = reinterpret_cast<PFN_glfwGetWindowPos>(gp("glfwGetWindowPos"));
     p_glfwSetWindowPos = reinterpret_cast<PFN_glfwSetWindowPos>(gp("glfwSetWindowPos"));
     p_glfwSetWindowSize = reinterpret_cast<PFN_glfwSetWindowSize>(gp("glfwSetWindowSize"));
+#ifdef _WIN32
+    p_glfwGetWin32Window = reinterpret_cast<PFN_glfwGetWin32Window>(gp("glfwGetWin32Window"));
+#endif
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_initFolderPath(JNIEnv *env,
@@ -331,4 +335,25 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Rende
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeSetGpuProfileEnabled(
     JNIEnv *, jclass, jboolean enabled) {
     Renderer::gpuProfiler.setEnabled(enabled);
+}
+
+/**
+ * Get overlay compositor diagnostic string (CSV key=value pairs).
+ */
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetOverlayDiag(
+    JNIEnv *env, jclass) {
+    auto fw = Renderer::instance().framework();
+    if (!fw) return env->NewStringUTF("framework=null");
+
+    auto *compositor = fw->overlayCompositor();
+    if (!compositor) {
+        // No compositor object — report why
+        std::string s = "compositor=null,frameGenEnabled=";
+        s += std::to_string(Renderer::options.frameGenEnabled ? 1 : 0);
+        s += ",decoupledPresent=";
+        s += std::to_string(fw->isDecoupledPresent() ? 1 : 0);
+        return env->NewStringUTF(s.c_str());
+    }
+
+    return env->NewStringUTF(compositor->getDiagnostics().c_str());
 }

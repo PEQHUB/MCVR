@@ -44,7 +44,12 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                                                    // SER: Shader Execution Reordering for material coherence
                                                    VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME,
                                                    // Shader clock: per-pixel profiling instrumentation
-                                                   VK_KHR_SHADER_CLOCK_EXTENSION_NAME};
+                                                   VK_KHR_SHADER_CLOCK_EXTENSION_NAME,
+#ifdef _WIN32
+                                                   // External memory: Vulkan-D3D11 texture sharing for DComp overlay
+                                                   VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
+#endif
+    };
 
     std::vector<VkExtensionProperties> dlssExtensions;
     NVSDK_NGX_Result dlssResult =

@@ -539,7 +539,7 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::materialClassMappingBuffer() {
     auto context = framework->safeAcquireCurrentContext();
 
     // Always return a valid buffer — create with GENERIC defaults if never uploaded.
-    // CRITICAL: must be full MaterialClassMapping size (256 entries), not single entry,
+    // CRITICAL: must be full MaterialClassMapping size (MAX_MATERIAL_CLASSES entries), not single entry,
     // because setAndUploadMaterialClassMappingBuffer skips creation if non-null
     // and uploadToBuffer copies min(src, buffer.size_) bytes.
     if (!materialClassMappingBuffer_[context->frameIndex]) {
@@ -549,9 +549,9 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::materialClassMappingBuffer() {
             vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::MaterialClassMapping),
                                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                           VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-        // Zero-init all 256 entries, then set safe defaults
+        // Zero-init all entries, then set safe defaults
         vk::Data::MaterialClassMapping dummy{};
-        for (int i = 0; i < 256; i++) {
+        for (int i = 0; i < vk::Data::MAX_MATERIAL_CLASSES; i++) {
             dummy.entries[i].f0 = {0.04f, 0.04f, 0.04f};
             dummy.entries[i].roughness = 0.5f;
             dummy.entries[i].metallic = 0.0f;
@@ -559,6 +559,10 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::materialClassMappingBuffer() {
             dummy.entries[i].ior = 1.5f;
             dummy.entries[i].subsurface = 0.0f;
             dummy.entries[i].flags = 0; // no override
+            dummy.entries[i].lumMin = 0.0f;
+            dummy.entries[i].lumMax = 1.0f;  // avoid division by zero
+            dummy.entries[i].autoPBRPacked0 = 0;
+            dummy.entries[i].autoPBRPacked1 = 0;
         }
         materialClassMappingBuffer_[context->frameIndex]->uploadToBuffer(&dummy);
     }

@@ -16,10 +16,33 @@
 #include "core/render/radiance_logger.hpp"
 #include "core/render/modules/world/frame_gen/frame_gen_manager.hpp"
 #include "core/render/frame_slot_ring.hpp"
+#include "core/render/overlay_compositor.hpp"
 #include "core/render/present_thread.hpp"
 
 #include <iostream>
 #include <random>
+#include <fstream>
+#include <filesystem>
+#include <cstdarg>
+
+// ── Diagnostic file logger (same pattern as overlay_diag.log) ──
+static std::ofstream sRenderDiag;
+static void renderDiag(const char *fmt, ...) {
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    if (sRenderDiag.is_open()) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        char ts[32];
+        snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%03d",
+                 st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+        sRenderDiag << ts << " " << buf << std::endl;
+        sRenderDiag.flush();
+    }
+}
 
 std::ostream &renderFrameworkCout() {
     return std::cout << "[Render Framework] ";
@@ -66,12 +89,14 @@ void FrameworkContext::fuseFinal() {
 
     auto overlayOutput = pipelineContext->uiModuleContext ? pipelineContext->uiModuleContext->overlayDrawColorImage : nullptr;
 
-    // Always composite world+UI into the swapchain. When DLSS-G is active, the game
-    // presents the full composited frame; Streamline decomposes via tagged
-    // kBufferTypeHUDLessColor + kBufferTypeUIColorAndAlpha for generated frames (§5.0).
-    auto compositeOverlay = overlayOutput;
+    // When overlay compositor is active (FG + DComp), composite world-only to swapchain.
+    // UI goes through the DComp overlay instead of the game swapchain.
+    // nullptr overlay -> HdrCompositePass uses transparentOverlayImage_ fallback.
+    auto overlayCompositor = f->overlayCompositor_.get();
+    bool overlayActive = overlayCompositor && overlayCompositor->isActive();
+    auto compositeOverlay = overlayActive ? nullptr : overlayOutput;
 
-    bool canComposite = f->pipeline_->hdrCompositePass() && compositeOverlay;
+    bool canComposite = f->pipeline_->hdrCompositePass() && (compositeOverlay || overlayActive);
 
     if (hdrOutputActive && canComposite) {
         // ═══════════ HDR path: composite shader ═══════════
@@ -223,6 +248,12 @@ void FrameworkContext::fuseFinal() {
 #endif
         swapchainImage->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
+
+    // Record premultiply pass when overlay compositor is active.
+    // Reads overlay image, writes premultiplied RGBA to shared image for DComp.
+    if (overlayActive && overlayOutput) {
+        overlayCompositor->recordPremultiply(fuseCommandBuffer, overlayOutput, mainQueueIndex);
+    }
 }
 
 Framework::Framework() {}
@@ -268,6 +299,14 @@ void Framework::init(GLFWwindow *window) {
     presentThread_ = std::make_unique<PresentThread>();
     presentThread_->init(shared_from_this(), frameSlotRing_.get());
 
+    // Open render diagnostic log
+    {
+        auto logDir = Renderer::folderPath / "logs";
+        std::filesystem::create_directories(logDir);
+        sRenderDiag.open((logDir / "render_diag.log").string(), std::ios::trunc);
+        renderDiag("init complete, contexts=%u", (unsigned)contexts_.size());
+    }
+
     // Decoupled present is initialized but NOT started by default.
     // The secondary queue may not support graphics/presentation on all GPUs.
     // TODO: Add queue family capability check before enabling.
@@ -283,6 +322,7 @@ Framework::~Framework() {
 void Framework::acquireContext() {
     if (!running_) return;
     g_crashRing.advanceFrame();
+    renderDiag("acquireContext frame=%llu decoupled=%d", g_crashRing.frameCount(), (int)decoupledPresent_);
 
     if (RadianceLogger::isEnabled()) {
         RadianceLogger::log("Frame", "INFO", "frame=%llu begin", g_crashRing.frameCount());
@@ -321,8 +361,10 @@ void Framework::acquireContext() {
         // Standard: acquire swapchain image
         imageAcquiredSemaphore = acquireSemaphore();
         g_crashRing.record("acquireImage");
+        renderDiag("  vkAcquireNextImageKHR...");
         VkResult result = vkAcquireNextImageKHR(device_->vkDevice(), swapchain_->vkSwapchain(), UINT64_MAX,
                                        imageAcquiredSemaphore->vkSemaphore(), VK_NULL_HANDLE, &imageIndex);
+        renderDiag("  vkAcquireNextImageKHR -> %d idx=%u", result, imageIndex);
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             recycleSemaphore(imageAcquiredSemaphore);
             recreate();
@@ -403,6 +445,9 @@ void Framework::acquireContext() {
 
 void Framework::submitCommand() {
     if (!running_) return;
+    renderDiag("submitCommand shouldRender=%d overlayActive=%d",
+               (int)Renderer::instance().world()->shouldRender(),
+               (int)(overlayCompositor_ && overlayCompositor_->isActive()));
 
     // PCL: simulation phase ends, render phase begins
 #ifdef _WIN32
@@ -496,8 +541,10 @@ void Framework::submitCommand() {
         crashExit(submitResult, "vkQueueSubmit failed");
     }
 
-    // Publish to FrameSlotRing for PresentThread (decoupled mode only)
-    if (decoupledPresent_ && frameSlotRing_) {
+    // Publish to FrameSlotRing for PresentThread (decoupled or overlay compositor mode)
+    bool shouldPublish = decoupledPresent_ ||
+                         (overlayCompositor_ && overlayCompositor_->isActive());
+    if (shouldPublish && frameSlotRing_) {
         auto worldOut = pipelineContext->worldPipelineContext
                           ? pipelineContext->worldPipelineContext->outputImage : nullptr;
         auto overlayOut = pipelineContext->uiModuleContext
@@ -507,11 +554,14 @@ void Framework::submitCommand() {
             worldOut, overlayOut,
             currentContext_->commandFinishedFence->vkFence(),
             hdr, Renderer::options.hdrUiBrightnessNits);
+        renderDiag("  published to ring (world=%p overlay=%p)", worldOut.get(), overlayOut.get());
     }
+    renderDiag("submitCommand done");
 }
 
 void Framework::present() {
     if (!running_) return;
+    renderDiag("present decoupled=%d needRecreate=%d", (int)decoupledPresent_, (int)Renderer::options.needRecreate);
 
     // Decoupled mode: PresentThread handles presenting.
     // Still check for recreation triggers.
@@ -536,13 +586,16 @@ void Framework::present() {
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentStart);
 #endif
     g_crashRing.record("present");
+    renderDiag("  vkQueuePresentKHR...");
     VkResult result = vkQueuePresentKHR(device_->mainVkQueue(), &presentInfo);
+    renderDiag("  vkQueuePresentKHR -> %d", result);
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentEnd);
 #endif
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || vk::Window::framebufferResized ||
         Renderer::options.needRecreate || pipeline_->needRecreate) {
+        renderDiag("  triggering recreate (result=%d needRecreate=%d)", result, (int)Renderer::options.needRecreate);
         recreate();
         return;
     } else if (result != VK_SUCCESS) {
@@ -553,17 +606,28 @@ void Framework::present() {
 
 void Framework::recreate() {
     if (!running_) return;
+    renderDiag("recreate() START fgEnabled=%d ptRunning=%d ptPaused=%d",
+               (int)Renderer::options.frameGenEnabled,
+               presentThread_ ? (int)presentThread_->isRunning() : -1,
+               presentThread_ ? (int)presentThread_->isPaused() : -1);
 
+    // Pause present thread BEFORE locking recreateMtx_ — pause() is synchronous and
+    // waits for the thread to acknowledge, but the thread may be holding recreateMtx_
+    // inside its loop body. Pausing first ensures the thread releases recreateMtx_
+    // and enters its pause wait before we try to acquire the lock.
+    if (presentThread_ && presentThread_->isRunning() && !presentThread_->isPaused()) {
+        renderDiag("  pausing PresentThread...");
+        presentThread_->pause();
+        renderDiag("  PresentThread paused");
+    }
+
+    renderDiag("  locking recreateMtx_...");
     std::unique_lock<std::recursive_mutex> lck(Renderer::instance().framework()->recreateMtx());
+    renderDiag("  recreateMtx_ locked");
 
     Renderer::options.needRecreate = false;
     vk::Window::framebufferResized = false;
     pipeline_->needRecreate = false;
-
-    // Pause present thread during swapchain recreation
-    if (presentThread_ && presentThread_->isRunning() && !presentThread_->isPaused()) {
-        presentThread_->pause();
-    }
 
     waitRenderQueueIdle();
     waitBackendQueueIdle();
@@ -622,20 +686,57 @@ void Framework::recreate() {
         frameSlotRing_->reset();
     }
 
-    // Presentation strategy: FG uses standard (Streamline interposer),
-    // non-FG uses decoupled (PresentThread at display rate).
-    if (Renderer::options.frameGenEnabled) {
-        // FG needs standard present — Streamline intercepts vkQueuePresentKHR
-        if (decoupledPresent_) {
-            disableDecoupledPresent();
+    // Overlay compositor lifecycle: create when FG enabled, destroy when disabled.
+    // When active, PresentThread runs in overlay-only mode (D3D11 copy + DXGI present).
+    bool wantOverlay = Renderer::options.frameGenEnabled;
+    renderDiag("  overlay: want=%d exists=%d active=%d", (int)wantOverlay,
+               (int)(overlayCompositor_ != nullptr),
+               (int)(overlayCompositor_ && overlayCompositor_->isActive()));
+    renderFrameworkCout() << "recreate: frameGenEnabled=" << wantOverlay
+                         << " overlayCompositor=" << (overlayCompositor_ ? "exists" : "null")
+                         << " active=" << (overlayCompositor_ && overlayCompositor_->isActive() ? "true" : "false")
+                         << std::endl;
+    if (wantOverlay && !overlayCompositor_) {
+        renderDiag("  creating overlay compositor...");
+        renderFrameworkCout() << "creating overlay compositor..." << std::endl;
+        overlayCompositor_ = std::make_unique<OverlayCompositor>();
+        if (!overlayCompositor_->init(shared_from_this())) {
+            renderFrameworkCerr() << "overlay compositor init failed, falling back" << std::endl;
+            overlayCompositor_.reset();
+            renderDiag("  overlay compositor init FAILED");
+        } else {
+            renderFrameworkCout() << "overlay compositor init succeeded" << std::endl;
+            renderDiag("  overlay compositor init SUCCESS");
         }
-    } else {
-        // No FG — enable decoupled present for display-rate UI
-        if (!decoupledPresent_) {
-            enableDecoupledPresent();
-        } else if (presentThread_ && presentThread_->isPaused()) {
-            presentThread_->resume();
+    } else if (wantOverlay && overlayCompositor_ && overlayCompositor_->isActive()) {
+        overlayCompositor_->resize(swapchain_->vkExtent().width, swapchain_->vkExtent().height);
+    } else if (!wantOverlay && overlayCompositor_) {
+        overlayCompositor_->destroy();
+        overlayCompositor_.reset();
+    }
+
+    // PresentThread mode: overlay compositor uses it for DXGI present
+    if (overlayCompositor_ && overlayCompositor_->isActive()) {
+        if (presentThread_) {
+            renderDiag("  setting PresentThread overlay mode, starting/resuming...");
+            presentThread_->setOverlayMode(true, overlayCompositor_.get());
+            if (!presentThread_->isRunning()) {
+                presentThread_->start();
+                renderDiag("  PresentThread started");
+            } else if (presentThread_->isPaused()) {
+                presentThread_->resume();
+                renderDiag("  PresentThread resumed");
+            }
         }
+    } else if (presentThread_ && !decoupledPresent_) {
+        presentThread_->setOverlayMode(false, nullptr);
+    }
+    renderDiag("recreate() END");
+
+    // Disable decoupled present during recreate. Decoupled present (Phase 2a)
+    // will be enabled explicitly via JNI once the overlay window is set up.
+    if (decoupledPresent_) {
+        disableDecoupledPresent();
     }
 
     Renderer::instance().textures()->bindAllTextures();
@@ -654,6 +755,9 @@ void Framework::waitBackendQueueIdle() {
 }
 
 void Framework::close() {
+    // Destroy overlay compositor before GPU teardown
+    overlayCompositor_.reset();
+
     // Stop present thread before GPU teardown
     if (presentThread_) {
         presentThread_->stop();
@@ -1092,6 +1196,14 @@ void Framework::disableDecoupledPresent() {
 
 bool Framework::isDecoupledPresent() const {
     return decoupledPresent_;
+}
+
+bool Framework::isOverlayCompositorActive() const {
+    return overlayCompositor_ && overlayCompositor_->isActive();
+}
+
+OverlayCompositor *Framework::overlayCompositor() const {
+    return overlayCompositor_.get();
 }
 
 GarbageCollector::GarbageCollector(std::shared_ptr<Framework> framework) : framework_(framework) {
