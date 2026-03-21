@@ -104,6 +104,15 @@ class UIRenderContext {
     bool isPaused() const { return paused_.load(std::memory_order_relaxed); }
     bool isPauseRequested() const { return pauseRequested_.load(std::memory_order_acquire); }
 
+    /// Pause/stop checkpoint — called from Java UIThread at top of every loop iteration.
+    /// Returns true to continue, false if stop was requested (UIThread should exit frame loop).
+    bool checkPause();
+
+    /// Request UIThread to stop and exit the frame loop. Non-blocking — sets a flag.
+    /// After calling, poll isLoopActive() to wait for UIThread to exit C++ code.
+    void requestStop();
+    bool isStopRequested() const { return stopRequested_.load(std::memory_order_acquire); }
+
     /// Rebuild images/framebuffers after swapchain recreation. Must be called while paused.
     void onSwapchainRecreate();
 
@@ -113,6 +122,7 @@ class UIRenderContext {
     /// Whether a frame is currently in-flight (between beginFrame and submitAndPresent).
     bool isFrameActive() const { return frameActive_; }
 
+    bool isLoopActive() const { return loopActive_.load(std::memory_order_acquire); }
     uint32_t width() const { return width_; }
     uint32_t height() const { return height_; }
 
@@ -194,6 +204,7 @@ class UIRenderContext {
 
     // Tracks whether any thread is driving the beginFrame/endFrame/submit loop
     std::atomic<bool> loopActive_{false};
+    std::atomic<bool> stopRequested_{false};
 
     // Pause protocol
     std::atomic<bool> paused_{false};
@@ -201,6 +212,13 @@ class UIRenderContext {
     std::atomic<bool> pauseAcknowledged_{false};
     std::mutex pauseMtx_;
     std::condition_variable pauseCv_;
+
+    // Phase tracker — atomic int updated at each step of the frame loop.
+    // Read by pause() on timeout to identify where UIThread is stuck.
+    // 0=idle, 1=checkPause, 2=beginFrame:pre-fence, 3=beginFrame:in-fence,
+    // 4=beginFrame:post-fence, 5=endFrame, 6=submit:pre-submit, 7=submit:in-fence,
+    // 8=submit:post-fence, 9=submit:present, 10=submit:waitDisplay, 11=submit:done
+    std::atomic<int> phase_{0};
 
     // Diagnostics
     std::ofstream diagFile_;

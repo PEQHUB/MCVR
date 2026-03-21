@@ -655,13 +655,23 @@ void Framework::recreate() {
         renderDiag("  PresentThread paused");
     }
 
-    // Pause UI render context (if UI thread is driving it).
-    // pause() blocks until UIThread acknowledges — may take >3s if UIThread
-    // is in a long Java frame, but will always succeed eventually.
-    if (uiRenderContext_ && !uiRenderContext_->isPaused()) {
-        renderDiag("  pausing UIRenderContext...");
-        uiRenderContext_->pause();
-        renderDiag("  UIRenderContext paused");
+    // Stop UI thread — signal it to exit its frame loop and destroy the context.
+    // UIThread will recreate it on-demand after recreate() completes.
+    // This is simpler and safer than pause/resume: no post-resume state issues,
+    // no driver corruption from concurrent Vulkan access during the transition.
+    if (uiRenderContext_) {
+        renderDiag("  requesting UIThread stop...");
+        uiRenderContext_->requestStop();
+        // Wait for UIThread to exit C++ code (loopActive becomes false)
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (uiRenderContext_ && uiRenderContext_->isLoopActive() &&
+               std::chrono::steady_clock::now() < deadline) {
+            Sleep(1);
+        }
+        // Safe to destroy — UIThread is in Java land, won't call back into C++
+        uiRenderContextActive_.store(false, std::memory_order_release);
+        uiRenderContext_.reset();
+        renderDiag("  UIRenderContext destroyed (stop/restart)");
     }
 
     renderDiag("  locking recreateMtx_...");
@@ -675,9 +685,9 @@ void Framework::recreate() {
     GLFW_GetFramebufferSize(window_->window(), &width, &height);
     renderDiag("  framebufferSize: %dx%d", width, height);
     if (width == 0 || height == 0) {
-        // Window minimized. UIRenderContext stays paused — it was paused at line ~658.
-        // Block render thread until window is restored. UIThread is safely blocked
-        // in beginFrame()'s pause wait and will resume when recreate() completes.
+        // Window minimized. UIRenderContext already destroyed above.
+        // Block render thread until window is restored. UIThread is in Java
+        // waiting to recreate the context (which requires recreateMtx_).
         renderDiag("  waiting for non-zero framebuffer...");
         while (width == 0 || height == 0) {
             GLFW_PollEvents();
@@ -788,28 +798,14 @@ void Framework::recreate() {
         overlayCompositor_.reset();
     }
 
-    // UIRenderContext lifecycle: NOT auto-created in recreate() — created on-demand
-    // by Java UIThread via JNI (createUIRenderContext). Only rebuild here if it already exists.
-    if (uiRenderContext_) {
-        if (wantOverlay && overlayCompositor_ && overlayCompositor_->isActive()) {
-            uiRenderContext_->onSwapchainRecreate();
-            uiRenderContext_->setOverlayCompositor(overlayCompositor_.get());
-            renderDiag("  UIRenderContext recreated for new swapchain");
-        } else {
-            renderDiag("  destroying UIRenderContext (FG disabled or overlay inactive)");
-            uiRenderContextActive_.store(false, std::memory_order_release);
-            uiRenderContext_.reset();
-        }
-    }
+    // UIRenderContext was destroyed before swapchain recreate (stop/restart pattern).
+    // Java UIThread will create a fresh one on-demand via createUIRenderContext()
+    // once it sees the overlay compositor is ready.
 
     // Overlay present is handled on the render thread (submitCommand), not PresentThread.
     // PresentThread is only for future decoupled present mode.
     if (presentThread_ && !decoupledPresent_) {
         presentThread_->setOverlayMode(false, nullptr);
-    }
-    // Resume UIRenderContext if it was paused for recreate
-    if (uiRenderContext_ && uiRenderContext_->isPaused()) {
-        uiRenderContext_->resume();
     }
 
     minimizedDefer_ = false;

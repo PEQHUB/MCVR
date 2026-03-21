@@ -249,6 +249,15 @@ void UIRenderContext::destroyResources() {
 // ── Frame lifecycle ──────────────────────────────────────────────────────
 
 void UIRenderContext::beginFrame() {
+    phase_.store(2, std::memory_order_relaxed);
+
+    // Stop check — exit immediately without touching Vulkan
+    if (stopRequested_.load(std::memory_order_acquire)) {
+        loopActive_.store(false, std::memory_order_release);
+        phase_.store(0, std::memory_order_relaxed);
+        return;
+    }
+
     // Check pause — if requested, acknowledge and wait for resume
     if (pauseRequested_.load(std::memory_order_acquire)) {
         std::unique_lock<std::mutex> lk(pauseMtx_);
@@ -264,8 +273,10 @@ void UIRenderContext::beginFrame() {
 
     // Wait for this buffer's previous submission to complete (only if actually submitted)
     if (!fenceSignaled_[idx]) {
+        phase_.store(3, std::memory_order_relaxed);
         vkWaitForFences(device_->vkDevice(), 1, &fences_[idx], VK_TRUE, UINT64_MAX);
     }
+    phase_.store(4, std::memory_order_relaxed);
     // Don't reset fence here — reset immediately before vkQueueSubmit in submitAndPresent
     // to guarantee every reset fence is submitted (prevents hang on pause path).
 
@@ -334,7 +345,8 @@ void UIRenderContext::beginFrame() {
 }
 
 void UIRenderContext::endFrame() {
-    if (!frameActive_) return;
+    phase_.store(5, std::memory_order_relaxed);
+    if (!frameActive_ || stopRequested_.load(std::memory_order_acquire)) return;
 
     int idx = currentIndex_;
 
@@ -362,7 +374,18 @@ void UIRenderContext::endFrame() {
 }
 
 void UIRenderContext::submitAndPresent() {
+    phase_.store(6, std::memory_order_relaxed);
     if (!frameActive_) return;
+
+    // Stop check — abandon frame, clean up in-flight state
+    if (stopRequested_.load(std::memory_order_acquire)) {
+        fenceSignaled_[currentIndex_] = true;
+        frameActive_ = false;
+        currentIndex_ = (currentIndex_ + 1) % kBufferCount;
+        loopActive_.store(false, std::memory_order_release);
+        phase_.store(0, std::memory_order_relaxed);
+        return;
+    }
 
     // Mid-frame pause check — if pause was requested while we were in Java-land,
     // acknowledge it now before submitting GPU work.
@@ -413,6 +436,7 @@ void UIRenderContext::submitAndPresent() {
     }
 
     // Wait for GPU to finish
+    phase_.store(7, std::memory_order_relaxed);
     VkResult waitResult = vkWaitForFences(device_->vkDevice(), 1, &fences_[idx], VK_TRUE, 100000000ULL); // 100ms timeout
     fenceSignaled_[idx] = (waitResult == VK_SUCCESS || waitResult == VK_TIMEOUT);
     if (waitResult == VK_ERROR_DEVICE_LOST) {
@@ -423,11 +447,39 @@ void UIRenderContext::submitAndPresent() {
         return;
     }
 
-    // Present via DComp overlay + pace to display rate
+    phase_.store(8, std::memory_order_relaxed);
+
+    // Post-fence checkpoint — stop or pause requested while blocked in fence wait.
+    if (stopRequested_.load(std::memory_order_acquire)) {
+        frameActive_ = false;
+        currentIndex_ = (currentIndex_ + 1) % kBufferCount;
+        loopActive_.store(false, std::memory_order_release);
+        phase_.store(0, std::memory_order_relaxed);
+        return;
+    }
+    if (pauseRequested_.load(std::memory_order_acquire)) {
+        frameActive_ = false;
+        currentIndex_ = (currentIndex_ + 1) % kBufferCount;
+        diagLog("submitAndPresent: skipped present — pause requested after fence wait");
+        std::unique_lock<std::mutex> lk(pauseMtx_);
+        pauseAcknowledged_ = true;
+        pauseCv_.notify_all();
+        pauseCv_.wait(lk, [this] { return !pauseRequested_.load(std::memory_order_acquire); });
+        return;
+    }
+
+    // Present via DComp overlay + interruptible display pacing.
+    // Break waitForDisplayReady into short intervals so pause requests
+    // during alt-tab (when DXGI may stall) are acknowledged quickly.
     auto *compositor = overlayCompositor_.load(std::memory_order_acquire);
     if (compositor && compositor->isActive()) {
+        phase_.store(9, std::memory_order_relaxed);
         compositor->present();
-        compositor->waitForDisplayReady(8);
+        phase_.store(10, std::memory_order_relaxed);
+        for (int i = 0; i < 4; i++) {
+            if (pauseRequested_.load(std::memory_order_acquire)) break;
+            compositor->waitForDisplayReady(2);
+        }
     } else {
         Sleep(8);
     }
@@ -437,10 +489,12 @@ void UIRenderContext::submitAndPresent() {
         diagLog("first frame presented");
     }
 
+    phase_.store(11, std::memory_order_relaxed);
     frameActive_ = false;
 
     // Advance to next buffer
     currentIndex_ = (currentIndex_ + 1) % kBufferCount;
+    phase_.store(0, std::memory_order_relaxed);
 }
 
 // ── Draw commands ────────────────────────────────────────────────────────
@@ -683,16 +737,43 @@ void UIRenderContext::pause() {
     if (!acked) {
         // UIThread is alive but busy. Wait indefinitely — proceeding without
         // acknowledgment would destroy resources UIThread is using (use-after-free).
-        // The Java isPauseRequested() check ensures UIThread responds within one
-        // frame cycle (~30ms). If it takes longer, it's a lag spike, not a deadlock.
-        diagLog("pause timeout (3s) — UIThread busy, waiting indefinitely...");
-        uiCtxCout() << "pause timeout — waiting for UIThread..." << std::endl;
+        // Java calls checkPause() at top of every loop iteration, and C++ has
+        // checkpoints in submitAndPresent() after each blocking op.
+        int stuckPhase = phase_.load(std::memory_order_relaxed);
+        diagLog("pause timeout (3s) — UIThread stuck at phase=%d, waiting indefinitely...", stuckPhase);
+        uiCtxCout() << "pause timeout — UIThread phase=" << stuckPhase << ", waiting..." << std::endl;
         pauseCv_.wait(lk, [this] { return pauseAcknowledged_.load(); });
         diagLog("pause acknowledged (after extended wait)");
     }
 
     paused_ = true;
     uiCtxCout() << "paused (acknowledged)" << std::endl;
+}
+
+bool UIRenderContext::checkPause() {
+    phase_.store(1, std::memory_order_relaxed);
+
+    // Stop check — signal UIThread to exit frame loop entirely.
+    // Sets loopActive=false so render thread knows we're out of C++ code.
+    if (stopRequested_.load(std::memory_order_acquire)) {
+        loopActive_.store(false, std::memory_order_release);
+        phase_.store(0, std::memory_order_relaxed);
+        return false;  // caller should break out of frame loop
+    }
+
+    // Pause check — block until resume (used by non-recreate pause scenarios)
+    if (pauseRequested_.load(std::memory_order_acquire)) {
+        std::unique_lock<std::mutex> lk(pauseMtx_);
+        pauseAcknowledged_ = true;
+        pauseCv_.notify_all();
+        pauseCv_.wait(lk, [this] { return !pauseRequested_.load(std::memory_order_acquire); });
+    }
+    return true;
+}
+
+void UIRenderContext::requestStop() {
+    stopRequested_.store(true, std::memory_order_release);
+    diagLog("requestStop: signaled");
 }
 
 void UIRenderContext::resume() {

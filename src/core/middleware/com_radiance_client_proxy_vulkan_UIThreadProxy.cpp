@@ -70,6 +70,13 @@ Java_com_radiance_client_proxy_vulkan_UIThreadProxy_isPauseRequested(JNIEnv *, j
     return ctx->isPauseRequested() ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_radiance_client_proxy_vulkan_UIThreadProxy_checkPause(JNIEnv *, jclass) {
+    auto *ctx = getUICtx();
+    if (!ctx) return JNI_TRUE;  // no context — not a stop signal, just inactive
+    return ctx->checkPause() ? JNI_TRUE : JNI_FALSE;
+}
+
 // ── Draw commands ────────────────────────────────────────────────────────
 
 extern "C" JNIEXPORT void JNICALL
