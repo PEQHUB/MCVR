@@ -7,7 +7,6 @@
 
 #include "core/render/renderer.hpp"
 #include "core/render/streamline_context.hpp"
-#include "core/render/modules/world/frame_gen/frame_gen_manager.hpp"
 
 #include <algorithm>
 #include <iostream>
@@ -265,14 +264,9 @@ void vk::Swapchain::reconstruct() {
     createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     createInfo.presentMode = presentMode_;
     createInfo.clipped = VK_TRUE;
-    // When DLSS-G is loaded, Streamline's vkCreateSwapchainKHR hook tracks swapchains
-    // and enforces a single-viewport rule. If oldSwapchain is still registered when
-    // creating a new one, Streamline rejects it: "only one swap-chain can be used".
-    // Fix: destroy old swapchain FIRST so Streamline deregisters it before the new create.
-    if (oldSwapchain != VK_NULL_HANDLE && FrameGenManager::isFeatureLoaded()) {
-        vkDestroySwapchainKHR(device_->vkDevice(), oldSwapchain, nullptr);
-        oldSwapchain = VK_NULL_HANDLE;
-    }
+    // Normal Vulkan swapchain transition: pass old swapchain for atomic replacement.
+    // DLSS-G feature is always unloaded in beforeSwapchainRecreate(), so Streamline's
+    // tracker is clean — no "only one swap-chain" rejection.
     createInfo.oldSwapchain = oldSwapchain;
 
     VkResult swapResult = vkCreateSwapchainKHR(device_->vkDevice(), &createInfo, nullptr, &swapchain_);
