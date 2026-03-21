@@ -16,7 +16,6 @@ struct UIModuleContext;
 class FrameSlotRing;
 class PresentThread;
 class OverlayCompositor;
-class UIRenderContext;
 
 class GarbageCollector : public SharedObject<GarbageCollector> {
   public:
@@ -86,13 +85,6 @@ class Framework : public SharedObject<Framework> {
 
     bool isOverlayCompositorActive() const;
     OverlayCompositor *overlayCompositor() const;
-
-    UIRenderContext *uiRenderContext() const;
-    bool isDecoupledUIActive() const;
-    bool isUIThreadRenderingOverlay() const;  // True only after UIThread's first present
-    bool isUIThreadStopSignaled() const { return uiThreadStopSignaled_.load(std::memory_order_acquire); }
-    bool createUIRenderContext();  // On-demand creation from Java UIThread
-    void destroyUIRenderContext();
 
     void takeScreenshot(bool withUI, int width, int height, int channel, void *dstPointer);
     VkFormat takeScreenshotRawHdrPacked(bool withUI, int width, int height, void *dstPointer, int dstByteSize);
@@ -164,10 +156,6 @@ class Framework : public SharedObject<Framework> {
     // DirectComposition overlay compositor (FG UI desyncing)
     std::unique_ptr<OverlayCompositor> overlayCompositor_;
 
-    // Decoupled UI rendering context (UI thread at display rate)
-    std::unique_ptr<UIRenderContext> uiRenderContext_;
-    std::atomic<bool> uiRenderContextActive_{false};  // atomic gate for cross-thread checks
-    std::atomic<bool> uiThreadStopSignaled_{false};   // true between requestStop and UIThread restart
     bool minimizedDefer_ = false;
 
     std::shared_ptr<GarbageCollector> gc_;

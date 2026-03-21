@@ -605,7 +605,7 @@ bool StreamlineContext::setDlssGOptions(sl::DLSSGMode mode, uint32_t numFramesTo
     sl::DLSSGOptions options{};
     options.mode = mode;
     options.numFramesToGenerate = numFramesToGenerate;
-    options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff | sl::DLSSGFlags::eEnableFullscreenMenuDetection;
+    options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
 
     sl::Result result = pfnDLSSGSetOptions(sl::ViewportHandle(0), options);
     if (result != sl::Result::eOk) {

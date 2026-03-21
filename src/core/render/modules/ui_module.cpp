@@ -1034,8 +1034,6 @@ void UIModuleContext::setOverlayClearStencil(int stencil) {
 }
 
 void UIModuleContext::switchOverlayDraw() {
-    if (overlaySuppressed) return;
-
     auto context = frameworkContext.lock();
     if (!context) return;
     auto framework = context->framework.lock();
@@ -1108,8 +1106,6 @@ void UIModuleContext::switchOverlayDraw() {
 }
 
 void UIModuleContext::switchOverlayPost() {
-    if (overlaySuppressed) return;
-
     auto context = frameworkContext.lock();
     if (!context) return;
     auto framework = context->framework.lock();
@@ -1180,8 +1176,6 @@ void UIModuleContext::switchOverlayPost() {
 }
 
 void UIModuleContext::clearOverlayEntireColorAttachment() {
-    if (overlaySuppressed) return;
-
     auto context = frameworkContext.lock();
     if (!context) return;
     auto framework = context->framework.lock();
@@ -1217,8 +1211,6 @@ void UIModuleContext::clearOverlayEntireColorAttachment() {
 }
 
 void UIModuleContext::clearOverlayEntireDepthStencilAttachment(int aspectMask) {
-    if (overlaySuppressed) return;
-
     auto context = frameworkContext.lock();
     if (!context) return;
     auto framework = context->framework.lock();
@@ -1245,8 +1237,6 @@ void UIModuleContext::drawIndexed(std::shared_ptr<vk::DeviceLocalBuffer> vertexB
                                   OverlayDrawPipelineType pipelineType,
                                   uint32_t indexCount,
                                   VkIndexType indexType) {
-    if (overlaySuppressed) return;
-
     auto context = frameworkContext.lock();
     if (!context) return;
     auto framework = context->framework.lock();
@@ -1270,8 +1260,6 @@ void UIModuleContext::drawIndexed(std::shared_ptr<vk::DeviceLocalBuffer> vertexB
 }
 
 void UIModuleContext::postBlur(int times) {
-    if (overlaySuppressed) return;
-
     auto context = frameworkContext.lock();
     if (!context) return;
     auto framework = context->framework.lock();
@@ -1399,9 +1387,6 @@ void UIModuleContext::begin(std::shared_ptr<UIModuleContext> lastContext) {
     auto framework = context->framework.lock();
     if (!framework || !framework->isRunning()) return;
 
-    // Render thread always draws UI — DLSS-G handles it via kBufferTypeUIColorAndAlpha
-    // tagging (no motion compensation on UI region). UIThread/DComp path is disabled.
-    overlaySuppressed = false;
     overlayMode = NONE;
 
     context->overlayCommandBuffer->bindDescriptorTable(overlayDescriptorTable, VK_PIPELINE_BIND_POINT_GRAPHICS);
@@ -1413,8 +1398,6 @@ void UIModuleContext::begin(std::shared_ptr<UIModuleContext> lastContext) {
 }
 
 void UIModuleContext::end() {
-    if (overlaySuppressed) return;
-
     auto context = frameworkContext.lock();
     if (!context) return;
     auto framework = context->framework.lock();

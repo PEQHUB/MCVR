@@ -18,7 +18,6 @@
 #include "core/render/frame_slot_ring.hpp"
 #include "core/render/overlay_compositor.hpp"
 #include "core/render/present_thread.hpp"
-#include "core/render/ui_render_context.hpp"
 
 #include <iostream>
 #include <random>
@@ -252,10 +251,7 @@ void FrameworkContext::fuseFinal() {
     }
 
     // Record premultiply pass when overlay compositor is active.
-    // Skip when UIRenderContext exists — it exclusively owns the compositor for premultiply.
-    // (Draw suppression uses isUIThreadRenderingOverlay; compositor ownership uses isDecoupledUIActive.)
-    bool uiThreadOwnsCompositor = f->isDecoupledUIActive();
-    if (overlayActive && overlayOutput && !uiThreadOwnsCompositor) {
+    if (overlayActive && overlayOutput) {
         overlayCompositor->recordPremultiply(fuseCommandBuffer, overlayOutput, mainQueueIndex);
     }
 }
@@ -559,11 +555,9 @@ void Framework::submitCommand() {
     }
 
     // Overlay present on render thread: wait for GPU, then D3D11 copy + DXGI present.
-    // Skip when UIRenderContext exists — it exclusively owns the compositor for present.
     bool overlayActive = FrameGenManager::isActive() &&
                          overlayCompositor_ && overlayCompositor_->isActive();
-    bool uiThreadOwnsCompositor = isDecoupledUIActive();
-    if (overlayActive && !uiThreadOwnsCompositor) {
+    if (overlayActive) {
         VkResult waitResult = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
         if (waitResult != VK_SUCCESS) {
             waitDeviceIdle();
@@ -655,30 +649,6 @@ void Framework::recreate() {
         renderDiag("  PresentThread paused");
     }
 
-    // Stop UI thread — signal it to exit its frame loop and destroy the context.
-    // UIThread will recreate it on-demand after recreate() completes.
-    // This is simpler and safer than pause/resume: no post-resume state issues,
-    // no driver corruption from concurrent Vulkan access during the transition.
-    if (uiRenderContext_) {
-        renderDiag("  requesting UIThread stop...");
-        uiThreadStopSignaled_.store(true, std::memory_order_release);
-        uiRenderContext_->requestStop();
-        // Wait for UIThread to exit C++ code (loopActive becomes false)
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-        while (uiRenderContext_ && uiRenderContext_->isLoopActive() &&
-               std::chrono::steady_clock::now() < deadline) {
-            Sleep(1);
-        }
-        if (uiRenderContext_ && uiRenderContext_->isLoopActive()) {
-            renderDiag("  UIThread stop TIMEOUT (3s) — phase=%d, forcing destroy",
-                        uiRenderContext_->phase());
-        }
-        // Safe to destroy — UIThread is in Java land (or timed out, force-destroy)
-        uiRenderContextActive_.store(false, std::memory_order_release);
-        uiRenderContext_.reset();
-        renderDiag("  UIRenderContext destroyed (stop/restart)");
-    }
-
     renderDiag("  locking recreateMtx_...");
     std::unique_lock<std::recursive_mutex> lck(Renderer::instance().framework()->recreateMtx());
     renderDiag("  recreateMtx_ locked");
@@ -690,9 +660,7 @@ void Framework::recreate() {
     GLFW_GetFramebufferSize(window_->window(), &width, &height);
     renderDiag("  framebufferSize: %dx%d", width, height);
     if (width == 0 || height == 0) {
-        // Window minimized. UIRenderContext already destroyed above.
-        // Block render thread until window is restored. UIThread is in Java
-        // waiting to recreate the context (which requires recreateMtx_).
+        // Window minimized — block render thread until window is restored.
         renderDiag("  waiting for non-zero framebuffer...");
         while (width == 0 || height == 0) {
             GLFW_PollEvents();
@@ -762,9 +730,11 @@ void Framework::recreate() {
     }
 
     // Overlay compositor lifecycle: create when FG enabled, destroy when disabled.
-    // Must exist before FG activates (tagFrame deferred activation needs the overlay ready).
-    // Overlay idles when FG is auto-paused (menu/loading) — not destroyed.
-    bool wantOverlay = Renderer::options.frameGenEnabled;
+    // DComp overlay is NOT used with DLSS-G — UI goes through kBufferTypeUIColorAndAlpha
+    // tagging in the swapchain (NVIDIA official path). Overlay compositor forces composed
+    // flip which breaks DLSS-G frame pacing. Only create overlay when FG is OFF and
+    // decoupled UI at display rate is desired (future MPO path).
+    bool wantOverlay = false;  // disabled — DLSS-G uses render-thread UI tagging
     renderDiag("  overlay: want=%d exists=%d compositorActive=%d", (int)wantOverlay,
                (int)(overlayCompositor_ != nullptr),
                (int)(overlayCompositor_ && overlayCompositor_->isActive()));
@@ -803,10 +773,6 @@ void Framework::recreate() {
         overlayCompositor_.reset();
     }
 
-    // UIRenderContext was destroyed before swapchain recreate (stop/restart pattern).
-    // Java UIThread will create a fresh one on-demand via createUIRenderContext()
-    // once it sees the overlay compositor is ready.
-
     // Overlay present is handled on the render thread (submitCommand), not PresentThread.
     // PresentThread is only for future decoupled present mode.
     if (presentThread_ && !decoupledPresent_) {
@@ -838,9 +804,6 @@ void Framework::waitBackendQueueIdle() {
 }
 
 void Framework::close() {
-    // Destroy UI render context before overlay compositor
-    uiRenderContext_.reset();
-
     // Destroy overlay compositor before GPU teardown
     overlayCompositor_.reset();
 
@@ -1288,51 +1251,6 @@ bool Framework::isOverlayCompositorActive() const {
 
 OverlayCompositor *Framework::overlayCompositor() const {
     return overlayCompositor_.get();
-}
-
-UIRenderContext *Framework::uiRenderContext() const {
-    return uiRenderContext_.get();
-}
-
-bool Framework::isDecoupledUIActive() const {
-    return uiRenderContextActive_.load(std::memory_order_acquire);
-}
-
-bool Framework::isUIThreadRenderingOverlay() const {
-    return uiRenderContextActive_.load(std::memory_order_acquire) &&
-           uiRenderContext_ && uiRenderContext_->hasPresented();
-}
-
-bool Framework::createUIRenderContext() {
-    std::unique_lock<std::recursive_mutex> lck(recreateMtx_);
-    if (uiRenderContext_) return true;  // already exists
-    if (!running_) return false;  // framework shutting down
-    if (Renderer::options.frameGenEnabled) return false;  // DLSS-G active — use render-thread UI tagging
-    if (!overlayCompositor_ || !overlayCompositor_->isActive()) return false;
-    if (!swapchain_ || swapchain_->vkExtent().width == 0) return false;  // swapchain invalid
-    if (!device_) return false;
-    auto uiModule = pipeline_ ? pipeline_->uiModule() : nullptr;
-    if (!uiModule) return false;
-
-    uiRenderContext_ = std::make_unique<UIRenderContext>();
-    if (!uiRenderContext_->init(shared_from_this(), uiModule.get())) {
-        uiRenderContext_.reset();
-        return false;
-    }
-    uiRenderContext_->setOverlayCompositor(overlayCompositor_.get());
-    uiRenderContextActive_.store(true, std::memory_order_release);
-    uiThreadStopSignaled_.store(false, std::memory_order_release);
-    renderDiag("createUIRenderContext: SUCCESS");
-    return true;
-}
-
-void Framework::destroyUIRenderContext() {
-    std::unique_lock<std::recursive_mutex> lck(recreateMtx_);
-    if (uiRenderContext_) {
-        uiRenderContextActive_.store(false, std::memory_order_release);
-        uiRenderContext_.reset();
-        renderDiag("destroyUIRenderContext: done");
-    }
 }
 
 GarbageCollector::GarbageCollector(std::shared_ptr<Framework> framework) : framework_(framework) {

@@ -59,7 +59,7 @@ class UIModule : public SharedObject<UIModule> {
 
     void bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index);
 
-    // Read-only accessors for shared pipeline objects (used by UIRenderContext)
+    // Read-only accessors for shared pipeline objects
     std::shared_ptr<vk::RenderPass> overlayDrawRenderPass() const { return overlayDrawRenderPass_; }
     std::shared_ptr<vk::DynamicGraphicsPipeline> overlayDrawPipeline(OverlayDrawPipelineType type) const {
         auto it = overlayDrawPipelines_.find(type);
@@ -145,7 +145,6 @@ struct UIModuleContext : public SharedObject<UIModuleContext> {
     uint32_t overlayClearStencil;
 
     OverlayMode overlayMode;
-    bool overlaySuppressed = false;  // true when UIThread owns overlay rendering
 
     std::shared_ptr<vk::DescriptorTable> overlayDescriptorTable;
     std::shared_ptr<vk::DeviceLocalImage> overlayDrawColorImage;
