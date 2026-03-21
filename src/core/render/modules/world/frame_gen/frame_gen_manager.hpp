@@ -35,6 +35,9 @@ class FrameGenManager {
     /// Must be called after swapchain recreation when toggling DLSS-G.
     static void afterSwapchainRecreate();
 
+    /// Whether the DLSS-G Streamline feature is currently loaded (hooks active).
+    static bool isFeatureLoaded() { return featureLoaded_; }
+
   private:
     static bool initialized_;
     static bool active_;

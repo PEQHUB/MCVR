@@ -258,12 +258,21 @@ void UIRenderContext::beginFrame() {
         return;
     }
 
-    // Check pause — if requested, acknowledge and wait for resume
+    // Check pause — if requested, acknowledge and wait for resume.
+    // Also break out if stop is requested while waiting.
     if (pauseRequested_.load(std::memory_order_acquire)) {
         std::unique_lock<std::mutex> lk(pauseMtx_);
         pauseAcknowledged_ = true;
         pauseCv_.notify_all();
-        pauseCv_.wait(lk, [this] { return !pauseRequested_.load(std::memory_order_acquire); });
+        pauseCv_.wait(lk, [this] {
+            return !pauseRequested_.load(std::memory_order_acquire) ||
+                    stopRequested_.load(std::memory_order_acquire);
+        });
+        if (stopRequested_.load(std::memory_order_acquire)) {
+            loopActive_.store(false, std::memory_order_release);
+            phase_.store(0, std::memory_order_relaxed);
+            return;
+        }
     }
 
     auto fw = framework_.lock();
@@ -762,11 +771,20 @@ bool UIRenderContext::checkPause() {
     }
 
     // Pause check — block until resume (used by non-recreate pause scenarios)
+    // Must also break out if stop is requested while waiting for resume.
     if (pauseRequested_.load(std::memory_order_acquire)) {
         std::unique_lock<std::mutex> lk(pauseMtx_);
         pauseAcknowledged_ = true;
         pauseCv_.notify_all();
-        pauseCv_.wait(lk, [this] { return !pauseRequested_.load(std::memory_order_acquire); });
+        pauseCv_.wait(lk, [this] {
+            return !pauseRequested_.load(std::memory_order_acquire) ||
+                    stopRequested_.load(std::memory_order_acquire);
+        });
+        if (stopRequested_.load(std::memory_order_acquire)) {
+            loopActive_.store(false, std::memory_order_release);
+            phase_.store(0, std::memory_order_relaxed);
+            return false;
+        }
     }
     return true;
 }
