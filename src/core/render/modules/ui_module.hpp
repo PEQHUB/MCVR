@@ -145,6 +145,7 @@ struct UIModuleContext : public SharedObject<UIModuleContext> {
     uint32_t overlayClearStencil;
 
     OverlayMode overlayMode;
+    bool overlaySuppressed = false;  // true when UIThread owns overlay rendering
 
     std::shared_ptr<vk::DescriptorTable> overlayDescriptorTable;
     std::shared_ptr<vk::DeviceLocalImage> overlayDrawColorImage;
