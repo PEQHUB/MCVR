@@ -57,6 +57,19 @@ Java_com_radiance_client_proxy_vulkan_UIThreadProxy_isDecoupledUIActive(JNIEnv *
     return framework ? framework->isDecoupledUIActive() : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_radiance_client_proxy_vulkan_UIThreadProxy_isUIThreadRenderingOverlay(JNIEnv *, jclass) {
+    auto framework = Renderer::instance().framework();
+    return framework ? framework->isUIThreadRenderingOverlay() : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_radiance_client_proxy_vulkan_UIThreadProxy_isPauseRequested(JNIEnv *, jclass) {
+    auto *ctx = getUICtx();
+    if (!ctx) return JNI_FALSE;
+    return ctx->isPauseRequested() ? JNI_TRUE : JNI_FALSE;
+}
+
 // ── Draw commands ────────────────────────────────────────────────────────
 
 extern "C" JNIEXPORT void JNICALL

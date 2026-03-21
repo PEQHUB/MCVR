@@ -40,6 +40,7 @@ typedef void (*PFN_glfwSetWindowTitle)(GLFWwindow *, const char *);
 typedef void (*PFN_glfwSetFramebufferSizeCallback)(GLFWwindow *, GLFWframebuffersizefun);
 typedef void (*PFN_glfwGetFramebufferSize)(GLFWwindow *, int *, int *);
 typedef void (*PFN_glfwWaitEvents)(void);
+typedef void (*PFN_glfwPollEvents)(void);
 typedef GLFWmonitor *(*PFN_glfwGetWindowMonitor)(GLFWwindow *);
 typedef GLFWmonitor *(*PFN_glfwGetPrimaryMonitor)(void);
 typedef const GLFWvidmode *(*PFN_glfwGetVideoMode)(GLFWmonitor *);
@@ -59,6 +60,7 @@ extern PFN_glfwSetWindowTitle p_glfwSetWindowTitle;
 extern PFN_glfwSetFramebufferSizeCallback p_glfwSetFramebufferSizeCallback;
 extern PFN_glfwGetFramebufferSize p_glfwGetFramebufferSize;
 extern PFN_glfwWaitEvents p_glfwWaitEvents;
+extern PFN_glfwPollEvents p_glfwPollEvents;
 extern PFN_glfwGetWindowMonitor p_glfwGetWindowMonitor;
 extern PFN_glfwGetPrimaryMonitor p_glfwGetPrimaryMonitor;
 extern PFN_glfwGetVideoMode p_glfwGetVideoMode;
@@ -78,6 +80,7 @@ extern PFN_glfwGetWin32Window p_glfwGetWin32Window;
 #    define GLFW_SetFramebufferSizeCallback p_glfwSetFramebufferSizeCallback
 #    define GLFW_GetFramebufferSize p_glfwGetFramebufferSize
 #    define GLFW_WaitEvents p_glfwWaitEvents
+#    define GLFW_PollEvents p_glfwPollEvents
 #    define GLFW_GetWindowMonitor p_glfwGetWindowMonitor
 #    define GLFW_GetPrimaryMonitor p_glfwGetPrimaryMonitor
 #    define GLFW_GetVideoMode p_glfwGetVideoMode
@@ -97,6 +100,7 @@ extern PFN_glfwGetWin32Window p_glfwGetWin32Window;
 #    define GLFW_SetFramebufferSizeCallback glfwSetFramebufferSizeCallback
 #    define GLFW_GetFramebufferSize glfwGetFramebufferSize
 #    define GLFW_WaitEvents glfwWaitEvents
+#    define GLFW_PollEvents glfwPollEvents
 #    define GLFW_GetWindowMonitor glfwGetWindowMonitor
 #    define GLFW_GetPrimaryMonitor glfwGetPrimaryMonitor
 #    define GLFW_GetVideoMode glfwGetVideoMode

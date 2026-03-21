@@ -98,9 +98,11 @@ class UIRenderContext {
     // ── Pause/resume (called from render thread during recreate) ──
 
     /// Synchronous pause: blocks caller until UI thread acknowledges.
+    /// Always succeeds — waits indefinitely after initial 3s diagnostic timeout.
     void pause();
     void resume();
     bool isPaused() const { return paused_.load(std::memory_order_relaxed); }
+    bool isPauseRequested() const { return pauseRequested_.load(std::memory_order_acquire); }
 
     /// Rebuild images/framebuffers after swapchain recreation. Must be called while paused.
     void onSwapchainRecreate();
@@ -113,6 +115,11 @@ class UIRenderContext {
 
     uint32_t width() const { return width_; }
     uint32_t height() const { return height_; }
+
+    /// True once the UI thread has submitted+presented at least one frame.
+    /// Used to gate render-thread suppression: don't suppress until UIThread
+    /// is actually producing visible content.
+    bool hasPresented() const { return firstFramePresented_.load(std::memory_order_acquire); }
 
   private:
     void createResources();
@@ -128,6 +135,7 @@ class UIRenderContext {
 
     // Double-buffered resources (owned by this context)
     static constexpr int kBufferCount = 2;
+    std::shared_ptr<vk::RenderPass> renderPass_;
     std::shared_ptr<vk::CommandPool> commandPool_;
     std::shared_ptr<vk::CommandBuffer> commandBuffers_[kBufferCount];
     std::shared_ptr<vk::DeviceLocalImage> colorImages_[kBufferCount];
@@ -141,6 +149,7 @@ class UIRenderContext {
     // Frame state
     bool frameActive_ = false;
     bool renderPassActive_ = false;
+    bool fenceSignaled_[kBufferCount] = {true, true};  // fences created signaled
 
     // Dynamic state (mirrors UIModuleContext fields)
     VkViewport viewport_{};
@@ -176,6 +185,9 @@ class UIRenderContext {
     float lineWidth_ = 1.0f;
 
     std::array<float, 4> clearColor_ = {0, 0, 0, 0};
+
+    // True after first successful submitAndPresent
+    std::atomic<bool> firstFramePresented_{false};
 
     // DComp overlay
     std::atomic<OverlayCompositor *> overlayCompositor_{nullptr};

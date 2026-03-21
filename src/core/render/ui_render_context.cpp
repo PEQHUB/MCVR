@@ -74,6 +74,56 @@ void UIRenderContext::createResources() {
     commandPool_ = vk::CommandPool::create(physicalDevice, device_,
                                            physicalDevice->mainQueueIndex());
 
+    // Own render pass — identical to UIModule's but with CLEAR depth (not LOAD).
+    // UIModule uses LOAD because it carries depth across draw calls within a frame.
+    // UIRenderContext's depth images start undefined each frame, so CLEAR is required.
+    renderPass_ = vk::RenderPassBuilder{}
+                      .beginAttachmentDescription()
+                      .defineAttachmentDescription(VkAttachmentDescription{
+                          .format = VK_FORMAT_R8G8B8A8_SRGB,
+                          .samples = VK_SAMPLE_COUNT_1_BIT,
+                          .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                          .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                          .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                          .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+#ifdef USE_AMD
+                          .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+#else
+                          .initialLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                          .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+#endif
+                      })
+                      .defineAttachmentDescription(VkAttachmentDescription{
+                          .format = VK_FORMAT_D32_SFLOAT,
+                          .samples = VK_SAMPLE_COUNT_1_BIT,
+                          .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                          .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                          .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                          .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
+                          .initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                          .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                      })
+                      .endAttachmentDescription()
+                      .beginAttachmentReference()
+                      .defineAttachmentReference({
+                          .attachment = 0,
+                          .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                      })
+                      .defineAttachmentReference({
+                          .attachment = 1,
+                          .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                      })
+                      .endAttachmentReference()
+                      .beginSubpassDescription()
+                      .defineSubpassDescription({
+                          .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          .colorAttachmentIndices = {0},
+                          .depthStencilAttachmentIndex = 1,
+                      })
+                      .endSubpassDescription()
+                      .build(device_);
+
     for (int i = 0; i < kBufferCount; i++) {
         commandBuffers_[i] = vk::CommandBuffer::create(device_, commandPool_);
 
@@ -84,19 +134,22 @@ void UIRenderContext::createResources() {
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
                 | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
 
+        colorImages_[i]->imageLayout() = VK_IMAGE_LAYOUT_UNDEFINED;
+
         // Depth image
         depthImages_[i] = vk::DeviceLocalImage::create(
             device_, fw->vma(), false, width_, height_, 1,
             VK_FORMAT_D32_SFLOAT,
             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+        depthImages_[i]->imageLayout() = VK_IMAGE_LAYOUT_UNDEFINED;
 
-        // Framebuffer using UIModule's shared render pass
+        // Framebuffer using our own render pass (CLEAR depth, not LOAD)
         framebuffers_[i] = vk::FramebufferBuilder{}
                                .beginAttachment()
                                .defineAttachment(colorImages_[i])
                                .defineAttachment(depthImages_[i])
                                .endAttachment()
-                               .build(device_, uiModule_->overlayDrawRenderPass());
+                               .build(device_, renderPass_);
 
         // Own descriptor table (same layout as UIModule's — bindless texture array)
         descriptorTables_[i] = vk::DescriptorTableBuilder{}
@@ -161,8 +214,12 @@ void UIRenderContext::destroyResources() {
 
     // Wait for any in-flight work
     for (int i = 0; i < kBufferCount; i++) {
-        if (fences_[i] != VK_NULL_HANDLE) {
-            vkWaitForFences(device_->vkDevice(), 1, &fences_[i], VK_TRUE, UINT64_MAX);
+        if (fences_[i] != VK_NULL_HANDLE && !fenceSignaled_[i]) {
+            VkResult r = vkWaitForFences(device_->vkDevice(), 1, &fences_[i], VK_TRUE, 500000000ULL); // 500ms
+            if (r == VK_TIMEOUT) {
+                diagLog("destroyResources: fence[%d] timeout, continuing", i);
+            }
+            fenceSignaled_[i] = true;
         }
     }
 
@@ -181,8 +238,12 @@ void UIRenderContext::destroyResources() {
     }
 
     commandPool_.reset();
+    renderPass_.reset();
     frameActive_ = false;
     renderPassActive_ = false;
+    // Note: firstFramePresented_ is NOT reset here. After swapchain recreate,
+    // the UIThread will present again immediately. Keeping it true prevents the
+    // render thread from briefly re-enabling overlay draws (which would double the UI).
 }
 
 // ── Frame lifecycle ──────────────────────────────────────────────────────
@@ -201,20 +262,75 @@ void UIRenderContext::beginFrame() {
 
     int idx = currentIndex_;
 
-    // Wait for this buffer's previous submission to complete
-    vkWaitForFences(device_->vkDevice(), 1, &fences_[idx], VK_TRUE, UINT64_MAX);
-    vkResetFences(device_->vkDevice(), 1, &fences_[idx]);
+    // Wait for this buffer's previous submission to complete (only if actually submitted)
+    if (!fenceSignaled_[idx]) {
+        vkWaitForFences(device_->vkDevice(), 1, &fences_[idx], VK_TRUE, UINT64_MAX);
+    }
+    // Don't reset fence here — reset immediately before vkQueueSubmit in submitAndPresent
+    // to guarantee every reset fence is submitted (prevents hang on pause path).
 
     // Mark that a thread is actively driving the loop
     loopActive_.store(true, std::memory_order_release);
 
-    // Phase A: minimal command buffer — just begin + end, no render pass.
-    // This isolates whether the submit/queue itself works.
     vkResetCommandBuffer(commandBuffers_[idx]->vkCommandBuffer(), 0);
     commandBuffers_[idx]->begin();
 
+    auto mainQueueIndex = fw->physicalDevice()->mainQueueIndex();
+
+    // Transition color image to render pass initialLayout
+    commandBuffers_[idx]->barriersBufferImage(
+        {}, {
+                {
+                    .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                    .oldLayout = colorImages_[idx]->imageLayout(),
+#ifdef USE_AMD
+                    .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+#else
+                    .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+#endif
+                    .srcQueueFamilyIndex = mainQueueIndex,
+                    .dstQueueFamilyIndex = mainQueueIndex,
+                    .image = colorImages_[idx],
+                    .subresourceRange = vk::wholeColorSubresourceRange,
+                },
+                {
+                    .srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    .srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                    .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                    .oldLayout = depthImages_[idx]->imageLayout(),
+                    .newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    .srcQueueFamilyIndex = mainQueueIndex,
+                    .dstQueueFamilyIndex = mainQueueIndex,
+                    .image = depthImages_[idx],
+                    .subresourceRange = vk::wholeDepthSubresourceRange,
+                },
+            });
+
+#ifdef USE_AMD
+    colorImages_[idx]->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+#else
+    colorImages_[idx]->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+#endif
+    depthImages_[idx]->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    // Begin render pass with CLEAR for both color and depth
+    commandBuffers_[idx]->beginRenderPass({
+        .renderPass = renderPass_,
+        .framebuffer = framebuffers_[idx],
+        .renderAreaExtent = {width_, height_},
+        .clearValues = {{.color = {clearColor_[0], clearColor_[1], clearColor_[2], clearColor_[3]}},
+                        {.depthStencil = {.depth = 1.0f}}},
+    });
+
+    // Bind descriptor table for draw calls
+    commandBuffers_[idx]->bindDescriptorTable(descriptorTables_[idx], VK_PIPELINE_BIND_POINT_GRAPHICS);
+
     frameActive_ = true;
-    renderPassActive_ = false;
+    renderPassActive_ = true;
 }
 
 void UIRenderContext::endFrame() {
@@ -225,6 +341,21 @@ void UIRenderContext::endFrame() {
     if (renderPassActive_) {
         commandBuffers_[idx]->endRenderPass();
         renderPassActive_ = false;
+#ifdef USE_AMD
+        colorImages_[idx]->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+#else
+        colorImages_[idx]->imageLayout() = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+#endif
+    }
+
+    // Premultiply alpha for DComp compositing
+    auto *compositor = overlayCompositor_.load(std::memory_order_acquire);
+    if (compositor && compositor->isActive()) {
+        auto fw = framework_.lock();
+        if (fw) {
+            compositor->recordPremultiply(commandBuffers_[idx], colorImages_[idx],
+                                          fw->physicalDevice()->mainQueueIndex());
+        }
     }
 
     commandBuffers_[idx]->end();
@@ -232,6 +363,25 @@ void UIRenderContext::endFrame() {
 
 void UIRenderContext::submitAndPresent() {
     if (!frameActive_) return;
+
+    // Mid-frame pause check — if pause was requested while we were in Java-land,
+    // acknowledge it now before submitting GPU work.
+    if (pauseRequested_.load(std::memory_order_acquire)) {
+        // Don't submit — just end the frame and acknowledge the pause.
+        // The command buffer was already ended in endFrame(), so we just skip submit.
+        // Mark fence as signaled so next beginFrame() won't wait on an unsubmitted fence.
+        int skipIdx = currentIndex_;
+        fenceSignaled_[skipIdx] = true;
+        frameActive_ = false;
+        currentIndex_ = (currentIndex_ + 1) % kBufferCount;
+        diagLog("submitAndPresent: skipped — pause requested mid-frame");
+
+        std::unique_lock<std::mutex> lk(pauseMtx_);
+        pauseAcknowledged_ = true;
+        pauseCv_.notify_all();
+        pauseCv_.wait(lk, [this] { return !pauseRequested_.load(std::memory_order_acquire); });
+        return;
+    }
 
     int idx = currentIndex_;
     auto fw = framework_.lock();
@@ -242,6 +392,11 @@ void UIRenderContext::submitAndPresent() {
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffers_[idx]->vkCommandBuffer();
 
+    // Reset fence immediately before submit — guarantees every reset fence gets submitted.
+    // This prevents the hang where beginFrame() waits on a fence that was reset but never submitted.
+    vkResetFences(device_->vkDevice(), 1, &fences_[idx]);
+    fenceSignaled_[idx] = false;
+
     // Submit to main queue with mutex (shared with render thread)
     VkResult result;
     {
@@ -251,13 +406,15 @@ void UIRenderContext::submitAndPresent() {
     if (result != VK_SUCCESS) {
         uiCtxCerr() << "submit failed: " << result << " idx=" << idx << std::endl;
         diagLog("submit failed: %d idx=%d", (int)result, idx);
+        fenceSignaled_[idx] = true;  // submit failed — fence was never actually submitted
         frameActive_ = false;
         currentIndex_ = (currentIndex_ + 1) % kBufferCount;
-        return; // Don't wait on a fence that was never signaled
+        return;
     }
 
     // Wait for GPU to finish
     VkResult waitResult = vkWaitForFences(device_->vkDevice(), 1, &fences_[idx], VK_TRUE, 100000000ULL); // 100ms timeout
+    fenceSignaled_[idx] = (waitResult == VK_SUCCESS || waitResult == VK_TIMEOUT);
     if (waitResult == VK_ERROR_DEVICE_LOST) {
         diagLog("device lost during fence wait — stopping UI loop");
         uiCtxCerr() << "device lost, UI thread will idle" << std::endl;
@@ -266,8 +423,19 @@ void UIRenderContext::submitAndPresent() {
         return;
     }
 
-    // Pace via Sleep for now (DComp integration deferred)
-    Sleep(8); // ~120 Hz pacing
+    // Present via DComp overlay + pace to display rate
+    auto *compositor = overlayCompositor_.load(std::memory_order_acquire);
+    if (compositor && compositor->isActive()) {
+        compositor->present();
+        compositor->waitForDisplayReady(8);
+    } else {
+        Sleep(8);
+    }
+
+    if (!firstFramePresented_.load(std::memory_order_acquire)) {
+        firstFramePresented_.store(true, std::memory_order_release);
+        diagLog("first frame presented");
+    }
 
     frameActive_ = false;
 
@@ -507,12 +675,23 @@ void UIRenderContext::pause() {
     pauseAcknowledged_ = false;
     pauseRequested_ = true;
 
-    // Wait for the UI thread to acknowledge the pause
+    // Wait for the UI thread to acknowledge the pause (with timeout)
     std::unique_lock<std::mutex> lk(pauseMtx_);
-    pauseCv_.wait(lk, [this] { return pauseAcknowledged_.load(); });
+    bool acked = pauseCv_.wait_for(lk, std::chrono::seconds(3),
+                                    [this] { return pauseAcknowledged_.load(); });
+
+    if (!acked) {
+        // UIThread is alive but busy. Wait indefinitely — proceeding without
+        // acknowledgment would destroy resources UIThread is using (use-after-free).
+        // The Java isPauseRequested() check ensures UIThread responds within one
+        // frame cycle (~30ms). If it takes longer, it's a lag spike, not a deadlock.
+        diagLog("pause timeout (3s) — UIThread busy, waiting indefinitely...");
+        uiCtxCout() << "pause timeout — waiting for UIThread..." << std::endl;
+        pauseCv_.wait(lk, [this] { return pauseAcknowledged_.load(); });
+        diagLog("pause acknowledged (after extended wait)");
+    }
 
     paused_ = true;
-    diagLog("paused");
     uiCtxCout() << "paused (acknowledged)" << std::endl;
 }
 
