@@ -24,7 +24,6 @@ uint32_t FrameGenManager::currentMode_ = 0;
 bool FrameGenManager::needsSwapchainRecreate_ = false;
 bool FrameGenManager::deferredActivation_ = false;
 bool FrameGenManager::featureLoaded_ = false;
-bool FrameGenManager::pendingReload_ = false;
 
 bool FrameGenManager::init() {
 #ifdef _WIN32
@@ -318,13 +317,16 @@ void FrameGenManager::beforeSwapchainRecreate() {
         fgCout() << "eOff before swapchain recreate" << std::endl;
     }
 
-    // ALWAYS unload feature before swapchain destroy. This clears Streamline's
-    // internal swapchain tracker, preventing "only one swap-chain" rejection on
-    // the next vkCreateSwapchainKHR. afterSwapchainRecreate() reloads as needed.
-    if (featureLoaded_) {
+    // Only unload when user explicitly disables FG. Keep feature loaded across
+    // normal recreates (resize, alt-tab) so hooks stay active on the swapchain
+    // and FG can reactivate immediately without a reload cycle.
+    // The "only one swap-chain" Streamline rejection was caused by the DComp overlay
+    // compositor (now disabled with wantOverlay=false), not by the feature lifecycle.
+    if (!wantActive && featureLoaded_) {
         StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, false);
         featureLoaded_ = false;
-        fgCout() << "feature unloaded before swapchain recreate" << std::endl;
+        deferredActivation_ = false;
+        fgCout() << "feature unloaded" << std::endl;
     }
 #endif
 }
@@ -335,42 +337,24 @@ void FrameGenManager::afterSwapchainRecreate() {
 
     bool wantActive = Renderer::options.frameGenEnabled;
 
-    // Feature load: reload DLSS-G after the swapchain was just created.
-    // beforeSwapchainRecreate always unloads, so we always reload here.
-    // First reload triggers needRecreate (so hooks are on a fresh swapchain).
-    // Second time through (pendingReload_=false), hooks are active — activate FG.
+    // Feature load happens here — AFTER swapchain reconstruct (new swapchain exists).
+    // The old swapchain was destroyed without the feature loaded, avoiding the
+    // sl.dlss_g.dll crash. SL hooks now attach to future swapchain operations,
+    // so we need one more recreate for hooks to be active on a fresh swapchain.
     if (wantActive && !featureLoaded_) {
         StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, true);
         featureLoaded_ = true;
+        // Initialize DLSS-G state immediately (eOff) so that the NEXT recreate's
+        // vkDestroySwapchainKHR hook won't crash on uninitialized state.
         StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOff, 1);
-
-        if (pendingReload_) {
-            // Second pass: hooks are active on this swapchain, can activate now.
-            pendingReload_ = false;
-            if (Renderer::instance().world()->shouldRender()) {
-                uint32_t multiplier = Renderer::options.frameGenMultiplier;
-                if (multiplier > maxFrames_) multiplier = maxFrames_;
-                if (multiplier < 1) multiplier = 1;
-                StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOn, multiplier);
-                active_ = true;
-                currentMode_ = Renderer::options.frameGenMode;
-                fgCout() << "activated after reload recreate" << std::endl;
-            } else {
-                deferredActivation_ = true;
-                fgCout() << "deferred activation after reload (waiting for shouldRender)" << std::endl;
-            }
-        } else {
-            // First pass: need one more recreate for hooks to be on a fresh swapchain.
-            pendingReload_ = true;
-            Renderer::options.needRecreate = true;
-            deferredActivation_ = true;
-            fgCout() << "feature loaded, triggering reload recreate" << std::endl;
-        }
+        Renderer::options.needRecreate = true;
+        deferredActivation_ = true;
+        fgCout() << "feature loaded + initialized, triggering second recreate" << std::endl;
         return;
     }
 
     if (wantActive && featureLoaded_) {
-        // Already loaded (shouldn't happen with always-unload-before, but safe).
+        // Second recreate (or normal recreate with feature loaded): hooks active.
         if (Renderer::instance().world()->shouldRender()) {
             uint32_t multiplier = Renderer::options.frameGenMultiplier;
             if (multiplier > maxFrames_) multiplier = maxFrames_;

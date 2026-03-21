@@ -46,5 +46,4 @@ class FrameGenManager {
     static bool needsSwapchainRecreate_;
     static bool deferredActivation_;  // eOn deferred until shouldRender() becomes true
     static bool featureLoaded_;       // Whether sl::kFeatureDLSS_G has been loaded
-    static bool pendingReload_;       // True between first load and reload-recreate (prevents infinite loop)
 };
