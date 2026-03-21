@@ -22,12 +22,6 @@ class StreamlineContext {
     /// @param pluginPath directory containing sl.*.dll files
     static bool init(const wchar_t *pluginPath);
 
-    /// After VkDevice creation — provide Vulkan info to Streamline.
-    /// Only needed in non-interposer mode. With interposer, use onDeviceCreated().
-    static bool setVulkanInfo(void *instance, void *physicalDevice, void *device,
-                              uint32_t graphicsQueueFamily, uint32_t graphicsQueueIndex,
-                              uint32_t computeQueueFamily, uint32_t computeQueueIndex);
-
     /// Call after vkCreateDevice when using the interposer model.
     /// The interposer already registered the device; this just loads feature functions.
     static bool onDeviceCreated();
@@ -102,10 +96,8 @@ class StreamlineContext {
     // Core SL function pointers (loaded via GetProcAddress from sl.interposer.dll)
     static PFun_slInit *pfnSlInit;
     static PFun_slShutdown *pfnSlShutdown;
-    static PFun_slSetVulkanInfo *pfnSlSetVulkanInfo;
     static PFun_slGetFeatureFunction *pfnSlGetFeatureFunction;
     static PFun_slGetNewFrameToken *pfnSlGetNewFrameToken;
-    static PFun_slIsFeatureSupported *pfnSlIsFeatureSupported;
     static PFun_slGetFeatureRequirements *pfnSlGetFeatureRequirements;
 
     // Reflex function pointers (loaded via slGetFeatureFunction after device set)

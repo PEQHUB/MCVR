@@ -21,7 +21,6 @@ bool FrameGenManager::initialized_ = false;
 bool FrameGenManager::active_ = false;
 uint32_t FrameGenManager::maxFrames_ = 0;
 uint32_t FrameGenManager::currentMode_ = 0;
-bool FrameGenManager::needsSwapchainRecreate_ = false;
 bool FrameGenManager::deferredActivation_ = false;
 bool FrameGenManager::featureLoaded_ = false;
 
@@ -65,8 +64,7 @@ void FrameGenManager::setMode(uint32_t mode, uint32_t numFramesToGenerate) {
 }
 
 void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
-                               std::shared_ptr<vk::DeviceLocalImage> worldOutput,
-                               std::shared_ptr<vk::DeviceLocalImage> overlayOutput) {
+                               std::shared_ptr<vk::DeviceLocalImage> worldOutput) {
 #ifdef _WIN32
     if (!StreamlineContext::isDlssGSupported()) return;
     if (!context) return;
@@ -87,8 +85,8 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
 
     if (!active_) return;
 
-    // §0.0 auto-pause: when world stops rendering (menu/loading transition),
-    // pause FG so the SL interposer doesn't process presents with zero tagged resources.
+    // Auto-pause FG when world stops rendering (menu/loading transition)
+    // so the SL interposer doesn't process presents with zero tagged resources.
     if (!shouldRender) {
         StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOff, 1);
         active_ = false;
@@ -216,7 +214,7 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
     consts.cameraAspectRatio = (std::abs(p00) > 1e-6f) ? std::abs(p11 / p00) : 1.0f;
 
     // Flags
-    consts.depthInverted = sl::Boolean::eFalse;        // Linear depth: larger = farther (not reversed)
+    consts.depthInverted = sl::Boolean::eFalse;        // Linear depth buffer (0=near, large=far)
     consts.cameraMotionIncluded = sl::Boolean::eTrue;  // MVs include camera motion
     consts.motionVectors3D = sl::Boolean::eFalse;      // 2D screen-space
     consts.reset = (firstFrame || Renderer::resetExposureAdaptation)
@@ -227,7 +225,10 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
     StreamlineContext::setConstants(consts);
 
     // --- Tag Resources ---
-    // Helper: fill sl::Resource from a DeviceLocalImage
+    // NVIDIA vk_streamline sample: tag depth, MV, and HUDless only.
+    // Do NOT tag kBufferTypeUIColorAndAlpha — DLSS-G diffs HUDless vs the
+    // final backbuffer (after UI composite) to identify UI pixels automatically.
+
     auto fillResource = [](sl::Resource &res, std::shared_ptr<vk::DeviceLocalImage> img, uint32_t layoutOverride = UINT_MAX) {
         res.type = sl::ResourceType::eTex2d;
         res.native = reinterpret_cast<void *>(img->vkImage());
@@ -241,58 +242,48 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
         res.arrayLayers = 1;
     };
 
-    // Depth (render resolution) — DLSS-G requires kBufferTypeDepth. Our RT outputs linear depth;
-    // sl::Constants flags (depthInverted etc.) tell SL how to interpret it.
+    sl::Resource resources[3] = {};
+    sl::ResourceTag tags[3] = {};
+    sl::Extent extents[3] = {};
+    uint32_t tagCount = 0;
+
+    // Depth (render resolution)
     if (frameIndex < Renderer::frameGenDepthImages.size() && Renderer::frameGenDepthImages[frameIndex]) {
         auto depthImg = Renderer::frameGenDepthImages[frameIndex];
-        sl::Resource depthRes(sl::ResourceType::eTex2d, nullptr, static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL));
-        fillResource(depthRes, depthImg, static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL));
-
-        sl::Extent renderExtent{0, 0, depthImg->width(), depthImg->height()};
-        sl::ResourceTag depthTag(&depthRes, sl::kBufferTypeDepth,
-                                  sl::ResourceLifecycle::eValidUntilPresent, &renderExtent);
-        StreamlineContext::tagResources(&depthTag, 1);
+        fillResource(resources[tagCount], depthImg, static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL));
+        extents[tagCount] = {0, 0, depthImg->width(), depthImg->height()};
+        tags[tagCount] = sl::ResourceTag(&resources[tagCount], sl::kBufferTypeDepth,
+                                          sl::ResourceLifecycle::eValidUntilPresent, &extents[tagCount]);
+        tagCount++;
     }
 
     // Motion Vectors (render resolution)
     if (frameIndex < Renderer::frameGenMotionVectorImages.size() && Renderer::frameGenMotionVectorImages[frameIndex]) {
         auto mvImg = Renderer::frameGenMotionVectorImages[frameIndex];
-        sl::Resource mvRes(sl::ResourceType::eTex2d, nullptr, static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL));
-        fillResource(mvRes, mvImg, static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL));
-
-        sl::Extent renderExtent{0, 0, mvImg->width(), mvImg->height()};
-        sl::ResourceTag mvTag(&mvRes, sl::kBufferTypeMotionVectors,
-                               sl::ResourceLifecycle::eValidUntilPresent, &renderExtent);
-        StreamlineContext::tagResources(&mvTag, 1);
+        fillResource(resources[tagCount], mvImg, static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL));
+        extents[tagCount] = {0, 0, mvImg->width(), mvImg->height()};
+        tags[tagCount] = sl::ResourceTag(&resources[tagCount], sl::kBufferTypeMotionVectors,
+                                          sl::ResourceLifecycle::eValidUntilPresent, &extents[tagCount]);
+        tagCount++;
     }
 
-    // HUD-less Color (display resolution — world output after tone mapping, before UI)
+    // HUD-less Color (display resolution — world output after tone mapping, before UI).
+    // Same format as swapchain (R8G8B8A8_UNORM). Where overlay alpha=0, the SDR
+    // composite fast-path writes worldOutput pixels verbatim to the swapchain, so
+    // HUDless == backbuffer for all non-UI pixels. DLSS-G diffs to find UI.
     if (worldOutput) {
-        sl::Resource hudlessRes(sl::ResourceType::eTex2d, nullptr, UINT_MAX);
-        fillResource(hudlessRes, worldOutput);
-
-        sl::Extent displayExtent{0, 0, worldOutput->width(), worldOutput->height()};
-        sl::ResourceTag hudlessTag(&hudlessRes, sl::kBufferTypeHUDLessColor,
-                                    sl::ResourceLifecycle::eValidUntilPresent, &displayExtent);
-        StreamlineContext::tagResources(&hudlessTag, 1);
+        fillResource(resources[tagCount], worldOutput);
+        extents[tagCount] = {0, 0, worldOutput->width(), worldOutput->height()};
+        tags[tagCount] = sl::ResourceTag(&resources[tagCount], sl::kBufferTypeHUDLessColor,
+                                          sl::ResourceLifecycle::eValidUntilPresent, &extents[tagCount]);
+        tagCount++;
     }
 
-    // UI Color and Alpha (display resolution — overlay with alpha channel).
-    // Always tag: when render thread draws UI, the image contains UI content and
-    // DLSS-G uses it to avoid interpolating UI regions. When UIThread suppresses
-    // render-thread overlay (overlaySuppressed=true), the image is transparent,
-    // which correctly tells DLSS-G "no UI in swapchain".
-    if (overlayOutput) {
-        sl::Resource uiRes(sl::ResourceType::eTex2d, nullptr, UINT_MAX);
-        fillResource(uiRes, overlayOutput);
-
-        sl::Extent displayExtent{0, 0, overlayOutput->width(), overlayOutput->height()};
-        // eOnlyValidNow: Streamline copies the UI buffer at tag time. The overlay image
-        // layout changes after tagging (fuseFinal reads it as sampled), so eValidUntilPresent
-        // would give DLSS-G a stale layout at present time → can't read UI → interpolates it.
-        sl::ResourceTag uiTag(&uiRes, sl::kBufferTypeUIColorAndAlpha,
-                               sl::ResourceLifecycle::eOnlyValidNow, &displayExtent);
-        StreamlineContext::tagResources(&uiTag, 1);
+    if (tagCount > 0) {
+        void *cmdBuf = context->fuseCommandBuffer
+                         ? reinterpret_cast<void *>(context->fuseCommandBuffer->vkCommandBuffer())
+                         : nullptr;
+        StreamlineContext::tagResources(tags, tagCount, cmdBuf);
     }
 #endif
 }

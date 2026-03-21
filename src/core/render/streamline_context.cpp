@@ -22,10 +22,8 @@ std::vector<std::string> StreamlineContext::requiredDeviceExtensions_;
 
 PFun_slInit *StreamlineContext::pfnSlInit = nullptr;
 PFun_slShutdown *StreamlineContext::pfnSlShutdown = nullptr;
-PFun_slSetVulkanInfo *StreamlineContext::pfnSlSetVulkanInfo = nullptr;
 PFun_slGetFeatureFunction *StreamlineContext::pfnSlGetFeatureFunction = nullptr;
 PFun_slGetNewFrameToken *StreamlineContext::pfnSlGetNewFrameToken = nullptr;
-PFun_slIsFeatureSupported *StreamlineContext::pfnSlIsFeatureSupported = nullptr;
 PFun_slGetFeatureRequirements *StreamlineContext::pfnSlGetFeatureRequirements = nullptr;
 
 PFun_slReflexSetOptions *StreamlineContext::pfnReflexSetOptions = nullptr;
@@ -96,12 +94,9 @@ bool StreamlineContext::loadCoreFunctions() {
     bool ok = true;
     ok &= loadProc(mod, "slInit", pfnSlInit);
     ok &= loadProc(mod, "slShutdown", pfnSlShutdown);
-    ok &= loadProc(mod, "slSetVulkanInfo", pfnSlSetVulkanInfo);
     ok &= loadProc(mod, "slGetFeatureFunction", pfnSlGetFeatureFunction);
     ok &= loadProc(mod, "slGetNewFrameToken", pfnSlGetNewFrameToken);
     ok &= loadProc(mod, "slGetFeatureRequirements", pfnSlGetFeatureRequirements);
-    // slIsFeatureSupported is optional — might not exist in all builds
-    loadProc(mod, "slIsFeatureSupported", pfnSlIsFeatureSupported);
     // Core functions needed for DLSS-G resource tagging and constants
     loadProc(mod, "slSetConstants", pfnSlSetConstants);
     loadProc(mod, "slSetTagForFrame", pfnSlSetTagForFrame);
@@ -304,7 +299,7 @@ bool StreamlineContext::init(const wchar_t *pluginPath) {
     // 3. Configure preferences
     sl::Preferences pref{};
     pref.showConsole = false;
-    pref.logLevel = sl::LogLevel::eVerbose; // TODO: set to eOff after debugging
+    pref.logLevel = sl::LogLevel::eDefault;
     pref.logMessageCallback = slLogMessageCallback;
     // Write SL SDK's own log files next to core.dll for additional diagnostics
     {
@@ -356,35 +351,6 @@ bool StreamlineContext::init(const wchar_t *pluginPath) {
     //    Must be done AFTER slInit but BEFORE vkCreateInstance/vkCreateDevice
     queryFeatureRequirements();
 
-    return true;
-}
-
-bool StreamlineContext::setVulkanInfo(void *instance, void *physicalDevice, void *device,
-                                     uint32_t graphicsQueueFamily, uint32_t graphicsQueueIndex,
-                                     uint32_t computeQueueFamily, uint32_t computeQueueIndex) {
-    // Kept for potential future use (e.g., non-interposer mode).
-    // With the interposer model, the interposer's vkCreateDevice hook already
-    // registers the device and initializes plugins. Use onDeviceCreated() instead.
-    if (!initialized_ || !pfnSlSetVulkanInfo) return false;
-    if (vulkanInfoSet_) return true;
-
-    sl::VulkanInfo info{};
-    info.device = device;
-    info.instance = instance;
-    info.physicalDevice = physicalDevice;
-    info.graphicsQueueIndex = graphicsQueueIndex;
-    info.graphicsQueueFamily = graphicsQueueFamily;
-    info.computeQueueIndex = computeQueueIndex;
-    info.computeQueueFamily = computeQueueFamily;
-
-    sl::Result result = pfnSlSetVulkanInfo(info);
-    if (result != sl::Result::eOk) {
-        slCerr() << "slSetVulkanInfo failed (result=" << static_cast<int>(result) << ")" << std::endl;
-        return false;
-    }
-
-    vulkanInfoSet_ = true;
-    loadReflexFunctions();
     return true;
 }
 
@@ -599,6 +565,12 @@ uint32_t StreamlineContext::getFrameIndex() { return frameIndex_; }
 
 bool StreamlineContext::isDlssGSupported() { return isAvailable() && dlssGSupported_; }
 
+// DLSS-G error callback — runs on the present thread, must return immediately.
+static void dlssGErrorCallback(const sl::APIError &e) {
+    auto &f = slLogFile();
+    f << "[DLSS-G ERROR CB] vkRes=" << e.vkRes << " hres=0x" << std::hex << e.hres << std::dec << std::endl;
+}
+
 bool StreamlineContext::setDlssGOptions(sl::DLSSGMode mode, uint32_t numFramesToGenerate) {
     if (!dlssGSupported_ || !pfnDLSSGSetOptions) return false;
 
@@ -606,6 +578,7 @@ bool StreamlineContext::setDlssGOptions(sl::DLSSGMode mode, uint32_t numFramesTo
     options.mode = mode;
     options.numFramesToGenerate = numFramesToGenerate;
     options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
+    options.onErrorCallback = dlssGErrorCallback;
 
     sl::Result result = pfnDLSSGSetOptions(sl::ViewportHandle(0), options);
     if (result != sl::Result::eOk) {

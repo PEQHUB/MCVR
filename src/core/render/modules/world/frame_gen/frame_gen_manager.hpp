@@ -18,10 +18,10 @@ class FrameGenManager {
     static void setMode(uint32_t mode, uint32_t numFramesToGenerate);
 
     /// Called every frame after world render completes and before present.
-    /// Sets SL common constants (camera matrices) and tags depth/MV/HUD-less/UI resources.
+    /// Sets SL common constants (camera matrices) and tags depth/MV/HUD-less resources.
+    /// DLSS-G diffs HUDless vs backbuffer to identify UI pixels automatically.
     static void tagFrame(std::shared_ptr<FrameworkContext> context,
-                         std::shared_ptr<vk::DeviceLocalImage> worldOutput,
-                         std::shared_ptr<vk::DeviceLocalImage> overlayOutput);
+                         std::shared_ptr<vk::DeviceLocalImage> worldOutput);
 
     /// Query whether DLSS-G is currently active (enabled + hardware supports it).
     static bool isActive();
@@ -43,7 +43,6 @@ class FrameGenManager {
     static bool active_;
     static uint32_t maxFrames_;
     static uint32_t currentMode_;
-    static bool needsSwapchainRecreate_;
     static bool deferredActivation_;  // eOn deferred until shouldRender() becomes true
     static bool featureLoaded_;       // Whether sl::kFeatureDLSS_G has been loaded
 };

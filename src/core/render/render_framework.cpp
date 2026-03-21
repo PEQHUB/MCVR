@@ -89,9 +89,8 @@ void FrameworkContext::fuseFinal() {
 
     auto overlayOutput = pipelineContext->uiModuleContext ? pipelineContext->uiModuleContext->overlayDrawColorImage : nullptr;
 
-    // When FG is active AND overlay compositor is operational, composite world-only
-    // to swapchain. UI goes through the DComp overlay instead.
-    // When FG auto-pauses (menu/loading), overlayActive=false, UI composites normally.
+    // When overlay compositor is active, composite world-only to swapchain
+    // (UI composites on its own surface). Currently disabled (wantOverlay=false).
     auto overlayCompositor = f->overlayCompositor_.get();
     bool overlayActive = FrameGenManager::isActive() &&
                          overlayCompositor && overlayCompositor->isActive();
@@ -479,21 +478,18 @@ void Framework::submitCommand() {
     }
     pipelineContext->uiModuleContext->end();
 
-    // Tag resources for DLSS-G frame generation (after world render, before composite).
-    // Called unconditionally — tagFrame() has internal guards and processes
-    // pendingEnable_ to activate FG on the first frame after swapchain recreate.
-    {
-        auto worldOutput = pipelineContext->worldPipelineContext
-                             ? pipelineContext->worldPipelineContext->outputImage : nullptr;
-        auto overlayOutput = pipelineContext->uiModuleContext
-                               ? pipelineContext->uiModuleContext->overlayDrawColorImage : nullptr;
-        FrameGenManager::tagFrame(currentContext_, worldOutput, overlayOutput);
-    }
-
     // Composite world+UI to swapchain (standard mode only).
     // In decoupled mode, PresentThread handles compositing.
     if (!decoupledPresent_) {
         currentContext_->fuseFinal();
+    }
+
+    // Tag resources for DLSS-G frame generation (after composite).
+    // Only HUDless is tagged — DLSS-G diffs it against the backbuffer to find UI.
+    {
+        auto worldOutput = pipelineContext->worldPipelineContext
+                             ? pipelineContext->worldPipelineContext->outputImage : nullptr;
+        FrameGenManager::tagFrame(currentContext_, worldOutput);
     }
 
     currentContext_->uploadCommandBuffer->end();
