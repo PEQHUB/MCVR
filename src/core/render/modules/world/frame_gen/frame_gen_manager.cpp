@@ -287,8 +287,11 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
         fillResource(uiRes, overlayOutput);
 
         sl::Extent displayExtent{0, 0, overlayOutput->width(), overlayOutput->height()};
+        // eOnlyValidNow: Streamline copies the UI buffer at tag time. The overlay image
+        // layout changes after tagging (fuseFinal reads it as sampled), so eValidUntilPresent
+        // would give DLSS-G a stale layout at present time → can't read UI → interpolates it.
         sl::ResourceTag uiTag(&uiRes, sl::kBufferTypeUIColorAndAlpha,
-                               sl::ResourceLifecycle::eValidUntilPresent, &displayExtent);
+                               sl::ResourceLifecycle::eOnlyValidNow, &displayExtent);
         StreamlineContext::tagResources(&uiTag, 1);
     }
 #endif
