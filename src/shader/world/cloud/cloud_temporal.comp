@@ -33,18 +33,24 @@ void main() {
     viewPos.xyz /= viewPos.w;
     vec3 worldDir = normalize((worldUBO.cameraEffectedViewMatInv * vec4(viewPos.xyz, 0.0)).xyz);
 
-    // Approximate cloud position at mid-layer — uses shared effectiveThickness()
+    // Cloud position via ray-slab intersection — NOT fixed mid-height.
+    // Using mid-height causes reprojection misalignment when viewing cloud
+    // base vs top at different angles → horizontal line artifacts.
     vec3 eyePos = getEyePos();
     float cloudThick = effectiveThickness();
-    float cloudMid = pc.cloudBase + cloudThick * 0.5;
+    float yBot = pc.cloudBase;
+    float yTop = pc.cloudBase + cloudThick;
 
-    // Handle all camera positions: below, inside, or above cloud layer
     float denom = worldDir.y;
     float tCloud;
     if (abs(denom) > 0.001) {
-        tCloud = (cloudMid - eyePos.y) / denom;
+        // Intersect both slab boundaries, use nearest valid hit
+        float tBot = (yBot - eyePos.y) / denom;
+        float tTop = (yTop - eyePos.y) / denom;
+        float tNear = min(tBot, tTop);
+        float tFar = max(tBot, tTop);
+        tCloud = (tNear > 0.0) ? tNear : max(tFar, 0.0);
     } else {
-        // Horizontal ray — use large distance for stable reprojection
         tCloud = 500.0;
     }
     tCloud = max(tCloud, 0.0);
@@ -63,10 +69,17 @@ void main() {
         return;
     }
 
-    // Sample history at reprojected location
-    ivec2 historyTexel = ivec2(prevUV * vec2(pc.cloudWidth, pc.cloudHeight));
-    historyTexel = clamp(historyTexel, ivec2(0), ivec2(pc.cloudWidth - 1, pc.cloudHeight - 1));
-    vec4 history = imageLoad(uCloudHistory, historyTexel);
+    // Sample history with bilinear interpolation — nearest-neighbor causes
+    // sub-texel misalignment that manifests as horizontal line artifacts.
+    vec2 historyCoord = prevUV * vec2(pc.cloudWidth, pc.cloudHeight) - 0.5;
+    ivec2 hBase = ivec2(floor(historyCoord));
+    vec2 hf = historyCoord - vec2(hBase);
+    hBase = clamp(hBase, ivec2(0), ivec2(pc.cloudWidth - 2, pc.cloudHeight - 2));
+    vec4 h00 = imageLoad(uCloudHistory, hBase);
+    vec4 h10 = imageLoad(uCloudHistory, hBase + ivec2(1, 0));
+    vec4 h01 = imageLoad(uCloudHistory, hBase + ivec2(0, 1));
+    vec4 h11 = imageLoad(uCloudHistory, hBase + ivec2(1, 1));
+    vec4 history = mix(mix(h00, h10, hf.x), mix(h01, h11, hf.x), hf.y);
 
     // Variance-based neighborhood clipping [Salvi16]
     // Uses CURRENT frame neighborhood for variance. When history has converged,

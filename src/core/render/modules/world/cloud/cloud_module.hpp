@@ -29,7 +29,6 @@ struct alignas(16) CloudPushConstant {
     float coverage;              // Base coverage [0-1]
     float cloudType;             // [0-1] maps to 4 types: 0=stratus, 0.33=sc, 0.67=cu, 1.0=cb
     float densityMultiplier;     // Density scale
-    float windSpeed;             // Wind speed multiplier
     float windTime;              // Accumulated wind time (seconds), wrapped at 86400s
     uint32_t frameIndex;         // For temporal jitter + blue noise
     uint32_t marchSteps;         // Ray march step count
@@ -42,11 +41,12 @@ struct alignas(16) CloudPushConstant {
     float detailStrength;        // Detail erosion multiplier [0-2]
     uint32_t scatterOctaves;     // Multi-scatter octave count [1-4] [Wrenninge13]
     float powderStrength;        // Beer-powder dark edge intensity [0-2] [Schneider15]
-    float ambientStrength;       // Density-based ambient occlusion [0-2] [Nubis³]
-    float sharpening;            // Density sharpening exponent [0.2-1.0] — lower = crisper edges
+    float ambientStrength;       // Density-based ambient occlusion [0-2] [Schneider15]
     float noiseScale;            // Noise texture period in blocks [128-512] — smaller = more detail
     float cellFrequency;         // Voronoi cell count across weather map [2-16]
     float atmosphereFadeDist;    // Cloud atmospheric fade distance in blocks [200-2000]
+    float windAngle;             // Wind direction in radians [0, 2π]
+    uint32_t debugMode;          // 0=normal, 1=weather coverage, 2=weather type, 3-5=noise R/G/A, 6=heightProfile, 7=raw density, 8=final density
 };
 
 class CloudModule : public WorldModule, public SharedObject<CloudModule> {

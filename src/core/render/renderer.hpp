@@ -197,10 +197,14 @@ struct Options {
     float cloudPowderStrength = 1.0f; // Beer-powder dark edge [0.0 - 2.0]
     float cloudAmbientStrength = 1.0f;// Ambient occlusion [0.0 - 2.0]
     float cloudTemporalBlend = -1.0f; // Temporal blend override (-1 = use quality default)
-    float cloudSharpening = 0.45f;    // Density sharpening exponent [0.2 - 1.0] (lower = crisper edges)
-    float cloudNoiseScale = 192.0f;   // Noise texture period in blocks [128 - 512]
-    float cloudCellFrequency = 8.0f;  // Voronoi cell count across weather map [2 - 16]
+    float cloudNoiseScale = 214.0f;   // Noise texture period in blocks [16 - 2048]
+    float cloudCellFrequency = 4.0f;  // Voronoi cell count across weather map [1 - 16]
     float cloudAtmosphereFadeDist = 800.0f; // Cloud atmospheric fade distance [200 - 2000]
+    uint32_t cloudDebugMode = 0;      // 0=normal, 1-8=debug views (see cloud_raymarch.comp)
+    float cloudWindAngle = 0.0f;      // Wind direction in radians [0, 2π]
+    uint32_t cloudMarchStepsOverride = 0;  // 0=use quality preset, 32-256
+    uint32_t cloudLightStepsOverride = 0;  // 0=use quality preset, 1-12
+    uint32_t cloudResDivisorOverride = 0;  // 0=use quality preset, 1-4
     float wetSurfaceStrength = 1.0f;  // Wet surface effect strength [0.0 - 2.0]
 
     // Diagnostics

@@ -65,6 +65,7 @@ bool CloudModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::Device
             switch (Renderer::options.cloudQuality) {
                 case 1:  smSize = 128; break;
                 case 5:  smSize = 512; break;
+                case 6:  smSize = 512; break;
                 default: smSize = 256; break;
             }
             cloudShadowImage_ = vk::DeviceLocalImage::create(
@@ -137,7 +138,18 @@ void CloudModule::build() {
         case 3: enabled_ = true;  resolutionDivisor_ = 2; marchSteps_ = 64; lightSteps_ = 4; temporalBlend_ = 0.95f; shadowMapSize_ = 256; break;
         case 4: enabled_ = true;  resolutionDivisor_ = 2; marchSteps_ = 96; lightSteps_ = 6; temporalBlend_ = 0.93f; shadowMapSize_ = 256; break;
         case 5: enabled_ = true;  resolutionDivisor_ = 1; marchSteps_ = 96; lightSteps_ = 6; temporalBlend_ = 0.93f; shadowMapSize_ = 512; break;
+        case 6: enabled_ = true;  resolutionDivisor_ = 1; marchSteps_ = 128; lightSteps_ = 8; temporalBlend_ = 0.90f; shadowMapSize_ = 512; break;
         default: enabled_ = true; resolutionDivisor_ = 2; marchSteps_ = 64; lightSteps_ = 4; temporalBlend_ = 0.95f; shadowMapSize_ = 256; break;
+    }
+
+    if (Renderer::options.cloudResDivisorOverride > 0) {
+        resolutionDivisor_ = std::clamp(Renderer::options.cloudResDivisorOverride, 1u, 4u);
+    }
+    if (Renderer::options.cloudMarchStepsOverride > 0) {
+        marchSteps_ = std::clamp(Renderer::options.cloudMarchStepsOverride, 1u, 256u);
+    }
+    if (Renderer::options.cloudLightStepsOverride > 0) {
+        lightSteps_ = std::clamp(Renderer::options.cloudLightStepsOverride, 1u, 12u);
     }
 
     cloudWidth_ = (width_ + resolutionDivisor_ - 1) / resolutionDivisor_;
@@ -551,16 +563,17 @@ void CloudModuleContext::render() {
     pc.renderHeight = module->height_;
     pc.cloudWidth = module->cloudWidth_;
     pc.cloudHeight = module->cloudHeight_;
-    pc.cloudBase = module->enabled_ ? Renderer::options.cloudAltitude : 99999.0f;
-    pc.cloudThickness = Renderer::options.cloudThickness;
-    pc.coverage = Renderer::options.cloudCoverage;
-    pc.cloudType = Renderer::options.cloudType;
-    pc.densityMultiplier = module->enabled_ ? Renderer::options.cloudDensity : 0.0f;
-    pc.windSpeed = Renderer::options.cloudSpeed;
+    pc.cloudBase = module->enabled_ ? std::clamp(Renderer::options.cloudAltitude, 64.0f, 320.0f) : 99999.0f;
+    pc.cloudThickness = std::clamp(Renderer::options.cloudThickness, 16.0f, 256.0f);
+    pc.coverage = std::clamp(Renderer::options.cloudCoverage, 0.0f, 1.0f);
+    pc.cloudType = std::clamp(Renderer::options.cloudType, 0.0f, 2.0f);
+    pc.densityMultiplier = module->enabled_ ? std::clamp(Renderer::options.cloudDensity, 0.0f, 5.0f) : 0.0f;
     pc.windTime = module->windTime_;
     pc.frameIndex = module->frameCounter_++;
-    pc.marchSteps = module->marchSteps_;
-    pc.lightSteps = module->lightSteps_;
+    pc.marchSteps = Renderer::options.cloudMarchStepsOverride > 0
+        ? Renderer::options.cloudMarchStepsOverride : module->marchSteps_;
+    pc.lightSteps = Renderer::options.cloudLightStepsOverride > 0
+        ? Renderer::options.cloudLightStepsOverride : module->lightSteps_;
     pc.temporalBlend = Renderer::options.cloudTemporalBlend >= 0.0f
         ? std::clamp(Renderer::options.cloudTemporalBlend, 0.0f, 1.0f)
         : std::clamp(module->temporalBlend_, 0.0f, 1.0f);
@@ -572,14 +585,15 @@ void CloudModuleContext::render() {
     pc.eyePosX = static_cast<float>(camPos.x);
     pc.eyePosY = static_cast<float>(camPos.y);
     pc.eyePosZ = static_cast<float>(camPos.z);
-    pc.detailStrength = Renderer::options.cloudDetailStrength;
-    pc.scatterOctaves = Renderer::options.cloudScatterOctaves;
-    pc.powderStrength = Renderer::options.cloudPowderStrength;
-    pc.ambientStrength = Renderer::options.cloudAmbientStrength;
-    pc.sharpening = std::clamp(Renderer::options.cloudSharpening, 0.2f, 1.0f);
-    pc.noiseScale = std::max(Renderer::options.cloudNoiseScale, 16.0f);
-    pc.cellFrequency = std::clamp(Renderer::options.cloudCellFrequency, 2.0f, 16.0f);
-    pc.atmosphereFadeDist = std::clamp(Renderer::options.cloudAtmosphereFadeDist, 200.0f, 2000.0f);
+    pc.detailStrength = std::clamp(Renderer::options.cloudDetailStrength, 0.0f, 3.0f);
+    pc.scatterOctaves = std::clamp(Renderer::options.cloudScatterOctaves, 1u, 8u);
+    pc.powderStrength = std::clamp(Renderer::options.cloudPowderStrength, 0.0f, 3.0f);
+    pc.ambientStrength = std::clamp(Renderer::options.cloudAmbientStrength, 0.0f, 3.0f);
+    pc.noiseScale = std::clamp(Renderer::options.cloudNoiseScale, 16.0f, 4096.0f);
+    pc.cellFrequency = std::clamp(Renderer::options.cloudCellFrequency, 1.0f, 32.0f);
+    pc.atmosphereFadeDist = std::clamp(Renderer::options.cloudAtmosphereFadeDist, 100.0f, 4000.0f);
+    pc.windAngle = Renderer::options.cloudWindAngle;
+    pc.debugMode = std::clamp(Renderer::options.cloudDebugMode, 0u, 8u);
 
     // Advance wind time using actual frame delta
     auto now = std::chrono::steady_clock::now();

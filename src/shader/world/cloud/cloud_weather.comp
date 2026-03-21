@@ -107,30 +107,30 @@ void main() {
 
     vec2 uv = (vec2(texel) + 0.5) / 256.0;
 
-    // Convert texel to absolute world position (weather map is camera-centered, 1024 blocks)
+    // Convert texel to absolute world position — fixed extent (matches cloud_common.glsl)
     vec3 eyePos = getEyePos();
-    vec2 worldXZ = eyePos.xz + (uv - 0.5) * 1024.0;
+    vec2 worldXZ = eyePos.xz + (uv - 0.5) * WEATHER_EXTENT;
 
-    // World-space UV for noise: NO wind drift. Weather map defines WHERE clouds form
-    // (semi-permanent like a satellite photo). Wind only moves 3D noise shapes.
-    // Slow evolution via time-varying domain warp gives natural forming/dissipating.
-    vec2 worldUV = worldXZ / 1024.0;
+    // World-space UV for noise: fixed scale independent of extent/fade.
+    // Uses 1/WEATHER_EXTENT so cell frequency directly controls cells-per-extent.
+    // Changing atmosphereFadeDist does NOT affect cloud placement.
+    vec2 worldUV = worldXZ / WEATHER_EXTENT;
 
     // --- Domain warping: breaks Voronoi grid regularity into organic shapes ---
+    // Higher frequencies + stronger amplitude to thoroughly disguise the Voronoi grid.
     float evolveTime = pc.windTime * 0.0001; // Very slow evolution (minutes)
     vec2 warp1 = vec2(
-        gradNoise2D(worldUV * 2.0 + vec2(evolveTime, 3.7)),
-        gradNoise2D(worldUV * 2.0 + vec2(5.2, evolveTime + 1.3))
+        gradNoise2D(worldUV * 4.0 + vec2(evolveTime, 3.7)),
+        gradNoise2D(worldUV * 4.0 + vec2(5.2, evolveTime + 1.3))
     );
     // Second octave of warp for finer distortion
     vec2 warp2 = vec2(
-        gradNoise2D(worldUV * 5.0 + warp1 * 2.0 + vec2(11.1, 7.3)),
-        gradNoise2D(worldUV * 5.0 + warp1 * 2.0 + vec2(3.9, 13.7))
+        gradNoise2D(worldUV * 10.0 + warp1 * 2.0 + vec2(11.1, 7.3)),
+        gradNoise2D(worldUV * 10.0 + warp1 * 2.0 + vec2(3.9, 13.7))
     );
-    vec2 warpedUV = worldUV + warp1 * 0.3 + warp2 * 0.1;
+    vec2 warpedUV = worldUV + warp1 * 0.6 + warp2 * 0.25;
 
     // --- Voronoi cellular placement ---
-    // Frequency ~4 cells across the 1024-block weather map = ~256 blocks per cell.
     // Each cell is one convective thermal / cloud tower.
     float cellFreq = pc.cellFrequency;
     vec4 vor = voronoi2D(warpedUV * cellFreq);
@@ -175,14 +175,14 @@ void main() {
     //   Small radius → tight isolated puffs
     //   Large radius → cells nearly fill their Voronoi region
     // Scale with coverage so high coverage makes fatter clouds that merge.
-    float cellRadius = mix(0.25, 0.50, baseCoverage);
+    float cellRadius = mix(0.35, 0.65, baseCoverage);
 
     // Normalized distance: 0 at center, 1 at the falloff edge
     float radialFalloff = 1.0 - smoothstep(0.0, cellRadius, distToCenter);
 
     // Add organic irregularity to the cell shape using small-scale FBM.
     // This breaks the circular symmetry into cauliflower-like irregular edges.
-    float edgeNoise = fbm2D(warpedUV * cellFreq * 3.0 + cellID * 5.3, 3);
+    float edgeNoise = fbm2D(warpedUV * 12.0 + cellID * 5.3, 3);
     // Modulate the falloff edge: push it in or out by up to 30%
     float noisyRadius = cellRadius * (0.7 + edgeNoise * 0.6);
     float noisyFalloff = 1.0 - smoothstep(0.0, noisyRadius, distToCenter);
@@ -193,9 +193,10 @@ void main() {
     // Final coverage for this texel: cell must be active AND within falloff radius
     float coverage = cellActive * cellShape;
 
-    // During rain/thunder, fill gaps between cells for overcast effect
-    // Use second-nearest distance to create inter-cell fill
-    float gapFill = rain * 0.6 + thunder * 0.3;
+    // Fill gaps at high coverage — not just during rain/thunder.
+    // At coverage > 0.7, cells start merging into overcast. At 1.0, full fill.
+    float highCovFill = smoothstep(0.7, 1.0, baseCoverage);
+    float gapFill = max(highCovFill, rain * 0.6 + thunder * 0.3);
     if (gapFill > 0.0) {
         float fillNoise = fbm2D(warpedUV * 6.0, 2);
         float fill = fillNoise * gapFill;

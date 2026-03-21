@@ -2,14 +2,17 @@
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_GOOGLE_include_directive : require
 
-// Cloud noise 3D texture generator. [Schneider15 §3.2, Bridson07]
+// Cloud noise 3D texture generator. [Schneider15 SIGGRAPH 2015]
 // Generates a 128^3 RGBA8 tiled noise texture at init time (once).
 //
-// Channel layout (matches cloudDensity() expectations in cloud_density.glsl):
-//   R: Perlin-Worley blend — base cloud shape (connected yet billowy, freq 1.0)
-//   G: Single-octave Worley at freq 4 — medium erosion (sharp cell edges)
-//   B: Single-octave Worley at freq 8 — fine erosion
-//   A: Curl noise magnitude — wispy tendrils for cloud edges [Bridson07]
+// Channel layout (Schneider 2015 procedural clouds):
+//   R: Perlin-Worley blend — connected large-scale cloud shape
+//   G: Worley F1 at freq 2x — erosion octave 1
+//   B: Worley F1 at freq 4x — erosion octave 2
+//   A: Worley F1 at freq 8x — erosion octave 3
+//
+// R creates the base cloud shape (connected, puffy masses).
+// G/B/A erode coverage edges to create realistic cloud boundaries.
 
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
@@ -21,31 +24,12 @@ layout(set = 0, binding = 9, rgba8) uniform writeonly image3D uNoiseTexture;
 
 // --- Noise primitives (self-contained for init-time generation) ---
 
-// Hash functions for procedural noise
+// Hash function for procedural noise
 vec3 hash33(vec3 p) {
     p = vec3(dot(p, vec3(127.1, 311.7, 74.7)),
              dot(p, vec3(269.5, 183.3, 246.1)),
              dot(p, vec3(113.5, 271.9, 124.6)));
     return fract(sin(p) * 43758.5453123);
-}
-
-float hash31(vec3 p) {
-    float h = dot(p, vec3(127.1, 311.7, 74.7));
-    return fract(sin(h) * 43758.5453123);
-}
-
-// 3D value noise with Hermite interpolation
-float valueNoise(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f); // Hermite smoothstep
-
-    return mix(
-        mix(mix(hash31(i + vec3(0, 0, 0)), hash31(i + vec3(1, 0, 0)), f.x),
-            mix(hash31(i + vec3(0, 1, 0)), hash31(i + vec3(1, 1, 0)), f.x), f.y),
-        mix(mix(hash31(i + vec3(0, 0, 1)), hash31(i + vec3(1, 0, 1)), f.x),
-            mix(hash31(i + vec3(0, 1, 1)), hash31(i + vec3(1, 1, 1)), f.x), f.y),
-        f.z);
 }
 
 // Worley (cellular) noise — returns F1 distance (nearest feature point)
@@ -90,76 +74,24 @@ float gradientNoise(vec3 p) {
         u.z) * 0.5 + 0.5;
 }
 
-// FBM (Fractional Brownian Motion) of gradient noise
-float fbm(vec3 p, int octaves) {
-    float value = 0.0;
-    float amplitude = 0.5;
-    float frequency = 1.0;
-    for (int i = 0; i < octaves; i++) {
-        value += amplitude * gradientNoise(p * frequency);
-        amplitude *= 0.5;
-        frequency *= 2.0;
-    }
-    return value;
-}
-
-// Worley FBM: weighted sum at 3 octaves [Schneider15 §3.2]
-// Only used for R channel (base shape). G/B use single-octave Worley.
-float worleyFBM3(vec3 p, float baseFreq) {
-    float w0 = 1.0 - worleyF1(p * baseFreq);
-    float w1 = 1.0 - worleyF1(p * baseFreq * 2.0);
-    float w2 = 1.0 - worleyF1(p * baseFreq * 4.0);
-    return 0.625 * w0 + 0.25 * w1 + 0.125 * w2;
-}
-
-// Curl noise magnitude [Bridson07] — generates wispy, tendril-like structures.
-// Computes |∇ × A| where A = (F1, F2, F3) are independent gradient noise fields.
-// Init-time only (runs once), so ALU cost is irrelevant.
-float curlNoiseMag(vec3 p, float freq) {
-    p *= freq;
-    float e = 0.05;
-    vec3 o2 = vec3(31.416, 47.853, 73.214);
-    vec3 o3 = vec3(113.957, 67.432, 29.876);
-
-    // Partial derivatives of three independent noise fields
-    // ∇ × (F1, F2, F3) = (∂F3/∂y - ∂F2/∂z, ∂F1/∂z - ∂F3/∂x, ∂F2/∂x - ∂F1/∂y)
-    float df1_dy = gradientNoise(p + vec3(0,e,0)) - gradientNoise(p - vec3(0,e,0));
-    float df1_dz = gradientNoise(p + vec3(0,0,e)) - gradientNoise(p - vec3(0,0,e));
-    float df2_dx = gradientNoise(p+o2 + vec3(e,0,0)) - gradientNoise(p+o2 - vec3(e,0,0));
-    float df2_dz = gradientNoise(p+o2 + vec3(0,0,e)) - gradientNoise(p+o2 - vec3(0,0,e));
-    float df3_dx = gradientNoise(p+o3 + vec3(e,0,0)) - gradientNoise(p+o3 - vec3(e,0,0));
-    float df3_dy = gradientNoise(p+o3 + vec3(0,e,0)) - gradientNoise(p+o3 - vec3(0,e,0));
-
-    vec3 curl = vec3(df3_dy - df2_dz, df1_dz - df3_dx, df2_dx - df1_dy) / (2.0 * e);
-    return clamp(length(curl) * 0.3, 0.0, 1.0);
-}
-
 void main() {
     ivec3 texel = ivec3(gl_GlobalInvocationID.xyz);
     if (any(greaterThanEqual(texel, ivec3(128)))) return;
 
     vec3 uvw = (vec3(texel) + 0.5) / 128.0;
-    vec3 p = uvw * 8.0; // Scale for good tiling frequency
+    vec3 p = uvw * 4.0;  // 4 cells across the 128³ volume
 
-    // R: Perlin-Worley blend (base cloud shape) [Schneider15 §3.2]
-    // Perlin provides connectivity, Worley provides billowy cauliflower shapes.
-    // Lower base frequency (1.0 vs 2.0) gives larger, more distinct cloud features.
-    float perlin = fbm(p, 4);
-    float worleyFbm = worleyFBM3(p, 1.0);
+    // R: Perlin-Worley blend [Schneider15] — connected large-scale shape.
+    // remap(perlin, 0, 1, worley, 1) biases Perlin toward Worley in valleys,
+    // creating connected, puffy masses instead of isolated blobs.
+    float perlin = gradientNoise(p);
+    float worley = 1.0 - worleyF1(p);
+    float r = perlin + (worley - perlin) * (1.0 - perlin);  // remap(perlin, 0,1, worley, 1)
 
-    // Schneider remap (not linear interpolation — creates continuous connectivity)
-    float perlinWorley = perlin * 0.5 + 0.5;  // Perlin to [0,1]
-    perlinWorley = max(perlinWorley - (1.0 - worleyFbm), 0.0) / max(worleyFbm, 0.001);
-    perlinWorley = clamp(perlinWorley, 0.0, 1.0);
+    // G/B/A: Worley F1 erosion octaves at doubling frequencies [Schneider15]
+    float g = 1.0 - worleyF1(p * 2.0);   // erosion octave 1
+    float b = 1.0 - worleyF1(p * 4.0);   // erosion octave 2
+    float a = 1.0 - worleyF1(p * 8.0);   // erosion octave 3
 
-    // G: Single-octave Worley at freq 4 (sharp cell edges, no FBM blurring)
-    float mediumErosion = 1.0 - worleyF1(p * 4.0);
-
-    // B: Single-octave Worley at freq 8 (fine erosion)
-    float fineErosion = 1.0 - worleyF1(p * 8.0);
-
-    // A: Curl noise (wispy tendrils for cloud edges) [Bridson07]
-    float curlDetail = curlNoiseMag(p, 4.0);
-
-    imageStore(uNoiseTexture, texel, vec4(perlinWorley, mediumErosion, fineErosion, curlDetail));
+    imageStore(uNoiseTexture, texel, vec4(r, g, b, a));
 }

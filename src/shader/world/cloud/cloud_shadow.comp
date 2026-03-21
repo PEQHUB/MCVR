@@ -24,9 +24,9 @@ void main() {
 
     vec3 eyePos = getEyePos();
 
-    // Map shadow texel to world XZ position (centered on camera, 1024-block coverage)
+    // Map shadow texel to world XZ position (centered on camera, fixed extent)
     vec2 uv = (vec2(texel) + 0.5) / float(pc.shadowMapSize);
-    vec2 worldXZ = eyePos.xz + (uv - 0.5) * 1024.0;
+    vec2 worldXZ = eyePos.xz + (uv - 0.5) * WEATHER_EXTENT;
 
     // Light direction: sun or moon (matches raymarch)
     vec3 sunDir = normalize(skyUBO.sunDirection);
@@ -48,12 +48,11 @@ void main() {
         pos.xz += lightDir.xz * lightT;
 
         vec3 noisePos = pos * NOISE_SCALE + windOffset(pc.windTime);
-        vec4 noise = texture(uNoise3D, noisePos);
+        vec4 noise = textureLod(uNoise3D, noisePos, 1.0);
         vec4 weather = sampleWeather(uWeatherMap, pos);
 
-        float density = cloudDensity(pos, weather.r, weather.g, noise,
-                                      pc.cloudBase, cloudThick, pc.densityMultiplier,
-                                      pc.detailStrength);
+        float density = getBaseDensity(pos, weather.r, weather.g, noise,
+                                       pc.cloudBase, cloudThick, pc.densityMultiplier);
         opticalDepth += density * stepSize;
 
         // Early termination: fully opaque shadow, remaining steps won't change result

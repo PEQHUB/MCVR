@@ -112,7 +112,6 @@ layout(push_constant) uniform PushConstants {
     float coverage;
     float cloudType;
     float densityMultiplier;
-    float windSpeed;
     float windTime;          // Wrapped at 86400s (24h) to preserve FP32 precision
     uint frameIndex;
     uint marchSteps;
@@ -126,10 +125,11 @@ layout(push_constant) uniform PushConstants {
     uint scatterOctaves;
     float powderStrength;    // Beer-powder dark edge intensity [0-2]
     float ambientStrength;   // Density-based ambient occlusion [0-2]
-    float sharpening;        // Density sharpening exponent [0.2-1.0]
     float noiseScale;        // Noise texture period in blocks [128-512]
     float cellFrequency;     // Voronoi cell count across weather map [2-16]
     float atmosphereFadeDist; // Cloud atmospheric fade distance in blocks [200-2000]
+    float windAngle;         // Wind direction in radians [0, 2π]
+    uint debugMode;          // 0=normal, 1=weather cov, 2=weather type, 3-5=noise R/G/A, 6=hProfile, 7=raw density, 8=final density
 } pc;
 
 // --- Shared constants ---
@@ -144,7 +144,9 @@ layout(push_constant) uniform PushConstants {
 // X-drift is 2x Z-drift for prevailing-wind asymmetry. [Schneider15 §3.3]
 // Tuned for Minecraft scale: ~1 block/sec at windSpeed=1.0.
 vec3 windOffset(float windTime) {
-    return vec3(windTime * 0.004, 0.0, windTime * 0.002);
+    float s = sin(pc.windAngle);
+    float c = cos(pc.windAngle);
+    return vec3(windTime * 0.004 * c, windTime * 0.0005, windTime * 0.004 * s);
 }
 
 // --- Shared helpers ---
@@ -163,20 +165,26 @@ float effectiveThickness() {
     return min(boosted, 320.0 - pc.cloudBase);
 }
 
-// Sample weather map centered on camera. Coverage area is 1024 blocks.
+// Fixed weather map coverage radius in blocks.
+// Must match cloud_weather.comp. Independent of atmosphereFadeDist so the
+// fade slider doesn't rescale/shift the cloud pattern.
+// 4000 blocks = covers full MARCH_CLAMP range from any camera angle.
+#define WEATHER_EXTENT 4000.0
+
+// Sample weather map centered on camera.
+// Uses fixed extent so cloud placement is independent of fade distance.
 // uWeatherMap must be declared by the including shader.
 #ifdef CLOUD_HAS_WEATHER_SAMPLER
 vec4 sampleWeather(sampler2D weatherMap, vec3 worldPos) {
     vec3 eyePos = getEyePos();
-    vec2 uv = (worldPos.xz - eyePos.xz) / 1024.0 + 0.5;
+    vec2 uv = (worldPos.xz - eyePos.xz) / WEATHER_EXTENT + 0.5;
 
-    // Fade coverage to zero near weather map edges — prevents solid cloud walls
-    // at the 1024-block boundary where CLAMP_TO_EDGE repeats edge texels.
-    vec2 edgeDist = min(uv, 1.0 - uv);  // Distance from nearest edge [0, 0.5]
-    float edgeFade = smoothstep(0.0, 0.1, min(edgeDist.x, edgeDist.y));
+    // Fade coverage near weather map edges — prevents solid walls at boundary
+    vec2 edgeDist = min(uv, 1.0 - uv);
+    float edgeFade = smoothstep(0.0, 0.08, min(edgeDist.x, edgeDist.y));
 
     vec4 weather = texture(weatherMap, uv);
-    weather.r *= edgeFade;  // Fade coverage only, preserve cloud type
+    weather.r *= edgeFade;
     return weather;
 }
 #endif

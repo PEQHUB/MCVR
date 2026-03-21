@@ -1,17 +1,16 @@
 #ifndef CLOUD_DENSITY_GLSL
 #define CLOUD_DENSITY_GLSL
 
-// Nubis cloud density and lighting model.
+// Schneider 2015 procedural cloud density and lighting model.
+// Matched to Frostnova compute.comp reference implementation.
 //
-// Core equation [Nubis³ p24]:
-//   cloud_density = saturate(noise_composite - (1.0 - dimensional_profile))
-//
-// Noise is the shape source; dimensional_profile sets the threshold.
-// High profile + high noise = density. Low profile = sparse/no clouds.
+// Two-stage density pipeline:
+//   1. getBaseDensity() — height gradient × base noise, coverage erosion
+//   2. getDetailDensity() — curl displacement + high-freq erosion
 //
 // References:
-//   [Nubis³]        Schneider, "Nubis, Cubed", SIGGRAPH 2023
-//   [NubisEvolved]  Schneider, "Nubis, Evolved", SIGGRAPH 2022
+//   [Schneider15]   Schneider, "Real-time Volumetric Cloudscapes of HZD", SIGGRAPH 2015
+//   [Frostnova]     github.com/Frostnova — compute.comp reference
 //   [Wrenninge13]   Multi-scatter octave approximation
 //   [Hillaire16]    Frostbite decay parameters
 //
@@ -21,115 +20,134 @@ const float PI = 3.14159265358979;
 
 // --- Utility ---
 
-float cloudRemap(float value, float low1, float high1, float low2, float high2) {
-    return low2 + (value - low1) / (high1 - low1) * (high2 - low2);
+// Unclamped remap [Frostnova ValueRemap] — for height gradients
+float valueRemap(float value, float low1, float high1, float low2, float high2) {
+    return low2 + (value - low1) / max(high1 - low1, 0.0001) * (high2 - low2);
 }
 
-// --- Dimensional Profile [NubisEvolved p97, Nubis³ p29] ---
-//
-// Height profile × coverage. The profile controls cloud vertical extent
-// per type; coverage controls what fraction of the noise produces density.
-//
-// type [0,1] controls vertical extent:
-//   0 = stratus (thin, h=[0, ~0.25])
-//   0.33 = stratocumulus (medium, h=[0, ~0.5])
-//   0.67 = cumulus (tall, h=[0, ~0.8])
-//   1.0 = cumulonimbus (full height)
+// Clamped remap [Frostnova ValueRemapClamped] — the core density operation.
+float valueRemapClamped(float value, float low1, float high1, float low2, float high2) {
+    return clamp(valueRemap(value, low1, high1, low2, high2), min(low2, high2), max(low2, high2));
+}
 
-// Height profile: vertical shape of the cloud. Peaks at ~1.0 in the cloud body,
-// tapers at base (condensation level) and top (type-dependent).
-// Coverage is NOT included here — it controls the threshold separately.
+// --- Height Gradients [Frostnova GetCloudLayerDensity] ---
+//
+// Linear ramps via ValueRemap (NOT smoothstep). Creates trapezoidal profiles.
+// Frostnova uses 3 types: stratus(0), stratocumulus(0.5), cumulus(1.0).
+// We add cumulonimbus for thunderstorms.
+
+float gradientStratus(float h) {
+    // Frostnova: ramp 0.0→0.1 up, 0.2→0.3 down
+    return max(0.0, valueRemap(h, 0.0, 0.1, 0.0, 1.0) * valueRemap(h, 0.2, 0.3, 1.0, 0.0));
+}
+
+float gradientStratocumulus(float h) {
+    // Frostnova: ramp 0.0→0.2 up, 0.2→0.7 down
+    return max(0.0, valueRemap(h, 0.0, 0.2, 0.0, 1.0) * valueRemap(h, 0.2, 0.7, 1.0, 0.0));
+}
+
+float gradientCumulus(float h) {
+    // Frostnova: ramp 0.0→0.2 up, 0.7→0.9 down
+    return max(0.0, valueRemap(h, 0.0, 0.2, 0.0, 1.0) * valueRemap(h, 0.7, 0.9, 1.0, 0.0));
+}
+
+float gradientCumulonimbus(float h) {
+    // Tall tower for thunderstorms — extends nearly to top
+    return max(0.0, valueRemap(h, 0.0, 0.1, 0.0, 1.0) * valueRemap(h, 0.8, 0.95, 1.0, 0.0));
+}
+
+// Blend types [Frostnova GetCloudLayerDensity blend formula]
+// type 0=St, 0.5=Sc, 1.0=Cu (Frostnova 3-type system)
+// Extended: type > 1.0 blends toward Cb for thunderstorms
 float heightProfile(float h, float type) {
-    // Base: quick ramp from condensation level [NubisEvolved p97]
-    float base = smoothstep(0.0, 0.1, h);
+    float st = gradientStratus(h);
+    float sc = gradientStratocumulus(h);
+    float cu = gradientCumulus(h);
+    float cb = gradientCumulonimbus(h);
 
-    // Top: type-dependent fade height
-    float topFade = mix(0.25, 1.0, type);
-    float top = smoothstep(topFade, topFade * 0.35, h);
-
-    return base * top;
+    // Frostnova blend: d1 = mix(St, Sc, type*2), d2 = mix(Sc, Cu, (type-0.5)*2), out = mix(d1, d2, type)
+    if (type <= 1.0) {
+        float d1 = mix(st, sc, clamp(type * 2.0, 0.0, 1.0));
+        float d2 = mix(sc, cu, clamp((type - 0.5) * 2.0, 0.0, 1.0));
+        return mix(d1, d2, type);
+    }
+    // Extended: type 1.0→2.0 blends Cu→Cb (thunderstorm towers)
+    return mix(cu, cb, clamp(type - 1.0, 0.0, 1.0));
 }
 
-// --- Noise Composite [Nubis³ p99, p104, p108] ---
+// --- Base Density [Frostnova GetBaseDensity] ---
 //
-// Noise channels (from cloud_noise_gen.comp):
-//   R = Perlin-Worley  (connected, flowing shapes)
-//   G = Worley freq 4  (medium cellular)
-//   B = Worley freq 8  (fine cellular)
-//   A = Curl noise     (wispy tendrils)
-//
-// Wispy (type=0): PW base → curl detail. Connected flowing shapes.
-// Billowy (type=1): PW base → Worley detail. Rounded cellular shapes.
-// Both channels use full [0,1] range (no 0.3 scaling — that was calibrated
-// for Nubis's Alligator noise, not our Worley).
+// Noise channel layout (Schneider 2015):
+//   R = Perlin-Worley blend (connected shape)
+//   G = Worley F1 2x (erosion octave 1)
+//   B = Worley F1 4x (erosion octave 2)
+//   A = Worley F1 8x (erosion octave 3)
 
-float noiseComposite(vec4 noise, float hProfile, float type) {
-    // Wispy: curl-dominated with PW connectivity [Nubis³ p99]
-    // Curl provides thin flowing tendrils; PW adds large-scale connectivity.
-    float wispy = noise.r * 0.4 + noise.a * 0.6;
-
-    // Billowy: Worley-dominated with PW connectivity [Nubis³ p104]
-    // Worley provides round puffy cells; PW fills gaps for connected shapes.
-    // Height-dependent blend: more PW at base, more Worley at top [p104]
-    float billowyGrad = pow(max(hProfile, 0.001), 0.25);
-    float billowy = mix(noise.r * 0.5 + noise.g * 0.5,
-                        noise.g * 0.7 + noise.b * 0.3, billowyGrad);
-
-    // Type blend [Nubis³ p108]: stratus=wispy, cumulus/cb=billowy
-    return mix(wispy, billowy, type);
-}
-
-// --- Main Cloud Density [Nubis³ p24, p118] ---
-//
-// Pipeline: dimProfile → noiseComposite → density threshold → detail erosion → sharpen
-// Returns density; writes dimensional_profile for ambient scattering.
-
-float cloudDensity(vec3 pos, float coverage, float type,
-                   vec4 noise, float cloudBase, float cloudThickness,
-                   float densityMul, float detailStr,
-                   out float outDimProfile) {
+float getBaseDensity(vec3 pos, float coverage, float type,
+                     vec4 noise, float cloudBase, float cloudThickness,
+                     float densityMul,
+                     out float outHeight) {
     float h = (pos.y - cloudBase) / cloudThickness;
-    if (h < 0.0 || h > 1.0) { outDimProfile = 0.0; return 0.0; }
+    outHeight = h;
+    if (h < 0.0 || h > 1.0) return 0.0;
 
-    // Height profile: vertical cloud shape [NubisEvolved p97]
+    // Height gradient [Frostnova GetCloudLayerDensity]
     float hProfile = heightProfile(h, type);
-    if (hProfile < 0.001) { outDimProfile = 0.0; return 0.0; }
+    if (hProfile < 0.001) return 0.0;
 
-    // Dimensional profile for ambient scattering: height × coverage [Nubis³ p29]
-    float dimProfile = hProfile * coverage;
-    outDimProfile = dimProfile;
+    // Base noise remapped [Frostnova: layerDensity * ValueRemapClamped(noise.r, 0.3, 1.0, 0.0, 1.0)]
+    float baseNoise = valueRemapClamped(noise.r, 0.3, 1.0, 0.0, 1.0);
+    float density = hProfile * baseNoise;
+    if (density < 0.0001) return 0.0;
 
-    // Noise composite: type blends wispy↔billowy [Nubis³ p99-108]
-    float nc = noiseComposite(noise, hProfile, type);
+    // Coverage with anvil bias [Frostnova: pow(coverage, ValueRemap(h, 0.7, 0.8, 1.0, 0.8))]
+    float anvilBias = valueRemap(h, 0.7, 0.8, 1.0, 0.8);
+    float adjCoverage = pow(max(coverage, 0.001), clamp(anvilBias, 0.5, 1.0));
 
-    // Coverage threshold [Nubis³ p24, Schneider15 §3.3]:
-    // Coverage DIRECTLY sets the noise threshold — NOT multiplied by height.
-    // This ensures visible clouds at moderate coverage (0.3-0.5).
-    // Height profile shapes the cloud AFTER thresholding.
-    float threshold = 1.0 - coverage;
-    float density = clamp(cloudRemap(nc, threshold, 1.0, 0.0, 1.0), 0.0, 1.0);
-    density *= coverage;    // Energy conservation [Schneider15]
-    density *= hProfile;    // Height shaping AFTER threshold — creates dome tops
+    // FBM erosion from G/B/A channels [Frostnova: 0.625*g + 0.25*b + 0.125*w]
+    float erosion = 0.625 * noise.g + 0.25 * noise.b + 0.125 * noise.a;
 
-    // Detail erosion: secondary noise breaks up edges [Nubis³ p104]
-    float detailNoise = mix(noise.a, noise.b, type);
-    density = max(density - detailNoise * 0.3 * detailStr, 0.0);
+    // Coverage erosion [Frostnova: ValueRemapClamped(erosion, coverage, 1.0, 0.0, 1.0)]
+    erosion = valueRemapClamped(erosion, adjCoverage, 1.0, 0.0, 1.0);
 
-    // Density multiplier
+    // Apply erosion to density [Frostnova: ValueRemapClamped(density, erosion, 1.0, 0.0, 1.0)]
+    density = valueRemapClamped(density, erosion, 1.0, 0.0, 1.0);
+
+    // Density multiplier (user control)
     density *= densityMul;
 
-    // Sharpening [Nubis³ p118]: pow pushes low densities toward zero
-    float sharp = clamp(pc.sharpening, 0.1, 1.0);
-    return pow(max(density, 0.0), sharp);
+    return density;
 }
 
-// Overload without outDimProfile for shadow/light march
-float cloudDensity(vec3 pos, float coverage, float type,
-                   vec4 noise, float cloudBase, float cloudThickness,
-                   float densityMul, float detailStr) {
+// Overload without outHeight for shadow/light march
+float getBaseDensity(vec3 pos, float coverage, float type,
+                     vec4 noise, float cloudBase, float cloudThickness,
+                     float densityMul) {
     float unused;
-    return cloudDensity(pos, coverage, type, noise, cloudBase, cloudThickness,
-                        densityMul, detailStr, unused);
+    return getBaseDensity(pos, coverage, type, noise, cloudBase, cloudThickness,
+                          densityMul, unused);
+}
+
+// --- Detail Density [Frostnova GetDetailDensity] ---
+//
+// Applies high-frequency erosion to base density.
+// Uses same noise texture at higher frequency (DETAIL_FREQ).
+// Height-inverted: wispy bottoms, smooth cauliflower tops.
+
+float getDetailDensity(float baseDensity, vec4 detailNoise, float height, float detailStr) {
+    if (baseDensity < 0.0001 || detailStr < 0.001) return baseDensity;
+
+    // FBM from detail noise G/B/A [Frostnova: 0.625*r + 0.25*g + 0.125*b — uses r/g/b of separate texture]
+    // We reuse same texture at higher freq, so erosion octaves are in G/B/A
+    float erosion = 0.625 * detailNoise.g + 0.25 * detailNoise.b + 0.125 * detailNoise.a;
+
+    // Height-invert [Frostnova: mix(erosion, 1-erosion, clamp(height*10, 0, 1))]
+    // Bottom of cloud (h≈0): use raw erosion → wispy tendrils
+    // Top of cloud (h>0.1): use inverted erosion → round cauliflower shapes
+    erosion = mix(erosion, 1.0 - erosion, clamp(height * 10.0, 0.0, 1.0));
+
+    // Apply detail erosion [Frostnova: ValueRemapClamped(density, erosion, 1.0, 0.0, 1.0)]
+    return valueRemapClamped(baseDensity, erosion * detailStr, 1.0, 0.0, 1.0);
 }
 
 // --- Phase Functions ---
@@ -140,33 +158,42 @@ float phaseHG(float cosTheta, float g) {
     return (1.0 - g2) / (4.0 * PI * denom * sqrt(denom));
 }
 
+// Dual-lobe HG [Nubis3 §8.5: max() of forward + silver-lining back lobe]
 float phaseDualHG(float cosTheta, float g1, float g2, float blend) {
-    return mix(phaseHG(cosTheta, g1), phaseHG(cosTheta, g2), blend);
+    const float SILVER_INTENSITY = 1.27;
+    const float SILVER_SPREAD    = 1.32;
+    float forward = phaseHG(cosTheta, g1);
+    float silver  = SILVER_INTENSITY * phaseHG(cosTheta, 0.99 - SILVER_SPREAD);
+    return max(forward, silver);
 }
 
 // --- Multi-scatter octave approximation [Wrenninge13, Hillaire16] ---
 
 float multiScatterEnergy(float opticalDepth, float cosTheta, uint octaves, float powderStr) {
     const float ISOTROPIC_PHASE = 1.0 / (4.0 * PI);
-    const float A_DECAY = 0.2;
+    const float A_DECAY = 0.5;
     const float B_DECAY = 0.5;
     const float C_DECAY = 0.5;
-
-    float powderBlend = clamp(-cosTheta * 0.5 + 0.5, 0.0, 1.0) * powderStr;
 
     float energy = 0.0;
     float a = 1.0, b = 1.0, c = 1.0;
 
     for (uint n = 0; n < octaves; n++) {
-        float phase = phaseDualHG(cosTheta, 0.8 * c, -0.3 * c, 0.2);
+        float phase = phaseDualHG(cosTheta, 0.8 * c, -0.5 * c, 0.5);
         phase = mix(ISOTROPIC_PHASE, phase, c);
 
         float od = opticalDepth * a;
-        float beer = exp(-od);
-        float powder = 1.0 - exp(-od * 2.0);
-        float t = beer * mix(1.0, powder * 2.0, powderBlend);
 
-        energy += b * phase * t;
+        // Dual-Beer attenuation [Nubis3 §8.3]
+        float primary   = exp(-od);
+        float secondary = exp(-od * 0.25) * 0.7;
+        // Angle-dependent: reduce secondary when looking toward sun (cos > 0.7)
+        float attenuation = max(
+            valueRemap(cosTheta, 0.7, 1.0, secondary, secondary * 0.25),
+            primary
+        );
+
+        energy += b * phase * attenuation;
         a *= A_DECAY;
         b *= B_DECAY;
         c *= C_DECAY;
