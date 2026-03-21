@@ -123,6 +123,7 @@ class UIRenderContext {
     bool isFrameActive() const { return frameActive_; }
 
     bool isLoopActive() const { return loopActive_.load(std::memory_order_acquire); }
+    int phase() const { return phase_.load(std::memory_order_relaxed); }
     uint32_t width() const { return width_; }
     uint32_t height() const { return height_; }
 

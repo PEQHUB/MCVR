@@ -90,6 +90,7 @@ class Framework : public SharedObject<Framework> {
     UIRenderContext *uiRenderContext() const;
     bool isDecoupledUIActive() const;
     bool isUIThreadRenderingOverlay() const;  // True only after UIThread's first present
+    bool isUIThreadStopSignaled() const { return uiThreadStopSignaled_.load(std::memory_order_acquire); }
     bool createUIRenderContext();  // On-demand creation from Java UIThread
     void destroyUIRenderContext();
 
@@ -166,7 +167,8 @@ class Framework : public SharedObject<Framework> {
     // Decoupled UI rendering context (UI thread at display rate)
     std::unique_ptr<UIRenderContext> uiRenderContext_;
     std::atomic<bool> uiRenderContextActive_{false};  // atomic gate for cross-thread checks
-    bool minimizedDefer_ = false;  // true only after 0x0 framebuffer defer in recreate()
+    std::atomic<bool> uiThreadStopSignaled_{false};   // true between requestStop and UIThread restart
+    bool minimizedDefer_ = false;
 
     std::shared_ptr<GarbageCollector> gc_;
 };

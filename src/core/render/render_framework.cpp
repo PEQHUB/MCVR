@@ -661,6 +661,7 @@ void Framework::recreate() {
     // no driver corruption from concurrent Vulkan access during the transition.
     if (uiRenderContext_) {
         renderDiag("  requesting UIThread stop...");
+        uiThreadStopSignaled_.store(true, std::memory_order_release);
         uiRenderContext_->requestStop();
         // Wait for UIThread to exit C++ code (loopActive becomes false)
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -668,7 +669,11 @@ void Framework::recreate() {
                std::chrono::steady_clock::now() < deadline) {
             Sleep(1);
         }
-        // Safe to destroy — UIThread is in Java land, won't call back into C++
+        if (uiRenderContext_ && uiRenderContext_->isLoopActive()) {
+            renderDiag("  UIThread stop TIMEOUT (3s) — phase=%d, forcing destroy",
+                        uiRenderContext_->phase());
+        }
+        // Safe to destroy — UIThread is in Java land (or timed out, force-destroy)
         uiRenderContextActive_.store(false, std::memory_order_release);
         uiRenderContext_.reset();
         renderDiag("  UIRenderContext destroyed (stop/restart)");
@@ -1301,7 +1306,10 @@ bool Framework::isUIThreadRenderingOverlay() const {
 bool Framework::createUIRenderContext() {
     std::unique_lock<std::recursive_mutex> lck(recreateMtx_);
     if (uiRenderContext_) return true;  // already exists
+    if (!running_) return false;  // framework shutting down
     if (!overlayCompositor_ || !overlayCompositor_->isActive()) return false;
+    if (!swapchain_ || swapchain_->vkExtent().width == 0) return false;  // swapchain invalid
+    if (!device_) return false;
     auto uiModule = pipeline_ ? pipeline_->uiModule() : nullptr;
     if (!uiModule) return false;
 
@@ -1312,6 +1320,7 @@ bool Framework::createUIRenderContext() {
     }
     uiRenderContext_->setOverlayCompositor(overlayCompositor_.get());
     uiRenderContextActive_.store(true, std::memory_order_release);
+    uiThreadStopSignaled_.store(false, std::memory_order_release);
     renderDiag("createUIRenderContext: SUCCESS");
     return true;
 }

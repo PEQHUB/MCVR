@@ -278,10 +278,11 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
     }
 
     // UI Color and Alpha (display resolution — overlay with alpha channel).
-    // Skip when overlay compositor handles UI separately via DComp.
-    // DLSS-G sees a world-only swapchain — no UI to decompose.
-    bool overlayCompositorActive = Renderer::instance().framework()->isOverlayCompositorActive();
-    if (overlayOutput && !overlayCompositorActive) {
+    // Always tag: when render thread draws UI, the image contains UI content and
+    // DLSS-G uses it to avoid interpolating UI regions. When UIThread suppresses
+    // render-thread overlay (overlaySuppressed=true), the image is transparent,
+    // which correctly tells DLSS-G "no UI in swapchain".
+    if (overlayOutput) {
         sl::Resource uiRes(sl::ResourceType::eTex2d, nullptr, UINT_MAX);
         fillResource(uiRes, overlayOutput);
 

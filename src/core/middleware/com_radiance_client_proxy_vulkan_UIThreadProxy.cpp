@@ -72,8 +72,15 @@ Java_com_radiance_client_proxy_vulkan_UIThreadProxy_isPauseRequested(JNIEnv *, j
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_radiance_client_proxy_vulkan_UIThreadProxy_checkPause(JNIEnv *, jclass) {
+    // Check the dedicated stop flag FIRST — set by render thread during recreate.
+    // This is safer than inferring stop from null context (which caused crashes
+    // when UIThread re-entered createUIRenderContext during mid-recreate state).
+    auto framework = Renderer::instance().framework();
+    if (framework && framework->isUIThreadStopSignaled())
+        return JNI_FALSE;  // stop — render thread explicitly requested it
+
     auto *ctx = getUICtx();
-    if (!ctx) return JNI_TRUE;  // no context — not a stop signal, just inactive
+    if (!ctx) return JNI_TRUE;  // no context yet — not a stop signal
     return ctx->checkPause() ? JNI_TRUE : JNI_FALSE;
 }
 

@@ -1400,11 +1400,49 @@ void UIModuleContext::begin(std::shared_ptr<UIModuleContext> lastContext) {
     if (!framework || !framework->isRunning()) return;
 
     // When UIThread owns overlay rendering via DComp/MPO, suppress render-thread
-    // overlay recording entirely. The overlay image stays clear (transparent),
-    // which is correct for DLSS-G tagging (kBufferTypeUIColorAndAlpha = transparent).
+    // overlay recording. Must still clear the overlay image to transparent so
+    // DLSS-G's kBufferTypeUIColorAndAlpha tag has correct alpha (no stale UI).
     overlaySuppressed = framework->isUIThreadRenderingOverlay();
     if (overlaySuppressed) {
         overlayMode = NONE;
+        // Explicitly clear overlay image to transparent via vkCmdClearColorImage
+        if (overlayDrawColorImage) {
+            auto mainQueueIndex = context->physicalDevice->mainQueueIndex();
+            VkClearColorValue clearColor = {{0.0f, 0.0f, 0.0f, 0.0f}};
+            VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            // Transition to TRANSFER_DST for clear
+            context->overlayCommandBuffer->barriersBufferImage(
+                {}, {{
+                    .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                    .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                    .oldLayout = overlayDrawColorImage->imageLayout(),
+                    .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    .srcQueueFamilyIndex = mainQueueIndex,
+                    .dstQueueFamilyIndex = mainQueueIndex,
+                    .image = overlayDrawColorImage,
+                    .subresourceRange = vk::wholeColorSubresourceRange,
+                }});
+            vkCmdClearColorImage(context->overlayCommandBuffer->vkCommandBuffer(),
+                overlayDrawColorImage->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                &clearColor, 1, &range);
+            // Transition back to shader read for DLSS-G tagging
+            context->overlayCommandBuffer->barriersBufferImage(
+                {}, {{
+                    .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                    .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    .srcQueueFamilyIndex = mainQueueIndex,
+                    .dstQueueFamilyIndex = mainQueueIndex,
+                    .image = overlayDrawColorImage,
+                    .subresourceRange = vk::wholeColorSubresourceRange,
+                }});
+            overlayDrawColorImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
         return;
     }
 

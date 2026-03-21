@@ -286,6 +286,14 @@ void UIRenderContext::beginFrame() {
         vkWaitForFences(device_->vkDevice(), 1, &fences_[idx], VK_TRUE, UINT64_MAX);
     }
     phase_.store(4, std::memory_order_relaxed);
+
+    // Post-fence stop check — if stop was requested while blocked in fence wait
+    if (stopRequested_.load(std::memory_order_acquire)) {
+        loopActive_.store(false, std::memory_order_release);
+        phase_.store(0, std::memory_order_relaxed);
+        return;
+    }
+
     // Don't reset fence here — reset immediately before vkQueueSubmit in submitAndPresent
     // to guarantee every reset fence is submitted (prevents hang on pause path).
 
@@ -411,7 +419,10 @@ void UIRenderContext::submitAndPresent() {
         std::unique_lock<std::mutex> lk(pauseMtx_);
         pauseAcknowledged_ = true;
         pauseCv_.notify_all();
-        pauseCv_.wait(lk, [this] { return !pauseRequested_.load(std::memory_order_acquire); });
+        pauseCv_.wait(lk, [this] {
+            return !pauseRequested_.load(std::memory_order_acquire) ||
+                    stopRequested_.load(std::memory_order_acquire);
+        });
         return;
     }
 
@@ -473,7 +484,10 @@ void UIRenderContext::submitAndPresent() {
         std::unique_lock<std::mutex> lk(pauseMtx_);
         pauseAcknowledged_ = true;
         pauseCv_.notify_all();
-        pauseCv_.wait(lk, [this] { return !pauseRequested_.load(std::memory_order_acquire); });
+        pauseCv_.wait(lk, [this] {
+            return !pauseRequested_.load(std::memory_order_acquire) ||
+                    stopRequested_.load(std::memory_order_acquire);
+        });
         return;
     }
 
@@ -486,7 +500,8 @@ void UIRenderContext::submitAndPresent() {
         compositor->present();
         phase_.store(10, std::memory_order_relaxed);
         for (int i = 0; i < 4; i++) {
-            if (pauseRequested_.load(std::memory_order_acquire)) break;
+            if (pauseRequested_.load(std::memory_order_acquire) ||
+                stopRequested_.load(std::memory_order_acquire)) break;
             compositor->waitForDisplayReady(2);
         }
     } else {
