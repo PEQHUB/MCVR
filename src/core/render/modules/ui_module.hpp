@@ -59,6 +59,13 @@ class UIModule : public SharedObject<UIModule> {
 
     void bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index);
 
+    // Read-only accessors for shared pipeline objects (used by UIRenderContext)
+    std::shared_ptr<vk::RenderPass> overlayDrawRenderPass() const { return overlayDrawRenderPass_; }
+    std::shared_ptr<vk::DynamicGraphicsPipeline> overlayDrawPipeline(OverlayDrawPipelineType type) const {
+        auto it = overlayDrawPipelines_.find(type);
+        return it != overlayDrawPipelines_.end() ? it->second : nullptr;
+    }
+
   private:
     void initOverlayDescriptorTablesAndFrameSamplers();
 

@@ -16,6 +16,7 @@ struct UIModuleContext;
 class FrameSlotRing;
 class PresentThread;
 class OverlayCompositor;
+class UIRenderContext;
 
 class GarbageCollector : public SharedObject<GarbageCollector> {
   public:
@@ -86,6 +87,11 @@ class Framework : public SharedObject<Framework> {
     bool isOverlayCompositorActive() const;
     OverlayCompositor *overlayCompositor() const;
 
+    UIRenderContext *uiRenderContext() const;
+    bool isDecoupledUIActive() const;
+    bool createUIRenderContext();  // On-demand creation from Java UIThread
+    void destroyUIRenderContext();
+
     void takeScreenshot(bool withUI, int width, int height, int channel, void *dstPointer);
     VkFormat takeScreenshotRawHdrPacked(bool withUI, int width, int height, void *dstPointer, int dstByteSize);
 
@@ -155,6 +161,9 @@ class Framework : public SharedObject<Framework> {
 
     // DirectComposition overlay compositor (FG UI desyncing)
     std::unique_ptr<OverlayCompositor> overlayCompositor_;
+
+    // Decoupled UI rendering context (UI thread at display rate)
+    std::unique_ptr<UIRenderContext> uiRenderContext_;
 
     std::shared_ptr<GarbageCollector> gc_;
 };

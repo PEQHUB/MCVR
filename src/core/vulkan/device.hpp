@@ -2,6 +2,8 @@
 
 #include "core/all_extern.hpp"
 
+#include <mutex>
+
 namespace vk {
 class Instance;
 class Window;
@@ -17,6 +19,7 @@ class Device : public SharedObject<Device> {
     VkDevice &vkDevice();
     VkQueue &mainVkQueue();
     VkQueue &secondaryQueue();
+    std::mutex &queueMutex() { return queueMtx_; }
     VkPipelineCache pipelineCache() const { return pipelineCache_; }
 
     void savePipelineCache();
@@ -36,6 +39,7 @@ class Device : public SharedObject<Device> {
     VkQueue secondaryQueue_ = VK_NULL_HANDLE;
     VkPipelineCache pipelineCache_ = VK_NULL_HANDLE;
 
+    std::mutex queueMtx_;  // protects mainVkQueue submits from multiple threads
     bool extendedDynamicState2LogicOp_ = false;
     bool ommSupported_ = false;
     bool serSupported_ = false;

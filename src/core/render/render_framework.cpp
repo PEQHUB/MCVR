@@ -18,6 +18,7 @@
 #include "core/render/frame_slot_ring.hpp"
 #include "core/render/overlay_compositor.hpp"
 #include "core/render/present_thread.hpp"
+#include "core/render/ui_render_context.hpp"
 
 #include <iostream>
 #include <random>
@@ -541,7 +542,11 @@ void Framework::submitCommand() {
     StreamlineContext::pclSetMarker(sl::PCLMarker::eRenderSubmitStart);
 #endif
     g_crashRing.record("queueSubmit");
-    VkResult submitResult = vkQueueSubmit(device_->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
+    VkResult submitResult;
+    {
+        std::lock_guard<std::mutex> qLock(device_->queueMutex());
+        submitResult = vkQueueSubmit(device_->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
+    }
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::eRenderSubmitEnd);
 #endif
@@ -647,6 +652,13 @@ void Framework::recreate() {
         renderDiag("  PresentThread paused");
     }
 
+    // Pause UI render context (if UI thread is driving it)
+    if (uiRenderContext_ && !uiRenderContext_->isPaused()) {
+        renderDiag("  pausing UIRenderContext...");
+        uiRenderContext_->pause();
+        renderDiag("  UIRenderContext paused");
+    }
+
     renderDiag("  locking recreateMtx_...");
     std::unique_lock<std::recursive_mutex> lck(Renderer::instance().framework()->recreateMtx());
     renderDiag("  recreateMtx_ locked");
@@ -655,15 +667,22 @@ void Framework::recreate() {
     vk::Window::framebufferResized = false;
     pipeline_->needRecreate = false;
 
+    renderDiag("  waitRenderQueueIdle...");
     waitRenderQueueIdle();
+    renderDiag("  waitBackendQueueIdle...");
     waitBackendQueueIdle();
+    renderDiag("  queues idle");
 
     // Notify frame gen manager before swapchain teardown
+    renderDiag("  FrameGenManager::beforeSwapchainRecreate...");
     FrameGenManager::beforeSwapchainRecreate();
+    renderDiag("  FrameGenManager done");
 
     int width = 0, height = 0;
     GLFW_GetFramebufferSize(window_->window(), &width, &height);
+    renderDiag("  framebufferSize: %dx%d", width, height);
     while (width == 0 || height == 0) {
+        renderDiag("  waiting for non-zero framebuffer...");
         GLFW_GetFramebufferSize(window_->window(), &width, &height);
         GLFW_WaitEvents();
     }
@@ -754,11 +773,29 @@ void Framework::recreate() {
         overlayCompositor_.reset();
     }
 
+    // UIRenderContext lifecycle: NOT auto-created in recreate() — created on-demand
+    // by Java UIThread via JNI (createUIRenderContext). Only rebuild here if it already exists.
+    if (uiRenderContext_) {
+        if (wantOverlay && overlayCompositor_ && overlayCompositor_->isActive()) {
+            uiRenderContext_->onSwapchainRecreate();
+            uiRenderContext_->setOverlayCompositor(overlayCompositor_.get());
+            renderDiag("  UIRenderContext recreated for new swapchain");
+        } else {
+            renderDiag("  destroying UIRenderContext (FG disabled or overlay inactive)");
+            uiRenderContext_.reset();
+        }
+    }
+
     // Overlay present is handled on the render thread (submitCommand), not PresentThread.
     // PresentThread is only for future decoupled present mode.
     if (presentThread_ && !decoupledPresent_) {
         presentThread_->setOverlayMode(false, nullptr);
     }
+    // Resume UIRenderContext if it was paused for recreate
+    if (uiRenderContext_ && uiRenderContext_->isPaused()) {
+        uiRenderContext_->resume();
+    }
+
     renderDiag("recreate() END");
 
     // Disable decoupled present during recreate. Decoupled present (Phase 2a)
@@ -783,6 +820,9 @@ void Framework::waitBackendQueueIdle() {
 }
 
 void Framework::close() {
+    // Destroy UI render context before overlay compositor
+    uiRenderContext_.reset();
+
     // Destroy overlay compositor before GPU teardown
     overlayCompositor_.reset();
 
@@ -1232,6 +1272,37 @@ bool Framework::isOverlayCompositorActive() const {
 
 OverlayCompositor *Framework::overlayCompositor() const {
     return overlayCompositor_.get();
+}
+
+UIRenderContext *Framework::uiRenderContext() const {
+    return uiRenderContext_.get();
+}
+
+bool Framework::isDecoupledUIActive() const {
+    return uiRenderContext_ != nullptr;
+}
+
+bool Framework::createUIRenderContext() {
+    if (uiRenderContext_) return true;  // already exists
+    if (!overlayCompositor_ || !overlayCompositor_->isActive()) return false;
+    auto uiModule = pipeline_ ? pipeline_->uiModule() : nullptr;
+    if (!uiModule) return false;
+
+    uiRenderContext_ = std::make_unique<UIRenderContext>();
+    if (!uiRenderContext_->init(shared_from_this(), uiModule.get())) {
+        uiRenderContext_.reset();
+        return false;
+    }
+    uiRenderContext_->setOverlayCompositor(overlayCompositor_.get());
+    renderDiag("createUIRenderContext: SUCCESS");
+    return true;
+}
+
+void Framework::destroyUIRenderContext() {
+    if (uiRenderContext_) {
+        uiRenderContext_.reset();
+        renderDiag("destroyUIRenderContext: done");
+    }
 }
 
 GarbageCollector::GarbageCollector(std::shared_ptr<Framework> framework) : framework_(framework) {
