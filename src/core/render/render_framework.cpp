@@ -1307,6 +1307,7 @@ bool Framework::createUIRenderContext() {
     std::unique_lock<std::recursive_mutex> lck(recreateMtx_);
     if (uiRenderContext_) return true;  // already exists
     if (!running_) return false;  // framework shutting down
+    if (Renderer::options.frameGenEnabled) return false;  // DLSS-G active — use render-thread UI tagging
     if (!overlayCompositor_ || !overlayCompositor_->isActive()) return false;
     if (!swapchain_ || swapchain_->vkExtent().width == 0) return false;  // swapchain invalid
     if (!device_) return false;
