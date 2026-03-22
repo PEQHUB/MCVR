@@ -673,6 +673,89 @@ void main() {
                 mat.roughness = max(pack0.a * pack0.a, 0.01);
             }
 
+            // Per-block POM: AutoPBR blocks with pomDepth > 0
+            if ((mc.flags & 0x8u) != 0u && mc.pomDepth > 0.0 && mainRay.index == 0) {
+                uint pp0_pom = mc.pomPacked0;
+                int perBlockSteps = int((pp0_pom >> 8u) & 0xFFu);
+                int perBlockRefinement = int((pp0_pom >> 16u) & 0xFu);
+
+                float pomDist = gl_HitTEXT;
+                float pomFadeDistance = 64.0; // fixed fade distance for per-block POM
+                float pomFade = 1.0 - smoothstep(pomFadeDistance * 0.5, pomFadeDistance, pomDist);
+
+                if (pomFade > 0.001 && perBlockSteps >= 4) {
+                    int effectiveSteps = max(int(float(perBlockSteps) * pomFade), 4);
+                    int effectiveRefinement = (pomFade > 0.5) ? perBlockRefinement : 0;
+
+                    // Construct TBN (same as global POM path)
+                    vec3 pomEdge1 = v1.pos - v0.pos;
+                    vec3 pomEdge2 = v2.pos - v0.pos;
+                    vec3 pomGeoN = normalize(cross(pomEdge1, pomEdge2));
+                    vec2 pomDuv1 = v1.textureUV - v0.textureUV;
+                    vec2 pomDuv2 = v2.textureUV - v0.textureUV;
+                    float pomDetVal = pomDuv1.x * pomDuv2.y - pomDuv2.x * pomDuv1.y;
+                    vec3 pomTangentObj;
+                    if (abs(pomDetVal) < 1e-6) {
+                        pomTangentObj = (abs(pomGeoN.x) > 0.99) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+                    } else {
+                        float pomF = 1.0 / pomDetVal;
+                        pomTangentObj = vec3(
+                            pomF * (pomDuv2.y * pomEdge1.x - pomDuv1.y * pomEdge2.x),
+                            pomF * (pomDuv2.y * pomEdge1.y - pomDuv1.y * pomEdge2.y),
+                            pomF * (pomDuv2.y * pomEdge1.z - pomDuv1.y * pomEdge2.z));
+                    }
+                    vec3 pomTObj = normalize(pomTangentObj - pomGeoN * dot(pomGeoN, pomTangentObj));
+                    vec3 pomBObj = cross(pomGeoN, pomTObj) * sign(pomDetVal);
+                    mat3 pomNMat = transpose(mat3(gl_WorldToObject3x4EXT));
+                    vec3 pomT = normalize(pomNMat * pomTObj);
+                    vec3 pomB = normalize(pomNMat * pomBObj);
+                    vec3 pomN = normalize(pomNMat * pomGeoN);
+
+                    // View direction in tangent space
+                    vec3 pomViewDirTS = vec3(dot(viewDir, pomT), dot(viewDir, pomB), dot(viewDir, pomN));
+
+                    // Unpack height pipeline params (same as in applyAutoPBR)
+                    int heightSourceMode = int((pp0_pom >> 5u) & 0x7u);
+                    uint pp1_pom = mc.pomPacked1;
+                    uint pp2_pom = mc.pomPacked2;
+                    float heightContrastVal = max(float((pp1_pom >> 24u) & 0xFFu) / 10.0, 0.01);
+                    float heightRemapMinVal = float(pp2_pom & 0xFFu) / 100.0;
+                    float heightRemapMaxVal = float((pp2_pom >> 8u) & 0xFFu) / 100.0;
+                    float heightOffsetVal = (float((pp2_pom >> 16u) & 0xFFu) - 100.0) / 100.0;
+                    bool invertHeight = (mc.flags & 0x40u) != 0u;
+                    vec3 channelWeights = vec3(0.2627, 0.6780, 0.0593);
+                    float lumMin = mc.lumMin;
+                    float lumMax = mc.lumMax;
+                    float lumSpan = lumMax - lumMin;
+
+                    float pomHeight;
+                    textureUV = parallaxOcclusionMappingAutoPBR(
+                        textureUV, pomViewDirTS, textureID,
+                        mc.pomDepth, effectiveSteps, effectiveRefinement,
+                        uvMin, uvMax,
+                        heightSourceMode, channelWeights,
+                        lumMin, lumSpan, invertHeight,
+                        heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal,
+                        pomHeight);
+
+                    // Re-sample albedo at displaced UV
+                    albedoValue = textureLod(textures[nonuniformEXT(textureID)], textureUV, 0);
+                    rawAlbedoLinear = albedoValue.rgb;
+
+                    // Re-run AutoPBR at displaced position for correct roughness + normals
+                    applyAutoPBR(mat, mc, rawAlbedoLinear, textureID, textureUV, uvMin, uvMax, gl_HitTEXT);
+
+                    // POM ambient occlusion: darken crevices based on displaced height
+                    if (pomHeight < 0.999) {
+                        float pomAOStrengthVal = float((mc.pomPacked1 >> 16u) & 0xFFu) / 100.0;
+                        if (pomAOStrengthVal > 0.001) {
+                            float pomAO = mix(1.0, pomHeight, pomAOStrengthVal);
+                            mat.ao *= pomAO;
+                        }
+                    }
+                }
+            }
+
             mat.metallic = pack1.x;
             if (pack1.y >= 0.0) mat.transmission = pack1.y;
             mat.ior = max(pack1.z, 1.0);
@@ -1739,6 +1822,9 @@ void main() {
     }
 
     mainRay.throughput *= bsdf / max(pdf, 1e-4);
+
+    // AO modulation: darken indirect lighting in occluded areas (LabPBR AO + POM AO)
+    mainRay.throughput *= mat.ao;
 
     vec3 bounceOffsetN = dot(sampleDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
     mainRay.origin = offset_ray(worldPos, bounceOffsetN);

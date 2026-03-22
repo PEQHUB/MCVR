@@ -117,6 +117,108 @@ vec2 parallaxOcclusionMapping(
     return parallaxOcclusionMapping(uv, viewDirTS, normalTexID, heightScale, steps, refinement, uvMin, uvMax, -1, h);
 }
 
+// AutoPBR height sampling: derives height from albedo texture via luminance pipeline
+// Used by per-block POM when AutoPBR flag is set (no dedicated height texture needed)
+float pomSampleHeightAutoPBR(
+    vec2 uv, uint texID, vec2 uvMin, vec2 uvMax,
+    int heightSourceMode, vec3 channelWeights,
+    float lumMin, float lumSpan, bool invertH,
+    float remapMin, float remapMax, float contrast, float offset
+) {
+    vec2 clampedUV = clamp(uv, uvMin, uvMax);
+    vec4 s = textureLod(textures[nonuniformEXT(texID)], clampedUV, 0);
+    float raw;
+    if (heightSourceMode == 1) raw = s.r;
+    else if (heightSourceMode == 2) raw = s.g;
+    else if (heightSourceMode == 3) raw = s.b;
+    else if (heightSourceMode == 4) raw = s.a;
+    else if (heightSourceMode == 5) raw = max(s.r, max(s.g, s.b));
+    else if (heightSourceMode == 6) raw = min(s.r, min(s.g, s.b));
+    else raw = dot(s.rgb, channelWeights);
+
+    float h = clamp((raw - lumMin) / lumSpan, 0.0, 1.0);
+    if (invertH) h = 1.0 - h;
+    h = mix(remapMin, remapMax, h);
+    if (contrast != 1.0) h = pow(clamp(h, 0.001, 1.0), contrast);
+    return clamp(h + offset, 0.0, 1.0);
+}
+
+// POM for AutoPBR blocks: uses albedo-derived height instead of normal texture alpha
+vec2 parallaxOcclusionMappingAutoPBR(
+    vec2 uv, vec3 viewDirTS, uint texID,
+    float heightScale, int steps, int refinement,
+    vec2 uvMin, vec2 uvMax,
+    int heightSourceMode, vec3 channelWeights,
+    float lumMin, float lumSpan, bool invertH,
+    float remapMin, float remapMax, float contrast, float offset,
+    out float displacedHeight
+) {
+    displacedHeight = 1.0;
+    if (viewDirTS.z <= 0.001 || heightScale <= 0.0) return uv;
+
+    vec2 tileSize = uvMax - uvMin;
+    vec2 maxOffset = -viewDirTS.xy / viewDirTS.z * heightScale * tileSize;
+    float stepSize = 1.0 / float(max(steps, 1));
+    vec2 stepUV = maxOffset * stepSize;
+
+    vec2 currentUV = uv;
+    float layerHeight = 0.0;
+    float texHeight = pomSampleHeightAutoPBR(currentUV, texID, uvMin, uvMax,
+        heightSourceMode, channelWeights, lumMin, lumSpan, invertH, remapMin, remapMax, contrast, offset);
+
+    vec2 prevUV = currentUV;
+    float prevLayerHeight = 0.0;
+    float prevTexHeight = texHeight;
+
+    // Linear search
+    for (int i = 0; i < steps && layerHeight < texHeight; i++) {
+        prevUV = currentUV;
+        prevLayerHeight = layerHeight;
+        prevTexHeight = texHeight;
+
+        currentUV += stepUV;
+        layerHeight += stepSize;
+        texHeight = pomSampleHeightAutoPBR(currentUV, texID, uvMin, uvMax,
+            heightSourceMode, channelWeights, lumMin, lumSpan, invertH, remapMin, remapMax, contrast, offset);
+    }
+
+    // Secant interpolation
+    float d1 = prevLayerHeight - prevTexHeight;
+    float d2 = layerHeight - texHeight;
+    float denom = d1 - d2;
+    float t = (abs(denom) > 1e-6) ? d1 / denom : 0.5;
+    currentUV = mix(prevUV, currentUV, t);
+    layerHeight = mix(prevLayerHeight, layerHeight, t);
+
+    // Binary refinement
+    for (int r = 0; r < refinement; r++) {
+        texHeight = pomSampleHeightAutoPBR(currentUV, texID, uvMin, uvMax,
+            heightSourceMode, channelWeights, lumMin, lumSpan, invertH, remapMin, remapMax, contrast, offset);
+        if (texHeight > layerHeight) {
+            // Ray above surface — intersection in upper half
+            prevUV = currentUV;
+            prevLayerHeight = layerHeight;
+        } else {
+            // Ray below — intersection in lower half
+        }
+        float midHeight = (prevLayerHeight + layerHeight) * 0.5;
+        vec2 midUV = (prevUV + currentUV) * 0.5;
+        float midTexH = pomSampleHeightAutoPBR(midUV, texID, uvMin, uvMax,
+            heightSourceMode, channelWeights, lumMin, lumSpan, invertH, remapMin, remapMax, contrast, offset);
+        if (midTexH > midHeight) {
+            currentUV = midUV;
+            layerHeight = midHeight;
+        } else {
+            prevUV = midUV;
+            prevLayerHeight = midHeight;
+        }
+    }
+
+    displacedHeight = pomSampleHeightAutoPBR(currentUV, texID, uvMin, uvMax,
+        heightSourceMode, channelWeights, lumMin, lumSpan, invertH, remapMin, remapMax, contrast, offset);
+    return clamp(currentUV, uvMin, uvMax);
+}
+
 /// Self-shadowing: trace height field from displaced point toward light.
 /// Returns 1.0 = fully lit, 0.0 = fully in POM shadow.
 /// Uses soft shadow approximation (penumbra from partial occlusion).
