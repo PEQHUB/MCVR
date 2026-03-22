@@ -587,7 +587,6 @@ void CloudModuleContext::render() {
     pc.eyePosZ = static_cast<float>(camPos.z);
     pc.detailStrength = std::clamp(Renderer::options.cloudDetailStrength, 0.0f, 3.0f);
     pc.scatterOctaves = std::clamp(Renderer::options.cloudScatterOctaves, 1u, 8u);
-    pc.powderStrength = std::clamp(Renderer::options.cloudPowderStrength, 0.0f, 3.0f);
     pc.ambientStrength = std::clamp(Renderer::options.cloudAmbientStrength, 0.0f, 3.0f);
     pc.noiseScale = std::clamp(Renderer::options.cloudNoiseScale, 16.0f, 4096.0f);
     pc.cellFrequency = std::clamp(Renderer::options.cloudCellFrequency, 1.0f, 32.0f);

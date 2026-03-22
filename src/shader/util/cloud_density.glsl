@@ -154,12 +154,14 @@ float getDetailDensity(float baseDensity, vec4 detailNoise, float height, float 
 
 float phaseHG(float cosTheta, float g) {
     float g2 = g * g;
-    float denom = 1.0 + g2 - 2.0 * g * cosTheta;
+    float denom = max(1.0 + g2 - 2.0 * g * cosTheta, 1e-6);
     return (1.0 - g2) / (4.0 * PI * denom * sqrt(denom));
 }
 
 // Dual-lobe HG [Nubis3 §8.5: max() of forward + silver-lining back lobe]
-float phaseDualHG(float cosTheta, float g1, float g2, float blend) {
+// g1 = forward eccentricity (0.8 for first octave, decays per octave)
+// Silver lobe: g = 0.99 - 1.32 = -0.33 (mild back-scatter), boosted 1.27x
+float phaseDualHG(float cosTheta, float g1) {
     const float SILVER_INTENSITY = 1.27;
     const float SILVER_SPREAD    = 1.32;
     float forward = phaseHG(cosTheta, g1);
@@ -169,7 +171,7 @@ float phaseDualHG(float cosTheta, float g1, float g2, float blend) {
 
 // --- Multi-scatter octave approximation [Wrenninge13, Hillaire16] ---
 
-float multiScatterEnergy(float opticalDepth, float cosTheta, uint octaves, float powderStr) {
+float multiScatterEnergy(float opticalDepth, float cosTheta, uint octaves) {
     const float ISOTROPIC_PHASE = 1.0 / (4.0 * PI);
     const float A_DECAY = 0.5;
     const float B_DECAY = 0.5;
@@ -179,7 +181,7 @@ float multiScatterEnergy(float opticalDepth, float cosTheta, uint octaves, float
     float a = 1.0, b = 1.0, c = 1.0;
 
     for (uint n = 0; n < octaves; n++) {
-        float phase = phaseDualHG(cosTheta, 0.8 * c, -0.5 * c, 0.5);
+        float phase = phaseDualHG(cosTheta, 0.8 * c);
         phase = mix(ISOTROPIC_PHASE, phase, c);
 
         float od = opticalDepth * a;

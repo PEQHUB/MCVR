@@ -18,7 +18,7 @@ struct CloudModuleContext;
 
 // Push constant shared by all cloud compute passes.
 // Must match PushConstants layout in cloud_common.glsl exactly.
-// 108 bytes of data (within Vulkan guaranteed minimum of 128 bytes).
+// 104 bytes of data (within Vulkan guaranteed minimum of 128 bytes).
 struct alignas(16) CloudPushConstant {
     uint32_t renderWidth;        // Render resolution width
     uint32_t renderHeight;       // Render resolution height
@@ -40,8 +40,7 @@ struct alignas(16) CloudPushConstant {
     float eyePosZ;               // Camera world position Z
     float detailStrength;        // Detail erosion multiplier [0-2]
     uint32_t scatterOctaves;     // Multi-scatter octave count [1-4] [Wrenninge13]
-    float powderStrength;        // Beer-powder dark edge intensity [0-2] [Schneider15]
-    float ambientStrength;       // Density-based ambient occlusion [0-2] [Schneider15]
+    float ambientStrength;       // Density-based ambient occlusion [0-2]
     float noiseScale;            // Noise texture period in blocks [128-512] — smaller = more detail
     float cellFrequency;         // Voronoi cell count across weather map [2-16]
     float atmosphereFadeDist;    // Cloud atmospheric fade distance in blocks [200-2000]

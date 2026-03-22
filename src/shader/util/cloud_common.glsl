@@ -123,7 +123,6 @@ layout(push_constant) uniform PushConstants {
     float eyePosZ;
     float detailStrength;
     uint scatterOctaves;
-    float powderStrength;    // Beer-powder dark edge intensity [0-2]
     float ambientStrength;   // Density-based ambient occlusion [0-2]
     float noiseScale;        // Noise texture period in blocks [128-512]
     float cellFrequency;     // Voronoi cell count across weather map [2-16]

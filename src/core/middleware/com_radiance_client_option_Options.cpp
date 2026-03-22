@@ -822,11 +822,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.cloudScatterOctaves = static_cast<uint32_t>(std::clamp(octaves, 1, 8));
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudPowderStrength(
-    JNIEnv *, jclass, jfloat strength, jboolean) {
-    Renderer::options.cloudPowderStrength = std::clamp(strength, 0.0f, 2.0f);
-}
-
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudAmbientStrength(
     JNIEnv *, jclass, jfloat strength, jboolean) {
     Renderer::options.cloudAmbientStrength = std::clamp(strength, 0.0f, 2.0f);

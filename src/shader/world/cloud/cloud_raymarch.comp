@@ -330,6 +330,10 @@ void main() {
             vec4 detailNoise = textureLod(uNoise3D, detailPos, detailMip);
 
             float density = getDetailDensity(baseDensity, detailNoise, h, pc.detailStrength);
+
+            // Distance density fade [Nubis3 §5.3: prevent pop-in during fly-through]
+            density *= valueRemapClamped(distFromCam, 10.0, 120.0, 0.25, 1.0);
+
             if (density < 0.0001) { t += stepSize; continue; }
 
             // Lighting
@@ -337,7 +341,7 @@ void main() {
             float lightEnergy;
             if (transmittance > 0.05) {
                 lightOD = lightMarch(pos, lightDir, pc.lightSteps, cloudThick);
-                lightEnergy = multiScatterEnergy(lightOD, cosAngle, pc.scatterOctaves, pc.powderStrength);
+                lightEnergy = multiScatterEnergy(lightOD, cosAngle, pc.scatterOctaves);
             } else {
                 lightOD = 5.0;
                 lightEnergy = 0.02;
