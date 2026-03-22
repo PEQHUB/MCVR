@@ -197,6 +197,7 @@ void applyAutoPBR(
 
     bool invertRoughness = (mc.flags & 0x10u) != 0u;
     bool invertNormal    = (mc.flags & 0x20u) != 0u;
+    bool invertHeight    = (mc.flags & 0x40u) != 0u;
 
     vec3 channelWeights = vec3(0.2627, 0.6780, 0.0593); // BT.2020 luminance
 
@@ -213,7 +214,9 @@ void applyAutoPBR(
     mat.roughness = max(roughness * roughness, 0.01);
 
     // Normal from central differences on albedo luminance
-    if (normalStrength > 0.001) {
+    if (normalStrength < 0.001) {
+        mat.normal = vec3(0.0, 0.0, 1.0); // flat — disable normal map
+    } else if (normalStrength > 0.001) {
         vec2 texelStep = 1.0 / vec2(textureSize(textures[nonuniformEXT(texID)], 0));
         vec2 uvRight = clamp(texUV + vec2(texelStep.x, 0.0), uvMin, uvMax);
         vec2 uvUp    = clamp(texUV + vec2(0.0, texelStep.y), uvMin, uvMax);
@@ -227,6 +230,12 @@ void applyAutoPBR(
         float hCenter = clamp((lum      - lumMin) / lumSpan, 0.0, 1.0);
         float hRight  = clamp((lumRight - lumMin) / lumSpan, 0.0, 1.0);
         float hUp     = clamp((lumUp    - lumMin) / lumSpan, 0.0, 1.0);
+
+        if (invertHeight) {
+            hCenter = 1.0 - hCenter;
+            hRight  = 1.0 - hRight;
+            hUp     = 1.0 - hUp;
+        }
 
         if (heightGamma != 1.0) {
             hCenter = pow(hCenter, heightGamma);
