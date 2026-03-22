@@ -69,8 +69,9 @@ uint32_t Buffers::allocateBuffer() {
 void Buffers::initializeBuffer(uint32_t id, uint32_t size, VkBufferUsageFlags usageFlags) {
     auto framework = Renderer::instance().framework();
     auto context = framework->safeAcquireCurrentContext();
+    if (!context) return;
 
-    auto frameIndex = framework->safeAcquireCurrentContext()->frameIndex;
+    auto frameIndex = context->frameIndex;
     auto device = framework->device();
     auto vma = framework->vma();
 
@@ -146,16 +147,17 @@ void Buffers::queueOverlayUpload(uint8_t *srcPointer, uint32_t dstId) {
 
 void Buffers::queueImportantWorldUpload(std::shared_ptr<vk::DeviceLocalBuffer> vertexBuffer,
                                         std::shared_ptr<vk::DeviceLocalBuffer> indexBuffer) {
-    Renderer::instance().framework()->safeAcquireCurrentContext();
-    Renderer::instance().framework()->safeAcquireCurrentContext();
+    auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
+    if (!context) return;
     importantIndexVertexBuffer_->push_back(vertexBuffer);
     importantIndexVertexBuffer_->push_back(indexBuffer);
 }
 
 void Buffers::performQueuedUpload() {
-    auto frameIndex = Renderer::instance().framework()->safeAcquireCurrentContext()->frameIndex;
-    std::shared_ptr<vk::CommandBuffer> cmdBuffer =
-        Renderer::instance().framework()->safeAcquireCurrentContext()->uploadCommandBuffer;
+    auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
+    if (!context) return;
+    auto frameIndex = context->frameIndex;
+    std::shared_ptr<vk::CommandBuffer> cmdBuffer = context->uploadCommandBuffer;
 
     auto physicalDevice = Renderer::instance().framework()->physicalDevice();
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
@@ -224,7 +226,8 @@ void Buffers::performQueuedUpload() {
 }
 
 void Buffers::appendOverlayDrawUniform(vk::Data::OverlayUBO &ubo) {
-    auto frameIndex = Renderer::instance().framework()->safeAcquireCurrentContext()->frameIndex;
+    auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
+    if (!context) return;
 
     glm::mat4 mapGLToVulkan(1.0f);
     mapGLToVulkan[1][1] = -1.0f;
@@ -237,17 +240,19 @@ void Buffers::appendOverlayDrawUniform(vk::Data::OverlayUBO &ubo) {
 }
 
 void Buffers::appendOverlayPostUniform(vk::Data::OverlayPostUBO &ubo) {
-    auto frameIndex = Renderer::instance().framework()->safeAcquireCurrentContext()->frameIndex;
+    auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
+    if (!context) return;
     overlayPostUniformQueue_->push_back(ubo);
 }
 
 void Buffers::buildAndUploadOverlayUniformBuffer() {
     auto framework = Renderer::instance().framework();
     auto context = framework->safeAcquireCurrentContext();
+    if (!context) return;
     auto vma = framework->vma();
     auto device = framework->device();
     auto pipelineContext =
-        Renderer::instance().framework()->pipeline()->acquirePipelineContext(framework->safeAcquireCurrentContext());
+        Renderer::instance().framework()->pipeline()->acquirePipelineContext(context);
 
     if (overlayDrawUniformQueue_->size() > 0) {
         if (overlayDrawUniformBuffer_[context->frameIndex] == nullptr ||

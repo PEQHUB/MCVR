@@ -60,7 +60,7 @@ LabPBRMat convertLabPBRMaterial(vec4 texAlbedo, vec4 texSpecular, vec4 texNormal
         float F0 = max(specularValue, 0.02); // LabPBR clamp
         mat.f0 = vec3(F0);
 
-        float sqrtF0 = sqrt(F0);
+        float sqrtF0 = sqrt(min(F0, 0.99));
         mat.ior = (1.0 + sqrtF0) / max(1.0 - sqrtF0, EPS);
 
         if (texAlbedo.a < 1.0 - EPS) { mat.transmission = 1.0; }

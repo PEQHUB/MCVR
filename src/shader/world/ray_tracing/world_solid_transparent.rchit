@@ -542,15 +542,15 @@ void main() {
             matNoiseStrength = pack3.z;
             // noisePacked: octaves (bits 0-3) | noiseType (bits 4-8) | seed (bits 9-17) | noiseTarget (bits 20-23)
             int noisePacked = int(mc.noisePacked);
-            matNoiseOctaves = noisePacked & 0xF;
-            matNoiseType = (noisePacked >> 4) & 0x1F;  // 5 bits = 0-31
+            matNoiseOctaves = clamp(noisePacked & 0xF, 1, 8);
+            matNoiseType = min((noisePacked >> 4) & 0x1F, 23);  // 5 bits = 0-31, max valid type 23
             matNoiseSeed = (noisePacked >> 9) & 0x1FF;  // 9 bits = 0-511
             matNoiseTarget = (noisePacked >> 20) & 0xF;
 
             matGamutBoost = pack5.x;
             matNoiseMaskThreshold = pack5.y;
             int maskPacked = int(mc.noiseMaskPacked);
-            matNoiseMaskMode = maskPacked & 0x7;       // bits 0-2
+            matNoiseMaskMode = min(maskPacked & 0x7, 4);       // bits 0-2, max valid mode 4
             matNoiseMaskInvert = ((maskPacked >> 3) & 0x1) != 0; // bit 3
             matNoiseWrap = (maskPacked >> 4) & 0x7;    // bits 4-6
 
@@ -607,7 +607,7 @@ void main() {
         float boostAmount = 1.0 - exp2(-4.0 * gamutFactor * dot(lab.yz, lab.yz));
         lab.yz *= 1.0 + boostAmount * (gamutFactor - 1.0);
         vec3 lms_g2 = lab_to_lms * lab;
-        vec3 lms2 = lms_g2 * lms_g2 * lms_g2;
+        vec3 lms2 = clamp(lms_g2 * lms_g2 * lms_g2, vec3(-10.0), vec3(10.0));
         mat.albedo = max(lms_to_bt2020 * lms2, vec3(0.0));
     }
 
@@ -859,12 +859,12 @@ void main() {
             vec3 lab = lms_to_lab * lms_g;
             lab.yz *= emGamut;
             vec3 lms_g2 = lab_to_lms * lab;
-            vec3 lms2 = lms_g2 * lms_g2 * lms_g2;
+            vec3 lms2 = clamp(lms_g2 * lms_g2 * lms_g2, vec3(-10.0), vec3(10.0));
             emissionTint = lms_to_bt2020 * lms2;
             float minC = min(emissionTint.r, min(emissionTint.g, emissionTint.b));
             if (minC < 0.0) {
                 float luma = dot(emissionTint, vec3(0.2627, 0.6780, 0.0593));
-                float t = luma / (luma - minC);
+                float t = luma / max(luma - minC, 1e-6);
                 emissionTint = mix(vec3(luma), emissionTint, t);
             }
         }
@@ -1166,7 +1166,7 @@ void main() {
                 vec3 brdf;
                 if (RESTIR_SIMPLIFIED_BRDF) {
                     float NdotL = max(dot(normal, currentRes.lightDir), 0.0);
-                    brdf = NdotL / 3.14159265 * mat.albedo;
+                    brdf = NdotL / PI * mat.albedo;
                 } else {
                     float pdf;
                     brdf = DisneyEval(mat, viewDir, normal, currentRes.lightDir, pdf, pc.flags);
@@ -1269,7 +1269,7 @@ void main() {
                 vec3 brdf;
                 if (RESTIR_SIMPLIFIED_BRDF) {
                     float NdotL = max(dot(normal, bestDir[k]), 0.0);
-                    brdf = NdotL / 3.14159265 * mat.albedo;
+                    brdf = NdotL / PI * mat.albedo;
                 } else {
                     float pdf;
                     brdf = DisneyEval(mat, viewDir, normal, bestDir[k], pdf, pc.flags);
@@ -1437,11 +1437,10 @@ void main() {
 
             // Simplified Lambertian BRDF for indirect bounces (specular invisible behind denoiser)
             float NdotL = max(dot(normal, currentRes.lightDir), 0.0);
-            vec3 brdf = NdotL / 3.14159265 * mat.albedo;
+            vec3 brdf = NdotL / PI * mat.albedo;
             alAccum = currentRes.unshadowed * brdf * currentRes.W * visibility;
         }
 
-        alAccum *= 1.0;
         mainRay.radiance += alAccum * mainRay.throughput;
 
         // Store reservoir for next frame's temporal reuse
@@ -1489,7 +1488,7 @@ void main() {
             vec3 brdf;
             if (RESTIR_SIMPLIFIED_BRDF) {
                 float NdotL_b = max(dot(normal, alDir), 0.0);
-                brdf = NdotL_b / 3.14159265 * mat.albedo;
+                brdf = NdotL_b / PI * mat.albedo;
             } else {
                 float pdf;
                 brdf = DisneyEval(mat, viewDir, normal, alDir, pdf, pc.flags);
@@ -1498,7 +1497,6 @@ void main() {
             alAccum += unshadowed * brdf;
         }
 
-        alAccum *= 1.0;
         mainRay.radiance += alAccum * mainRay.throughput;
     }
 
