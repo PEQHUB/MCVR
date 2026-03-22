@@ -420,26 +420,6 @@ namespace Data {
         MaterialClassEntry entries[MAX_MATERIAL_CLASSES];
     }; // 72 KB (512 × 144 bytes)
 
-    // Displacement mapping: per-face data for intersection shader DDA.
-    // One entry per displaced AABB in the displaced BLAS, indexed by gl_PrimitiveID.
-    struct DisplacedFaceData {
-        T_VEC3 corner;        // object-space corner of quad (min UV corner)
-        T_UINT faceAxis;      // 0=+X,1=-X,2=+Y,3=-Y,4=+Z,5=-Z
-        T_VEC3 edgeU;         // object-space edge along U direction
-        T_FLOAT heightScale;  // displacement depth in world units
-        T_VEC3 edgeV;         // object-space edge along V direction
-        T_UINT textureID;     // bindless texture index (albedo)
-        T_INT normalTexID;    // normal texture (height in alpha), -1 = none
-        T_INT specularTexID;  // specular texture, -1 = none
-        T_VEC2 uvMin;         // atlas UV tile min
-        T_VEC2 uvMax;         // atlas UV tile max
-        T_VEC4 colorLayer;    // vertex color tint (RGBA)
-        T_UINT emissiveBlockType; // EmissiveBlock ordinal (255 = none)
-        T_UINT properties;    // TextureMapEntry.properties (bit 0: has height map)
-        T_UINT _pad0;
-        T_UINT _pad1;
-    }; // 96 bytes, 6 × vec4, std430 aligned
-
     struct ExposureData {
         T_INT width;
         T_INT height;

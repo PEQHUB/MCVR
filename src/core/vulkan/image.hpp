@@ -217,24 +217,4 @@ class Sampler : public SharedObject<Sampler> {
     VkSampler samper_;
 };
 
-class ImageLoader : public SharedObject<ImageLoader> {
-  public:
-    // ImageLoader(std::string imagePath, uint32_t forceChannel);
-    ImageLoader(std::vector<std::string> imagePaths, uint32_t forceChannel);
-    ~ImageLoader();
-
-    uint32_t width();
-    uint32_t height();
-    uint32_t channel();
-    uint32_t layer();
-    void *data();
-
-  private:
-    std::vector<std::string> imagePaths_;
-    int width_;
-    int height_;
-    int channel_;
-    int layer_;
-    std::vector<uint8_t> data_;
-};
 }; // namespace vk

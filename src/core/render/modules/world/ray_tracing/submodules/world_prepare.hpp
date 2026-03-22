@@ -46,9 +46,7 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     std::shared_ptr<vk::DeviceLocalBuffer> lastIndexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastObjToWorldMat;
     std::shared_ptr<vk::DeviceLocalBuffer> areaLightBuffer;
-    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
     int areaLightCount = 0;
-    int displacedFaceCount = 0;
 
     WorldPrepareContext(std::shared_ptr<FrameworkContext> frameworkContext, std::shared_ptr<WorldPrepare> worldprepare);
 

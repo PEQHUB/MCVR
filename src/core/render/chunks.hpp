@@ -61,13 +61,8 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     std::shared_ptr<vk::BLAS> blas;
     std::shared_ptr<vk::BLASBuilder> blasBuilder;
 
-    // Displacement Tier 1: separate BLAS for AABB procedural geometry
-    std::vector<VkAabbPositionsKHR> displacedAABBs;
-    std::vector<vk::Data::DisplacedFaceData> displacedFaceData;
-    std::shared_ptr<vk::DeviceLocalBuffer> displacedAABBBuffer;
-    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
-    std::shared_ptr<vk::BLAS> displacedBlas;
-    std::shared_ptr<vk::BLASBuilder> displacedBlasBuilder;
+    // Displacement is now handled via in-place tessellation into WORLD_SOLID geometry.
+    // No separate BLAS needed — tessellated triangles are part of the regular BLAS.
 
     ChunkBuildData(int64_t id,
                    int x,
@@ -82,13 +77,14 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
                    std::vector<std::vector<uint32_t>> &&indices);
     ~ChunkBuildData();
 
-    void build(bool allowMicromapBake = true, bool skipOMM = false);
+    void build(bool allowMicromapBake = true, bool skipOMM = false, glm::vec3 cameraPos = glm::vec3(0));
 };
 
 struct Chunk1;
 
 struct ChunkBuildDataBatch : public SharedObject<ChunkBuildDataBatch> {
     std::vector<std::shared_ptr<ChunkBuildData>> batchData;
+    glm::vec3 cameraPos;
 
     ChunkBuildDataBatch(uint32_t maxBatchSize,
                         std::set<int64_t> &queuedIndex,
@@ -140,10 +136,6 @@ struct ChunkRenderData : public SharedObject<ChunkRenderData> {
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
     std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>> vertices;
     std::shared_ptr<std::vector<std::vector<uint32_t>>> indices;
-    // Displacement
-    std::shared_ptr<vk::BLAS> displacedBlas;
-    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
-    uint32_t displacedFaceCount = 0;
 };
 
 struct ChunkLightEntry {
@@ -174,12 +166,6 @@ struct Chunk1 : public SharedObject<Chunk1> {
     std::shared_ptr<std::vector<World::GeometryTypes>> geometryTypes;
     std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>> vertices;
     std::shared_ptr<std::vector<std::vector<uint32_t>>> indices;
-
-    // Displacement
-    std::shared_ptr<vk::BLAS> displacedBlas;
-    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
-    std::shared_ptr<std::vector<vk::Data::DisplacedFaceData>> displacedFaceDataCPU; // CPU copy for SSBO upload
-    uint32_t displacedFaceCount = 0;
 
     std::vector<ChunkLightEntry> lightSources;
 

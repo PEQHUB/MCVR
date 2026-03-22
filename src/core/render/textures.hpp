@@ -24,6 +24,12 @@ class Textures : public SharedObject<Textures> {
         bool animated = false; // true if re-uploaded (animation frame change)
     };
 
+    struct TextureRGBAData {
+        std::vector<uint8_t> rgba; // 4 bytes per texel (R,G,B,A)
+        uint32_t width = 0;
+        uint32_t height = 0;
+    };
+
     Textures(std::shared_ptr<Framework> framework);
 
     void reset();
@@ -52,6 +58,8 @@ class Textures : public SharedObject<Textures> {
 
     const TextureAlphaData *getTextureAlphaData(uint32_t id) const;
 
+    const TextureRGBAData *getTextureRGBAData(uint32_t id) const;
+
   private:
     std::map<uint32_t, std::shared_ptr<vk::DeviceLocalImage>> textures_;
     std::map<uint32_t, std::shared_ptr<vk::Sampler>> samplers;
@@ -64,6 +72,7 @@ class Textures : public SharedObject<Textures> {
 
     std::map<uint32_t, AlphaClass> textureAlphaClass_;
     std::map<uint32_t, TextureAlphaData> textureAlphaData_;
+    std::map<uint32_t, TextureRGBAData> textureRGBAData_;
 };
 
 class ImageBufferCache : public SharedObject<ImageBufferCache> {

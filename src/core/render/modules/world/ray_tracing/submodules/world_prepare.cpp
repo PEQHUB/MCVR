@@ -100,7 +100,6 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
         lastIndexBufferAddr,
         lastObjToWorldMat,
         areaLightBuffer,
-        displacedFaceDataBuffer,
     }};
 
     std::vector<vk::CommandBuffer::BufferMemoryBarrier> uploadPreBufferBarriers, uploadPostBufferBarriers;
@@ -193,7 +192,6 @@ void WorldPrepareContext::render() {
     std::vector<uint64_t> vertexBufferAddrs, indexBufferAddrs;
     std::vector<uint64_t> lastVertexBufferAddrs, lastIndexBufferAddrs;
     std::vector<glm::mat4> lastObjToWorldMats;
-    std::vector<vk::Data::DisplacedFaceData> allDisplacedFaceData;
 
     tlasBuilder = vk::TLASBuilder::create();
     auto &instanceBuilder = tlasBuilder->beginInstanceBuilder();
@@ -370,38 +368,7 @@ void WorldPrepareContext::render() {
 
             blasIndex++;
 
-            // Displacement: add second TLAS instance for displaced AABB BLAS
-            if (chunk1->displacedBlas && chunk1->displacedFaceCount > 0) {
-                instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0, chunk1->displacedBlas);
-
-                // Displaced BLAS has 1 AABB geometry → 2 SBT entries (shadow + primary)
-                geometryTypes.push_back(World::GeometryTypes::WORLD_DISPLACED_SHADOW);
-                geometryTypes.push_back(World::GeometryTypes::WORLD_DISPLACED);
-
-                // No vertex/index buffers for AABB geometry — push zeros
-                vertexBufferAddrs.push_back(0);
-                indexBufferAddrs.push_back(0);
-                lastVertexBufferAddrs.push_back(0);
-                lastIndexBufferAddrs.push_back(0);
-
-                lastObjToWorldMats.push_back(glm::transpose(glm::mat4(
-                    glm::vec4(1.0f, 0.0f, 0.0f, static_cast<float>(static_cast<double>(chunk1->x) - cameraPos.x)),
-                    glm::vec4(0.0f, 1.0f, 0.0f, static_cast<float>(static_cast<double>(chunk1->y) - cameraPos.y)),
-                    glm::vec4(0.0f, 0.0f, 1.0f, static_cast<float>(static_cast<double>(chunk1->z) - cameraPos.z)),
-                    glm::vec4(0.0f, 0.0f, 0.0f, 1.0f))));
-
-                blasOffset.push_back(blasAccu);
-                blasAccu += 1; // 1 AABB geometry
-                blasGroupAccu += 2; // shadow + primary procedural hit groups
-
-                // Collect face data for SSBO upload
-                if (chunk1->displacedFaceDataCPU) {
-                    allDisplacedFaceData.insert(allDisplacedFaceData.end(),
-                        chunk1->displacedFaceDataCPU->begin(), chunk1->displacedFaceDataCPU->end());
-                }
-
-                blasIndex++;
-            }
+            // Displacement is now handled via in-place tessellation (WORLD_SOLID geometry).
         }
     }
 
@@ -522,23 +489,6 @@ void WorldPrepareContext::render() {
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             areaLightBuffer->uploadToStagingBuffer(&dummy);
         }
-    }
-
-    // Upload displaced face data SSBO (all chunks' displaced faces merged)
-    if (!allDisplacedFaceData.empty()) {
-        displacedFaceDataBuffer = vk::DeviceLocalBuffer::create(
-            vma, device, allDisplacedFaceData.size() * sizeof(vk::Data::DisplacedFaceData),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        displacedFaceDataBuffer->uploadToStagingBuffer(allDisplacedFaceData.data());
-        displacedFaceCount = static_cast<int>(allDisplacedFaceData.size());
-    } else {
-        // Dummy buffer for descriptor binding
-        vk::Data::DisplacedFaceData dummy{};
-        displacedFaceDataBuffer = vk::DeviceLocalBuffer::create(
-            vma, device, sizeof(vk::Data::DisplacedFaceData),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        displacedFaceDataBuffer->uploadToStagingBuffer(&dummy);
-        displacedFaceCount = 0;
     }
 
     if (instanceBuilder.instances.empty()) {

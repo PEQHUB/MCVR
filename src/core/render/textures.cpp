@@ -19,6 +19,7 @@ void Textures::reset() {
     textures_.clear();
     textureAlphaClass_.clear();
     textureAlphaData_.clear();
+    textureRGBAData_.clear();
     nextID = 0;
 }
 
@@ -217,6 +218,39 @@ void Textures::queueUpload(uint8_t *srcPointer,
         }
     }
 #endif
+
+    // Cache full RGBA data for displacement tessellation height sampling (mip 0, RGBA formats)
+    if (level == 0 && bytePerPixel == 4) {
+        uint32_t texW = dstTexture->width();
+        uint32_t texH = dstTexture->height();
+
+        auto it = textureRGBAData_.find(dstId);
+        if (it == textureRGBAData_.end()) {
+            TextureRGBAData &data = textureRGBAData_[dstId];
+            data.width = texW;
+            data.height = texH;
+            data.rgba.resize(texW * texH * 4, 0);
+            it = textureRGBAData_.find(dstId);
+        }
+
+        TextureRGBAData &data = it->second;
+        for (uint32_t row = 0; row < height; ++row) {
+            uint32_t srcRow = srcOffsetY + row;
+            uint32_t dstRow = dstOffsetY + row;
+            if (dstRow >= texH) break;
+            for (uint32_t col = 0; col < width; ++col) {
+                uint32_t srcCol = srcOffsetX + col;
+                uint32_t dstCol = dstOffsetX + col;
+                if (dstCol >= texW) break;
+                size_t srcIdx = (srcRow * srcRowPixels + srcCol) * 4;
+                size_t dstIdx = (dstRow * texW + dstCol) * 4;
+                data.rgba[dstIdx + 0] = srcPointer[srcIdx + 0];
+                data.rgba[dstIdx + 1] = srcPointer[srcIdx + 1];
+                data.rgba[dstIdx + 2] = srcPointer[srcIdx + 2];
+                data.rgba[dstIdx + 3] = srcPointer[srcIdx + 3];
+            }
+        }
+    }
 }
 
 void Textures::performQueuedUpload() {
@@ -353,6 +387,7 @@ void Textures::destroyTexture(uint32_t id) {
     caches_.erase(id);
     textureAlphaClass_.erase(id);
     textureAlphaData_.erase(id);
+    textureRGBAData_.erase(id);
 
     // Return ID to free list for reuse
     freeList_.push_back(id);
@@ -375,6 +410,14 @@ Textures::AlphaClass Textures::getTextureAlphaClass(uint32_t id) const {
 const Textures::TextureAlphaData *Textures::getTextureAlphaData(uint32_t id) const {
     auto it = textureAlphaData_.find(id);
     if (it != textureAlphaData_.end()) {
+        return &it->second;
+    }
+    return nullptr;
+}
+
+const Textures::TextureRGBAData *Textures::getTextureRGBAData(uint32_t id) const {
+    auto it = textureRGBAData_.find(id);
+    if (it != textureRGBAData_.end()) {
         return &it->second;
     }
     return nullptr;

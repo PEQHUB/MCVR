@@ -163,8 +163,12 @@ struct Options {
     int   pomRefinement   = 4;      // Binary refinement iterations (0–8)
     float pomFadeDistance = 64.0f;  // Distance in blocks to fade POM out (8–256)
 
-    // Displacement mapping (replaces POM for proper RT integration)
-    uint32_t displacementQuality = 0;  // 0=Off, 1=Intersection DDA, 2=Micro-Tessellation, 3=CLAS (RTX 5090+)
+    // Geometric displacement tessellation (replaces DDA intersection system)
+    uint32_t displacementQuality = 0;  // 0=Off, 1+=Tessellation enabled
+    uint32_t tessMaxLevel = 16;        // Max tessellation grid resolution (2–32)
+    float tessNearDist  = 32.0f;       // Full tessellation distance (blocks)
+    float tessMidDist   = 96.0f;       // Half tessellation distance
+    float tessFarDist   = 192.0f;      // Quarter tessellation distance
 
     // Offline accumulation mode
     uint32_t offlineState = 0;       // 0=NORMAL, 1=FREE, 2=ACCUMULATING

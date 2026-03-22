@@ -138,11 +138,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::shared_ptr<vk::Shader> endGatewayClosestHitShader_;
     std::shared_ptr<vk::Shader> endGatewayAnyHitShader_;
 
-    // Displacement: procedural intersection + hit shaders
-    std::shared_ptr<vk::Shader> displacedBlockIntersectionShader_;
-    std::shared_ptr<vk::Shader> displacedBlockClosestHitShader_;
-    std::shared_ptr<vk::Shader> displacedShadowClosestHitShader_;
-
     std::shared_ptr<vk::Shader> worldPostColorToDepthVertShader_;
     std::shared_ptr<vk::Shader> worldPostColorToDepthFragShader_;
     std::shared_ptr<vk::Shader> worldPostVertShader_;
