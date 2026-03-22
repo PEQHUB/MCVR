@@ -563,6 +563,10 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::materialClassMappingBuffer() {
             dummy.entries[i].transmission = -1.0f; // keep LabPBR
             dummy.entries[i].ior = 1.5f;
             dummy.entries[i].subsurface = 0.0f;
+            dummy.entries[i].pomPacked0 = 0 | (0 << 3) | (0 << 5) | (64 << 8) | (4 << 16);
+            dummy.entries[i].pomPacked1 = 100 | (10 << 24);  // normalClamp=100, heightContrast=10
+            dummy.entries[i].pomPacked2 = (100 << 8) | (100 << 16);  // remapMax=100, offset=100
+            dummy.entries[i].pomDepth = 0.0f;
             dummy.entries[i].flags = 0; // no override
             dummy.entries[i].lumMin = 0.0f;
             dummy.entries[i].lumMax = 1.0f;  // avoid division by zero

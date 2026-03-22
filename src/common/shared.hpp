@@ -377,11 +377,11 @@ namespace Data {
         T_FLOAT noiseStrength;  // [0,1]
         T_UINT  noisePacked;    // Bit-packed: octaves(0-3), type(4-8), seed(9-17), target(20-23)
 
-        // Pack 4: reserved for future use (16 bytes) — was channelR/G/B/textureBlend
-        T_FLOAT _reserved4a;
-        T_FLOAT _reserved4b;
-        T_FLOAT _reserved4c;
-        T_FLOAT pomDepth;       // [0,1] per-block POM depth scale (future use, currently 0)
+        // Pack 4: POM + height field + normal controls (16 bytes)
+        T_UINT  pomPacked0;   // filterMode(3) | pomMode(2) | heightSource(3) | pomSteps(8) | pomRefinement(4) | filterRadius(4) | mipBias(4) | flags(4)
+        T_UINT  pomPacked1;   // normalClamp(8) | geometricBlend(8) | pomAOStrength(8) | heightContrast(8)
+        T_UINT  pomPacked2;   // heightRemapMin(8) | heightRemapMax(8) | heightOffset(8) | normalDistanceFade(8)
+        T_FLOAT pomDepth;     // [0.00-0.50] per-block POM depth in blocks (0 = disabled)
 
         // Pack 5: gamut + noise mask + normal strength
         T_FLOAT gamutBoost;     // Oklab chroma scale (1.0 = neutral)
