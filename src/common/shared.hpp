@@ -377,11 +377,11 @@ namespace Data {
         T_FLOAT noiseStrength;  // [0,1]
         T_UINT  noisePacked;    // Bit-packed: octaves(0-3), type(4-8), seed(9-17), target(20-23)
 
-        // Pack 4: texture roughness routing
-        T_FLOAT channelR;       // [0,1] weight
-        T_FLOAT channelG;       // [0,1] weight
-        T_FLOAT channelB;       // [0,1] weight
-        T_FLOAT textureBlend;   // [0,1]
+        // Pack 4: reserved for future use (16 bytes) — was channelR/G/B/textureBlend
+        T_FLOAT _reserved4a;
+        T_FLOAT _reserved4b;
+        T_FLOAT _reserved4c;
+        T_FLOAT pomDepth;       // [0,1] per-block POM depth scale (future use, currently 0)
 
         // Pack 5: gamut + noise mask + normal strength
         T_FLOAT gamutBoost;     // Oklab chroma scale (1.0 = neutral)

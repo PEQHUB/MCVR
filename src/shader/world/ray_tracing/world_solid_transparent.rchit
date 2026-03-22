@@ -179,7 +179,8 @@ void applyAutoPBR(
 ) {
     float lumMin = mc.lumMin;
     float lumMax = mc.lumMax;
-    float lumSpan = max(lumMax - lumMin, 0.001);
+    if (lumMin >= lumMax) return;
+    float lumSpan = lumMax - lumMin;
 
     uint p0 = mc.autoPBRPacked0;
     float rMin = float(p0 & 0xFFu) / 100.0;
@@ -190,20 +191,19 @@ void applyAutoPBR(
     // Safety: skip if no valid AutoPBR data (packed params all zero)
     if (p0 == 0u) return;
 
+    float normalStrength = mc.normalStrength; // unified normal strength (pack5.w)
     uint p1 = mc.autoPBRPacked1;
-    float normalStrength = float(p1 & 0xFFFFu) / 100.0;
-    float heightGamma = max(float((p1 >> 16u) & 0xFFFFu) / 100.0, 0.01);
+    float heightGamma = max(float(p1 & 0xFFFFu) / 100.0, 0.01);
 
     bool invertRoughness = (mc.flags & 0x10u) != 0u;
     bool invertNormal    = (mc.flags & 0x20u) != 0u;
 
-    vec3 channelWeights = vec3(mc.channelR, mc.channelG, mc.channelB);
-    float weightSum = channelWeights.x + channelWeights.y + channelWeights.z;
-    if (weightSum < 0.001) channelWeights = vec3(0.2126, 0.7152, 0.0722);
-    else channelWeights /= weightSum;
+    vec3 channelWeights = vec3(0.2627, 0.6780, 0.0593); // BT.2020 luminance
 
     // Roughness from luminance percentile mapping
     float lum = dot(rawAlbedoLinear, channelWeights);
+    // Skip AutoPBR for transparent/masked pixels (arbitrary RGB values contaminate derivatives)
+    if (lum < 0.001) return;
     float normLum = clamp((lum - lumMin) / lumSpan, 0.0, 1.0);
     float windowStart = (centerPct - spreadPct * 0.5) / 100.0;
     float windowSize = max(spreadPct / 100.0, 0.01);
@@ -498,7 +498,6 @@ void main() {
         vec4 pack1 = vec4(mc.metallic, mc.transmission, mc.ior, mc.subsurface);
         vec4 pack2 = vec4(mc.anisotropic, mc.sheenWeight, mc.sheenTint, mc.coatWeight);
         vec4 pack3 = vec4(mc.coatRoughness, mc.noiseScale, mc.noiseStrength, 0.0);
-        vec4 pack4 = vec4(mc.channelR, mc.channelG, mc.channelB, mc.textureBlend);
         vec4 pack5 = vec4(mc.gamutBoost, mc.noiseMaskThreshold, 0.0, mc.normalStrength);
         vec4 pack6 = vec4(mc.noiseRotation, mc.noiseAspect, mc.noiseLacunarity, mc.noiseContrast);
 
@@ -520,29 +519,12 @@ void main() {
                 float f0 = ((ior - 1.0) * (ior - 1.0)) / ((ior + 1.0) * (ior + 1.0));
                 mat.f0 = vec3(f0);
             }
-            float textureBlend = pack4.w;
-
             // GPU-side AutoPBR: derive roughness + normal from albedo when enabled
             if ((mc.flags & 0x8u) != 0u) {
                 applyAutoPBR(mat, mc, rawAlbedoLinear, textureID, textureUV, uvMin, uvMax);
-            }
-
-            // Tex Roughness: blend between slider roughness and albedo-derived per-pixel roughness
-            // Composes with AutoPBR — textureBlend modulates the AutoPBR result toward albedo signal
-            float matRoughness = pack0.a * pack0.a;  // perceptual → GGX alpha
-            if (textureBlend > 0.001) {
-                float texRoughness;
-                if (specularTextureID >= 0) {
-                    texRoughness = texSourceRoughness;
-                } else {
-                    float weightSum = pack4.x + pack4.y + pack4.z;
-                    float signal = dot(rawAlbedoLinear, pack4.xyz) / max(weightSum, 0.001);
-                    texRoughness = (1.0 - signal) * (1.0 - signal);
-                }
-                mat.roughness = max(mix(matRoughness, texRoughness, textureBlend), 0.01);
             } else {
-                // No textureBlend → slider roughness always takes priority
-                mat.roughness = max(matRoughness, 0.01);
+                // Material class slider roughness (perceptual → GGX alpha)
+                mat.roughness = max(pack0.a * pack0.a, 0.01);
             }
 
             mat.metallic = pack1.x;
@@ -575,7 +557,9 @@ void main() {
             // Normal strength: amplify/attenuate LabPBR normal map (skip for AutoPBR — already applied)
             if ((mc.flags & 0x8u) == 0u) {
                 float matNormalStrength = pack5.w;
-                if (matNormalStrength > 0.01 && matNormalStrength != 1.0 && length(mat.normal) > 0.01) {
+                if (matNormalStrength < 0.01) {
+                    mat.normal = vec3(0.0, 0.0, 1.0); // flat — disable normal map
+                } else if (matNormalStrength != 1.0 && length(mat.normal) > 0.01) {
                     mat.normal.xy *= matNormalStrength;
                     mat.normal = normalize(mat.normal);
                 }
@@ -587,16 +571,7 @@ void main() {
             matNoiseContrast = pack6.w;
 
             if (mat.metallic > 0.5) {
-                if (textureBlend > 0.001) {
-                    // Textured metal: preserve texture detail in reflectance
-                    // Modulate F0 by texture luminance variation
-                    float texLum = dot(mat.albedo, vec3(0.2627, 0.6780, 0.0593));
-                    float avgLum = max(texLum, 0.01); // avoid div-by-zero
-                    vec3 texDetail = mat.albedo / avgLum; // normalized texture pattern
-                    mat.albedo = mat.f0 * mix(vec3(1.0), texDetail, textureBlend);
-                } else {
-                    mat.albedo = mat.f0;  // flat metal: pure F0 color
-                }
+                mat.albedo = mat.f0;
             }
         }
     }

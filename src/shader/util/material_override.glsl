@@ -90,7 +90,7 @@ void applyMaterialOverride(
         {
         vec4 pack1 = vec4(mc.metallic, mc.transmission, mc.ior, mc.subsurface);
         vec4 pack2 = vec4(mc.anisotropic, mc.sheenWeight, mc.sheenTint, mc.coatWeight);
-        vec4 pack4 = vec4(mc.channelR, mc.channelG, mc.channelB, mc.textureBlend);
+        // Pack 4 is reserved (was channelR/G/B/textureBlend — removed)
 
         {
             // Apply F0 override if set; for dielectrics with zero F0, derive from IOR
@@ -105,20 +105,7 @@ void applyMaterialOverride(
                 // Metal without explicit F0: use albedo (standard Disney metallic workflow)
                 mat.f0 = mat.albedo;
             }
-            float matRoughness = pack0.a * pack0.a;  // perceptual -> GGX alpha
-
-            // Texture roughness channel routing: derive roughness from albedo channel mix.
-            // textureBlend > 0 blends between slider value and albedo-derived roughness.
-            // textureBlend = 0 uses slider value directly (default for most blocks).
-            float textureBlend = pack4.w;
-            if (textureBlend > 0.001) {
-                float weightSum = pack4.x + pack4.y + pack4.z;
-                float signal = dot(rawAlbedoLinear, pack4.xyz) / max(weightSum, 0.001);
-                float texRoughness = (1.0 - signal) * (1.0 - signal);
-                mat.roughness = mix(matRoughness, texRoughness, textureBlend);
-            } else {
-                mat.roughness = matRoughness;
-            }
+            mat.roughness = pack0.a * pack0.a;  // perceptual -> GGX alpha
 
             mat.metallic = pack1.x;
             // Transmission override protocol:
