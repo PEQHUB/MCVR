@@ -596,6 +596,9 @@ void main() {
     albedoValue = vec4(tint, albedoValue.a);
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
 
+    // No normal texture → AO channel is uninitialized (0), not "full occlusion"
+    if (normalTextureID < 0) mat.ao = 1.0;
+
     // Save original texture properties before material overrides (for masks + Tex Roughness blend)
     float texSourceRoughness = mat.roughness;
     float texSourceLuminance = dot(mat.albedo, vec3(0.2126, 0.7152, 0.0722));
