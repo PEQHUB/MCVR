@@ -50,9 +50,23 @@ class Tessellator {
         std::vector<float> edgeDispU0, edgeDispU1, edgeDispV0, edgeDispV1;
     };
 
+    // UV-ordered quad corners for bilinear interpolation
+    struct QuadCorners {
+        const vk::VertexFormat::PBRTriangle *c00; // parametric (0,0)
+        const vk::VertexFormat::PBRTriangle *c10; // parametric (1,0)
+        const vk::VertexFormat::PBRTriangle *c01; // parametric (0,1)
+        const vk::VertexFormat::PBRTriangle *c11; // parametric (1,1)
+    };
+
     // Tessellate a quad into an NxN triangle grid with height displacement.
     // Returns (tessLevel+1)^2 vertices and 2*tessLevel^2 triangles.
     static Output tessellate(const Input &input);
+
+    // Map raw quad vertices to UV-ordered bilinear corners.
+    static QuadCorners mapCornersPublic(const Input &input);
+
+    // Interpolate all PBRTriangle fields at parametric (u,v) from UV-ordered corners.
+    static void interpVertexPublic(vk::VertexFormat::PBRTriangle &vert, const QuadCorners &q, float u, float v);
 
     // Determine tessellation level based on distance and texture resolution.
     // Returns a level capped by texture resolution and max setting, reduced by distance LOD.

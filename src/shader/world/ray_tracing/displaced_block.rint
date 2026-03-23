@@ -131,8 +131,9 @@ void main() {
     vec2 uvSpan = face.uvMax - face.uvMin;
     float texelsU = max(texSize.x * uvSpan.x, 1.0);
     float texelsV = max(texSize.y * uvSpan.y, 1.0);
-    float edgeWidthU = max(1.0, heightScale * texelsU) / texelsU;
-    float edgeWidthV = max(1.0, heightScale * texelsV) / texelsV;
+    float edgeWidthU = min(2.0, max(1.0, heightScale * texelsU)) / texelsU;
+    float edgeWidthV = min(2.0, max(1.0, heightScale * texelsV)) / texelsV;
+    uint fadeMask = face.fadeEdgeMask;
 
     // DDA march through the displacement volume
     float dt = (tExit - tEntry) / float(maxSteps);
@@ -160,9 +161,13 @@ void main() {
                                    hasLabPBR, face.normalTexID);
 
             // Fade displacement to zero near face edges so adjacent faces meet
-            // at the original cube boundary (prevents edge tears)
-            float edgeFade = smoothstep(0.0, edgeWidthU, u) * smoothstep(0.0, edgeWidthU, 1.0 - u)
-                           * smoothstep(0.0, edgeWidthV, v) * smoothstep(0.0, edgeWidthV, 1.0 - v);
+            // at the original cube boundary (prevents edge tears).
+            // Only fade edges marked in fadeEdgeMask; coplanar neighbors skip fade.
+            float edgeFade = 1.0;
+            if ((fadeMask & 0x1u) != 0u) edgeFade *= smoothstep(0.0, edgeWidthU, u);
+            if ((fadeMask & 0x2u) != 0u) edgeFade *= smoothstep(0.0, edgeWidthU, 1.0 - u);
+            if ((fadeMask & 0x4u) != 0u) edgeFade *= smoothstep(0.0, edgeWidthV, v);
+            if ((fadeMask & 0x8u) != 0u) edgeFade *= smoothstep(0.0, edgeWidthV, 1.0 - v);
 
             // Height surface: distance from face plane along negative normal
             // edgeFade=0 at edges → surfaceDepth=0 → surface at face plane (no displacement)
@@ -188,10 +193,12 @@ void main() {
                                               invertH, remapMin, remapMax, heightContrast, hOffset,
                                               hasLabPBR, face.normalTexID);
                     // Apply same edge fade during refinement
-                    float fadeMid = smoothstep(0.0, edgeWidthU, clamp(uMid,0,1))
-                                  * smoothstep(0.0, edgeWidthU, 1.0 - clamp(uMid,0,1))
-                                  * smoothstep(0.0, edgeWidthV, clamp(vMid,0,1))
-                                  * smoothstep(0.0, edgeWidthV, 1.0 - clamp(vMid,0,1));
+                    float uMidC = clamp(uMid, 0, 1), vMidC = clamp(vMid, 0, 1);
+                    float fadeMid = 1.0;
+                    if ((fadeMask & 0x1u) != 0u) fadeMid *= smoothstep(0.0, edgeWidthU, uMidC);
+                    if ((fadeMask & 0x2u) != 0u) fadeMid *= smoothstep(0.0, edgeWidthU, 1.0 - uMidC);
+                    if ((fadeMask & 0x4u) != 0u) fadeMid *= smoothstep(0.0, edgeWidthV, vMidC);
+                    if ((fadeMask & 0x8u) != 0u) fadeMid *= smoothstep(0.0, edgeWidthV, 1.0 - vMidC);
                     float surfMid = (1.0 - hMid) * heightScale * fadeMid;
                     float depMid = -dot(relMid, faceN);
                     if (depMid >= surfMid) tHi = tMid;

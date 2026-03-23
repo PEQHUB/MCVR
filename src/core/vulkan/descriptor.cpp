@@ -175,6 +175,62 @@ vk::DescriptorTable::bindAS(std::shared_ptr<TLAS> tlas, uint32_t set, uint32_t b
     return shared_from_this();
 }
 
+std::shared_ptr<vk::DescriptorTable>
+vk::DescriptorTable::bindImages(const std::vector<ImageBinding> &bindings) {
+    if (bindings.empty()) return shared_from_this();
+
+    std::vector<VkDescriptorImageInfo> imageInfos(bindings.size());
+    std::vector<VkWriteDescriptorSet> writes(bindings.size());
+
+    for (size_t i = 0; i < bindings.size(); i++) {
+        auto &b = bindings[i];
+        imageInfos[i] = {};
+        imageInfos[i].imageView = b.image->vkImageView(b.viewIndex);
+        imageInfos[i].imageLayout = b.layout;
+
+        writes[i] = {};
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = table_[b.set];
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = tableTypes_[b.set][b.binding];
+        writes[i].pImageInfo = &imageInfos[i];
+        writes[i].dstBinding = b.binding;
+    }
+
+    vkUpdateDescriptorSets(device_->vkDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+    return shared_from_this();
+}
+
+std::shared_ptr<vk::DescriptorTable>
+vk::DescriptorTable::bindBufferBatch(const std::vector<BufferBinding> &bindings) {
+    if (bindings.empty()) return shared_from_this();
+
+    std::vector<VkDescriptorBufferInfo> bufferInfos(bindings.size());
+    std::vector<VkWriteDescriptorSet> writes(bindings.size());
+
+    for (size_t i = 0; i < bindings.size(); i++) {
+        auto &b = bindings[i];
+        bufferInfos[i] = {};
+        bufferInfos[i].buffer = b.buffer->vkBuffer();
+        bufferInfos[i].offset = 0;
+        bufferInfos[i].range = b.buffer->size();
+
+        writes[i] = {};
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = table_[b.set];
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = tableTypes_[b.set][b.binding];
+        writes[i].pBufferInfo = &bufferInfos[i];
+        writes[i].dstBinding = b.binding;
+        writes[i].dstArrayElement = b.index;
+    }
+
+    vkUpdateDescriptorSets(device_->vkDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+    return shared_from_this();
+}
+
 uint32_t vk::DescriptorTable::setCount() {
     return table_.size();
 }

@@ -512,6 +512,58 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                                 0.0f, 0.5f); // Cap at 0.5 blocks
                             uint32_t i4v = idx[t + 4]; // 4th unique vertex
 
+                            // Compute per-edge fade mask: check 4 in-plane neighbors
+                            // for coplanar displaced faces. If a neighbor exists, skip
+                            // fading that edge so adjacent blocks blend seamlessly.
+                            // Shared by both tessellation and DDA paths.
+                            uint32_t fadeEdgeMask = 0xF; // default: fade all
+                            {
+                                glm::vec3 fc = 0.25f * (verts[i0].pos + verts[i1].pos + verts[i2].pos + verts[i4v].pos);
+                                glm::ivec3 bp = glm::ivec3(glm::floor(fc - norm * 0.5f));
+
+                                const vk::VertexFormat::PBRTriangle *qv[4] = {&verts[i0], &verts[i1], &verts[i2], &verts[i4v]};
+                                int mi = 0;
+                                for (int qi = 1; qi < 4; qi++) {
+                                    if (qv[qi]->textureUV.x < qv[mi]->textureUV.x - 0.0001f ||
+                                        (std::abs(qv[qi]->textureUV.x - qv[mi]->textureUV.x) < 0.0001f &&
+                                         qv[qi]->textureUV.y < qv[mi]->textureUV.y))
+                                        mi = qi;
+                                }
+                                glm::vec3 cPos = qv[mi]->pos;
+                                glm::vec2 cUV = qv[mi]->textureUV;
+                                glm::vec3 dirU(0), dirV(0);
+                                for (int qi = 0; qi < 4; qi++) {
+                                    if (qi == mi) continue;
+                                    glm::vec2 dUV = qv[qi]->textureUV - cUV;
+                                    if (std::abs(dUV.x) > 0.0001f && std::abs(dUV.y) < 0.0001f && glm::length(dirU) < 0.001f)
+                                        dirU = glm::normalize(qv[qi]->pos - cPos);
+                                    else if (std::abs(dUV.y) > 0.0001f && std::abs(dUV.x) < 0.0001f && glm::length(dirV) < 0.001f)
+                                        dirV = glm::normalize(qv[qi]->pos - cPos);
+                                }
+
+                                auto roundDir = [](glm::vec3 d) -> glm::ivec3 {
+                                    glm::ivec3 r(0);
+                                    float ax = std::abs(d.x), ay = std::abs(d.y), az = std::abs(d.z);
+                                    if (ax >= ay && ax >= az) r.x = (d.x > 0) ? 1 : -1;
+                                    else if (ay >= ax && ay >= az) r.y = (d.y > 0) ? 1 : -1;
+                                    else r.z = (d.z > 0) ? 1 : -1;
+                                    return r;
+                                };
+                                glm::ivec3 uDir = roundDir(dirU);
+                                glm::ivec3 vDir = roundDir(dirV);
+
+                                glm::ivec3 nU0 = bp - uDir, nU1 = bp + uDir;
+                                glm::ivec3 nV0 = bp - vDir, nV1 = bp + vDir;
+                                if (displacedFaceSet.count({(int16_t)nU0.x, (int16_t)nU0.y, (int16_t)nU0.z, (uint8_t)faceAxis}))
+                                    fadeEdgeMask &= ~0x1u;
+                                if (displacedFaceSet.count({(int16_t)nU1.x, (int16_t)nU1.y, (int16_t)nU1.z, (uint8_t)faceAxis}))
+                                    fadeEdgeMask &= ~0x2u;
+                                if (displacedFaceSet.count({(int16_t)nV0.x, (int16_t)nV0.y, (int16_t)nV0.z, (uint8_t)faceAxis}))
+                                    fadeEdgeMask &= ~0x4u;
+                                if (displacedFaceSet.count({(int16_t)nV1.x, (int16_t)nV1.y, (int16_t)nV1.z, (uint8_t)faceAxis}))
+                                    fadeEdgeMask &= ~0x8u;
+                            }
+
                             // --- Tessellation path (method 2 or 3) ---
                             if (dispMethod == 2 || dispMethod == 3) {
                                 // Use chunk-local camera distance: if global cameraPos is unset (0,0,0 default),
@@ -555,61 +607,6 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                                         correctedMat.lumMax = tileMax;
                                     }
                                     effectiveMat = &correctedMat;
-                                }
-
-                                // Compute per-edge fade mask: check 4 in-plane neighbors
-                                // for coplanar displaced faces. If a neighbor exists, skip
-                                // fading that edge so adjacent blocks blend seamlessly.
-                                uint32_t fadeEdgeMask = 0xF; // default: fade all
-                                {
-                                    glm::vec3 fc = 0.25f * (verts[i0].pos + verts[i1].pos + verts[i2].pos + verts[i4v].pos);
-                                    glm::ivec3 bp = glm::ivec3(glm::floor(fc - norm * 0.5f));
-
-                                    // Determine U and V world-space directions from quad corners
-                                    // Find min-UV vertex and its neighbors (same logic as mapCorners)
-                                    const vk::VertexFormat::PBRTriangle *qv[4] = {&verts[i0], &verts[i1], &verts[i2], &verts[i4v]};
-                                    int mi = 0;
-                                    for (int qi = 1; qi < 4; qi++) {
-                                        if (qv[qi]->textureUV.x < qv[mi]->textureUV.x - 0.0001f ||
-                                            (std::abs(qv[qi]->textureUV.x - qv[mi]->textureUV.x) < 0.0001f &&
-                                             qv[qi]->textureUV.y < qv[mi]->textureUV.y))
-                                            mi = qi;
-                                    }
-                                    glm::vec3 cPos = qv[mi]->pos;
-                                    glm::vec2 cUV = qv[mi]->textureUV;
-                                    glm::vec3 dirU(0), dirV(0);
-                                    for (int qi = 0; qi < 4; qi++) {
-                                        if (qi == mi) continue;
-                                        glm::vec2 dUV = qv[qi]->textureUV - cUV;
-                                        if (std::abs(dUV.x) > 0.0001f && std::abs(dUV.y) < 0.0001f && glm::length(dirU) < 0.001f)
-                                            dirU = glm::normalize(qv[qi]->pos - cPos);
-                                        else if (std::abs(dUV.y) > 0.0001f && std::abs(dUV.x) < 0.0001f && glm::length(dirV) < 0.001f)
-                                            dirV = glm::normalize(qv[qi]->pos - cPos);
-                                    }
-
-                                    // Round directions to nearest block axis
-                                    auto roundDir = [](glm::vec3 d) -> glm::ivec3 {
-                                        glm::ivec3 r(0);
-                                        float ax = std::abs(d.x), ay = std::abs(d.y), az = std::abs(d.z);
-                                        if (ax >= ay && ax >= az) r.x = (d.x > 0) ? 1 : -1;
-                                        else if (ay >= ax && ay >= az) r.y = (d.y > 0) ? 1 : -1;
-                                        else r.z = (d.z > 0) ? 1 : -1;
-                                        return r;
-                                    };
-                                    glm::ivec3 uDir = roundDir(dirU);
-                                    glm::ivec3 vDir = roundDir(dirV);
-
-                                    // Check neighbors: if a coplanar displaced face exists, clear that edge's fade bit
-                                    glm::ivec3 nU0 = bp - uDir, nU1 = bp + uDir;
-                                    glm::ivec3 nV0 = bp - vDir, nV1 = bp + vDir;
-                                    if (displacedFaceSet.count({(int16_t)nU0.x, (int16_t)nU0.y, (int16_t)nU0.z, (uint8_t)faceAxis}))
-                                        fadeEdgeMask &= ~0x1u; // U=0 edge has coplanar neighbor
-                                    if (displacedFaceSet.count({(int16_t)nU1.x, (int16_t)nU1.y, (int16_t)nU1.z, (uint8_t)faceAxis}))
-                                        fadeEdgeMask &= ~0x2u; // U=1 edge has coplanar neighbor
-                                    if (displacedFaceSet.count({(int16_t)nV0.x, (int16_t)nV0.y, (int16_t)nV0.z, (uint8_t)faceAxis}))
-                                        fadeEdgeMask &= ~0x4u; // V=0 edge has coplanar neighbor
-                                    if (displacedFaceSet.count({(int16_t)nV1.x, (int16_t)nV1.y, (int16_t)nV1.z, (uint8_t)faceAxis}))
-                                        fadeEdgeMask &= ~0x8u; // V=1 edge has coplanar neighbor
                                 }
 
                                 Tessellator::Input tessInput{};
@@ -753,7 +750,7 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                                 fd.pomPacked1 = matEntry ? matEntry->pomPacked1 : 0;
                                 fd.pomPacked2 = matEntry ? matEntry->pomPacked2 : 0;
                                 fd.flags = matEntry ? matEntry->flags : 0;
-                                fd._pad0 = 0;
+                                fd.fadeEdgeMask = fadeEdgeMask;
                                 displacedFaceData.push_back(fd);
 
                                 tessellated = true; // consumed — don't keep original quad
@@ -791,6 +788,10 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                     float invN = 1.0f / static_cast<float>(N);
                     glm::vec3 fN3 = -info.norm; // displacement direction
 
+                    // UV-ordered corners for correct bilinear interpolation
+                    auto q = Tessellator::mapCornersPublic(info.tessInput);
+                    if (!q.c00 || !q.c10 || !q.c01 || !q.c11) continue;
+
                     // Check each edge direction for coplanar neighbor
                     auto checkEdge = [&](const std::vector<float> &myEdge, glm::ivec3 neighborDir,
                                          bool isU, bool isMax) {
@@ -813,15 +814,8 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
 
                             // Generate seam wall at the shared boundary
                             float dNear = std::min(dA, dB), dFar = std::max(dA, dB);
-                            float p0, p1; // parametric positions along the edge
-                            float edgeParam; // fixed parametric coord (0 or 1)
-                            if (isU) {
-                                edgeParam = isMax ? 1.0f : 0.0f;
-                                p0 = k * invN; p1 = (k + 1) * invN;
-                            } else {
-                                edgeParam = isMax ? 1.0f : 0.0f;
-                                p0 = k * invN; p1 = (k + 1) * invN;
-                            }
+                            float p0 = k * invN, p1 = (k + 1) * invN;
+                            float edgeParam = isMax ? 1.0f : 0.0f;
 
                             // Create 4 wall vertices (double-sided = 8 verts, 4 tris)
                             for (int side = 0; side < 2; side++) {
@@ -837,18 +831,12 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                                     eu1 = p1; ev1 = edgeParam;
                                 }
 
-                                // Interpolate wall vertex positions from tessInput corners
-                                const auto &ti = info.tessInput;
-                                auto lerpPos = [&](float pu, float pv) -> glm::vec3 {
-                                    return (1-pu)*(1-pv)*ti.v0->pos + pu*(1-pv)*ti.v1->pos
-                                         + (1-pu)*pv*ti.v2->pos + pu*pv*ti.v3->pos;
-                                };
-                                // Use v0 as template for non-position fields
-                                wv[0] = *ti.v0; wv[1] = *ti.v0; wv[2] = *ti.v0; wv[3] = *ti.v0;
-                                wv[0].pos = lerpPos(eu0, ev0);
-                                wv[1].pos = lerpPos(eu1, ev1);
-                                wv[2].pos = wv[1].pos; wv[3].pos = wv[0].pos;
+                                // Use UV-ordered corners (mapCorners) for correct interpolation
+                                Tessellator::interpVertexPublic(wv[0], q, eu0, ev0);
+                                Tessellator::interpVertexPublic(wv[1], q, eu1, ev1);
+                                wv[2] = wv[1]; wv[3] = wv[0];
 
+                                // Offset top pair by dNear, bottom pair by dFar
                                 wv[0].pos += fN3 * dNear; wv[0].postBase += fN3 * dNear;
                                 wv[1].pos += fN3 * dNear; wv[1].postBase += fN3 * dNear;
                                 wv[2].pos += fN3 * dFar;  wv[2].postBase += fN3 * dFar;
@@ -969,6 +957,32 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                             ->allocateBuffers(physicalDevice, device, vma)
                             ->build(device);
     }
+
+    // Cache the face count before releaseHostGeometry() clears the vector
+    displacedFaceCount = static_cast<uint32_t>(displacedFaceData.size());
+}
+
+void ChunkBuildData::releaseHostGeometry() {
+    for (auto &v : vertices) {
+        v.clear();
+        v.shrink_to_fit();
+    }
+    vertices.clear();
+    vertices.shrink_to_fit();
+
+    for (auto &idx : indices) {
+        idx.clear();
+        idx.shrink_to_fit();
+    }
+    indices.clear();
+    indices.shrink_to_fit();
+
+    // Also release CPU-side displacement data (GPU buffers are already uploaded)
+    displacedAABBs.clear();
+    displacedAABBs.shrink_to_fit();
+    displacedFaceCount = static_cast<uint32_t>(displacedFaceData.size());
+    displacedFaceData.clear();
+    displacedFaceData.shrink_to_fit();
 }
 
 ChunkBuildDataBatch::ChunkBuildDataBatch(uint32_t maxBatchSize,
@@ -999,6 +1013,7 @@ ChunkBuildDataBatch::ChunkBuildDataBatch(uint32_t maxBatchSize,
 
         auto data = chunkBuildDatas[queuedIndices[i]];
         data->build(true, false, cameraPos);
+        data->releaseHostGeometry();
         batchData.push_back(data);
     }
 }
@@ -1355,10 +1370,8 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
     if (displacedFaceDataBuffer) gc.collect(displacedFaceDataBuffer);
     displacedFaceDataBuffer = chunkBuildData->displacedFaceDataBuffer;
     displacedBlas = chunkBuildData->displacedBlas;
-    displacedFaceCount = static_cast<uint32_t>(chunkBuildData->displacedFaceData.size());
-    vertices =
-        std::make_shared<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>>(std::move(chunkBuildData->vertices));
-    indices = std::make_shared<std::vector<std::vector<uint32_t>>>(std::move(chunkBuildData->indices));
+    displacedFaceCount = chunkBuildData->displacedFaceCount;
+    // CPU vertex/index data already released by releaseHostGeometry() — not stored in Chunk1.
 }
 
 void Chunk1::invalidate() {
@@ -1391,8 +1404,6 @@ std::shared_ptr<ChunkRenderData> Chunk1::tryGetValid() {
     ret->allIndexCount = allIndexCount;
     ret->geometryCount = geometryCount;
     ret->geometryTypes = geometryTypes;
-    ret->vertices = vertices;
-    ret->indices = indices;
 
     return ret;
 }
@@ -1537,7 +1548,7 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
             importantBLASBuilders_->push_back(chunkBuildData->displacedBlasBuilder);
         }
 
-        // Copy geometry data BEFORE enqueue (enqueue moves them out)
+        // Copy geometry data BEFORE releasing host data (enqueue no longer stores CPU data)
         std::shared_ptr<ChunkBuildData> asyncRebuildData;
         if (ommEnabled) {
             asyncRebuildData = ChunkBuildData::create(
@@ -1548,6 +1559,9 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
                 std::vector<std::vector<vk::VertexFormat::PBRTriangle>>(chunkBuildData->vertices),
                 std::vector<std::vector<uint32_t>>(chunkBuildData->indices));
         }
+
+        // Release CPU vertex/index data now that GPU buffers are uploaded and async copy is made
+        chunkBuildData->releaseHostGeometry();
 
         chunks_[task.id]->enqueue(chunkBuildData);
 

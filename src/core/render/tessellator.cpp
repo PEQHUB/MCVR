@@ -8,6 +8,12 @@
 static const glm::vec3 FACE_NORMALS[6] = {
     {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
 
+// CPU smoothstep matching GLSL smoothstep(edge0, edge1, x)
+static inline float smoothstep(float edge0, float edge1, float x) {
+    float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
 // Bilinear interpolation of a float
 static inline float bilerp(float v00, float v10, float v01, float v11, float u, float v) {
     return (1 - u) * (1 - v) * v00 + u * (1 - v) * v10 + (1 - u) * v * v01 + u * v * v11;
@@ -35,12 +41,7 @@ static inline glm::ivec2 bilerpIvec2(glm::ivec2 a, glm::ivec2 b, glm::ivec2 c, g
 // Quad index pattern: [v0,v1,v2, v2,v3,v0] — two triangles.
 // We need to find corner mapping: (0,0), (1,0), (1,1), (0,1) in UV space.
 // Since faces are axis-aligned, we find the corner with min textureUV and map from there.
-struct QuadCorners {
-    const vk::VertexFormat::PBRTriangle *c00; // parametric (0,0)
-    const vk::VertexFormat::PBRTriangle *c10; // parametric (1,0)
-    const vk::VertexFormat::PBRTriangle *c01; // parametric (0,1)
-    const vk::VertexFormat::PBRTriangle *c11; // parametric (1,1)
-};
+using QuadCorners = Tessellator::QuadCorners;
 
 static QuadCorners mapCorners(const Tessellator::Input &input) {
     // Find the vertex with min UV (bottom-left in atlas) as c00
@@ -159,16 +160,16 @@ Tessellator::Output Tessellator::tessellate(const Input &input) {
                     input.hasLabPBRHeight, input.isAutoPBR,
                     texUV.x, texUV.y,
                     input.uvMinX, input.uvMinY, input.uvMaxX, input.uvMaxY);
-                // Per-edge fade: only fade edges marked in fadeEdgeMask (perpendicular edges).
+                // Per-edge fade: smoothstep matching rint/rchit shaders.
+                // Only fade edges marked in fadeEdgeMask (perpendicular edges).
                 // Coplanar edges (adjacent tessellated block) keep full displacement.
-                float fadeTexels = std::max(1.0f, input.heightScale * static_cast<float>(N));
                 float fN = static_cast<float>(N);
-                float minEdgeDist = fadeTexels; // default: no fade (full displacement)
-                if (input.fadeEdgeMask & 0x1) minEdgeDist = std::min(minEdgeDist, centerU * fN);       // U=0 edge
-                if (input.fadeEdgeMask & 0x2) minEdgeDist = std::min(minEdgeDist, (1.0f - centerU) * fN); // U=1 edge
-                if (input.fadeEdgeMask & 0x4) minEdgeDist = std::min(minEdgeDist, centerV * fN);       // V=0 edge
-                if (input.fadeEdgeMask & 0x8) minEdgeDist = std::min(minEdgeDist, (1.0f - centerV) * fN); // V=1 edge
-                float edgeFade = std::clamp(minEdgeDist / fadeTexels, 0.0f, 1.0f);
+                float edgeWidth = std::min(2.0f, std::max(1.0f, input.heightScale * fN)) / fN; // parametric [0,1], capped at 2 texels
+                float edgeFade = 1.0f;
+                if (input.fadeEdgeMask & 0x1) edgeFade *= smoothstep(0.0f, edgeWidth, centerU);
+                if (input.fadeEdgeMask & 0x2) edgeFade *= smoothstep(0.0f, edgeWidth, 1.0f - centerU);
+                if (input.fadeEdgeMask & 0x4) edgeFade *= smoothstep(0.0f, edgeWidth, centerV);
+                if (input.fadeEdgeMask & 0x8) edgeFade *= smoothstep(0.0f, edgeWidth, 1.0f - centerV);
                 disp[cy * N + cx] = (1.0f - height) * input.heightScale * edgeFade;
             }
         }
@@ -362,14 +363,13 @@ Tessellator::Output Tessellator::tessellate(const Input &input) {
                     vert.textureUV.x, vert.textureUV.y,
                     input.uvMinX, input.uvMinY, input.uvMaxX, input.uvMaxY);
 
-                float fadeTexels = std::max(1.0f, input.heightScale * static_cast<float>(N));
                 float fN = static_cast<float>(N);
-                float minEdgeDist = fadeTexels;
-                if (input.fadeEdgeMask & 0x1) minEdgeDist = std::min(minEdgeDist, u * fN);
-                if (input.fadeEdgeMask & 0x2) minEdgeDist = std::min(minEdgeDist, (1.0f - u) * fN);
-                if (input.fadeEdgeMask & 0x4) minEdgeDist = std::min(minEdgeDist, v * fN);
-                if (input.fadeEdgeMask & 0x8) minEdgeDist = std::min(minEdgeDist, (1.0f - v) * fN);
-                float edgeFade = std::clamp(minEdgeDist / fadeTexels, 0.0f, 1.0f);
+                float edgeWidth = std::min(2.0f, std::max(1.0f, input.heightScale * fN)) / fN; // parametric [0,1], capped at 2 texels
+                float edgeFade = 1.0f;
+                if (input.fadeEdgeMask & 0x1) edgeFade *= smoothstep(0.0f, edgeWidth, u);
+                if (input.fadeEdgeMask & 0x2) edgeFade *= smoothstep(0.0f, edgeWidth, 1.0f - u);
+                if (input.fadeEdgeMask & 0x4) edgeFade *= smoothstep(0.0f, edgeWidth, v);
+                if (input.fadeEdgeMask & 0x8) edgeFade *= smoothstep(0.0f, edgeWidth, 1.0f - v);
 
                 float displacement = (1.0f - height) * input.heightScale * edgeFade;
                 glm::vec3 offset = -faceNormal * displacement;
@@ -404,6 +404,14 @@ Tessellator::Output Tessellator::tessellate(const Input &input) {
     }
 
     return out;
+}
+
+Tessellator::QuadCorners Tessellator::mapCornersPublic(const Input &input) {
+    return mapCorners(input);
+}
+
+void Tessellator::interpVertexPublic(vk::VertexFormat::PBRTriangle &vert, const QuadCorners &q, float u, float v) {
+    interpVertex(vert, q, u, v);
 }
 
 uint32_t Tessellator::computeTessLevel(float distanceToCamera, uint32_t textureResolution,

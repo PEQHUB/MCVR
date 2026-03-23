@@ -219,6 +219,13 @@ class TLASBuilder : public SharedObject<TLASBuilder> {
                                                  std::shared_ptr<VMA> vma);
     std::shared_ptr<TLAS> buildAndSubmit(std::shared_ptr<Device> device, std::shared_ptr<CommandBuffer> commandBuffer);
 
+    /// In-place UPDATE: reuses existing TLAS handle/buffer, only updates instance transforms.
+    /// The existing TLAS must have been built with ALLOW_UPDATE_BIT.
+    /// Caller must have called defineUpdateProperty() before this.
+    void updateAndSubmit(std::shared_ptr<TLAS> existingTlas,
+                         std::shared_ptr<DeviceLocalBuffer> scratchBuffer,
+                         std::shared_ptr<CommandBuffer> commandBuffer);
+
   private:
     TLASInstanceBuilder tlasInstanceBuilder_;
 
