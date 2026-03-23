@@ -9,11 +9,11 @@
 //
 // The algorithm provides excellent spatial distribution for denoising.
 
-layout(set = 1, binding = 9) readonly buffer SobolBuffer {
+layout(set = 1, binding = 13) readonly buffer SobolBuffer {
     uint data[];
 } sobolBuffer;
 
-layout(set = 1, binding = 10) readonly buffer ScramblingBuffer {
+layout(set = 1, binding = 14) readonly buffer ScramblingBuffer {
     uint data[];
 } scramblingBuffer;
 

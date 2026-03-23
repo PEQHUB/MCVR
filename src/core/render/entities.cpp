@@ -57,7 +57,8 @@ void EntityBuildDataBatch::addData(std::shared_ptr<EntityBuildData> data) {
     datas.push_back(data);
 }
 
-void EntityBuildDataBatch::build() {
+void EntityBuildDataBatch::build(std::shared_ptr<vk::DeviceLocalBuffer> &pooledVertexBuffer,
+                                std::shared_ptr<vk::DeviceLocalBuffer> &pooledIndexBuffer) {
     auto framework = Renderer::instance().framework();
     auto vma = framework->vma();
     auto device = framework->device();
@@ -83,14 +84,24 @@ void EntityBuildDataBatch::build() {
         totalGeometryCount += data->geometryCount;
     }
 
-    vertexBuffer = vk::DeviceLocalBuffer::create(
-        vma, device, totalVertexCount * sizeof(vk::VertexFormat::PBRTriangle),
+    constexpr VkBufferUsageFlags entityBufferUsage =
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    indexBuffer = vk::DeviceLocalBuffer::create(
-        vma, device, totalIndexCount * sizeof(uint32_t),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+    // Reuse pooled vertex buffer if capacity is sufficient (safe because acquireContext
+    // waited on the fence for this context, guaranteeing previous GPU work is done)
+    size_t requiredVBSize = totalVertexCount * sizeof(vk::VertexFormat::PBRTriangle);
+    if (!pooledVertexBuffer || pooledVertexBuffer->size() < requiredVBSize) {
+        pooledVertexBuffer = vk::DeviceLocalBuffer::create(vma, device, requiredVBSize, entityBufferUsage);
+    }
+    vertexBuffer = pooledVertexBuffer;
+
+    // Reuse pooled index buffer if capacity is sufficient
+    size_t requiredIBSize = totalIndexCount * sizeof(uint32_t);
+    if (!pooledIndexBuffer || pooledIndexBuffer->size() < requiredIBSize) {
+        pooledIndexBuffer = vk::DeviceLocalBuffer::create(vma, device, requiredIBSize, entityBufferUsage);
+    }
+    indexBuffer = pooledIndexBuffer;
 
     vk::VertexFormat::PBRTriangle *vertexPtr = static_cast<vk::VertexFormat::PBRTriangle *>(vertexBuffer->mappedPtr());
     uint32_t *indexPtr = static_cast<uint32_t *>(indexBuffer->mappedPtr());
@@ -856,13 +867,21 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 }
 
 void Entities::build() {
-    Renderer::instance().framework()->safeAcquireCurrentContext();
+    auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
     auto framework = Renderer::instance().framework();
     auto vma = framework->vma();
     auto device = framework->device();
     auto physicalDevice = framework->physicalDevice();
 
-    entityBuildDataBatch_->build();
+    // Lazily initialize per-context pooled buffer vectors
+    uint32_t contextCount = static_cast<uint32_t>(framework->contexts().size());
+    if (pooledVertexBuffers_.size() < contextCount) {
+        pooledVertexBuffers_.resize(contextCount);
+        pooledIndexBuffers_.resize(contextCount);
+    }
+
+    uint32_t fi = context->frameIndex;
+    entityBuildDataBatch_->build(pooledVertexBuffers_[fi], pooledIndexBuffers_[fi]);
 
     Renderer::instance().buffers()->queueImportantWorldUpload(entityBuildDataBatch_->vertexBuffer,
                                                               entityBuildDataBatch_->indexBuffer);

@@ -551,3 +551,27 @@ std::shared_ptr<vk::TLAS> vk::TLASBuilder::buildAndSubmit(std::shared_ptr<Device
 
     return TLAS::create(device, dstTLAS_, tlasBuffer_);
 }
+
+void vk::TLASBuilder::updateAndSubmit(std::shared_ptr<TLAS> existingTlas,
+                                       std::shared_ptr<DeviceLocalBuffer> scratchBuffer,
+                                       std::shared_ptr<CommandBuffer> commandBuffer) {
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+    buildInfo.flags = flags_;
+    buildInfo.geometryCount = static_cast<uint32_t>(tlasInstanceBuilder_.geometries.size());
+    buildInfo.pGeometries = tlasInstanceBuilder_.geometries.data();
+
+    // In-place update: src and dst are the same existing TLAS
+    buildInfo.srcAccelerationStructure = existingTlas->tlas();
+    buildInfo.dstAccelerationStructure = existingTlas->tlas();
+    buildInfo.scratchData.deviceAddress = scratchBuffer->bufferAddress();
+
+    VkAccelerationStructureBuildRangeInfoKHR buildRanges{};
+    buildRanges.primitiveCount = tlasInstanceBuilder_.instances.size();
+    buildRanges.primitiveOffset = 0;
+
+    const VkAccelerationStructureBuildRangeInfoKHR *pBuildRanges = &buildRanges;
+    vkCmdBuildAccelerationStructuresKHR(commandBuffer->vkCommandBuffer(), 1, &buildInfo, &pBuildRanges);
+}

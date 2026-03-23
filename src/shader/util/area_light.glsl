@@ -9,8 +9,10 @@ struct CubeSample {
 // Sample a point on the closest face of a cube area light.
 // Point-like sources get a small virtual disk jitter for soft shadows.
 // shadowSoft: 0.0 = no jitter (hard shadows), 1.0 = default, 2.0 = extra soft
-CubeSample sampleCubeLight(AreaLight light, vec3 shadingPos, float shadowSoft, inout uint seed) {
+CubeSample sampleCubeLight(AreaLight light, vec3 shadingPos, float shadowSoft, inout uint seed, vec2 xi) {
     CubeSample s;
+    // When xi >= 0, use pre-generated samples (blue noise); otherwise PCG
+    bool useBN = (xi.x >= 0.0);
 
     if (light.halfExtent < 0.01) {
         // Point-like source — jitter in plane perpendicular to light direction
@@ -22,8 +24,8 @@ CubeSample sampleCubeLight(AreaLight light, vec3 shadingPos, float shadowSoft, i
         vec3 tangent = normalize(cross(dir, up));
         vec3 bitangent = cross(dir, tangent);
         float virtualRadius = 0.08 * shadowSoft;
-        float ju = (rand(seed) - 0.5) * virtualRadius;
-        float jv = (rand(seed) - 0.5) * virtualRadius;
+        float ju = ((useBN ? xi.x : rand(seed)) - 0.5) * virtualRadius;
+        float jv = ((useBN ? xi.y : rand(seed)) - 0.5) * virtualRadius;
         s.worldPos = light.position + tangent * ju + bitangent * jv;
         s.faceAxis = 0;
         return s;
@@ -31,8 +33,8 @@ CubeSample sampleCubeLight(AreaLight light, vec3 shadingPos, float shadowSoft, i
 
     vec3 toCenter = light.position - shadingPos;
     vec3 absDir = abs(toCenter);
-    float u = rand(seed) - 0.5;  // [-0.5, 0.5]
-    float v = rand(seed) - 0.5;
+    float u = (useBN ? xi.x : rand(seed)) - 0.5;  // [-0.5, 0.5]
+    float v = (useBN ? xi.y : rand(seed)) - 0.5;
 
     if (absDir.x >= absDir.y && absDir.x >= absDir.z) {
         vec3 fn = vec3(sign(toCenter.x), 0.0, 0.0);
@@ -51,6 +53,11 @@ CubeSample sampleCubeLight(AreaLight light, vec3 shadingPos, float shadowSoft, i
         s.faceAxis = 2;
     }
     return s;
+}
+
+// PCG fallback overload
+CubeSample sampleCubeLight(AreaLight light, vec3 shadingPos, float shadowSoft, inout uint seed) {
+    return sampleCubeLight(light, shadingPos, shadowSoft, seed, vec2(-1.0));
 }
 
 // Face area for geometric term

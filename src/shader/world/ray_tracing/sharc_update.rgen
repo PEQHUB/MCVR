@@ -53,7 +53,7 @@ layout(push_constant) uniform PushConstant {
     float pomFadeDistance;
     // Color expansion
     float colorExpansion;
-    int _pad0;
+    uint blueNoiseFrame;
     // SHARC fields
     uint64_t sharcHashEntries;
     uint64_t sharcAccumulation;
@@ -107,8 +107,7 @@ void main() {
     float fovY = fovYFromProj(worldUBO.cameraProjMat);
     float fovX = fovXFromProj(worldUBO.cameraProjMat);
     mainRay.coneSpread = coneSpreadFromFov(fovY, fovX, resolution);
-    mainRay.insideBoat = 0;
-    mainRay.isHand = 0;
+    mainRay.flags = 0u; // all flags clear (not hand, not in boat, etc.)
     mainRay.pixelPacked = pixel.x | (pixel.y << 16u);
 
     // Initialize SHARC state
@@ -133,13 +132,11 @@ void main() {
 
     // Trace primary ray
     mainRay.index = 0;
-    mainRay.stop = 0;
-    mainRay.cont = 0;
+    mainRay.flags = (mainRay.flags & (PR_ISHAND_BIT | PR_INSIDEBOAT_BIT)) | (255u << PR_EMBLOCK_SHIFT);
     mainRay.hitT = 0;
     mainRay.directLightRadiance = vec3(0.0);
     mainRay.directLightHitT = 0.0;
     mainRay.albedoEmission = 0.0;
-    mainRay.emBlockTypeOut = 255u;
     mainRay.roughness = 1.0;
 
     // Primary mask: match world.rgen PSR primary (first-person exclusion + BOAT_WATER_MASK)
@@ -169,7 +166,7 @@ void main() {
         }
 
         // Non-sky stop (CHS early termination — failed BSDF sample, etc.)
-        if (mainRay.stop > 0) break;
+        if (prGetStop(mainRay)) break;
 
         // Extract LOCAL direct radiance at this hit (emission + sun, WITHOUT path throughput).
         // The CHS adds radiance contributions as: contribution * cumulativeThroughput.
@@ -211,13 +208,11 @@ void main() {
 
         // Trace next bounce (CHS sets up mainRay.origin/direction for next segment)
         mainRay.index = b + 1;
-        mainRay.stop = 0;
-        mainRay.cont = 0;
+        mainRay.flags = (mainRay.flags & (PR_ISHAND_BIT | PR_INSIDEBOAT_BIT)) | (255u << PR_EMBLOCK_SHIFT);
         mainRay.hitT = 0;
         mainRay.directLightRadiance = vec3(0.0);
         mainRay.directLightHitT = 0.0;
         mainRay.albedoEmission = 0.0;
-        mainRay.emBlockTypeOut = 255u;
         mainRay.roughness = 1.0;
 
         // Masks matching world.rgen bounce loop

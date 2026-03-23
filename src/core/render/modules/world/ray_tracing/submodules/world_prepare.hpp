@@ -39,6 +39,11 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     std::shared_ptr<vk::TLAS> tlas;
     std::shared_ptr<vk::TLASBuilder> tlasBuilder;
 
+    // TLAS update tracking: reuse TLAS when only transforms changed (same instance count)
+    uint32_t prevTlasInstanceCount_ = 0;
+    std::shared_ptr<vk::DeviceLocalBuffer> tlasScratchBuffer_;  // persisted for UPDATE mode reuse
+    VkDeviceSize tlasScratchSize_ = 0;  // max(buildScratchSize, updateScratchSize)
+
     std::shared_ptr<vk::DeviceLocalBuffer> blasOffsetsBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> vertexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> indexBufferAddr;

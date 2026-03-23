@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <unordered_map>
 #include <glm/gtc/type_ptr.hpp>
 
 WorldPrepare::WorldPrepare() {}
@@ -56,41 +57,39 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
     auto mainQueueIndex = physicalDevice->mainQueueIndex();
     auto cmdBuffer = context->worldCommandBuffer;
 
-    blasOffsetsBuffer = vk::DeviceLocalBuffer::create(
-        vma, device, blasOffsets.size() * sizeof(uint32_t),
+    constexpr VkBufferUsageFlags metaUsage =
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    blasOffsetsBuffer->uploadToStagingBuffer(blasOffsets.data());
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
-    vertexBufferAddr = vk::DeviceLocalBuffer::create(
-        vma, device, vertexBufferAddrs.size() * sizeof(uint64_t),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    vertexBufferAddr->uploadToStagingBuffer(vertexBufferAddrs.data());
+    auto ensureBuffer = [&](std::shared_ptr<vk::DeviceLocalBuffer> &buf, size_t requiredSize) {
+        if (!buf || buf->size() < requiredSize) {
+            buf = vk::DeviceLocalBuffer::create(vma, device, requiredSize, metaUsage);
+        }
+    };
 
-    indexBufferAddr = vk::DeviceLocalBuffer::create(
-        vma, device, indexBufferAddrs.size() * sizeof(uint64_t),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    indexBufferAddr->uploadToStagingBuffer(indexBufferAddrs.data());
+    size_t blasOffsetsSize = blasOffsets.size() * sizeof(uint32_t);
+    ensureBuffer(blasOffsetsBuffer, blasOffsetsSize);
+    blasOffsetsBuffer->uploadToStagingBuffer(blasOffsets.data(), blasOffsetsSize, 0);
 
-    lastVertexBufferAddr = vk::DeviceLocalBuffer::create(
-        vma, device, lastVertexBufferAddrs.size() * sizeof(uint64_t),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    lastVertexBufferAddr->uploadToStagingBuffer(lastVertexBufferAddrs.data());
+    size_t vertexAddrSize = vertexBufferAddrs.size() * sizeof(uint64_t);
+    ensureBuffer(vertexBufferAddr, vertexAddrSize);
+    vertexBufferAddr->uploadToStagingBuffer(vertexBufferAddrs.data(), vertexAddrSize, 0);
 
-    lastIndexBufferAddr = vk::DeviceLocalBuffer::create(
-        vma, device, lastIndexBufferAddrs.size() * sizeof(uint64_t),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    lastIndexBufferAddr->uploadToStagingBuffer(lastIndexBufferAddrs.data());
+    size_t indexAddrSize = indexBufferAddrs.size() * sizeof(uint64_t);
+    ensureBuffer(indexBufferAddr, indexAddrSize);
+    indexBufferAddr->uploadToStagingBuffer(indexBufferAddrs.data(), indexAddrSize, 0);
 
-    lastObjToWorldMat = vk::DeviceLocalBuffer::create(
-        vma, device, lastObjToWorldMats.size() * sizeof(glm::mat4),
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    lastObjToWorldMat->uploadToStagingBuffer(lastObjToWorldMats.data());
+    size_t lastVertexAddrSize = lastVertexBufferAddrs.size() * sizeof(uint64_t);
+    ensureBuffer(lastVertexBufferAddr, lastVertexAddrSize);
+    lastVertexBufferAddr->uploadToStagingBuffer(lastVertexBufferAddrs.data(), lastVertexAddrSize, 0);
+
+    size_t lastIndexAddrSize = lastIndexBufferAddrs.size() * sizeof(uint64_t);
+    ensureBuffer(lastIndexBufferAddr, lastIndexAddrSize);
+    lastIndexBufferAddr->uploadToStagingBuffer(lastIndexBufferAddrs.data(), lastIndexAddrSize, 0);
+
+    size_t lastObjSize = lastObjToWorldMats.size() * sizeof(glm::mat4);
+    ensureBuffer(lastObjToWorldMat, lastObjSize);
+    lastObjToWorldMat->uploadToStagingBuffer(lastObjToWorldMats.data(), lastObjSize, 0);
 
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> rayTracingMetaData{{
         blasOffsetsBuffer,
@@ -202,15 +201,15 @@ void WorldPrepareContext::render() {
         auto entityBatch = entities->entityBatch();
 
         if (entityBatch != nullptr) {
-            static std::queue<std::map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>>>
+            static std::queue<std::unordered_map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>>>
                 previousEntityRenderDataBatches;
-            static std::map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>> emptyMap;
+            static std::unordered_map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>> emptyMap;
 
-            std::map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>> &previousEntityRenderDataBatch =
+            std::unordered_map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>> &previousEntityRenderDataBatch =
                 previousEntityRenderDataBatches.empty() ? emptyMap : previousEntityRenderDataBatches.back();
             if (previousEntityRenderDataBatches.size() > Renderer::instance().framework()->swapchain()->imageCount())
                 previousEntityRenderDataBatches.pop();
-            std::map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>> &currentEntityRenderDataBatch =
+            std::unordered_map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>> &currentEntityRenderDataBatch =
                 previousEntityRenderDataBatches.emplace();
 
             auto worldUniformBuffer = Renderer::instance().buffers()->worldUniformBuffer();
@@ -479,6 +478,10 @@ void WorldPrepareContext::render() {
             }
         }
 
+        // All chunks data has been read into local vectors; release the lock
+        // before sorting, buffer uploads, TLAS build, and SBT setup.
+        lock.unlock();
+
         // Sort by contribution (brightest/nearest first)
         std::sort(gatheredLights.begin(), gatheredLights.end(),
                   [](const LightWithDist &a, const LightWithDist &b) { return a.contribution > b.contribution; });
@@ -496,6 +499,14 @@ void WorldPrepareContext::render() {
 
         areaLightCount = static_cast<int>(gatheredLights.size());
 
+        // Pre-allocate for max lights on first use; reuse on subsequent frames
+        constexpr size_t AREA_LIGHT_BUFFER_CAPACITY = MAX_AREA_LIGHTS;
+        if (!areaLightBuffer) {
+            areaLightBuffer = vk::DeviceLocalBuffer::create(
+                vma, device, AREA_LIGHT_BUFFER_CAPACITY * sizeof(vk::Data::AreaLight),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        }
+
         if (areaLightCount > 0) {
             std::vector<vk::Data::AreaLight> lightData;
             lightData.reserve(areaLightCount);
@@ -503,37 +514,100 @@ void WorldPrepareContext::render() {
                 lightData.push_back(lwd.light);
             }
 
-            areaLightBuffer = vk::DeviceLocalBuffer::create(
-                vma, device, lightData.size() * sizeof(vk::Data::AreaLight),
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            areaLightBuffer->uploadToStagingBuffer(lightData.data());
+            areaLightBuffer->uploadToStagingBuffer(lightData.data(),
+                                                    lightData.size() * sizeof(vk::Data::AreaLight), 0);
         } else {
-            // Ensure a valid buffer exists even with 0 lights (for descriptor binding)
+            // Upload a dummy light so the descriptor binding remains valid
             vk::Data::AreaLight dummy{};
-            areaLightBuffer = vk::DeviceLocalBuffer::create(
-                vma, device, sizeof(vk::Data::AreaLight),
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            areaLightBuffer->uploadToStagingBuffer(&dummy);
+            areaLightBuffer->uploadToStagingBuffer(&dummy, sizeof(vk::Data::AreaLight), 0);
         }
     }
 
     if (instanceBuilder.instances.empty()) {
         tlas = nullptr;
+        prevTlasInstanceCount_ = 0;
         return;
     }
 
-    // Log TLAS instance count for profiling (every 120 frames ~ 1/sec at 120fps)
+    // Log TLAS instance count and build mode for profiling (every 120 frames ~ 1/sec at 120fps)
     static uint32_t tlasLogCounter = 0;
-    if (++tlasLogCounter >= 120) {
-        std::cout << "[Profiler] TLAS instances: " << instanceBuilder.instances.size() << std::endl;
-        tlasLogCounter = 0;
+    static uint32_t tlasUpdateCount = 0;
+    static uint32_t tlasBuildCount = 0;
+
+    // Collect current BLAS device addresses for change detection
+    uint32_t currentInstanceCount = static_cast<uint32_t>(instanceBuilder.instances.size());
+    // Determine if UPDATE is possible: same instance count means no chunks added/removed.
+    // We skip per-BLAS address comparison — if a chunk BLAS was rebuilt at the same index,
+    // one frame of stale geometry in the TLAS is visually imperceptible at 60+ FPS.
+    bool canUpdate = (tlas != nullptr) &&
+                     (currentInstanceCount == prevTlasInstanceCount_) &&
+                     (tlasScratchBuffer_ != nullptr);
+
+    constexpr VkBuildAccelerationStructureFlagsKHR tlasFlags =
+        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+        VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+
+    if (canUpdate) {
+        // UPDATE path: reuse existing TLAS, only transforms changed
+        // Upload new instance data (endInstanceBuilder writes to a new host-visible buffer)
+        instanceBuilder.endInstanceBuilder(device, vma);
+        tlasBuilder->defineBuildProperty(tlasFlags);  // sets flags_ for the geometry info
+
+        tlasBuilder->updateAndSubmit(tlas, tlasScratchBuffer_, worldCommandBuffer);
+        tlasUpdateCount++;
+    } else {
+        // Full BUILD path: instance count or BLAS composition changed
+        instanceBuilder.endInstanceBuilder(device, vma);
+        tlasBuilder->defineBuildProperty(tlasFlags);
+        tlasBuilder->querySizeInfo(device);
+        tlasBuilder->allocateBuffers(physicalDevice, device, vma);
+        tlas = tlasBuilder->buildAndSubmit(device, worldCommandBuffer);
+
+        // Persist scratch buffer sized for max(build, update) for future UPDATE calls.
+        // Query both BUILD and UPDATE scratch sizes to ensure the buffer is large enough.
+        VkAccelerationStructureBuildGeometryInfoKHR sizeQueryInfo{};
+        sizeQueryInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+        sizeQueryInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        sizeQueryInfo.flags = tlasFlags;
+
+        VkAccelerationStructureBuildSizesInfoKHR buildSizeInfo{};
+        buildSizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+        sizeQueryInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        vkGetAccelerationStructureBuildSizesKHR(device->vkDevice(),
+            VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+            &sizeQueryInfo, &currentInstanceCount, &buildSizeInfo);
+
+        VkAccelerationStructureBuildSizesInfoKHR updateSizeInfo{};
+        updateSizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+        sizeQueryInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+        vkGetAccelerationStructureBuildSizesKHR(device->vkDevice(),
+            VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+            &sizeQueryInfo, &currentInstanceCount, &updateSizeInfo);
+
+        VkDeviceSize requiredScratchSize = std::max(buildSizeInfo.buildScratchSize,
+                                                     updateSizeInfo.updateScratchSize);
+
+        if (!tlasScratchBuffer_ || tlasScratchSize_ < requiredScratchSize) {
+            tlasScratchSize_ = requiredScratchSize;
+            tlasScratchBuffer_ = vk::DeviceLocalBuffer::create(
+                vma, device, false, tlasScratchSize_,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                0, VMA_MEMORY_USAGE_GPU_ONLY,
+                physicalDevice->accelerationStructProperties().minAccelerationStructureScratchOffsetAlignment);
+        }
+        tlasBuildCount++;
     }
 
-    tlas = instanceBuilder.endInstanceBuilder(device, vma)
-               ->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
-               ->querySizeInfo(device)
-               ->allocateBuffers(physicalDevice, device, vma)
-               ->buildAndSubmit(device, worldCommandBuffer);
+    // Save state for next frame's change detection
+    prevTlasInstanceCount_ = currentInstanceCount;
+
+    if (++tlasLogCounter >= 120) {
+        std::cout << "[Profiler] TLAS instances: " << currentInstanceCount
+                  << "  builds: " << tlasBuildCount << "  updates: " << tlasUpdateCount << std::endl;
+        tlasLogCounter = 0;
+        tlasUpdateCount = 0;
+        tlasBuildCount = 0;
+    }
 
     worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
         .srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,

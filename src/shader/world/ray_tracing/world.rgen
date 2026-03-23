@@ -18,6 +18,7 @@
 
 #include "../util/labpbr.glsl"
 #include "../util/random.glsl"
+#include "../util/blue_noise.glsl"
 #include "../util/ray_cone.glsl"
 #include "../util/ray_payloads.glsl"
 #include "../util/util.glsl"
@@ -146,7 +147,7 @@ layout(push_constant) uniform PushConstant {
     float pomFadeDistance;
     // Color expansion
     float colorExpansion;
-    int _pad0;
+    uint blueNoiseFrame;
     // SHARC fields
     uint64_t sharcHashEntries;
     uint64_t sharcAccumulation;
@@ -229,9 +230,9 @@ void main() {
 
     // Thin lens DOF (active when aperture > 0: both FREE preview and ACCUMULATING)
     if (pc.aperture > 0.0) {
-        uint dofSeed = uint(pixel.x * 1973 + pixel.y * 9277 + pc.accumFrameCount * 26699) | 1u;
-        float r1 = rand(dofSeed);
-        float r2 = rand(dofSeed);
+        vec2 dofBN = blueNoise2D(gl_LaunchIDEXT.xy, pc.blueNoiseFrame);
+        float r1 = dofBN.x;
+        float r2 = dofBN.y;
         // Concentric disk sample for uniform lens sampling
         float theta = 2.0 * 3.14159265 * r2;
         float r = pc.aperture * sqrt(r1);
@@ -258,6 +259,8 @@ void main() {
     vec3 firstHitDirectRadiance = vec3(0.0);
     vec3 firstHitIndirectRadiance = vec3(0.0);
     vec3 firstHitBaseEmission = vec3(0.0);
+    // Local intermediateRadiance (moved out of payload — never crosses traceRayEXT boundary)
+    vec3 intermediateRadiance = vec3(0.0);
 
     // DLSS-RR guide: first-bounce ray direction + hit distance
     vec3 diffuseRayDir = vec3(0.0);
@@ -292,8 +295,8 @@ void main() {
         mainRay.seed = xxhash32(uvec3(gl_LaunchIDEXT.x, gl_LaunchIDEXT.y, mainRay.seed));
         mainRay.coneWidth = 0;
         mainRay.coneSpread = coneSpreadFromFov(fovY, fovX, resolution);
-        mainRay.insideBoat = 0;
-        mainRay.isHand = isHand;
+        // Initialize packed flags: isHand in bit 3, emBlockTypeOut=255 in bits 8-15
+        mainRay.flags = (isHand != 0 ? PR_ISHAND_BIT : 0u);
         mainRay.pixelPacked = gl_LaunchIDEXT.x | (gl_LaunchIDEXT.y << 16u);
         do {
             mainRay.index = psrDepth;
@@ -301,9 +304,8 @@ void main() {
             mainRay.directLightRadiance = vec3(0.0);
             mainRay.directLightHitT = 0.0;
             mainRay.albedoEmission = 0.0;
-            mainRay.emBlockTypeOut = 255u;
-            mainRay.stop = 0;
-            mainRay.cont = 0;
+            // Reset per-trace flags: clear stop/cont/noisy/lobeType, set emBlockTypeOut=255, preserve isHand/insideBoat
+            mainRay.flags = (mainRay.flags & (PR_ISHAND_BIT | PR_INSIDEBOAT_BIT)) | (255u << PR_EMBLOCK_SHIFT);
             mainRay.roughness = 1.0;
 
             float len;
@@ -435,14 +437,14 @@ void main() {
             hitSky = (mainRay.hitT == INF_DISTANCE);
             if (hitSky) { break; }
 
-            if (mainRay.cont > 0) continue;
+            if (prGetCont(mainRay)) continue;
 
             // Did we hit anything other than a mirror?
             // If so, stop PSR — the final non-mirror surface becomes the primary surface.
             if (mainRay.roughness >= 0.001) { break; }
 
             // special stop
-            if (mainRay.stop > 0) { break; }
+            if (prGetStop(mainRay)) { break; }
 
             // At least one mirror hit
             isPsr = true;
@@ -495,11 +497,11 @@ void main() {
                 vec2 motionVec = computeCameraMotionVector(prevRelativeMVP, pixelCenter, motionOrigin);
                 imageStore(motionVectorImage, pixel, vec4(motionVec, vec2(0.0)));
 
-                mainRay.intermediateRadiance = mainRay.radiance;
+                intermediateRadiance = mainRay.radiance;
                 psrHitSky = true;
                 psrHitDepth = 0.0;
             } else {
-                mainRay.radiance = mainRay.intermediateRadiance;
+                mainRay.radiance = intermediateRadiance;
             }
             continue;
         } else {
@@ -544,7 +546,7 @@ void main() {
         {
             float shadingId = 0.0;
             if (firstHitMat.metallic > 0.5) shadingId = 0.25;
-            else if (mainRay.lobeType == 2u) shadingId = 0.5;
+            else if (prGetLobeType(mainRay) == 2u) shadingId = 0.5;
             else if (firstHitMat.emission > 0.0) shadingId = 0.75;
             else if (firstHitMat.subSurface > 0.0) shadingId = 1.0;
             imageStore(gbufferShadingModelIdImage, pixel, vec4(shadingId, 0.0, 0.0, 0.0));
@@ -629,7 +631,7 @@ void main() {
 
         psrHitPosition = mainRay.origin;
 
-        isFirstHitNoisy = mainRay.noisy > 0;
+        isFirstHitNoisy = prGetNoisy(mainRay);
         if (isFirstHitNoisy) {
             // Emission in scene-referred units (1.0 = EMISSION_REFERENCE_NITS cd/m²).
             // Vertex nits (albedoEmission) are authoritative when set; LabPBR is fallback only.
@@ -644,14 +646,14 @@ void main() {
             sceneEmission *= smoothstep(0.10, 0.40, texLum);
 
             // Flame color override for bloom
-            if (mainRay.emBlockTypeOut < 50u) {
-                vec3 co = worldUBO.emissionData[mainRay.emBlockTypeOut].rgb;
+            if (prGetEmBlockType(mainRay) < 50u) {
+                vec3 co = worldUBO.emissionData[prGetEmBlockType(mainRay)].rgb;
                 if (dot(co, co) > 0.0001) {
                     float flameMask = smoothstep(0.15, 0.5, texLum);
                     emTint = mix(emTint, co, flameMask);
                 }
                 // Per-emissive gamut boost (Oklab chroma scaling)
-                float emGamut = worldUBO.emissiveGamut[mainRay.emBlockTypeOut >> 2u][mainRay.emBlockTypeOut & 3u];
+                float emGamut = worldUBO.emissiveGamut[prGetEmBlockType(mainRay) >> 2u][prGetEmBlockType(mainRay) & 3u];
                 if (emGamut != 1.0) {
                     const mat3 bt2020_to_lms = mat3(
                         0.6167557871, 0.2651330639, 0.1001026342,
@@ -686,7 +688,7 @@ void main() {
                 }
             }
             firstHitEmission = emTint * sceneEmission;
-            if (mainRay.lobeType == 0 || mainRay.lobeType == 2) { // Diffuse OR Refraction
+            if (prGetLobeType(mainRay) == 0 || prGetLobeType(mainRay) == 2) { // Diffuse OR Refraction
                 isFirstHitDiffuse = true;
                 firstHitDirectRadiance = mainRay.directLightRadiance;
             } else {
@@ -747,7 +749,7 @@ void main() {
         float minPathRoughness = mainRay.roughness; // PSR termination surface roughness
 
         for (int b = psrDepth; b < pc.numRayBounces; b++) {
-            if (mainRay.stop > 0) break;
+            if (prGetStop(mainRay)) break;
 
             mainRay.index = b;
 
@@ -832,7 +834,7 @@ void main() {
             // AND current surface roughness (don't cache view-dependent specular outgoing).
             // On cache hit, REPLACE the CHS contribution with the cached total outgoing
             // radiance to avoid double-counting direct light at this surface.
-            if (SHARC_ENABLED && b >= 1 && mainRay.stop == 0 && mainRay.hitT != INF_DISTANCE
+            if (SHARC_ENABLED && b >= 1 && !prGetStop(mainRay) && mainRay.hitT != INF_DISTANCE
                 && minPathRoughness >= pc.sharcRoughnessThreshold
                 && mainRay.roughness >= pc.sharcRoughnessThreshold) {
                 SharcParameters sharcParams;
@@ -903,7 +905,7 @@ void main() {
             }
         }
 
-        if (isHand == 0) { mainRay.intermediateRadiance = mainRay.radiance; }
+        if (isHand == 0) { intermediateRadiance = mainRay.radiance; }
     }
 
     if (isnan(mainRay.radiance.r) || isinf(mainRay.radiance.r)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
@@ -997,13 +999,13 @@ void main() {
     // (lava emBlockTypeOut==0, or water lobeType==2). Helps DLSS-RR reduce ghosting on animated surfaces.
     {
         bool isAnimated = isFirstHitNoisy &&
-                          (mainRay.emBlockTypeOut == 0u || mainRay.lobeType == 2u);
+                          (prGetEmBlockType(mainRay) == 0u || prGetLobeType(mainRay) == 2u);
         imageStore(animTexMaskImage, ivec2(pixel), vec4(isAnimated ? 1.0 : 0.0, 0.0, 0.0, 0.0));
     }
     // Particle/refractive mask: 1.0 for transparent/refractive surfaces (water, glass).
     // Helps DLSS-RR distinguish refracted surfaces from opaque geometry.
     {
-        bool isRefractive = isFirstHitNoisy && (mainRay.lobeType == 2u);
+        bool isRefractive = isFirstHitNoisy && (prGetLobeType(mainRay) == 2u);
         imageStore(particleMaskImage, ivec2(pixel), vec4(isRefractive ? 1.0 : 0.0, 0.0, 0.0, 0.0));
     }
     // Bias current color mask: downweight stale history on temporally unstable pixels.
@@ -1011,7 +1013,7 @@ void main() {
     {
         float biasMask = 0.0;
         if (isFirstHitNoisy) {
-            bool isLava = (mainRay.emBlockTypeOut == 0u);  // lava: animated emissive
+            bool isLava = (prGetEmBlockType(mainRay) == 0u);  // lava: animated emissive
             bool isEmissive = (dot(firstHitEmission, firstHitEmission) > 0.0001);
             biasMask = isLava ? 1.0 : (isEmissive ? 0.5 : 0.0);
         }
