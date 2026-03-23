@@ -105,7 +105,6 @@ void main() {
     vec3 geomNormal = FACE_NORMALS[face.faceAxis];
 
     // Compute displaced normal via central differences on height field
-    // This is a simplified approximation using texel neighbors
     vec3 normal = geomNormal;
     {
         vec2 texSize = vec2(textureSize(textures[nonuniformEXT(face.textureID)], 0));
@@ -116,11 +115,20 @@ void main() {
         float hR = textureLod(textures[nonuniformEXT(face.textureID)], clamp(texUV + dU, uvMin, uvMax), 0).r;
         float hU = textureLod(textures[nonuniformEXT(face.textureID)], clamp(texUV + dV, uvMin, uvMax), 0).r;
 
-        // World-space edge vectors per texel
-        vec3 dpdu = face.edgeU / max(texSize.x * (uvMax.x - uvMin.x), 1.0);
-        vec3 dpdv = face.edgeV / max(texSize.y * (uvMax.y - uvMin.y), 1.0);
+        // Edge fade: flatten normals near face edges to match zero displacement there
+        vec2 uvSpan = uvMax - uvMin;
+        float edgeWidthU = 1.0 / max(texSize.x * uvSpan.x, 1.0);
+        float edgeWidthV = 1.0 / max(texSize.y * uvSpan.y, 1.0);
+        // Recover parametric u,v from texture UV
+        vec2 param = (texUV - uvMin) / max(uvSpan, vec2(1e-6));
+        float edgeFade = smoothstep(0.0, edgeWidthU, param.x) * smoothstep(0.0, edgeWidthU, 1.0 - param.x)
+                       * smoothstep(0.0, edgeWidthV, param.y) * smoothstep(0.0, edgeWidthV, 1.0 - param.y);
 
-        float scale = face.heightScale;
+        // World-space edge vectors per texel
+        vec3 dpdu = face.edgeU / max(texSize.x * uvSpan.x, 1.0);
+        vec3 dpdv = face.edgeV / max(texSize.y * uvSpan.y, 1.0);
+
+        float scale = face.heightScale * edgeFade;
         vec3 tangent = dpdu + geomNormal * (hR - hC) * (-scale);
         vec3 bitangent = dpdv + geomNormal * (hU - hC) * (-scale);
         normal = normalize(cross(tangent, bitangent));

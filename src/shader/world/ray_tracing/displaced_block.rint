@@ -126,17 +126,25 @@ void main() {
     tExit  = min(tExit, gl_RayTmaxEXT);
     if (tEntry >= tExit) return;
 
+    // Edge fade width scales with displacement depth to prevent clipping perpendicular faces
+    vec2 texSize = vec2(textureSize(textures[nonuniformEXT(face.textureID)], 0));
+    vec2 uvSpan = face.uvMax - face.uvMin;
+    float texelsU = max(texSize.x * uvSpan.x, 1.0);
+    float texelsV = max(texSize.y * uvSpan.y, 1.0);
+    float edgeWidthU = max(1.0, heightScale * texelsU) / texelsU;
+    float edgeWidthV = max(1.0, heightScale * texelsV) / texelsV;
+
     // DDA march through the displacement volume
     float dt = (tExit - tEntry) / float(maxSteps);
     float t = tEntry;
+    float lenU2 = dot(edgeU, edgeU);
+    float lenV2 = dot(edgeV, edgeV);
 
     for (int step = 0; step < maxSteps; step++) {
         vec3 p = rayOrigin + rayDir * t;
 
         // Project onto face to get parametric coordinates
         vec3 rel = p - corner;
-        float lenU2 = dot(edgeU, edgeU);
-        float lenV2 = dot(edgeV, edgeV);
         float u = dot(rel, edgeU) / lenU2;
         float v = dot(rel, edgeV) / lenV2;
 
@@ -151,8 +159,14 @@ void main() {
                                    invertH, remapMin, remapMax, heightContrast, hOffset,
                                    hasLabPBR, face.normalTexID);
 
+            // Fade displacement to zero near face edges so adjacent faces meet
+            // at the original cube boundary (prevents edge tears)
+            float edgeFade = smoothstep(0.0, edgeWidthU, u) * smoothstep(0.0, edgeWidthU, 1.0 - u)
+                           * smoothstep(0.0, edgeWidthV, v) * smoothstep(0.0, edgeWidthV, 1.0 - v);
+
             // Height surface: distance from face plane along negative normal
-            float surfaceDepth = (1.0 - h) * heightScale;
+            // edgeFade=0 at edges → surfaceDepth=0 → surface at face plane (no displacement)
+            float surfaceDepth = (1.0 - h) * heightScale * edgeFade;
 
             // Current ray depth below face plane
             float rayDepth = -dot(rel, faceN);
@@ -173,7 +187,12 @@ void main() {
                                               filterMode, heightSource, face.lumMin, face.lumMax,
                                               invertH, remapMin, remapMax, heightContrast, hOffset,
                                               hasLabPBR, face.normalTexID);
-                    float surfMid = (1.0 - hMid) * heightScale;
+                    // Apply same edge fade during refinement
+                    float fadeMid = smoothstep(0.0, edgeWidthU, clamp(uMid,0,1))
+                                  * smoothstep(0.0, edgeWidthU, 1.0 - clamp(uMid,0,1))
+                                  * smoothstep(0.0, edgeWidthV, clamp(vMid,0,1))
+                                  * smoothstep(0.0, edgeWidthV, 1.0 - clamp(vMid,0,1));
+                    float surfMid = (1.0 - hMid) * heightScale * fadeMid;
                     float depMid = -dot(relMid, faceN);
                     if (depMid >= surfMid) tHi = tMid;
                     else tLo = tMid;

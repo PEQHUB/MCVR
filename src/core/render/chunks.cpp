@@ -14,6 +14,8 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <map>
+#include <set>
 
 ChunkBuildData::ChunkBuildData(int64_t id,
                                int x,
@@ -379,6 +381,58 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
             keptIndices.reserve(idx.size());
             bool anyTessellated = false;
 
+            // Pre-scan: collect block positions of all faces that will be displaced,
+            // so we can detect coplanar neighbors and skip edge fade between them.
+            struct FaceKey {
+                int16_t x, y, z;
+                uint8_t axis;
+                bool operator<(const FaceKey &o) const {
+                    if (x != o.x) return x < o.x;
+                    if (y != o.y) return y < o.y;
+                    if (z != o.z) return z < o.z;
+                    return axis < o.axis;
+                }
+            };
+            std::set<FaceKey> displacedFaceSet;
+            struct SeamEdgeInfo {
+                std::vector<float> u0, u1, v0, v1;
+                glm::ivec3 uDir, vDir;
+                uint32_t faceAxis;
+                glm::vec3 norm;
+                Tessellator::Input tessInput; // for interpVertex in seam wall generation
+            };
+            std::map<FaceKey, SeamEdgeInfo> seamEdgeData;
+            for (size_t t = 0; t + 5 < idx.size(); t += 6) {
+                auto &sv0 = verts[idx[t]];
+                uint32_t stID = sv0.textureID;
+                if (stID >= 4096) continue;
+                auto &se = texMappingPtr->entries[stID];
+                uint32_t sMT = (sv0.emissiveBlockType >> 8u) & 0xFFu;
+                if (sMT == 0 || !matClassPtr) continue;
+                uint32_t sMCI = sMT - 1;
+                if (sMCI >= vk::Data::MAX_MATERIAL_CLASSES) continue;
+                auto &smc = matClassPtr->entries[sMCI];
+                float sPD = smc.pomDepth;
+                bool sAP = (smc.flags & 0x8u) != 0;
+                bool sLH = (se.properties & vk::Data::TEX_PROP_HAS_HEIGHT_MAP) && se.normal >= 0;
+                bool sHH = sLH || (sAP && sPD > 0.0f);
+                int sM = (smc.pomPacked0 >> 3) & 0x7;
+                if (sM == 0 && sHH && sPD > 0.0f) sM = (Renderer::options.displacementQuality >= 1) ? 2 : 0;
+                if (sM == 1) sM = 2;
+                if (!sHH || (sM != 2 && sM != 3)) continue;
+                glm::vec3 sn = sv0.norm;
+                float sax = std::abs(sn.x), say = std::abs(sn.y), saz = std::abs(sn.z);
+                if (sax <= 0.9f && say <= 0.9f && saz <= 0.9f) continue;
+                uint8_t sFA;
+                if (sax > 0.9f) sFA = (sn.x > 0) ? 0 : 1;
+                else if (say > 0.9f) sFA = (sn.y > 0) ? 2 : 3;
+                else sFA = (sn.z > 0) ? 4 : 5;
+                // Block position = floor(face_center - 0.5 * normal)
+                glm::vec3 sc = 0.25f * (verts[idx[t]].pos + verts[idx[t+1]].pos + verts[idx[t+2]].pos + verts[idx[t+4]].pos);
+                glm::ivec3 sbp = glm::ivec3(glm::floor(sc - sn * 0.5f));
+                displacedFaceSet.insert({(int16_t)sbp.x, (int16_t)sbp.y, (int16_t)sbp.z, sFA});
+            }
+
             // Process quads (6 indices = 2 triangles per quad)
             for (size_t t = 0; t + 5 < idx.size(); t += 6) {
                 uint32_t i0 = idx[t], i1 = idx[t + 1], i2 = idx[t + 2];
@@ -439,9 +493,14 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                                 uvMax = glm::max(uvMax, verts[quadIdx[q]].textureUV);
                             }
 
-                            uint32_t texRes = 16;
+                            // texRes = tile width in texels, NOT atlas width
                             auto *albedoRGBA = tessTextures ? tessTextures->getTextureRGBAData(texID) : nullptr;
-                            if (albedoRGBA && albedoRGBA->width > 0) texRes = albedoRGBA->width;
+                            uint32_t texRes = 16;
+                            if (albedoRGBA && albedoRGBA->width > 0) {
+                                // Compute tile width from UV span * atlas width
+                                float uvSpanX = uvMax.x - uvMin.x;
+                                texRes = std::max(2u, static_cast<uint32_t>(uvSpanX * albedoRGBA->width + 0.5f));
+                            }
 
                             const Textures::TextureRGBAData *normalRGBA = nullptr;
                             if (hasLabPBRHeight && entry.normal >= 0 && tessTextures) {
@@ -450,14 +509,108 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
 
                             float heightScale = std::clamp(
                                 (pomDepth > 0.0f) ? pomDepth : Renderer::options.pomHeightScale,
-                                0.0f, 0.05f); // Cap at 0.05 blocks (~1 texel on 16px texture)
+                                0.0f, 0.5f); // Cap at 0.5 blocks
                             uint32_t i4v = idx[t + 4]; // 4th unique vertex
 
                             // --- Tessellation path (method 2 or 3) ---
                             if (dispMethod == 2 || dispMethod == 3) {
-                                uint32_t tessLevel = Tessellator::computeTessLevel(
-                                    distToCamera, texRes, maxTessLevel,
-                                    Renderer::options.tessNearDist, Renderer::options.tessMidDist, Renderer::options.tessFarDist);
+                                // Use chunk-local camera distance: if global cameraPos is unset (0,0,0 default),
+                                // distToCamera is wildly wrong. Fall back to max level until camera is valid.
+                                uint32_t tessLevel;
+                                if (distToCamera > 500.0f) {
+                                    // Camera position likely uninitialized — use max tessellation
+                                    tessLevel = std::clamp(std::min(texRes, maxTessLevel), 2u, 32u);
+                                } else {
+                                    tessLevel = Tessellator::computeTessLevel(
+                                        distToCamera, texRes, maxTessLevel,
+                                        Renderer::options.tessNearDist, Renderer::options.tessMidDist, Renderer::options.tessFarDist);
+                                }
+
+                                // If lumMin/lumMax are uninitialized defaults (0/1), compute
+                                // the tile's actual luminance range for proper height normalization
+                                vk::Data::MaterialClassEntry correctedMat{};
+                                const vk::Data::MaterialClassEntry *effectiveMat = matEntry;
+                                if (matEntry && albedoRGBA && isAutoPBR &&
+                                    matEntry->lumMin < 0.001f && matEntry->lumMax > 0.99f) {
+                                    correctedMat = *matEntry;
+                                    float tileMin = 1.0f, tileMax = 0.0f;
+                                    uint32_t tw = albedoRGBA->width, th = albedoRGBA->height;
+                                    int x0 = static_cast<int>(uvMin.x * tw);
+                                    int x1 = static_cast<int>(uvMax.x * tw);
+                                    int y0 = static_cast<int>(uvMin.y * th);
+                                    int y1 = static_cast<int>(uvMax.y * th);
+                                    for (int py = y0; py < y1 && py < static_cast<int>(th); py++) {
+                                        for (int px = x0; px < x1 && px < static_cast<int>(tw); px++) {
+                                            size_t pi = (py * tw + px) * 4;
+                                            float r = albedoRGBA->rgba[pi] / 255.0f;
+                                            float g = albedoRGBA->rgba[pi+1] / 255.0f;
+                                            float b = albedoRGBA->rgba[pi+2] / 255.0f;
+                                            float lum = r * 0.2627f + g * 0.6780f + b * 0.0593f;
+                                            tileMin = std::min(tileMin, lum);
+                                            tileMax = std::max(tileMax, lum);
+                                        }
+                                    }
+                                    if (tileMax > tileMin + 1e-4f) {
+                                        correctedMat.lumMin = tileMin;
+                                        correctedMat.lumMax = tileMax;
+                                    }
+                                    effectiveMat = &correctedMat;
+                                }
+
+                                // Compute per-edge fade mask: check 4 in-plane neighbors
+                                // for coplanar displaced faces. If a neighbor exists, skip
+                                // fading that edge so adjacent blocks blend seamlessly.
+                                uint32_t fadeEdgeMask = 0xF; // default: fade all
+                                {
+                                    glm::vec3 fc = 0.25f * (verts[i0].pos + verts[i1].pos + verts[i2].pos + verts[i4v].pos);
+                                    glm::ivec3 bp = glm::ivec3(glm::floor(fc - norm * 0.5f));
+
+                                    // Determine U and V world-space directions from quad corners
+                                    // Find min-UV vertex and its neighbors (same logic as mapCorners)
+                                    const vk::VertexFormat::PBRTriangle *qv[4] = {&verts[i0], &verts[i1], &verts[i2], &verts[i4v]};
+                                    int mi = 0;
+                                    for (int qi = 1; qi < 4; qi++) {
+                                        if (qv[qi]->textureUV.x < qv[mi]->textureUV.x - 0.0001f ||
+                                            (std::abs(qv[qi]->textureUV.x - qv[mi]->textureUV.x) < 0.0001f &&
+                                             qv[qi]->textureUV.y < qv[mi]->textureUV.y))
+                                            mi = qi;
+                                    }
+                                    glm::vec3 cPos = qv[mi]->pos;
+                                    glm::vec2 cUV = qv[mi]->textureUV;
+                                    glm::vec3 dirU(0), dirV(0);
+                                    for (int qi = 0; qi < 4; qi++) {
+                                        if (qi == mi) continue;
+                                        glm::vec2 dUV = qv[qi]->textureUV - cUV;
+                                        if (std::abs(dUV.x) > 0.0001f && std::abs(dUV.y) < 0.0001f && glm::length(dirU) < 0.001f)
+                                            dirU = glm::normalize(qv[qi]->pos - cPos);
+                                        else if (std::abs(dUV.y) > 0.0001f && std::abs(dUV.x) < 0.0001f && glm::length(dirV) < 0.001f)
+                                            dirV = glm::normalize(qv[qi]->pos - cPos);
+                                    }
+
+                                    // Round directions to nearest block axis
+                                    auto roundDir = [](glm::vec3 d) -> glm::ivec3 {
+                                        glm::ivec3 r(0);
+                                        float ax = std::abs(d.x), ay = std::abs(d.y), az = std::abs(d.z);
+                                        if (ax >= ay && ax >= az) r.x = (d.x > 0) ? 1 : -1;
+                                        else if (ay >= ax && ay >= az) r.y = (d.y > 0) ? 1 : -1;
+                                        else r.z = (d.z > 0) ? 1 : -1;
+                                        return r;
+                                    };
+                                    glm::ivec3 uDir = roundDir(dirU);
+                                    glm::ivec3 vDir = roundDir(dirV);
+
+                                    // Check neighbors: if a coplanar displaced face exists, clear that edge's fade bit
+                                    glm::ivec3 nU0 = bp - uDir, nU1 = bp + uDir;
+                                    glm::ivec3 nV0 = bp - vDir, nV1 = bp + vDir;
+                                    if (displacedFaceSet.count({(int16_t)nU0.x, (int16_t)nU0.y, (int16_t)nU0.z, (uint8_t)faceAxis}))
+                                        fadeEdgeMask &= ~0x1u; // U=0 edge has coplanar neighbor
+                                    if (displacedFaceSet.count({(int16_t)nU1.x, (int16_t)nU1.y, (int16_t)nU1.z, (uint8_t)faceAxis}))
+                                        fadeEdgeMask &= ~0x2u; // U=1 edge has coplanar neighbor
+                                    if (displacedFaceSet.count({(int16_t)nV0.x, (int16_t)nV0.y, (int16_t)nV0.z, (uint8_t)faceAxis}))
+                                        fadeEdgeMask &= ~0x4u; // V=0 edge has coplanar neighbor
+                                    if (displacedFaceSet.count({(int16_t)nV1.x, (int16_t)nV1.y, (int16_t)nV1.z, (uint8_t)faceAxis}))
+                                        fadeEdgeMask &= ~0x8u; // V=1 edge has coplanar neighbor
+                                }
 
                                 Tessellator::Input tessInput{};
                                 tessInput.v0 = &verts[i0];
@@ -467,7 +620,7 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                                 tessInput.faceAxis = faceAxis;
                                 tessInput.normalRGBA = normalRGBA;
                                 tessInput.albedoRGBA = albedoRGBA;
-                                tessInput.material = matEntry;
+                                tessInput.material = effectiveMat;
                                 tessInput.hasLabPBRHeight = hasLabPBRHeight;
                                 tessInput.isAutoPBR = isAutoPBR;
                                 tessInput.uvMinX = uvMin.x;
@@ -476,6 +629,7 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                                 tessInput.uvMaxY = uvMax.y;
                                 tessInput.tessLevel = tessLevel;
                                 tessInput.heightScale = heightScale;
+                                tessInput.fadeEdgeMask = fadeEdgeMask;
 
                                 auto tessOutput = Tessellator::tessellate(tessInput);
                                 if (!tessOutput.vertices.empty()) {
@@ -486,6 +640,39 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                                     newVerts.insert(newVerts.end(), tessOutput.vertices.begin(), tessOutput.vertices.end());
                                     tessellated = true;
                                     anyTessellated = true;
+
+                                    // Store edge data for seam stitching post-pass
+                                    glm::vec3 fc2 = 0.25f * (verts[i0].pos + verts[i1].pos + verts[i2].pos + verts[i4v].pos);
+                                    glm::ivec3 bp2 = glm::ivec3(glm::floor(fc2 - norm * 0.5f));
+                                    // Recompute UV directions for seam wall generation
+                                    const vk::VertexFormat::PBRTriangle *qv2[4] = {&verts[i0], &verts[i1], &verts[i2], &verts[i4v]};
+                                    int mi2 = 0;
+                                    for (int qi = 1; qi < 4; qi++)
+                                        if (qv2[qi]->textureUV.x < qv2[mi2]->textureUV.x - 0.0001f ||
+                                            (std::abs(qv2[qi]->textureUV.x - qv2[mi2]->textureUV.x) < 0.0001f &&
+                                             qv2[qi]->textureUV.y < qv2[mi2]->textureUV.y))
+                                            mi2 = qi;
+                                    glm::vec3 dirU2(0), dirV2(0);
+                                    for (int qi = 0; qi < 4; qi++) {
+                                        if (qi == mi2) continue;
+                                        glm::vec2 dUV2 = qv2[qi]->textureUV - qv2[mi2]->textureUV;
+                                        if (std::abs(dUV2.x) > 0.0001f && std::abs(dUV2.y) < 0.0001f && glm::length(dirU2) < 0.001f)
+                                            dirU2 = glm::normalize(qv2[qi]->pos - qv2[mi2]->pos);
+                                        else if (std::abs(dUV2.y) > 0.0001f && std::abs(dUV2.x) < 0.0001f && glm::length(dirV2) < 0.001f)
+                                            dirV2 = glm::normalize(qv2[qi]->pos - qv2[mi2]->pos);
+                                    }
+                                    auto roundDir2 = [](glm::vec3 d) -> glm::ivec3 {
+                                        glm::ivec3 r(0);
+                                        float ax = std::abs(d.x), ay = std::abs(d.y), az = std::abs(d.z);
+                                        if (ax >= ay && ax >= az) r.x = (d.x > 0) ? 1 : -1;
+                                        else if (ay >= ax && ay >= az) r.y = (d.y > 0) ? 1 : -1;
+                                        else r.z = (d.z > 0) ? 1 : -1;
+                                        return r;
+                                    };
+                                    FaceKey fk{(int16_t)bp2.x, (int16_t)bp2.y, (int16_t)bp2.z, (uint8_t)faceAxis};
+                                    seamEdgeData[fk] = {std::move(tessOutput.edgeDispU0), std::move(tessOutput.edgeDispU1),
+                                                        std::move(tessOutput.edgeDispV0), std::move(tessOutput.edgeDispV1),
+                                                        roundDir2(dirU2), roundDir2(dirV2), faceAxis, norm, tessInput};
                                 }
                             }
 
@@ -592,6 +779,107 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                 for (size_t t = idx.size() - remainder; t < idx.size(); t++) {
                     keptIndices.push_back(idx[t]);
                 }
+            }
+
+            // Post-pass: generate seam walls between adjacent displaced faces
+            // For each face with a coplanar neighbor (fadeEdgeMask bit cleared),
+            // compare edge displacements and add wall quads where they differ.
+            if (!seamEdgeData.empty()) {
+                for (auto &[fk, info] : seamEdgeData) {
+                    uint32_t N = static_cast<uint32_t>(info.u0.size());
+                    if (N == 0) continue;
+                    float invN = 1.0f / static_cast<float>(N);
+                    glm::vec3 fN3 = -info.norm; // displacement direction
+
+                    // Check each edge direction for coplanar neighbor
+                    auto checkEdge = [&](const std::vector<float> &myEdge, glm::ivec3 neighborDir,
+                                         bool isU, bool isMax) {
+                        glm::ivec3 nPos = glm::ivec3(fk.x, fk.y, fk.z) + neighborDir;
+                        FaceKey nk{(int16_t)nPos.x, (int16_t)nPos.y, (int16_t)nPos.z, fk.axis};
+                        auto nit = seamEdgeData.find(nk);
+                        if (nit == seamEdgeData.end()) return;
+
+                        // Get the neighbor's OPPOSITE edge
+                        const std::vector<float> &theirEdge = isU
+                            ? (isMax ? nit->second.u0 : nit->second.u1)
+                            : (isMax ? nit->second.v0 : nit->second.v1);
+
+                        uint32_t nN = static_cast<uint32_t>(theirEdge.size());
+                        uint32_t minN = std::min(N, nN);
+
+                        for (uint32_t k = 0; k < minN; k++) {
+                            float dA = myEdge[k], dB = theirEdge[k];
+                            if (std::abs(dA - dB) < 1e-5f) continue;
+
+                            // Generate seam wall at the shared boundary
+                            float dNear = std::min(dA, dB), dFar = std::max(dA, dB);
+                            float p0, p1; // parametric positions along the edge
+                            float edgeParam; // fixed parametric coord (0 or 1)
+                            if (isU) {
+                                edgeParam = isMax ? 1.0f : 0.0f;
+                                p0 = k * invN; p1 = (k + 1) * invN;
+                            } else {
+                                edgeParam = isMax ? 1.0f : 0.0f;
+                                p0 = k * invN; p1 = (k + 1) * invN;
+                            }
+
+                            // Create 4 wall vertices (double-sided = 8 verts, 4 tris)
+                            for (int side = 0; side < 2; side++) {
+                                uint32_t base = static_cast<uint32_t>(verts.size()) + static_cast<uint32_t>(newVerts.size());
+                                vk::VertexFormat::PBRTriangle wv[4];
+
+                                float eu0, ev0, eu1, ev1;
+                                if (isU) {
+                                    eu0 = edgeParam; ev0 = p0;
+                                    eu1 = edgeParam; ev1 = p1;
+                                } else {
+                                    eu0 = p0; ev0 = edgeParam;
+                                    eu1 = p1; ev1 = edgeParam;
+                                }
+
+                                // Interpolate wall vertex positions from tessInput corners
+                                const auto &ti = info.tessInput;
+                                auto lerpPos = [&](float pu, float pv) -> glm::vec3 {
+                                    return (1-pu)*(1-pv)*ti.v0->pos + pu*(1-pv)*ti.v1->pos
+                                         + (1-pu)*pv*ti.v2->pos + pu*pv*ti.v3->pos;
+                                };
+                                // Use v0 as template for non-position fields
+                                wv[0] = *ti.v0; wv[1] = *ti.v0; wv[2] = *ti.v0; wv[3] = *ti.v0;
+                                wv[0].pos = lerpPos(eu0, ev0);
+                                wv[1].pos = lerpPos(eu1, ev1);
+                                wv[2].pos = wv[1].pos; wv[3].pos = wv[0].pos;
+
+                                wv[0].pos += fN3 * dNear; wv[0].postBase += fN3 * dNear;
+                                wv[1].pos += fN3 * dNear; wv[1].postBase += fN3 * dNear;
+                                wv[2].pos += fN3 * dFar;  wv[2].postBase += fN3 * dFar;
+                                wv[3].pos += fN3 * dFar;  wv[3].postBase += fN3 * dFar;
+
+                                glm::vec3 wallNorm = glm::normalize(glm::cross(
+                                    wv[1].pos - wv[0].pos, fN3));
+                                if (side == 1) wallNorm = -wallNorm;
+                                for (int vi = 0; vi < 4; vi++) wv[vi].norm = wallNorm;
+
+                                newVerts.push_back(wv[0]); newVerts.push_back(wv[1]);
+                                newVerts.push_back(wv[2]); newVerts.push_back(wv[3]);
+
+                                if (side == 0) {
+                                    newIndices.push_back(base); newIndices.push_back(base+1); newIndices.push_back(base+2);
+                                    newIndices.push_back(base); newIndices.push_back(base+2); newIndices.push_back(base+3);
+                                } else {
+                                    newIndices.push_back(base); newIndices.push_back(base+2); newIndices.push_back(base+1);
+                                    newIndices.push_back(base); newIndices.push_back(base+3); newIndices.push_back(base+2);
+                                }
+                            }
+                        }
+                    };
+
+                    // Only generate seam walls for edges where fade was DISABLED (coplanar neighbor)
+                    if (!(info.tessInput.fadeEdgeMask & 0x1)) checkEdge(info.u0, -info.uDir, true, false);
+                    if (!(info.tessInput.fadeEdgeMask & 0x2)) checkEdge(info.u1, info.uDir, true, true);
+                    if (!(info.tessInput.fadeEdgeMask & 0x4)) checkEdge(info.v0, -info.vDir, false, false);
+                    if (!(info.tessInput.fadeEdgeMask & 0x8)) checkEdge(info.v1, info.vDir, false, true);
+                }
+                anyTessellated = true; // seam walls add geometry
             }
 
             if (anyTessellated) {

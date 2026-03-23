@@ -35,11 +35,19 @@ class Tessellator {
         // Tessellation params
         uint32_t tessLevel;  // NxN grid (2-32)
         float heightScale;   // Displacement depth in world units (pomDepth)
+
+        // Per-edge fade mask: bit set = fade that edge (perpendicular/exposed).
+        // Bit 0 = U=0 edge, Bit 1 = U=1 edge, Bit 2 = V=0 edge, Bit 3 = V=1 edge.
+        // Coplanar edges (adjacent tessellated block) should NOT be faded.
+        uint32_t fadeEdgeMask = 0xF; // default: fade all edges
     };
 
     struct Output {
         std::vector<vk::VertexFormat::PBRTriangle> vertices;
         std::vector<uint32_t> indices;
+        // Edge displacement values for seam stitching with neighbors.
+        // Each has N entries (one per texel along that edge).
+        std::vector<float> edgeDispU0, edgeDispU1, edgeDispV0, edgeDispV1;
     };
 
     // Tessellate a quad into an NxN triangle grid with height displacement.

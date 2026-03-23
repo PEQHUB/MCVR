@@ -134,14 +134,9 @@ float HeightSampler::sample(const Textures::TextureRGBAData *normalRGBA,
 
     // AutoPBR: derive height from albedo using material pipeline
     if (isAutoPBR && material && albedoRGBA) {
-        // Only displace when per-block histogram is computed (not the 0/1 default).
-        // Without a real histogram, normalization maps absolute luminance to height,
-        // making dark blocks get near-maximum displacement regardless of texture detail.
-        float earlyLumSpan = material->lumMax - material->lumMin;
-        if (earlyLumSpan > 0.95f && material->lumMin < 0.01f) {
-            // lumMin≈0, lumMax≈1 = uninitialized defaults → no meaningful displacement
-            return 1.0f; // surface level, no displacement
-        }
+        // When lumMin/lumMax are uninitialized defaults (0/1), use raw luminance directly
+        // instead of bailing. This allows displacement to work even before AutoPBR
+        // histogram is computed — the absolute luminance becomes the height.
 
         // Unpack height source from pomPacked0 bits 6-8 (new layout)
         int heightSource = (material->pomPacked0 >> 6) & 0x7;
