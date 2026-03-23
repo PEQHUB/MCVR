@@ -98,7 +98,7 @@ void main() {
     }
 
     // if insideBoat, then ignore liquid
-    if (prGetInsideBoat(mainRay) && (flags.r & 0x1) > 0) {
+    if (mainRay.insideBoat > 0 && (flags.r & 0x1) > 0) {
         ignoreIntersectionEXT;
         return;
     }

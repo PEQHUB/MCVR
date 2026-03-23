@@ -458,7 +458,7 @@ namespace Data {
         T_UINT pomPacked1;       // normalClamp, geometricBlend, pomAOStrength, heightContrast
         T_UINT pomPacked2;       // heightRemapMin/Max, heightOffset, normalDistanceFade
         T_UINT flags;            // Material flags (bit 3=AutoPBR, bit 6=invertHeight, etc.)
-        T_UINT fadeEdgeMask;     // Per-edge fade mask (bit 0=U0, 1=U1, 2=V0, 3=V1; 0xF=fade all)
+        T_UINT _pad0;            // Padding to 128 bytes
     }; // 128 bytes (8 x vec4), std430 aligned
 
     struct ExposureData {

@@ -75,7 +75,8 @@ void main() {
     vec3 worldPos = vec4(localPos, 1.0) * gl_ObjectToWorld3x4EXT;
     mainRay.origin = worldPos + mainRay.direction * 0.001;
 
-    mainRay.flags |= PR_INSIDEBOAT_BIT | PR_CONT_BIT;
+    mainRay.insideBoat = 1;
+    mainRay.cont = 1;
     mainRay.hitT = gl_HitTEXT;
     mainRay.coneWidth += gl_HitTEXT * mainRay.coneSpread;
 }

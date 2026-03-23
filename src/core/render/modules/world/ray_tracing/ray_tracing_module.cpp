@@ -9,7 +9,6 @@
 #include "core/render/crash_ring_buffer.hpp"
 #include "core/render/radiance_logger.hpp"
 #include "core/render/renderer.hpp"
-#include "core/render/modules/world/svgf/blue_noise.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -123,22 +122,20 @@ bool RayTracingModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::D
     Renderer::frameGenMotionVectorImages[frameIndex] = motionVectorImages_[frameIndex];
 
     // Create reservoir images for ReSTIR DI (only once, shared across frames)
-    if (Renderer::options.restirEnabled) {
-        if (!reservoirImages_[0]) {
-            for (int r = 0; r < 2; r++) {
-                reservoirImages_[r] = vk::DeviceLocalImage::create(
-                    framework->device(), framework->vma(), false, width, height, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-            }
+    if (!reservoirImages_[0]) {
+        for (int r = 0; r < 2; r++) {
+            reservoirImages_[r] = vk::DeviceLocalImage::create(
+                framework->device(), framework->vma(), false, width, height, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
         }
+    }
 
-        // Create bounce ReSTIR DI reservoir images (per-bounce temporal reuse, bounces 1-3)
-        if (!bounceReservoirImages_[0]) {
-            for (int b = 0; b < 3; b++) {
-                bounceReservoirImages_[b] = vk::DeviceLocalImage::create(
-                    framework->device(), framework->vma(), false, width, height, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-            }
+    // Create bounce ReSTIR DI reservoir images (per-bounce temporal reuse, bounces 1-3)
+    if (!bounceReservoirImages_[0]) {
+        for (int b = 0; b < 3; b++) {
+            bounceReservoirImages_[b] = vk::DeviceLocalImage::create(
+                framework->device(), framework->vma(), false, width, height, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
         }
     }
 
@@ -183,15 +180,10 @@ void RayTracingModule::build() {
     initSpatialPipeline();
     initClusterPipeline();
     sharcCapacity_ = 1u << static_cast<uint32_t>(Renderer::options.sharcCapacityExponent);
-    if (Renderer::options.sharcEnabled) {
-        initSharcBuffers();
-        initSharcUpdatePipeline();
-        initSharcResolvePipeline();
-    }
+    initSharcBuffers();
+    initSharcUpdatePipeline();
+    initSharcResolvePipeline();
     initAccumulationPipeline();
-
-    // Initialize blue noise buffers (Owen-scrambled Sobol + spatial scrambling tile)
-    blueNoise_ = std::make_shared<BlueNoise>(framework->device(), framework->vma());
 
     for (int i = 0; i < size; i++) {
         contexts_[i] =
@@ -497,18 +489,6 @@ void RayTracingModule::initDescriptorTables() {
                     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     .descriptorCount = 1,
                     .stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 13, // binding 13: Blue noise Sobol buffer (256 samples x 256 dims)
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 14, // binding 14: Blue noise scrambling tile (128x128x8)
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
                 })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
@@ -986,56 +966,50 @@ void RayTracingModule::initImages() {
         rayTracingDescriptorTables_[i]->bindSamplerImageForShader(atmosphere_->atmCubeMapImageSamplers_[i],
                                                                   atmosphere_->atmCubeMapImages_[i], 0, 2, 7);
 
-        // Batch all RT output image bindings into a single vkUpdateDescriptorSets call
-        using IB = vk::DescriptorTable::ImageBinding;
-        std::vector<IB> imageBindings = {
-            {hdrNoisyOutputImages_[i],                 VK_IMAGE_LAYOUT_GENERAL, 3,  0},
-            {diffuseAlbedoImages_[i],                  VK_IMAGE_LAYOUT_GENERAL, 3,  1},
-            {specularAlbedoImages_[i],                 VK_IMAGE_LAYOUT_GENERAL, 3,  2},
-            {normalRoughnessImages_[i],                VK_IMAGE_LAYOUT_GENERAL, 3,  3},
-            {motionVectorImages_[i],                   VK_IMAGE_LAYOUT_GENERAL, 3,  4},
-            {linearDepthImages_[i],                    VK_IMAGE_LAYOUT_GENERAL, 3,  5},
-            {specularHitDepthImages_[i],               VK_IMAGE_LAYOUT_GENERAL, 3,  6},
-            {firstHitDepthImages_[i],                  VK_IMAGE_LAYOUT_GENERAL, 3,  7},
-            {firstHitDiffuseDirectLightImages_[i],     VK_IMAGE_LAYOUT_GENERAL, 3,  8},
-            {firstHitDiffuseIndirectLightImages_[i],   VK_IMAGE_LAYOUT_GENERAL, 3,  9},
-            {firstHitSpecularImages_[i],               VK_IMAGE_LAYOUT_GENERAL, 3, 10},
-            {firstHitClearImages_[i],                  VK_IMAGE_LAYOUT_GENERAL, 3, 11},
-            {firstHitBaseEmissionImages_[i],           VK_IMAGE_LAYOUT_GENERAL, 3, 12},
-            {directLightDepthImages_[i],               VK_IMAGE_LAYOUT_GENERAL, 3, 13},
-            {diffuseRayDirHitDistImages_[i],           VK_IMAGE_LAYOUT_GENERAL, 3, 16},
-            {specularRayDirHitDistImages_[i],          VK_IMAGE_LAYOUT_GENERAL, 3, 17},
-            {reflectionMvImages_[i],                   VK_IMAGE_LAYOUT_GENERAL, 3, 21},
-        };
-        // Conditionally add optional output images
+        rayTracingDescriptorTables_[i]->bindImage(hdrNoisyOutputImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 0);
+        rayTracingDescriptorTables_[i]->bindImage(diffuseAlbedoImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 1);
+        rayTracingDescriptorTables_[i]->bindImage(specularAlbedoImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 2);
+        rayTracingDescriptorTables_[i]->bindImage(normalRoughnessImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 3);
+        rayTracingDescriptorTables_[i]->bindImage(motionVectorImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 4);
+        rayTracingDescriptorTables_[i]->bindImage(linearDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 5);
+        rayTracingDescriptorTables_[i]->bindImage(specularHitDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 6);
+        rayTracingDescriptorTables_[i]->bindImage(firstHitDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 7);
+        rayTracingDescriptorTables_[i]->bindImage(firstHitDiffuseDirectLightImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 8);
+        rayTracingDescriptorTables_[i]->bindImage(firstHitDiffuseIndirectLightImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3,
+                                                  9);
+        rayTracingDescriptorTables_[i]->bindImage(firstHitSpecularImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 10);
+        rayTracingDescriptorTables_[i]->bindImage(firstHitClearImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 11);
+        rayTracingDescriptorTables_[i]->bindImage(firstHitBaseEmissionImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 12);
+        rayTracingDescriptorTables_[i]->bindImage(directLightDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 13);
+        rayTracingDescriptorTables_[i]->bindImage(diffuseRayDirHitDistImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 16);
+        rayTracingDescriptorTables_[i]->bindImage(specularRayDirHitDistImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 17);
+        rayTracingDescriptorTables_[i]->bindImage(reflectionMvImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 21);
         if (animatedTexMaskImages_[i])
-            imageBindings.push_back({animatedTexMaskImages_[i],       VK_IMAGE_LAYOUT_GENERAL, 3, 22});
+            rayTracingDescriptorTables_[i]->bindImage(animatedTexMaskImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 22);
         if (particleMaskImages_[i])
-            imageBindings.push_back({particleMaskImages_[i],          VK_IMAGE_LAYOUT_GENERAL, 3, 23});
+            rayTracingDescriptorTables_[i]->bindImage(particleMaskImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 23);
         if (biasMaskImages_[i])
-            imageBindings.push_back({biasMaskImages_[i],              VK_IMAGE_LAYOUT_GENERAL, 3, 24});
+            rayTracingDescriptorTables_[i]->bindImage(biasMaskImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 24);
         if (rtHitDistImages_[i])
-            imageBindings.push_back({rtHitDistImages_[i],             VK_IMAGE_LAYOUT_GENERAL, 3, 25});
+            rayTracingDescriptorTables_[i]->bindImage(rtHitDistImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 25);
         if (motionVectors3DImages_[i])
-            imageBindings.push_back({motionVectors3DImages_[i],       VK_IMAGE_LAYOUT_GENERAL, 3, 26});
+            rayTracingDescriptorTables_[i]->bindImage(motionVectors3DImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 26);
         if (gbufferMetallicImages_[i])
-            imageBindings.push_back({gbufferMetallicImages_[i],       VK_IMAGE_LAYOUT_GENERAL, 3, 27});
+            rayTracingDescriptorTables_[i]->bindImage(gbufferMetallicImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 27);
         if (gbufferShadingModelIdImages_[i])
-            imageBindings.push_back({gbufferShadingModelIdImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 28});
+            rayTracingDescriptorTables_[i]->bindImage(gbufferShadingModelIdImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 28);
         if (gbufferMaterialIdImages_[i])
-            imageBindings.push_back({gbufferMaterialIdImages_[i],     VK_IMAGE_LAYOUT_GENERAL, 3, 29});
+            rayTracingDescriptorTables_[i]->bindImage(gbufferMaterialIdImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 29);
         if (positionViewSpaceImages_[i])
-            imageBindings.push_back({positionViewSpaceImages_[i],     VK_IMAGE_LAYOUT_GENERAL, 3, 30});
+            rayTracingDescriptorTables_[i]->bindImage(positionViewSpaceImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 30);
 
         // ReSTIR DI reservoir images (initial binding, rebound each frame in render)
         if (reservoirImages_[0]) {
-            imageBindings.push_back({reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL, 3, 14});
-            imageBindings.push_back({reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL, 3, 15});
+            rayTracingDescriptorTables_[i]->bindImage(reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL, 3, 14);
+            rayTracingDescriptorTables_[i]->bindImage(reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL, 3, 15);
         }
 
-        rayTracingDescriptorTables_[i]->bindImages(imageBindings);
-
-        // Energy compensation LUT (set 2, binding 4) — sampler image, stays individual
+        // Energy compensation LUT (set 2, binding 4)
         if (energyLUT_ && energyLUTSampler_) {
             rayTracingDescriptorTables_[i]->bindSamplerImageForShader(energyLUTSampler_, energyLUT_, 2, 4);
         }
@@ -1515,48 +1489,29 @@ void RayTracingModuleContext::render() {
     if (!module) return;
 
     rayTracingDescriptorTable->bindAS(worldPrepareContext->tlas, 1, 0);
+    rayTracingDescriptorTable->bindBuffer(worldPrepareContext->blasOffsetsBuffer, 1, 1);
+    rayTracingDescriptorTable->bindBuffer(worldPrepareContext->vertexBufferAddr, 1, 2);
+    rayTracingDescriptorTable->bindBuffer(worldPrepareContext->indexBufferAddr, 1, 3);
+    rayTracingDescriptorTable->bindBuffer(worldPrepareContext->lastVertexBufferAddr, 1, 4);
+    rayTracingDescriptorTable->bindBuffer(worldPrepareContext->lastIndexBufferAddr, 1, 5);
+    rayTracingDescriptorTable->bindBuffer(worldPrepareContext->lastObjToWorldMat, 1, 6);
 
     auto buffers = Renderer::instance().buffers();
     auto worldBuffer = buffers->worldUniformBuffer();
 
-    // Batch all per-frame buffer bindings into a single vkUpdateDescriptorSets call
-    using BB = vk::DescriptorTable::BufferBinding;
-    std::vector<BB> bufferBindings = {
-        {worldPrepareContext->blasOffsetsBuffer,     1,  1},
-        {worldPrepareContext->vertexBufferAddr,      1,  2},
-        {worldPrepareContext->indexBufferAddr,        1,  3},
-        {worldPrepareContext->lastVertexBufferAddr,  1,  4},
-        {worldPrepareContext->lastIndexBufferAddr,   1,  5},
-        {worldPrepareContext->lastObjToWorldMat,     1,  6},
-        {buffers->textureMappingBuffer(),            1,  7},
-        {worldPrepareContext->areaLightBuffer,       1,  8},
-        {worldBuffer,                                2,  0},
-        {buffers->lastWorldUniformBuffer(),          2,  1},
-        {buffers->skyUniformBuffer(),                2,  2},
-    };
+    rayTracingDescriptorTable->bindBuffer(buffers->textureMappingBuffer(), 1, 7);
+    rayTracingDescriptorTable->bindBuffer(worldPrepareContext->areaLightBuffer, 1, 8);
     if (module->tileLightBuffer_) {
-        bufferBindings.push_back({module->tileLightBuffer_, 1, 9});
+        rayTracingDescriptorTable->bindBuffer(module->tileLightBuffer_, 1, 9);
     }
     // Always bind Material Class Mapping buffer (may be real data or dummy)
     auto mcBuffer = buffers->materialClassMappingBuffer();
     if (mcBuffer) {
-        bufferBindings.push_back({mcBuffer, 1, 11});
+        rayTracingDescriptorTable->bindBuffer(mcBuffer, 1, 11);
     }
-    // Blue noise buffers (Owen-scrambled Sobol + spatial scrambling tile)
-    if (module->blueNoise_) {
-        // One-time staging → device-local transfer on first frame
-        if (!module->blueNoiseUploaded_) {
-            module->blueNoise_->uploadToBuffer(worldCommandBuffer);
-            module->blueNoiseUploaded_ = true;
-        }
-        bufferBindings.push_back({module->blueNoise_->sobolBuffer(),      1, 13});
-        bufferBindings.push_back({module->blueNoise_->scramblingBuffer(), 1, 14});
-    }
-    rayTracingDescriptorTable->bindBufferBatch(bufferBindings);
-
-    // Batch per-frame image rebindings (ReSTIR reservoirs, bounce reservoirs)
-    using IB = vk::DescriptorTable::ImageBinding;
-    std::vector<IB> frameImageBindings;
+    rayTracingDescriptorTable->bindBuffer(worldBuffer, 2, 0);
+    rayTracingDescriptorTable->bindBuffer(buffers->lastWorldUniformBuffer(), 2, 1);
+    rayTracingDescriptorTable->bindBuffer(buffers->skyUniformBuffer(), 2, 2);
 
     // ReSTIR DI: reservoir image binding
     // Binding 14 = CHS write (temporal output)
@@ -1564,28 +1519,27 @@ void RayTracingModuleContext::render() {
     if (module->reservoirImages_[0]) {
         bool spatialEnabled = Renderer::options.restirEnabled && Renderer::options.restirSpatialEnabled && module->spatialPipeline_ != VK_NULL_HANDLE;
         if (spatialEnabled) {
-            // Spatial path: CHS writes [0], spatial transforms [0]->[1], next CHS reads [1]
+            // Spatial path: CHS writes [0], spatial transforms [0]→[1], next CHS reads [1]
             // No self-aliasing: CHS reads [1] and writes [0]
-            frameImageBindings.push_back({module->reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL, 3, 14});
-            frameImageBindings.push_back({module->reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL, 3, 15});
+            rayTracingDescriptorTable->bindImage(module->reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL, 3, 14);
+            rayTracingDescriptorTable->bindImage(module->reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL, 3, 15);
         } else {
             // No spatial: ping-pong to prevent read-write race on same image
             uint32_t frameIdx = context->frameIndex;
             int writeIdx = frameIdx & 1;
             int readIdx  = 1 - writeIdx;
-            frameImageBindings.push_back({module->reservoirImages_[writeIdx], VK_IMAGE_LAYOUT_GENERAL, 3, 14});
-            frameImageBindings.push_back({module->reservoirImages_[readIdx],  VK_IMAGE_LAYOUT_GENERAL, 3, 15});
+            rayTracingDescriptorTable->bindImage(module->reservoirImages_[writeIdx], VK_IMAGE_LAYOUT_GENERAL, 3, 14);
+            rayTracingDescriptorTable->bindImage(module->reservoirImages_[readIdx], VK_IMAGE_LAYOUT_GENERAL, 3, 15);
         }
     }
 
     // Bounce ReSTIR DI: per-bounce reservoir images (bindings 18-20)
     for (int b = 0; b < 3; b++) {
         if (module->bounceReservoirImages_[b]) {
-            frameImageBindings.push_back(
-                {module->bounceReservoirImages_[b], VK_IMAGE_LAYOUT_GENERAL, 3, static_cast<uint32_t>(18 + b)});
+            rayTracingDescriptorTable->bindImage(
+                module->bounceReservoirImages_[b], VK_IMAGE_LAYOUT_GENERAL, 3, 18 + b);
         }
     }
-    rayTracingDescriptorTable->bindImages(frameImageBindings);
 
     bool accumulating = Renderer::options.offlineState == 2;
 
@@ -1630,7 +1584,7 @@ void RayTracingModuleContext::render() {
 
     // Color expansion
     pushConstant.colorExpansion = Renderer::options.colorExpansion;
-    pushConstant.blueNoiseFrame = context->frameIndex;
+    pushConstant._pad0 = 0;
 
     // Structured logging: push constants (every ~1 second)
     if (RadianceLogger::isEnabled()) {
@@ -1826,58 +1780,41 @@ void RayTracingModuleContext::render() {
             0, 1, &clusterBarrier, 0, nullptr, 0, nullptr);
     }
 
-    // Lazy SHARC init: create buffers + pipelines if enabled at runtime but not yet allocated
-    if (Renderer::options.sharcEnabled && !module->sharcHashEntries_) {
-        module->sharcCapacity_ = 1u << static_cast<uint32_t>(Renderer::options.sharcCapacityExponent);
-        module->initSharcBuffers();
-        module->initSharcUpdatePipeline();
-        module->initSharcResolvePipeline();
-    }
-
     // Reset SHARC buffers when disabled so re-enable starts fresh (prevents stale cache artifacts)
     if (!Renderer::options.sharcEnabled && module->sharcBuffersInitialized_) {
         module->sharcBuffersInitialized_ = false;
         module->sharcFrameIndex_ = 0;
     }
 
-    // Deferred SHARC resize: process pending capacity change at frame boundary.
-    // Previous frame's SHARC dispatch used old buffers via BDA — drain GPU before freeing them.
-    // This is still vkDeviceWaitIdle, but deferred to the next frame boundary instead of inline,
-    // so it doesn't stall mid-render and the wait is shorter (one frame of latency absorbed).
-    if (module->sharcResizePending_ && module->sharcHashEntries_) {
-        uint32_t desiredCapacity = 1u << static_cast<uint32_t>(
-            std::max(18, std::min(26, Renderer::options.sharcCapacityExponent)));
-        auto fw = module->framework_.lock();
-        if (fw) {
-            vkDeviceWaitIdle(fw->device()->vkDevice());
-
-            VkBufferUsageFlags sharcUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-                | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            module->sharcCapacity_ = desiredCapacity;
-            module->sharcHashEntries_ = vk::DeviceLocalBuffer::create(
-                fw->vma(), fw->device(), desiredCapacity * 8, sharcUsage);
-            module->sharcAccumulation_ = vk::DeviceLocalBuffer::create(
-                fw->vma(), fw->device(), desiredCapacity * 16, sharcUsage);
-            module->sharcResolved_ = vk::DeviceLocalBuffer::create(
-                fw->vma(), fw->device(), desiredCapacity * 16, sharcUsage);
-            module->sharcBuffersInitialized_ = false;
-            module->sharcFrameIndex_ = 0;
-            // Update push constant BDAs for this frame
-            pushConstant.sharcHashEntries = module->sharcHashEntries_->bufferAddress();
-            pushConstant.sharcAccumulation = module->sharcAccumulation_->bufferAddress();
-            pushConstant.sharcResolved = module->sharcResolved_->bufferAddress();
-            pushConstant.sharcCapacity = desiredCapacity;
-        }
-        module->sharcResizePending_ = false;
-    }
-
-    // Check if SHARC capacity exponent changed — mark for deferred resize at next frame boundary
+    // Check if SHARC capacity exponent changed — reallocate buffers if needed
+    // Must wait for GPU idle before freeing old buffers (previous frames reference them via BDA)
     {
         uint32_t desiredCapacity = 1u << static_cast<uint32_t>(
             std::max(18, std::min(26, Renderer::options.sharcCapacityExponent)));
         if (desiredCapacity != module->sharcCapacity_ && module->sharcHashEntries_) {
-            module->sharcResizePending_ = true;
+            auto fw = module->framework_.lock();
+            if (fw) {
+                // Drain GPU — old buffers are still referenced by in-flight command buffers
+                vkDeviceWaitIdle(fw->device()->vkDevice());
+
+                VkBufferUsageFlags sharcUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                    | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                    | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                module->sharcCapacity_ = desiredCapacity;
+                module->sharcHashEntries_ = vk::DeviceLocalBuffer::create(
+                    fw->vma(), fw->device(), desiredCapacity * 8, sharcUsage);
+                module->sharcAccumulation_ = vk::DeviceLocalBuffer::create(
+                    fw->vma(), fw->device(), desiredCapacity * 16, sharcUsage);
+                module->sharcResolved_ = vk::DeviceLocalBuffer::create(
+                    fw->vma(), fw->device(), desiredCapacity * 16, sharcUsage);
+                module->sharcBuffersInitialized_ = false;
+                module->sharcFrameIndex_ = 0;
+                // Update push constant BDAs for this frame
+                pushConstant.sharcHashEntries = module->sharcHashEntries_->bufferAddress();
+                pushConstant.sharcAccumulation = module->sharcAccumulation_->bufferAddress();
+                pushConstant.sharcResolved = module->sharcResolved_->bufferAddress();
+                pushConstant.sharcCapacity = desiredCapacity;
+            }
         }
     }
 
@@ -2003,8 +1940,7 @@ void RayTracingModuleContext::render() {
     worldCommandBuffer->endLabel(); // end MainTrace
 
     // Spatial reuse compute pass (when ReSTIR and spatial reuse are both enabled)
-    if (Renderer::options.restirEnabled && Renderer::options.restirSpatialEnabled && module->spatialPipeline_ != VK_NULL_HANDLE
-        && module->reservoirImages_[0] && module->reservoirImages_[1]) {
+    if (Renderer::options.restirEnabled && Renderer::options.restirSpatialEnabled && module->spatialPipeline_ != VK_NULL_HANDLE) {
         worldCommandBuffer->beginLabel("RT:ReSTIR Spatial", 0.2f, 0.8f, 0.8f);
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
 

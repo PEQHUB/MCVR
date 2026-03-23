@@ -14,5 +14,5 @@ layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
 
 void main() {
     mainRay.hitT = INF_DISTANCE;
-    mainRay.flags |= PR_STOP_BIT;
+    mainRay.stop = 1;
 }

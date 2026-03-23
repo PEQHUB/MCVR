@@ -111,16 +111,16 @@ void main() {
 
     if (skyUBO.cameraSubmersionType == 0 /*LAVA*/ || skyUBO.cameraSubmersionType == 2 /*POWDER_SNOW*/ ||
         skyUBO.hasBlindnessOrDarkness > 0) {
-        mainRay.flags |= PR_STOP_BIT;
+        mainRay.stop = 1;
         mainRay.hitT = INF_DISTANCE;
     } else {
         switch (skyUBO.skyType) {
             case 0: // NONE
-                mainRay.flags |= PR_STOP_BIT;
+                mainRay.stop = 1;
                 mainRay.hitT = INF_DISTANCE;
                 return;
             case 2: // END
-                mainRay.flags |= PR_STOP_BIT;
+                mainRay.stop = 1;
                 mainRay.hitT = INF_DISTANCE;
                 return;
             case 1: // NORMAL
@@ -198,7 +198,7 @@ void main() {
             }
         }
 
-        mainRay.flags |= PR_STOP_BIT;
+        mainRay.stop = 1;
         mainRay.hitT = INF_DISTANCE;
     }
 }

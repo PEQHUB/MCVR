@@ -76,8 +76,7 @@ struct EntityBuildDataBatch : public SharedObject<EntityBuildDataBatch> {
     std::shared_ptr<vk::BLASBatchBuilder> blasBatchBuilder;
 
     void addData(std::shared_ptr<EntityBuildData> data);
-    void build(std::shared_ptr<vk::DeviceLocalBuffer> &pooledVertexBuffer,
-               std::shared_ptr<vk::DeviceLocalBuffer> &pooledIndexBuffer);
+    void build();
 };
 
 struct EntityPostBuildDataBatch : public SharedObject<EntityPostBuildDataBatch> {
@@ -160,10 +159,4 @@ class Entities : public SharedObject<Entities> {
     std::shared_ptr<EntityPostBuildDataBatch> entityPostBuildDataBatch_;
 
     std::shared_ptr<vk::BLASBatchBuilder> blasBatchBuilder_;
-
-    // Per-context pooled buffers: reused across frames when capacity is sufficient.
-    // Indexed by frameIndex (context/swapchain image index). Safe because acquireContext()
-    // waits on the fence for the context being reused, guaranteeing the previous GPU work is done.
-    std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> pooledVertexBuffers_;
-    std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> pooledIndexBuffers_;
 };

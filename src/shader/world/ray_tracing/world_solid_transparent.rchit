@@ -8,7 +8,6 @@
 
 #include "../util/disney.glsl"
 #include "../util/random.glsl"
-#include "../util/blue_noise.glsl"
 #include "../util/ray_cone.glsl"
 #include "../util/ray_payloads.glsl"
 #include "../util/util.glsl"
@@ -111,7 +110,7 @@ layout(push_constant) uniform PushConstant {
     int   pomRefinement;        // binary refinement iterations (0-8)
     float pomFadeDistance;      // distance in blocks to fade POM out (8-256)
     float colorExpansion;       // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
-    uint blueNoiseFrame;                 // alignment padding (offset 52)
+    uint _pad0;                 // alignment padding (offset 52)
     // SHARC BDA fields (offsets 56-119, 64 bytes)
     uint64_t _sharcBDA0;
     uint64_t _sharcBDA1;
@@ -894,6 +893,9 @@ void main() {
                 mainRay.radiance = al.color * max(al.intensity, 1.0) * cubeFade * mainRay.throughput;
                 mainRay.albedoValue = vec4(al.color, 1.0);
                 mainRay.albedoEmission = 0.0;
+                mainRay.specularValue = vec4(0.0);
+                mainRay.normalValue = vec4(0.5, 0.5, 1.0, 1.0); // flat LabPBR normal (avoids NaN from vec4(0))
+                mainRay.flagValue = ivec4(0);
                 mainRay.directLightRadiance = vec3(0.0);
                 mainRay.directLightHitT = INF_DISTANCE;
                 mainRay.hitT = gl_HitTEXT;
@@ -904,9 +906,10 @@ void main() {
                 mainRay.geometryIndex = geometryID;
                 mainRay.primitiveIndex = gl_PrimitiveID;
                 mainRay.baryCoords = baryCoords;
+                mainRay.noisy = 0;
+                mainRay.lobeType = 0;
                 mainRay.roughness = 1.0;
-                // Clear noisy/lobeType, set stop=1 (preserve isHand/insideBoat/emBlockType)
-                mainRay.flags = (mainRay.flags & (PR_ISHAND_BIT | PR_INSIDEBOAT_BIT)) | PR_STOP_BIT | (prGetEmBlockType(mainRay) << PR_EMBLOCK_SHIFT);
+                mainRay.stop = 1;
                 return;
             }
         }
@@ -923,7 +926,7 @@ void main() {
     // Apply per-block emission data from UBO (color override + scalar multiplier)
     // Extract emissive type from lower 8 bits of packed field
     uint emBlockType = packedBlockType & 0xFFu;
-    prSetEmBlockType(mainRay, emBlockType);
+    mainRay.emBlockTypeOut = emBlockType;
     vec3 emissionTint = tint; // default: texture albedo (BT.2020)
     bool uniformGlow = false;
     if (emBlockType < 50u && albedoEmission > 0.0) {
@@ -1027,12 +1030,9 @@ void main() {
     vec3 lightDir = sunDir;
     // Softer sun sampling for hand = wider penumbras (500 vs 3000)
     // Ground truth: physical sun disk half-angle 0.267° → kappa ≈ 46000
-    float kappa = PHYSICAL_SUN_DISK ? 46000.0 : ((prGetIsHand(mainRay)) ? 500.0 : 3000.0);
+    float kappa = PHYSICAL_SUN_DISK ? 46000.0 : ((mainRay.isHand > 0) ? 500.0 : 3000.0);
     if (sunDir.y < 0) { lightDir = normalize(skyUBO.moonDirection); }
-    vec2 vmfBN = (mainRay.index == 0)
-        ? blueNoise2DEx(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 66u)
-        : vec2(-1.0);
-    vec3 sampledLightDir = SampleVMF(mainRay.seed, lightDir, kappa, vmfBN);
+    vec3 sampledLightDir = SampleVMF(mainRay.seed, lightDir, kappa);
     vec3 shadowBiasN = dot(sampledLightDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
     vec3 shadowRayOrigin = offset_ray(worldPos, shadowBiasN);
 
@@ -1044,13 +1044,13 @@ void main() {
         shadowRay.throughput = vec3(1.0);
         shadowRay.seed = mainRay.seed;
         shadowRay.hitT = INF_DISTANCE;
-        shadowRay.insideBoat = prGetInsideBoat(mainRay) ? 1u : 0u;
+        shadowRay.insideBoat = mainRay.insideBoat;
         shadowRay.bounceIndex = mainRay.index;
         shadowRay.mediumAbsorption = vec3(0.0);
         shadowRay.mediumEntryT = 0.0;
 
         uint shadowMask = WORLD_MASK;
-        if (!prGetIsHand(mainRay)) {
+        if (mainRay.isHand == 0) {
             shadowMask |= PLAYER_MASK | PLAYER_HEAD_MASK;  // world surfaces see player shadows; hand does not (prevents self-shadowing)
         }
 
@@ -1078,7 +1078,7 @@ void main() {
         // Hand shadow smoothing: apply ambient floor with smooth falloff
         // Prevents harsh black transitions on hand geometry in shadow
         // Ground truth: no fake ambient — accumulation provides correct indirect fill
-        if (prGetIsHand(mainRay) && !NO_HAND_AMBIENT) {
+        if (mainRay.isHand > 0 && !NO_HAND_AMBIENT) {
             float shadowLum = dot(finalLightRadiance, vec3(0.2627, 0.6780, 0.0593));
             float ambientFloor = 0.08 * dot(mainRay.throughput, vec3(0.2627, 0.6780, 0.0593));
             float blend = smoothstep(0.0, ambientFloor * 2.0, shadowLum);
@@ -1126,11 +1126,8 @@ void main() {
             float sourcePdf = 1.0 / float(max(effectiveCount, 1));
 
             for (int c = 0; c < numCandidates; c++) {
-                // Blue noise light selection (first bounce), PCG fallback for indirect
-                float lightRand = (mainRay.index == 0)
-                    ? blueNoise1D(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 2u + uint(c))
-                    : rand(mainRay.seed);
-                int tileSlot = int(lightRand * float(effectiveCount));
+                // Uniform random selection from available lights
+                int tileSlot = int(rand(mainRay.seed) * float(effectiveCount));
                 tileSlot = clamp(tileSlot, 0, effectiveCount - 1);
                 int idx = tileSlot;
                 AreaLight al = areaLightBuffer.lights[idx];
@@ -1249,10 +1246,7 @@ void main() {
             if (currentRes.lightIdx >= 0) {
                 AreaLight al = areaLightBuffer.lights[currentRes.lightIdx];
 
-                vec2 cubeBN = (mainRay.index == 0)
-                    ? blueNoise2DEx(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 68u)
-                    : vec2(-1.0);
-                CubeSample cs = sampleCubeLight(al, worldPos, pc.shadowSoftness, mainRay.seed, cubeBN);
+                CubeSample cs = sampleCubeLight(al, worldPos, pc.shadowSoftness, mainRay.seed);
                 vec3 toSample = cs.worldPos - worldPos;
                 float sDist = length(toSample);
                 vec3 sDir = toSample / sDist;
@@ -1262,7 +1256,7 @@ void main() {
                 shadowRay.throughput = vec3(0.0);
                 shadowRay.seed = mainRay.seed;
                 shadowRay.hitT = INF_DISTANCE;
-                shadowRay.insideBoat = prGetInsideBoat(mainRay) ? 1u : 0u;
+                shadowRay.insideBoat = mainRay.insideBoat;
                 shadowRay.bounceIndex = mainRay.index;
 
                 float safeMargin = al.halfExtent + 0.02;
@@ -1356,10 +1350,7 @@ void main() {
                 if (bestIdx[k] < 0) continue;
                 AreaLight al = areaLightBuffer.lights[bestIdx[k]];
 
-                vec2 cubeBN2 = (mainRay.index == 0)
-                    ? blueNoise2DEx(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 70u + uint(k) * 2u)
-                    : vec2(-1.0);
-                CubeSample cs = sampleCubeLight(al, worldPos, pc.shadowSoftness, mainRay.seed, cubeBN2);
+                CubeSample cs = sampleCubeLight(al, worldPos, pc.shadowSoftness, mainRay.seed);
                 vec3 toSample = cs.worldPos - worldPos;
                 float sDist = length(toSample);
                 vec3 sDir = toSample / sDist;
@@ -1369,7 +1360,7 @@ void main() {
                 shadowRay.throughput = vec3(0.0);
                 shadowRay.seed = mainRay.seed;
                 shadowRay.hitT = INF_DISTANCE;
-                shadowRay.insideBoat = prGetInsideBoat(mainRay) ? 1u : 0u;
+                shadowRay.insideBoat = mainRay.insideBoat;
                 shadowRay.bounceIndex = mainRay.index;
 
                 float safeMargin = al.halfExtent + 0.02;
@@ -1417,10 +1408,7 @@ void main() {
         float sourcePdf = 1.0 / float(max(searchCount, 1));
 
         for (int c = 0; c < numCandidates; c++) {
-            float lightRand2 = (mainRay.index == 0)
-                ? blueNoise1D(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 34u + uint(c))
-                : rand(mainRay.seed);
-            int idx = clamp(int(lightRand2 * float(searchCount)), 0, searchCount - 1);
+            int idx = clamp(int(rand(mainRay.seed) * float(searchCount)), 0, searchCount - 1);
             AreaLight al = areaLightBuffer.lights[idx];
 
 
@@ -1530,10 +1518,7 @@ void main() {
         if (currentRes.lightIdx >= 0) {
             AreaLight al = areaLightBuffer.lights[currentRes.lightIdx];
 
-            vec2 cubeBN3 = (mainRay.index == 0)
-                ? blueNoise2DEx(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 74u)
-                : vec2(-1.0);
-            CubeSample cs = sampleCubeLight(al, worldPos, pc.shadowSoftness, mainRay.seed, cubeBN3);
+            CubeSample cs = sampleCubeLight(al, worldPos, pc.shadowSoftness, mainRay.seed);
             vec3 toSample = cs.worldPos - worldPos;
             float sDist = length(toSample);
             vec3 sDir = toSample / sDist;
@@ -1543,7 +1528,7 @@ void main() {
             shadowRay.throughput = vec3(0.0);
             shadowRay.seed = mainRay.seed;
             shadowRay.hitT = INF_DISTANCE;
-            shadowRay.insideBoat = prGetInsideBoat(mainRay) ? 1u : 0u;
+            shadowRay.insideBoat = mainRay.insideBoat;
             shadowRay.bounceIndex = mainRay.index;
 
             float safeMargin = al.halfExtent + 0.02;
@@ -1633,6 +1618,9 @@ void main() {
     mainRay.worldPos = worldPos;
     mainRay.normal = normal;
     mainRay.albedoValue = albedoValue;
+    mainRay.specularValue = specularValue;
+    mainRay.normalValue = normalValue;
+    mainRay.flagValue = flagValue;
 
     // PSR mirror/glass continuation: if roughness is near-zero, trace deterministically
     // instead of stochastic BSDF sampling. The rgen PSR loop will continue tracing.
@@ -1659,17 +1647,17 @@ void main() {
                 mainRay.origin = offset_ray(worldPos, bounceOffsetN);
                 mainRay.direction = reflectDir;
                 mainRay.throughput *= mat.f0;
-                prSetLobeType(mainRay, 1u); // specular
+                mainRay.lobeType = 1; // specular
             } else {
                 // Refraction path
                 vec3 bounceOffsetN = dot(refractDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
                 mainRay.origin = offset_ray(worldPos, bounceOffsetN);
                 mainRay.direction = refractDir;
                 mainRay.throughput *= (1.0 - fresnelReflect);
-                prSetLobeType(mainRay, 2u); // transmission
+                mainRay.lobeType = 2; // transmission
             }
-            // Clear noisy and stop (PSR continuation)
-            mainRay.flags &= ~(PR_NOISY_BIT | PR_STOP_BIT);
+            mainRay.noisy = 0;
+            mainRay.stop = 0;
             return;
         } else {
             // PSR mirror: opaque specular reflection
@@ -1683,31 +1671,25 @@ void main() {
             vec3 fresnel = mat.f0 + (1.0 - mat.f0) * pow(1.0 - cosTheta, 5.0);
             mainRay.throughput *= fresnel;
 
-            // Clear noisy and stop, set lobeType=specular
-            mainRay.flags &= ~(PR_NOISY_BIT | PR_STOP_BIT);
-            prSetLobeType(mainRay, 1u);
+            mainRay.noisy = 0;
+            mainRay.lobeType = 1; // specular
+            mainRay.stop = 0;
             return;
         }
     }
 
     // sample next direction using Disney BSDF
-    // First bounce: Owen-scrambled Sobol for lobe selection (dim 76) + GGX VNDF (dims 77-78)
     vec3 sampleDir;
     float pdf;
     uint lobeType;
-    vec3 bsdfXi = (mainRay.index == 0)
-        ? vec3(blueNoise1D(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 77u),
-               blueNoise1D(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 78u),
-               blueNoise1D(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 76u))
-        : vec3(-1.0);
-    vec3 bsdf = DisneySample(mat, viewDir, normal, sampleDir, pdf, mainRay.seed, lobeType, pc.flags, bsdfXi);
+    vec3 bsdf = DisneySample(mat, viewDir, normal, sampleDir, pdf, mainRay.seed, lobeType, pc.flags);
 
-    prSetLobeType(mainRay, lobeType);
-    mainRay.flags |= PR_NOISY_BIT;
+    mainRay.lobeType = lobeType;
+    mainRay.noisy = 1;
 
     // early exit if sampling failed (check BEFORE updating throughput to avoid amplification)
     if (pdf <= 1e-6) {
-        mainRay.flags |= PR_STOP_BIT;
+        mainRay.stop = 1;
         return;
     }
 
@@ -1715,7 +1697,7 @@ void main() {
     // geometric surface plane. Kill these for non-transmissive lobes (diffuse/specular).
     // Transmission (lobeType 2: glass/water) still needs through-surface rays.
     if (lobeType != 2 && dot(sampleDir, geometricNormal) <= 0.0) {
-        mainRay.flags |= PR_STOP_BIT;
+        mainRay.stop = 1;
         return;
     }
 
@@ -1728,5 +1710,5 @@ void main() {
     mainRay.origin = offset_ray(worldPos, bounceOffsetN);
 
     mainRay.direction = sampleDir;
-    mainRay.flags &= ~PR_STOP_BIT;
+    mainRay.stop = 0;
 }

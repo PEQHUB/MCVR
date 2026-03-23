@@ -53,7 +53,7 @@ layout(push_constant) uniform PushConstant {
     int   pomRefinement;
     float pomFadeDistance;
     float colorExpansion;
-    uint blueNoiseFrame;
+    uint _pad0;
     uint64_t _sharcBDA0, _sharcBDA1, _sharcBDA2;
     float _sp0, _sp1, _sp2, _sp3;
     uint _sp4;
@@ -115,21 +115,14 @@ void main() {
         float hR = textureLod(textures[nonuniformEXT(face.textureID)], clamp(texUV + dU, uvMin, uvMax), 0).r;
         float hU = textureLod(textures[nonuniformEXT(face.textureID)], clamp(texUV + dV, uvMin, uvMax), 0).r;
 
-        // Edge fade: flatten normals near face edges to match displacement fade.
-        // Width formula matches displaced_block.rint exactly.
+        // Edge fade: flatten normals near face edges to match zero displacement there
         vec2 uvSpan = uvMax - uvMin;
-        float texelsU = max(texSize.x * uvSpan.x, 1.0);
-        float texelsV = max(texSize.y * uvSpan.y, 1.0);
-        float edgeWidthU = min(2.0, max(1.0, face.heightScale * texelsU)) / texelsU;
-        float edgeWidthV = min(2.0, max(1.0, face.heightScale * texelsV)) / texelsV;
+        float edgeWidthU = 1.0 / max(texSize.x * uvSpan.x, 1.0);
+        float edgeWidthV = 1.0 / max(texSize.y * uvSpan.y, 1.0);
         // Recover parametric u,v from texture UV
         vec2 param = (texUV - uvMin) / max(uvSpan, vec2(1e-6));
-        uint fadeMask = face.fadeEdgeMask;
-        float edgeFade = 1.0;
-        if ((fadeMask & 0x1u) != 0u) edgeFade *= smoothstep(0.0, edgeWidthU, param.x);
-        if ((fadeMask & 0x2u) != 0u) edgeFade *= smoothstep(0.0, edgeWidthU, 1.0 - param.x);
-        if ((fadeMask & 0x4u) != 0u) edgeFade *= smoothstep(0.0, edgeWidthV, param.y);
-        if ((fadeMask & 0x8u) != 0u) edgeFade *= smoothstep(0.0, edgeWidthV, 1.0 - param.y);
+        float edgeFade = smoothstep(0.0, edgeWidthU, param.x) * smoothstep(0.0, edgeWidthU, 1.0 - param.x)
+                       * smoothstep(0.0, edgeWidthV, param.y) * smoothstep(0.0, edgeWidthV, 1.0 - param.y);
 
         // World-space edge vectors per texel
         vec3 dpdu = face.edgeU / max(texSize.x * uvSpan.x, 1.0);
@@ -175,9 +168,11 @@ void main() {
     mainRay.metallic = metallic;
     mainRay.f0 = f0;
     mainRay.hitT = gl_HitTEXT;
+    mainRay.stop = 0u;
+    mainRay.cont = 1u;
+    mainRay.noisy = 0u;
     mainRay.albedoEmission = 0.0;
-    // Set cont=1 (continuation), clear stop/noisy, emBlockType=255, preserve isHand/insideBoat
-    mainRay.flags = (mainRay.flags & (PR_ISHAND_BIT | PR_INSIDEBOAT_BIT)) | PR_CONT_BIT | (255u << PR_EMBLOCK_SHIFT);
+    mainRay.emBlockTypeOut = 255u;
 
     // Throughput: Lambertian approximation for indirect bounces
     float NdotV = max(dot(normal, -gl_WorldRayDirectionEXT), 0.0);

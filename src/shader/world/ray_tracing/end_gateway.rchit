@@ -183,6 +183,10 @@ void main() {
     mainRay.worldPos = worldPos;
     mainRay.normal = vec3(0);
     mainRay.albedoValue = vec4(0.0);
-    // Clear noisy/lobeType, set stop=1 (preserve isHand/insideBoat/emBlockType)
-    mainRay.flags = (mainRay.flags & (PR_ISHAND_BIT | PR_INSIDEBOAT_BIT)) | PR_STOP_BIT | (prGetEmBlockType(mainRay) << PR_EMBLOCK_SHIFT);
+    mainRay.specularValue = vec4(0.0);
+    mainRay.normalValue = vec4(0.0);
+    mainRay.flagValue = ivec4(0);
+    mainRay.noisy = 0;
+    mainRay.lobeType = 0;
+    mainRay.stop = 1;
 }

@@ -343,7 +343,7 @@ std::shared_ptr<vk::RayTracingPipeline> vk::RayTracingPipelineBuilder::build(std
     pipelineInfo.groupCount = shaderGroupBuilder_.shaderGroupCreateInfos.size();
     pipelineInfo.pGroups = shaderGroupBuilder_.shaderGroupCreateInfos.data();
     pipelineInfo.layout = pipelineLayout_;
-    pipelineInfo.maxPipelineRayRecursionDepth = 3;
+    pipelineInfo.maxPipelineRayRecursionDepth = 16;
     if (device->hasOMM() && Renderer::options.ommEnabled) {
         pipelineInfo.flags |= VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_EXT;
     }

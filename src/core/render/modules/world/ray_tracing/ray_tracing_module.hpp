@@ -38,7 +38,7 @@ struct RayTracingPushConstant {
     float pomFadeDistance;       // distance in blocks to fade POM out (8-256)
     // Color expansion (offset 48)
     float colorExpansion;        // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
-    uint32_t blueNoiseFrame;     // monotonic frame counter for blue noise temporal offset
+    uint32_t _pad0;              // alignment padding for uint64_t below
     // SHARC fields (offset 56, 52 bytes) — buffer device addresses + grid params
     uint64_t sharcHashEntries;   // BDA of hash entry buffer
     uint64_t sharcAccumulation;  // BDA of accumulation buffer
@@ -226,7 +226,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::shared_ptr<vk::DeviceLocalBuffer> sharcAccumulation_;
     std::shared_ptr<vk::DeviceLocalBuffer> sharcResolved_;
     bool sharcBuffersInitialized_ = false;
-    bool sharcResizePending_ = false;
     uint32_t sharcFrameIndex_ = 0;
     float sharcPrevCameraX_ = 0.0f, sharcPrevCameraY_ = 0.0f, sharcPrevCameraZ_ = 0.0f;
 
@@ -243,10 +242,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     // Offline accumulation compute pipeline (resources stored in Renderer statics)
     std::shared_ptr<vk::Shader> accumShader_;
     void initAccumulationPipeline();
-
-    // Blue noise (Owen-scrambled Sobol + spatial scrambling tile)
-    std::shared_ptr<class BlueNoise> blueNoise_;
-    bool blueNoiseUploaded_ = false;
 
     // Energy compensation LUT (64x64 RGBA16F)
     // R = GGX E(NdotV, alpha), G = FON E(NdotV, r), B = GGX E_avg(alpha), A = FON E_avg(r)

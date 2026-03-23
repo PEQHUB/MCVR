@@ -8,7 +8,7 @@ layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
 hitAttributeEXT vec2 attribs;
 
 void main() {
-    if (prGetInsideBoat(mainRay)) {
+    if (mainRay.insideBoat > 0) {
         ignoreIntersectionEXT;
     } else {
         return;

@@ -65,7 +65,6 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     // Face data accessible via BDA in the intersection shader.
     std::vector<VkAabbPositionsKHR> displacedAABBs;
     std::vector<vk::Data::DisplacedFaceData> displacedFaceData;
-    uint32_t displacedFaceCount = 0; // Cached count, survives releaseHostGeometry()
     std::shared_ptr<vk::DeviceLocalBuffer> displacedAABBBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
     std::shared_ptr<vk::BLAS> displacedBlas;
@@ -85,10 +84,6 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     ~ChunkBuildData();
 
     void build(bool allowMicromapBake = true, bool skipOMM = false, glm::vec3 cameraPos = glm::vec3(0));
-
-    // Release CPU-side vertex/index data after GPU upload + BLAS build.
-    // Frees ~4GB of RAM across all loaded chunks.
-    void releaseHostGeometry();
 };
 
 struct Chunk1;
@@ -145,6 +140,8 @@ struct ChunkRenderData : public SharedObject<ChunkRenderData> {
     std::shared_ptr<std::vector<World::GeometryTypes>> geometryTypes;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
+    std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>> vertices;
+    std::shared_ptr<std::vector<std::vector<uint32_t>>> indices;
 };
 
 struct ChunkLightEntry {
@@ -173,6 +170,8 @@ struct Chunk1 : public SharedObject<Chunk1> {
     uint32_t allIndexCount;
     uint32_t geometryCount;
     std::shared_ptr<std::vector<World::GeometryTypes>> geometryTypes;
+    std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>> vertices;
+    std::shared_ptr<std::vector<std::vector<uint32_t>>> indices;
 
     std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer; // DDA face data (BDA access)
     std::shared_ptr<vk::BLAS> displacedBlas; // Separate AABB BLAS for DDA displacement

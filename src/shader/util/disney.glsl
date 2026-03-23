@@ -118,17 +118,16 @@ float SmithGAniso(float NDotV, float VDotX, float VDotY, float ax, float ay) {
     return (2.0 * NDotV) / (NDotV + sqrt(a * a + b * b + c * c));
 }
 
-vec3 SampleVMF(inout uint seed, vec3 mu, float kappa, vec2 xi) {
+vec3 SampleVMF(inout uint seed, vec3 mu, float kappa) {
     kappa = max(kappa, 0.1);
-    bool useBN = (xi.x >= 0.0);
 
-    float u1 = useBN ? xi.x : rand(seed);
+    float u1 = rand(seed);
     float expNeg2K = exp(-2.0 * kappa);
     float w = 1.0 + (1.0 / kappa) * log(u1 + (1.0 - u1) * expNeg2K);
 
     w = clamp(w, -1.0, 1.0);
 
-    float u2 = useBN ? xi.y : rand(seed);
+    float u2 = rand(seed);
     float phi = 2.0 * PI * u2;
     float vx = cos(phi);
     float vy = sin(phi);
@@ -147,11 +146,6 @@ vec3 SampleVMF(inout uint seed, vec3 mu, float kappa, vec2 xi) {
 
     float sinTheta = sqrt(max(0.0, 1.0 - w * w));
     return normalize(w * mu + sinTheta * (vx * u_basis + vy * v_basis));
-}
-
-// PCG fallback overload
-vec3 SampleVMF(inout uint seed, vec3 mu, float kappa) {
-    return SampleVMF(seed, mu, kappa, vec2(-1.0));
 }
 
 float Luminance(vec3 c) {
@@ -461,16 +455,15 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
     return DisneyEval(mat, V, N, L, pdf, 0);
 }
 
-vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed, out uint lobeType, int brdfFlags, vec3 xi) {
+vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed, out uint lobeType, int brdfFlags) {
     pdf = 0.0;
     vec3 T, B;
     Onb(N, T, B);
 
     vec3 localV = ToLocal(T, B, N, V);
-    // When xi >= 0, use pre-generated samples (blue noise on primary hit); otherwise PCG
-    float r1 = (xi.x >= 0.0) ? xi.x : rand(seed);
-    float r2 = (xi.y >= 0.0) ? xi.y : rand(seed);
-    float r3 = (xi.z >= 0.0) ? xi.z : rand(seed);
+    float r1 = rand(seed);
+    float r2 = rand(seed);
+    float r3 = rand(seed);
 
     // Anisotropic roughness
     float a = max(mat.roughness, 1e-4);
@@ -541,14 +534,9 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
     return DisneyEval(mat, V, N, L, pdf, brdfFlags);
 }
 
-// Overload: flags but no blue noise (PCG fallback via negative xi)
-vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed, out uint lobeType, int brdfFlags) {
-    return DisneySample(mat, V, N, L, pdf, seed, lobeType, brdfFlags, vec3(-1.0));
-}
-
-// Overload: no flags, no blue noise
+// Backward-compatible overload (no flags = original Disney behavior)
 vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed, out uint lobeType) {
-    return DisneySample(mat, V, N, L, pdf, seed, lobeType, 0, vec3(-1.0));
+    return DisneySample(mat, V, N, L, pdf, seed, lobeType, 0);
 }
 
 #endif

@@ -504,7 +504,7 @@ void Framework::submitCommand() {
     std::vector<VkSemaphore> signalSemaphores;
     if (!decoupledPresent_) {
         waitSemaphores.push_back(currentContext_->imageAcquiredSemaphore->vkSemaphore());
-        waitStageMasks.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        waitStageMasks.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
         signalSemaphores.push_back(currentContext_->commandProcessedSemaphore->vkSemaphore());
     }
     std::vector<VkCommandBuffer> commandbuffers = {
@@ -617,21 +617,11 @@ void Framework::present() {
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentEnd);
 #endif
 
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || vk::Window::framebufferResized ||
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || vk::Window::framebufferResized ||
         Renderer::options.needRecreate || pipeline_->needRecreate) {
         renderDiag("  triggering recreate (result=%d needRecreate=%d)", result, (int)Renderer::options.needRecreate);
         recreate();
         return;
-    }
-    // VK_SUBOPTIMAL_KHR — image was presented successfully, just not optimal for
-    // the current surface properties. No need to recreate; unnecessary recreates
-    // cause frame stutters.
-    if (result == VK_SUBOPTIMAL_KHR) {
-        static bool loggedOnce = false;
-        if (!loggedOnce) {
-            renderDiag("  VK_SUBOPTIMAL_KHR from vkQueuePresentKHR — continuing without recreate");
-            loggedOnce = true;
-        }
     } else if (result != VK_SUCCESS) {
         waitDeviceIdle();
         crashExit(result, "vkQueuePresentKHR failed");
