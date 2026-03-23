@@ -368,7 +368,33 @@ void WorldPrepareContext::render() {
 
             blasIndex++;
 
-            // Displacement is now handled via in-place tessellation (WORLD_SOLID geometry).
+            // DDA displacement: add separate TLAS instance for the AABB BLAS
+            if (chunk1->displacedBlas && chunk1->displacedFaceDataBuffer) {
+                instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0,
+                                               chunk1->displacedBlas);
+
+                // Only 1 geometry: WORLD_DISPLACED (procedural hit group)
+                geometryTypes.push_back(World::GeometryTypes::WORLD_DISPLACED);
+
+                // Face data buffer address for the intersection shader
+                vertexBufferAddrs.push_back(chunk1->displacedFaceDataBuffer->bufferAddress());
+                indexBufferAddrs.push_back(0); // AABBs don't use index buffers
+                lastVertexBufferAddrs.push_back(0);
+                lastIndexBufferAddrs.push_back(0);
+
+                glm::mat4 lastObjToWorldMat = glm::transpose(glm::mat4(
+                    glm::vec4(1, 0, 0, static_cast<float>(static_cast<double>(chunk1->x) - cameraPos.x)),
+                    glm::vec4(0, 1, 0, static_cast<float>(static_cast<double>(chunk1->y) - cameraPos.y)),
+                    glm::vec4(0, 0, 1, static_cast<float>(static_cast<double>(chunk1->z) - cameraPos.z)),
+                    glm::vec4(0, 0, 0, 1)));
+                lastObjToWorldMats.push_back(lastObjToWorldMat);
+
+                blasOffset.push_back(blasAccu);
+                blasAccu += 1; // 1 geometry
+                blasGroupAccu += 1; // no SHADOW prefix for displaced BLAS
+
+                blasIndex++;
+            }
         }
     }
 

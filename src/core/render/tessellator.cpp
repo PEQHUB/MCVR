@@ -162,7 +162,12 @@ Tessellator::Output Tessellator::tessellate(const Input &input) {
                 input.uvMinX, input.uvMinY, input.uvMaxX, input.uvMaxY);
 
             // Displacement: height=1 means surface (no displacement), height=0 means max depth
-            float displacement = (1.0f - height) * input.heightScale;
+            // Edge fade: displacement must be zero at face boundaries to maintain watertight
+            // cube edges. Without this, adjacent perpendicular faces tear apart at their seams.
+            float edgeFade = std::min({u, 1.0f - u, v, 1.0f - v}) * static_cast<float>(N);
+            edgeFade = std::clamp(edgeFade, 0.0f, 1.0f); // 0 at edge, 1 one texel inward
+
+            float displacement = (1.0f - height) * input.heightScale * edgeFade;
             glm::vec3 offset = -faceNormal * displacement;
             vert.pos += offset;
             vert.postBase += offset; // Keep motion vectors consistent

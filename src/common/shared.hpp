@@ -377,11 +377,11 @@ namespace Data {
         T_FLOAT noiseStrength;  // [0,1]
         T_UINT  noisePacked;    // Bit-packed: octaves(0-3), type(4-8), seed(9-17), target(20-23)
 
-        // Pack 4: POM + height field + normal controls (16 bytes)
-        T_UINT  pomPacked0;   // filterMode(3) | pomMode(2) | heightSource(3) | pomSteps(8) | pomRefinement(4) | filterRadius(4) | mipBias(4) | flags(4)
+        // Pack 4: displacement + height field + normal controls (16 bytes)
+        T_UINT  pomPacked0;   // heightFilter(3) | dispMethod(3) | heightSource(3) | ddaSteps(7) | ddaRefinement(4) | filterRadius(4) | mipBias(4) | selfShadow(1) | clipSilhouette(1) | mvs(1) | areaLightOff(1)
         T_UINT  pomPacked1;   // normalClamp(8) | geometricBlend(8) | pomAOStrength(8) | heightContrast(8)
         T_UINT  pomPacked2;   // heightRemapMin(8) | heightRemapMax(8) | heightOffset(8) | normalDistanceFade(8)
-        T_FLOAT pomDepth;     // [0.00-0.50] per-block POM depth in blocks (0 = disabled)
+        T_FLOAT pomDepth;     // [0.00-2.00] per-block displacement depth in blocks (0 = disabled)
 
         // Pack 5: gamut + noise mask + normal strength
         T_FLOAT gamutBoost;     // Oklab chroma scale (1.0 = neutral)
@@ -419,6 +419,47 @@ namespace Data {
     struct MaterialClassMapping {
         MaterialClassEntry entries[MAX_MATERIAL_CLASSES];
     }; // 72 KB (512 × 144 bytes)
+
+    // DDA displacement: per-face data for intersection shader ray marching.
+    // Stored in SSBO, indexed by gl_PrimitiveID. 128 bytes per face, std430.
+    struct DisplacedFaceData {
+        // 0-15: face geometry
+        T_VEC3 corner;           // World-space corner of the quad (parametric 0,0)
+        T_UINT faceAxis;         // 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
+
+        // 16-31: face edges + displacement scale
+        T_VEC3 edgeU;            // Edge along U axis (corner → u-neighbor)
+        T_FLOAT heightScale;     // Displacement depth in world units
+
+        // 32-47: face edges + texture
+        T_VEC3 edgeV;            // Edge along V axis (corner → v-neighbor)
+        T_UINT textureID;        // Albedo texture ID
+
+        // 48-63: texture refs + UV bounds
+        T_INT normalTexID;       // Normal texture ID (-1 = none)
+        T_INT specularTexID;     // Specular texture ID (-1 = none)
+        T_VEC2 uvMin;            // Texture UV min bounds
+
+        // 64-79: UV bounds + material
+        T_VEC2 uvMax;            // Texture UV max bounds
+        T_UINT pomPacked0;       // Per-block displacement params (same layout as MaterialClassEntry)
+        T_UINT materialClassIdx; // Material class index into SSBO
+
+        // 80-95: emissive + luminance
+        T_UINT emissiveBlockType;// emissiveBlockType from vertex (emission type + material class)
+        T_UINT properties;       // TextureMapEntry properties bitfield
+        T_FLOAT lumMin;          // AutoPBR luminance min
+        T_FLOAT lumMax;          // AutoPBR luminance max
+
+        // 96-111: color layer
+        T_VEC4 colorLayer;       // Vertex color tint
+
+        // 112-127: packed params + flags
+        T_UINT pomPacked1;       // normalClamp, geometricBlend, pomAOStrength, heightContrast
+        T_UINT pomPacked2;       // heightRemapMin/Max, heightOffset, normalDistanceFade
+        T_UINT flags;            // Material flags (bit 3=AutoPBR, bit 6=invertHeight, etc.)
+        T_UINT _pad0;            // Padding to 128 bytes
+    }; // 128 bytes (8 x vec4), std430 aligned
 
     struct ExposureData {
         T_INT width;

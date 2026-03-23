@@ -41,6 +41,7 @@ class World : public SharedObject<World> {
         BOAT_WATER_MASK,
         END_PORTAL,
         END_GATE_WAY,
+        WORLD_DISPLACED,      // DDA intersection shader — procedural AABB geometry
         NUM_GEOMETRY_TYPES,
     };
 

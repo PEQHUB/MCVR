@@ -347,12 +347,12 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
         }
     }
 
-    // Geometric tessellation: replace height-mapped quads with NxN displaced triangle grids
-    bool useTessellation = Renderer::options.displacementQuality >= 1;
+    // Geometric displacement: per-block method dispatch (DDA collects AABBs, Tessellation generates triangles)
+    bool useDisplacement = Renderer::options.displacementQuality >= 1;
     vk::Data::TextureMapping *texMappingPtr = nullptr;
     vk::Data::MaterialClassMapping *matClassPtr = nullptr;
     auto tessTextures = textures; // reuse existing textures ptr from line 57
-    if (useTessellation) {
+    if (useDisplacement) {
         auto buffers = Renderer::instance().buffers();
         auto texMappingBuf = buffers ? buffers->textureMappingBuffer() : nullptr;
         texMappingPtr = texMappingBuf ? static_cast<vk::Data::TextureMapping *>(texMappingBuf->mappedPtr()) : nullptr;
@@ -360,7 +360,7 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
         matClassPtr = matClassBuf ? static_cast<vk::Data::MaterialClassMapping *>(matClassBuf->mappedPtr()) : nullptr;
     }
 
-    if (useTessellation && texMappingPtr) {
+    if (useDisplacement && texMappingPtr) {
         uint32_t maxTessLevel = Renderer::options.tessMaxLevel;
         // Chunk center distance to camera for LOD tessellation level
         glm::vec3 chunkCenter(x * 16.0f + 8.0f, y * 16.0f + 8.0f, z * 16.0f + 8.0f);
@@ -394,24 +394,36 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                     // Check for LabPBR height map
                     bool hasLabPBRHeight = (entry.properties & vk::Data::TEX_PROP_HAS_HEIGHT_MAP) && entry.normal >= 0;
 
-                    // Check for AutoPBR with pomDepth > 0
+                    // Read material class for displacement method dispatch
                     bool isAutoPBR = false;
                     float pomDepth = 0.0f;
                     const vk::Data::MaterialClassEntry *matEntry = nullptr;
                     uint32_t materialType = (v0.emissiveBlockType >> 8u) & 0xFFu;
+                    int dispMethod = 0; // 0=Off, 1=DDA, 2=Tessellation, 3=Hybrid, 4=CLAS
                     if (materialType > 0 && matClassPtr) {
                         uint32_t mcIdx = materialType - 1;
                         if (mcIdx < vk::Data::MAX_MATERIAL_CLASSES) {
                             matEntry = &matClassPtr->entries[mcIdx];
                             pomDepth = matEntry->pomDepth;
-                            isAutoPBR = (matEntry->flags & 0x8u) != 0; // Bit 3 = AutoPBR
+                            isAutoPBR = (matEntry->flags & 0x8u) != 0;
+                            dispMethod = (matEntry->pomPacked0 >> 3) & 0x7; // bits 3-5
                         }
                     }
 
-                    bool shouldTessellate = (hasLabPBRHeight || (isAutoPBR && pomDepth > 0.0f));
+                    // Resolve method: if Off (0) but block has height data + depth, use global default
+                    bool hasHeight = hasLabPBRHeight || (isAutoPBR && pomDepth > 0.0f);
+                    if (dispMethod == 0 && hasHeight && pomDepth > 0.0f) {
+                        // Global default maps to tessellation (DDA disabled pending VRAM budgeting)
+                        dispMethod = (Renderer::options.displacementQuality >= 1) ? 2 : 0;
+                    }
+                    // Force DDA→Tessellation until VRAM budget + distance culling are implemented
+                    if (dispMethod == 1) dispMethod = 2;
 
-                    if (shouldTessellate) {
-                        // Determine face axis from normal
+                    // Displace when method is Tessellation(2) or Hybrid(3)
+                    bool shouldDisplace = hasHeight && (dispMethod == 2 || dispMethod == 3);
+
+                    if (shouldDisplace) {
+                        // Common setup: face axis, UV bounds, texture data
                         glm::vec3 norm = v0.norm;
                         float ax = std::abs(norm.x), ay = std::abs(norm.y), az = std::abs(norm.z);
                         if (ax > 0.9f || ay > 0.9f || az > 0.9f) {
@@ -420,7 +432,6 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                             else if (ay > 0.9f) faceAxis = (norm.y > 0) ? 2 : 3;
                             else faceAxis = (norm.z > 0) ? 4 : 5;
 
-                            // Get UV bounds for this quad
                             glm::vec2 uvMin(1e9f), uvMax(-1e9f);
                             std::array<uint32_t, 6> quadIdx = {i0, i1, i2, i3, i4, i5};
                             for (int q = 0; q < 6; q++) {
@@ -428,60 +439,139 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                                 uvMax = glm::max(uvMax, verts[quadIdx[q]].textureUV);
                             }
 
-                            // Get texture resolution for LOD
                             uint32_t texRes = 16;
                             auto *albedoRGBA = tessTextures ? tessTextures->getTextureRGBAData(texID) : nullptr;
                             if (albedoRGBA && albedoRGBA->width > 0) texRes = albedoRGBA->width;
 
-                            // Get height data
                             const Textures::TextureRGBAData *normalRGBA = nullptr;
                             if (hasLabPBRHeight && entry.normal >= 0 && tessTextures) {
                                 normalRGBA = tessTextures->getTextureRGBAData(static_cast<uint32_t>(entry.normal));
                             }
 
-                            // Use per-block pomDepth if set, otherwise global heightScale
-                            float heightScale = (pomDepth > 0.0f) ? pomDepth : Renderer::options.pomHeightScale;
+                            float heightScale = std::clamp(
+                                (pomDepth > 0.0f) ? pomDepth : Renderer::options.pomHeightScale,
+                                0.0f, 0.05f); // Cap at 0.05 blocks (~1 texel on 16px texture)
+                            uint32_t i4v = idx[t + 4]; // 4th unique vertex
 
-                            uint32_t tessLevel = Tessellator::computeTessLevel(
-                                distToCamera, texRes, maxTessLevel,
-                                Renderer::options.tessNearDist, Renderer::options.tessMidDist, Renderer::options.tessFarDist);
+                            // --- Tessellation path (method 2 or 3) ---
+                            if (dispMethod == 2 || dispMethod == 3) {
+                                uint32_t tessLevel = Tessellator::computeTessLevel(
+                                    distToCamera, texRes, maxTessLevel,
+                                    Renderer::options.tessNearDist, Renderer::options.tessMidDist, Renderer::options.tessFarDist);
 
-                            // Build tessellation input — index pattern [j,j+1,j+2, j+2,j+3,j]
-                            // i0=j, i1=j+1, i2=j+2, i3=j+2(dup!), i4=j+3, i5=j(dup!)
-                            // 4 unique verts: i0, i1, i2, i4
-                            uint32_t i4 = idx[t + 4]; // The actual 4th unique vertex (j+3)
-                            Tessellator::Input tessInput{};
-                            tessInput.v0 = &verts[i0];
-                            tessInput.v1 = &verts[i1];
-                            tessInput.v2 = &verts[i2];
-                            tessInput.v3 = &verts[i4]; // i4 = j+3, the 4th unique vertex
-                            tessInput.faceAxis = faceAxis;
-                            tessInput.normalRGBA = normalRGBA;
-                            tessInput.albedoRGBA = albedoRGBA;
-                            tessInput.material = matEntry;
-                            tessInput.hasLabPBRHeight = hasLabPBRHeight;
-                            tessInput.isAutoPBR = isAutoPBR;
-                            tessInput.uvMinX = uvMin.x;
-                            tessInput.uvMinY = uvMin.y;
-                            tessInput.uvMaxX = uvMax.x;
-                            tessInput.uvMaxY = uvMax.y;
-                            tessInput.tessLevel = tessLevel;
-                            tessInput.heightScale = heightScale;
+                                Tessellator::Input tessInput{};
+                                tessInput.v0 = &verts[i0];
+                                tessInput.v1 = &verts[i1];
+                                tessInput.v2 = &verts[i2];
+                                tessInput.v3 = &verts[i4v];
+                                tessInput.faceAxis = faceAxis;
+                                tessInput.normalRGBA = normalRGBA;
+                                tessInput.albedoRGBA = albedoRGBA;
+                                tessInput.material = matEntry;
+                                tessInput.hasLabPBRHeight = hasLabPBRHeight;
+                                tessInput.isAutoPBR = isAutoPBR;
+                                tessInput.uvMinX = uvMin.x;
+                                tessInput.uvMinY = uvMin.y;
+                                tessInput.uvMaxX = uvMax.x;
+                                tessInput.uvMaxY = uvMax.y;
+                                tessInput.tessLevel = tessLevel;
+                                tessInput.heightScale = heightScale;
 
-                            auto tessOutput = Tessellator::tessellate(tessInput);
-
-                            if (!tessOutput.vertices.empty()) {
-                                // Append tessellated vertices and indices
-                                uint32_t baseVertex = static_cast<uint32_t>(verts.size()) + static_cast<uint32_t>(newVerts.size());
-                                for (uint32_t ti : tessOutput.indices) {
-                                    newIndices.push_back(baseVertex + ti);
+                                auto tessOutput = Tessellator::tessellate(tessInput);
+                                if (!tessOutput.vertices.empty()) {
+                                    uint32_t baseVertex = static_cast<uint32_t>(verts.size()) + static_cast<uint32_t>(newVerts.size());
+                                    for (uint32_t ti : tessOutput.indices) {
+                                        newIndices.push_back(baseVertex + ti);
+                                    }
+                                    newVerts.insert(newVerts.end(), tessOutput.vertices.begin(), tessOutput.vertices.end());
+                                    tessellated = true;
+                                    anyTessellated = true;
                                 }
-                                newVerts.insert(newVerts.end(), tessOutput.vertices.begin(), tessOutput.vertices.end());
+                            }
 
-                                tessellated = true;
+                            // --- DDA path (method 1) ---
+                            if (dispMethod == 1) {
+                                // Map quad corners by UV: find min-UV corner, U-neighbor, V-neighbor
+                                const auto *qVerts = &verts[0];
+                                uint32_t qIdx[4] = {i0, i1, i2, i4v};
+                                // Find min-UV corner
+                                int minI = 0;
+                                for (int qi = 1; qi < 4; qi++) {
+                                    auto &a = qVerts[qIdx[qi]].textureUV, &b = qVerts[qIdx[minI]].textureUV;
+                                    if (a.x < b.x - 0.0001f || (std::abs(a.x - b.x) < 0.0001f && a.y < b.y))
+                                        minI = qi;
+                                }
+                                glm::vec3 cornerPos = qVerts[qIdx[minI]].pos;
+                                glm::vec3 edgeU(0), edgeV(0);
+                                glm::vec2 cornerUV = qVerts[qIdx[minI]].textureUV;
+                                for (int qi = 0; qi < 4; qi++) {
+                                    if (qi == minI) continue;
+                                    glm::vec2 dUV = qVerts[qIdx[qi]].textureUV - cornerUV;
+                                    if (std::abs(dUV.x) > 0.0001f && std::abs(dUV.y) < 0.0001f && glm::length(edgeU) < 0.001f)
+                                        edgeU = qVerts[qIdx[qi]].pos - cornerPos;
+                                    else if (std::abs(dUV.y) > 0.0001f && std::abs(dUV.x) < 0.0001f && glm::length(edgeV) < 0.001f)
+                                        edgeV = qVerts[qIdx[qi]].pos - cornerPos;
+                                }
+                                // Fallback: if UV mapping failed, assign remaining edges
+                                if (glm::length(edgeU) < 0.001f || glm::length(edgeV) < 0.001f) {
+                                    for (int qi = 0; qi < 4; qi++) {
+                                        if (qi == minI) continue;
+                                        glm::vec3 e = qVerts[qIdx[qi]].pos - cornerPos;
+                                        if (glm::length(edgeU) < 0.001f) edgeU = e;
+                                        else if (glm::length(edgeV) < 0.001f) edgeV = e;
+                                    }
+                                }
+
+                                // Compute AABB: expand along negative face normal by heightScale
+                                static const glm::vec3 FACE_NORMALS[6] = {
+                                    {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+                                glm::vec3 fn = FACE_NORMALS[faceAxis];
+                                glm::vec3 p[4];
+                                for (int qi = 0; qi < 4; qi++) p[qi] = qVerts[qIdx[qi]].pos;
+                                glm::vec3 bmin(1e9f), bmax(-1e9f);
+                                for (int qi = 0; qi < 4; qi++) {
+                                    bmin = glm::min(bmin, p[qi]);
+                                    bmax = glm::max(bmax, p[qi]);
+                                    glm::vec3 displaced = p[qi] - fn * heightScale;
+                                    bmin = glm::min(bmin, displaced);
+                                    bmax = glm::max(bmax, displaced);
+                                }
+                                // Small epsilon expansion to avoid precision issues
+                                bmin -= glm::vec3(0.001f);
+                                bmax += glm::vec3(0.001f);
+
+                                VkAabbPositionsKHR aabb{bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z};
+                                displacedAABBs.push_back(aabb);
+
+                                // Build DisplacedFaceData
+                                vk::Data::DisplacedFaceData fd{};
+                                fd.corner = cornerPos;
+                                fd.faceAxis = faceAxis;
+                                fd.edgeU = edgeU;
+                                fd.heightScale = heightScale;
+                                fd.edgeV = edgeV;
+                                fd.textureID = texID;
+                                fd.normalTexID = entry.normal;
+                                fd.specularTexID = entry.specular;
+                                fd.uvMin = uvMin;
+                                fd.uvMax = uvMax;
+                                fd.pomPacked0 = matEntry ? matEntry->pomPacked0 : 0;
+                                uint32_t mcIdx = (materialType > 0) ? (materialType - 1) : 0;
+                                fd.materialClassIdx = mcIdx;
+                                fd.emissiveBlockType = v0.emissiveBlockType;
+                                fd.properties = entry.properties;
+                                fd.lumMin = matEntry ? matEntry->lumMin : 0.0f;
+                                fd.lumMax = matEntry ? matEntry->lumMax : 1.0f;
+                                fd.colorLayer = v0.colorLayer;
+                                fd.pomPacked1 = matEntry ? matEntry->pomPacked1 : 0;
+                                fd.pomPacked2 = matEntry ? matEntry->pomPacked2 : 0;
+                                fd.flags = matEntry ? matEntry->flags : 0;
+                                fd._pad0 = 0;
+                                displacedFaceData.push_back(fd);
+
+                                tessellated = true; // consumed — don't keep original quad
                                 anyTessellated = true;
                             }
-                            // If tessellation failed (degenerate quad), tessellated stays false → original quad kept
                         }
                     }
                 }
@@ -566,6 +656,31 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                ->querySizeInfo(device)
                ->allocateBuffers(physicalDevice, device, vma)
                ->build(device);
+
+    // Build separate AABB BLAS for DDA displaced faces
+    if (!displacedAABBs.empty()) {
+        displacedAABBBuffer = vk::DeviceLocalBuffer::create(
+            vma, device, displacedAABBs.size() * sizeof(VkAabbPositionsKHR),
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+        displacedAABBBuffer->uploadToStagingBuffer(displacedAABBs.data());
+
+        displacedFaceDataBuffer = vk::DeviceLocalBuffer::create(
+            vma, device, displacedFaceData.size() * sizeof(vk::Data::DisplacedFaceData),
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        displacedFaceDataBuffer->uploadToStagingBuffer(displacedFaceData.data());
+
+        displacedBlasBuilder = vk::BLASBuilder::create();
+        auto displacedGeomBuilder = displacedBlasBuilder->beginGeometries();
+        displacedGeomBuilder->defineAABBGeometry(
+            displacedAABBBuffer, static_cast<uint32_t>(displacedAABBs.size()), true);
+        displacedGeomBuilder->endGeometries();
+        displacedBlas = displacedBlasBuilder
+                            ->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR)
+                            ->querySizeInfo(device)
+                            ->allocateBuffers(physicalDevice, device, vma)
+                            ->build(device);
+    }
 }
 
 ChunkBuildDataBatch::ChunkBuildDataBatch(uint32_t maxBatchSize,
@@ -712,7 +827,7 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
         if (chunkBuildDataBatch->batchData.size() > 0) {
             worldAsyncBuffer->begin();
 
-            // Upload all buffers (vertex, index, OMM)
+            // Upload all buffers (vertex, index, OMM, displaced)
             for (auto chunkBuildData : chunkBuildDataBatch->batchData) {
                 for (int i = 0; i < chunkBuildData->geometryCount; i++) {
                     chunkBuildData->vertexBuffers[i]->uploadToBuffer(worldAsyncBuffer);
@@ -726,6 +841,13 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
                         gd.arrayBuffer->uploadToBuffer(worldAsyncBuffer);
                         gd.descBuffer->uploadToBuffer(worldAsyncBuffer);
                     }
+                }
+                // DDA displacement buffer uploads
+                if (chunkBuildData->displacedAABBBuffer) {
+                    chunkBuildData->displacedAABBBuffer->uploadToBuffer(worldAsyncBuffer);
+                }
+                if (chunkBuildData->displacedFaceDataBuffer) {
+                    chunkBuildData->displacedFaceDataBuffer->uploadToBuffer(worldAsyncBuffer);
                 }
             }
 
@@ -793,6 +915,20 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
                     }
                 }
             }
+            // Add barriers for displaced AABB buffers
+            for (auto chunkBuildData : chunkBuildDataBatch->batchData) {
+                if (chunkBuildData->displacedAABBBuffer) {
+                    bufferBarriers.push_back(vk::CommandBuffer::BufferMemoryBarrier{
+                        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                        .srcQueueFamilyIndex = secondaryQueueIndex,
+                        .dstQueueFamilyIndex = secondaryQueueIndex,
+                        .buffer = chunkBuildData->displacedAABBBuffer,
+                    });
+                }
+            }
             worldAsyncBuffer->barriersBufferImage(bufferBarriers, {});
 
             // Build micromaps (before BLAS build)
@@ -838,10 +974,13 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
                 vkCmdPipelineBarrier2(worldAsyncBuffer->vkCommandBuffer(), &depInfo);
             }
 
-            // Build BLAS
+            // Build BLAS (regular + displaced)
             std::vector<std::shared_ptr<vk::BLASBuilder>> builders;
             for (auto chunkBuildData : chunkBuildDataBatch->batchData) {
                 builders.push_back(chunkBuildData->blasBuilder);
+                if (chunkBuildData->displacedBlasBuilder) {
+                    builders.push_back(chunkBuildData->displacedBlasBuilder);
+                }
             }
             vk::BLASBuilder::batchSubmit(builders, worldAsyncBuffer);
 
@@ -909,6 +1048,8 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
             std::move(chunkBuildData->indexBuffers));
     } else {
         gc.collect(chunkBuildData->blas);
+        if (chunkBuildData->displacedBlas) gc.collect(chunkBuildData->displacedBlas);
+        if (chunkBuildData->displacedFaceDataBuffer) gc.collect(chunkBuildData->displacedFaceDataBuffer);
 
         gc.collect(std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
             std::move(chunkBuildData->vertexBuffers)));
@@ -921,6 +1062,12 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
     allIndexCount = chunkBuildData->allIndexCount;
     geometryCount = chunkBuildData->geometryCount;
     geometryTypes = std::make_shared<std::vector<World::GeometryTypes>>(std::move(chunkBuildData->geometryTypes));
+    // Defer destruction of old displaced resources (GPU may still reference from in-flight frames)
+    if (displacedBlas) gc.collect(displacedBlas);
+    if (displacedFaceDataBuffer) gc.collect(displacedFaceDataBuffer);
+    displacedFaceDataBuffer = chunkBuildData->displacedFaceDataBuffer;
+    displacedBlas = chunkBuildData->displacedBlas;
+    displacedFaceCount = static_cast<uint32_t>(chunkBuildData->displacedFaceData.size());
     vertices =
         std::make_shared<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>>(std::move(chunkBuildData->vertices));
     indices = std::make_shared<std::vector<std::vector<uint32_t>>>(std::move(chunkBuildData->indices));
@@ -1094,6 +1241,13 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
             }
         }
         importantBLASBuilders_->push_back(chunkBuildData->blasBuilder);
+
+        // DDA displacement: upload AABB buffer and queue displaced BLAS build
+        if (chunkBuildData->displacedBlasBuilder) {
+            Renderer::instance().buffers()->queueImportantWorldUpload(chunkBuildData->displacedAABBBuffer, nullptr);
+            Renderer::instance().buffers()->queueImportantWorldUpload(chunkBuildData->displacedFaceDataBuffer, nullptr);
+            importantBLASBuilders_->push_back(chunkBuildData->displacedBlasBuilder);
+        }
 
         // Copy geometry data BEFORE enqueue (enqueue moves them out)
         std::shared_ptr<ChunkBuildData> asyncRebuildData;

@@ -58,8 +58,12 @@ struct RayTracingPushConstant {
     int accumFrameCount;           // frame index for jitter sequence during accumulation
     float aperture;                // thin lens aperture radius (0 = pinhole)
     float focalDistance;           // focal distance in blocks
-    // Material SSBO BDA (offset 128, 8 bytes) — avoids descriptor lookup for material reads
+    // Material SSBO BDA — avoids descriptor lookup for material reads
     uint64_t materialClassAddr;    // BDA of MaterialClassMapping buffer
+    // DDA displacement BDA
+    uint64_t displacedFaceDataAddr; // BDA of merged DisplacedFaceData buffer (0 = no displaced faces)
+    T_INT displacedFaceCount;       // Total displaced faces across all chunks
+    T_INT displacementQuality;      // 0=Off, 1=DDA, 2=Tess, 3=Hybrid, 4=CLAS
 };
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {
@@ -137,6 +141,11 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
 
     std::shared_ptr<vk::Shader> endGatewayClosestHitShader_;
     std::shared_ptr<vk::Shader> endGatewayAnyHitShader_;
+
+    // DDA displacement procedural hit group
+    std::shared_ptr<vk::Shader> displacedIntersectionShader_;  // .rint
+    std::shared_ptr<vk::Shader> displacedClosestHitShader_;    // .rchit
+    std::shared_ptr<vk::Shader> displacedShadowClosestHitShader_; // .rchit (shadow)
 
     std::shared_ptr<vk::Shader> worldPostColorToDepthVertShader_;
     std::shared_ptr<vk::Shader> worldPostColorToDepthFragShader_;

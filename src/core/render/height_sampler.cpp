@@ -7,6 +7,15 @@ static constexpr float LUM_R = 0.2627f;
 static constexpr float LUM_G = 0.6780f;
 static constexpr float LUM_B = 0.0593f;
 
+float HeightSampler::sampleNearest(const uint8_t *rgba, uint32_t width, uint32_t height,
+                                   float u, float v, int channel) {
+    int ix = static_cast<int>(std::floor(u * static_cast<float>(width)));
+    int iy = static_cast<int>(std::floor(v * static_cast<float>(height)));
+    ix = std::clamp(ix, 0, static_cast<int>(width) - 1);
+    iy = std::clamp(iy, 0, static_cast<int>(height) - 1);
+    return static_cast<float>(rgba[(iy * width + ix) * 4 + channel]) / 255.0f;
+}
+
 float HeightSampler::sampleBilinear(const uint8_t *rgba, uint32_t width, uint32_t height,
                                     float u, float v, int channel) {
     // Mirror GPU pomSampleHeightBilinear: uv * texSize - 0.5, then bilinear
@@ -38,23 +47,29 @@ float HeightSampler::sampleBilinear(const uint8_t *rgba, uint32_t width, uint32_
     return top + (bot - top) * fy;
 }
 
+float HeightSampler::sampleFiltered(const uint8_t *rgba, uint32_t width, uint32_t height,
+                                    float u, float v, int channel, int filterMode) {
+    if (filterMode == FILTER_NEAREST) {
+        return sampleNearest(rgba, width, height, u, v, channel);
+    }
+    return sampleBilinear(rgba, width, height, u, v, channel);
+}
+
 float HeightSampler::sampleLabPBR(const Textures::TextureRGBAData *normalRGBA,
                                   float u, float v, float uvMinX, float uvMinY,
-                                  float uvMaxX, float uvMaxY) {
+                                  float uvMaxX, float uvMaxY, int filterMode) {
     if (!normalRGBA || normalRGBA->rgba.empty()) return 1.0f;
 
-    // Clamp to tile bounds
     u = std::clamp(u, uvMinX, uvMaxX);
     v = std::clamp(v, uvMinY, uvMaxY);
 
-    // Sample alpha channel (channel 3) of normal texture
-    return sampleBilinear(normalRGBA->rgba.data(), normalRGBA->width, normalRGBA->height, u, v, 3);
+    return sampleFiltered(normalRGBA->rgba.data(), normalRGBA->width, normalRGBA->height, u, v, 3, filterMode);
 }
 
 float HeightSampler::sampleAutoPBR(const Textures::TextureRGBAData *albedoRGBA,
                                    float u, float v, float uvMinX, float uvMinY,
                                    float uvMaxX, float uvMaxY,
-                                   int heightSourceMode,
+                                   int heightSourceMode, int filterMode,
                                    float lumMin, float lumSpan, bool invertH,
                                    float remapMin, float remapMax, float contrast, float offset) {
     if (!albedoRGBA || albedoRGBA->rgba.empty()) return 1.0f;
@@ -62,39 +77,34 @@ float HeightSampler::sampleAutoPBR(const Textures::TextureRGBAData *albedoRGBA,
     u = std::clamp(u, uvMinX, uvMaxX);
     v = std::clamp(v, uvMinY, uvMaxY);
 
-    // Sample raw channel value based on heightSourceMode
+    const uint8_t *data = albedoRGBA->rgba.data();
+    uint32_t tw = albedoRGBA->width, th = albedoRGBA->height;
+
+    // Sample raw channel value based on heightSourceMode, using selected filter
     float raw;
     switch (heightSourceMode) {
-    case 1: // Red
-        raw = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 0);
-        break;
-    case 2: // Green
-        raw = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 1);
-        break;
-    case 3: // Blue
-        raw = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 2);
-        break;
-    case 4: // Alpha
-        raw = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 3);
-        break;
+    case 1: raw = sampleFiltered(data, tw, th, u, v, 0, filterMode); break; // Red
+    case 2: raw = sampleFiltered(data, tw, th, u, v, 1, filterMode); break; // Green
+    case 3: raw = sampleFiltered(data, tw, th, u, v, 2, filterMode); break; // Blue
+    case 4: raw = sampleFiltered(data, tw, th, u, v, 3, filterMode); break; // Alpha
     case 5: { // MaxRGB
-        float r = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 0);
-        float g = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 1);
-        float b = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 2);
+        float r = sampleFiltered(data, tw, th, u, v, 0, filterMode);
+        float g = sampleFiltered(data, tw, th, u, v, 1, filterMode);
+        float b = sampleFiltered(data, tw, th, u, v, 2, filterMode);
         raw = std::max({r, g, b});
         break;
     }
     case 6: { // MinRGB
-        float r = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 0);
-        float g = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 1);
-        float b = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 2);
+        float r = sampleFiltered(data, tw, th, u, v, 0, filterMode);
+        float g = sampleFiltered(data, tw, th, u, v, 1, filterMode);
+        float b = sampleFiltered(data, tw, th, u, v, 2, filterMode);
         raw = std::min({r, g, b});
         break;
     }
     default: { // 0 or 7: Luminance (BT.2020)
-        float r = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 0);
-        float g = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 1);
-        float b = sampleBilinear(albedoRGBA->rgba.data(), albedoRGBA->width, albedoRGBA->height, u, v, 2);
+        float r = sampleFiltered(data, tw, th, u, v, 0, filterMode);
+        float g = sampleFiltered(data, tw, th, u, v, 1, filterMode);
+        float b = sampleFiltered(data, tw, th, u, v, 2, filterMode);
         raw = r * LUM_R + g * LUM_G + b * LUM_B;
         break;
     }
@@ -114,21 +124,33 @@ float HeightSampler::sample(const Textures::TextureRGBAData *normalRGBA,
                             bool hasLabPBRHeight, bool isAutoPBR,
                             float u, float v, float uvMinX, float uvMinY,
                             float uvMaxX, float uvMaxY) {
+    // Extract filter mode from pomPacked0 bits 0-2 (new layout)
+    int filterMode = material ? static_cast<int>(material->pomPacked0 & 0x7) : FILTER_BILINEAR;
+
     // LabPBR has explicit height in normal alpha — use it directly
     if (hasLabPBRHeight && normalRGBA) {
-        return sampleLabPBR(normalRGBA, u, v, uvMinX, uvMinY, uvMaxX, uvMaxY);
+        return sampleLabPBR(normalRGBA, u, v, uvMinX, uvMinY, uvMaxX, uvMaxY, filterMode);
     }
 
     // AutoPBR: derive height from albedo using material pipeline
     if (isAutoPBR && material && albedoRGBA) {
-        // Unpack height source from pomPacked0 bits 5-7
-        int heightSource = (material->pomPacked0 >> 5) & 0x7;
+        // Only displace when per-block histogram is computed (not the 0/1 default).
+        // Without a real histogram, normalization maps absolute luminance to height,
+        // making dark blocks get near-maximum displacement regardless of texture detail.
+        float earlyLumSpan = material->lumMax - material->lumMin;
+        if (earlyLumSpan > 0.95f && material->lumMin < 0.01f) {
+            // lumMin≈0, lumMax≈1 = uninitialized defaults → no meaningful displacement
+            return 1.0f; // surface level, no displacement
+        }
 
-        // Unpack height pipeline params from pomPacked1/2
-        float heightContrast = static_cast<float>((material->pomPacked1 >> 24) & 0xFF) / 10.0f; // 0-25.5
+        // Unpack height source from pomPacked0 bits 6-8 (new layout)
+        int heightSource = (material->pomPacked0 >> 6) & 0x7;
+
+        // Unpack height pipeline params from pomPacked1/2 (unchanged layout)
+        float heightContrast = static_cast<float>((material->pomPacked1 >> 24) & 0xFF) / 10.0f;
         float remapMin = static_cast<float>((material->pomPacked2 >> 0) & 0xFF) / 100.0f;
         float remapMax = static_cast<float>((material->pomPacked2 >> 8) & 0xFF) / 100.0f;
-        float heightOffset = (static_cast<float>((material->pomPacked2 >> 16) & 0xFF) - 100.0f) / 100.0f; // [-1, 1]
+        float heightOffset = (static_cast<float>((material->pomPacked2 >> 16) & 0xFF) - 100.0f) / 100.0f;
         bool invertH = (material->flags >> 6) & 0x1; // bit 6 = invertHeight
 
         float lumMin = material->lumMin;
@@ -136,7 +158,7 @@ float HeightSampler::sample(const Textures::TextureRGBAData *normalRGBA,
         float lumSpan = lumMax - lumMin;
 
         return sampleAutoPBR(albedoRGBA, u, v, uvMinX, uvMinY, uvMaxX, uvMaxY,
-                             heightSource, lumMin, lumSpan, invertH,
+                             heightSource, filterMode, lumMin, lumSpan, invertH,
                              remapMin, remapMax, heightContrast, heightOffset);
     }
 

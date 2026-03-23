@@ -623,7 +623,31 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDisplacementQuality(
     JNIEnv *, jclass, jint v, jboolean) {
-    Renderer::options.displacementQuality = std::clamp(v, 0, 3);
+    Renderer::options.displacementQuality = std::clamp(v, 0, 4);
+    Renderer::options.needRecreate = true;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTessMaxLevel(
+    JNIEnv *, jclass, jint v, jboolean) {
+    Renderer::options.tessMaxLevel = std::clamp(static_cast<uint32_t>(v), 2u, 32u);
+    Renderer::options.needRecreate = true;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTessNearDist(
+    JNIEnv *, jclass, jint v, jboolean) {
+    Renderer::options.tessNearDist = std::clamp(static_cast<float>(v), 8.0f, 256.0f);
+    Renderer::options.needRecreate = true;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTessMidDist(
+    JNIEnv *, jclass, jint v, jboolean) {
+    Renderer::options.tessMidDist = std::clamp(static_cast<float>(v), 16.0f, 384.0f);
+    Renderer::options.needRecreate = true;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTessFarDist(
+    JNIEnv *, jclass, jint v, jboolean) {
+    Renderer::options.tessFarDist = std::clamp(static_cast<float>(v), 32.0f, 512.0f);
     Renderer::options.needRecreate = true;
 }
 

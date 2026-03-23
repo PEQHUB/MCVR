@@ -61,8 +61,14 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     std::shared_ptr<vk::BLAS> blas;
     std::shared_ptr<vk::BLASBuilder> blasBuilder;
 
-    // Displacement is now handled via in-place tessellation into WORLD_SOLID geometry.
-    // No separate BLAS needed — tessellated triangles are part of the regular BLAS.
+    // DDA displacement: separate AABB BLAS (can't mix with triangle BLAS due to shadow stride=0).
+    // Face data accessible via BDA in the intersection shader.
+    std::vector<VkAabbPositionsKHR> displacedAABBs;
+    std::vector<vk::Data::DisplacedFaceData> displacedFaceData;
+    std::shared_ptr<vk::DeviceLocalBuffer> displacedAABBBuffer;
+    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
+    std::shared_ptr<vk::BLAS> displacedBlas;
+    std::shared_ptr<vk::BLASBuilder> displacedBlasBuilder;
 
     ChunkBuildData(int64_t id,
                    int x,
@@ -166,6 +172,10 @@ struct Chunk1 : public SharedObject<Chunk1> {
     std::shared_ptr<std::vector<World::GeometryTypes>> geometryTypes;
     std::shared_ptr<std::vector<std::vector<vk::VertexFormat::PBRTriangle>>> vertices;
     std::shared_ptr<std::vector<std::vector<uint32_t>>> indices;
+
+    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer; // DDA face data (BDA access)
+    std::shared_ptr<vk::BLAS> displacedBlas; // Separate AABB BLAS for DDA displacement
+    uint32_t displacedFaceCount = 0;
 
     std::vector<ChunkLightEntry> lightSources;
 

@@ -1062,6 +1062,14 @@ void RayTracingModule::initPipeline() {
     endGatewayAnyHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/end_gateway_rahit.spv").string());
 
+    // DDA displacement shaders
+    displacedIntersectionShader_ =
+        vk::Shader::create(device, (shaderPath / "world/ray_tracing/displaced_block_rint.spv").string());
+    displacedClosestHitShader_ =
+        vk::Shader::create(device, (shaderPath / "world/ray_tracing/displaced_block_rchit.spv").string());
+    displacedShadowClosestHitShader_ =
+        vk::Shader::create(device, (shaderPath / "world/ray_tracing/displaced_shadow_rchit.spv").string());
+
     rayTracingPipeline_ =
         vk::RayTracingPipelineBuilder{}
             .beginShaderStage()
@@ -1084,6 +1092,9 @@ void RayTracingModule::initPipeline() {
             .defineShaderStage(endGatewayClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)            // 16
             .defineShaderStage(endGatewayAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                    // 17
             .defineShaderStage(pointLightShadowMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                   // 18
+            .defineShaderStage(displacedIntersectionShader_, VK_SHADER_STAGE_INTERSECTION_BIT_KHR)      // 19
+            .defineShaderStage(displacedClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)         // 20
+            .defineShaderStage(displacedShadowClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)   // 21
             .endShaderStage()
             .beginShaderGroup()
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 0, VK_SHADER_UNUSED_KHR,
@@ -1114,6 +1125,9 @@ void RayTracingModule::initPipeline() {
                                VK_SHADER_UNUSED_KHR) // end portal
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 16, 17,
                                VK_SHADER_UNUSED_KHR) // end gateway
+            // Hit group 8: DDA displacement (procedural — rint + rchit)
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 20,
+                               VK_SHADER_UNUSED_KHR, 19) // displaced block (CHS=20, rint=19)
             .endShaderGroup()
             .definePipelineLayout(rayTracingDescriptorTables_[0])
             .build(device);
@@ -1123,11 +1137,11 @@ void RayTracingModule::initSBT() {
     auto framework = framework_.lock();
     if (!framework) return;
 
-    // 4 miss groups, 8 hit groups (all triangle, no procedural displacement)
+    // 4 miss groups, 9 hit groups (8 triangle + 1 procedural for DDA displacement)
     sbts_.resize(framework->swapchain()->imageCount());
     for (int i = 0; i < framework->swapchain()->imageCount(); i++) {
         sbts_[i] = vk::SBT::create(framework->physicalDevice(), framework->device(), framework->vma(),
-                                   rayTracingPipeline_, 4, 8);
+                                   rayTracingPipeline_, 4, 9);
     }
 }
 
@@ -1320,6 +1334,9 @@ void RayTracingModule::initSharcUpdatePipeline() {
             .defineShaderStage(endGatewayClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)             // 16
             .defineShaderStage(endGatewayAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                     // 17
             .defineShaderStage(pointLightShadowMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                    // 18
+            .defineShaderStage(displacedIntersectionShader_, VK_SHADER_STAGE_INTERSECTION_BIT_KHR)       // 19
+            .defineShaderStage(displacedClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)          // 20
+            .defineShaderStage(displacedShadowClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)    // 21
             .endShaderStage()
             .beginShaderGroup()
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 0, VK_SHADER_UNUSED_KHR,
@@ -1349,6 +1366,9 @@ void RayTracingModule::initSharcUpdatePipeline() {
                                VK_SHADER_UNUSED_KHR) // end portal
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 16, 17,
                                VK_SHADER_UNUSED_KHR) // end gateway
+            // Hit group 8: DDA displacement (procedural)
+            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 20,
+                               VK_SHADER_UNUSED_KHR, 19) // displaced block (CHS=20, rint=19)
             .endShaderGroup()
             .definePipelineLayout(rayTracingDescriptorTables_[0])
             .build(device);
@@ -1358,11 +1378,11 @@ void RayTracingModule::initSharcUpdatePipeline() {
         return;
     }
 
-    // Create SBTs for the update pipeline (same structure as main: 4 miss, 8 hit groups)
+    // Create SBTs for the update pipeline (same structure as main: 4 miss, 9 hit groups)
     sharcUpdateSbts_.resize(framework->swapchain()->imageCount());
     for (int i = 0; i < framework->swapchain()->imageCount(); i++) {
         sharcUpdateSbts_[i] = vk::SBT::create(framework->physicalDevice(), framework->device(), framework->vma(),
-                                               sharcUpdatePipeline_, 4, 8);
+                                               sharcUpdatePipeline_, 4, 9);
     }
 }
 
