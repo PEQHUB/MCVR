@@ -100,7 +100,7 @@ void main() {
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     vec3 localPos = baryCoords.x * v0.pos + baryCoords.y * v1.pos + baryCoords.z * v2.pos;
     vec3 worldPos = vec4(localPos, 1.0) * gl_ObjectToWorld3x4EXT;
-    uint coordinate = v0.coordinate;
+    uint coordinate = (v0.flags >> PBR_FLAG_COORD_SHIFT) & 0x7u;
     vec3 normal = baryCoords.x * v0.norm + baryCoords.y * v1.norm + baryCoords.z * v2.norm;
     if (coordinate == 1) {
         normal = normalize(mat3(worldUbo.cameraViewMatInv) * normal);
@@ -117,9 +117,9 @@ void main() {
     mat.ior = 0.0;
     mat.emission = 0.0;
 
-    uint useColorLayer = v0.useColorLayer;
+    bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
     vec3 colorLayer;
-    if (useColorLayer > 0) {
+    if (useColorLayer) {
         colorLayer = (baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer).rgb;
     } else {
         colorLayer = vec3(1.0);

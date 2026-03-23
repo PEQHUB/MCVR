@@ -1,6 +1,7 @@
 #include "core/render/modules/world/dlss/dlss_module.hpp"
 
 #include "core/render/buffers.hpp"
+#include "core/render/gpu_diagnostics.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
@@ -826,6 +827,7 @@ void DLSSModuleContext::render() {
             bool dlssReset = (Renderer::options.offlineState == 2
                               && Renderer::options.offlineDenoised == 2
                               && Renderer::dlssEpochFrame == 0);
+            GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::DLSS_EVALUATE);
             module->dlss_->denoise(worldCommandBuffer, glm::uvec2{module->inputWidth_, module->inputHeight_}, jitter,
                                    worldUBO->cameraEffectedViewMat, worldUBO->cameraProjMat, preExposure, dlssReset,
                                    frameTimeDeltaMs);

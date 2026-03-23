@@ -462,15 +462,15 @@ void main() {
     vec3 localPos = baryCoords.x * v0.pos + baryCoords.y * v1.pos + baryCoords.z * v2.pos;
     vec3 worldPos = vec4(localPos, 1.0) * gl_ObjectToWorld3x4EXT;
 
-    uint useColorLayer = v0.useColorLayer;
+    bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
     vec3 colorLayer;
-    if (useColorLayer > 0) {
+    if (useColorLayer) {
         colorLayer = (baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer).rgb;
     } else {
         colorLayer = vec3(1.0);
     }
 
-    uint useTexture = v0.useTexture;
+    bool useTexture = (v0.flags & PBR_FLAG_USE_TEXTURE) != 0u;
     float albedoEmission =
         baryCoords.x * v0.albedoEmission + baryCoords.y * v1.albedoEmission + baryCoords.z * v2.albedoEmission;
     uint textureID = v0.textureID;
@@ -485,7 +485,7 @@ void main() {
     vec2 uvMin = vec2(0.0);
     vec2 uvMax = vec2(1.0);
     vec3 rawAlbedoLinear = vec3(1.0); // raw albedo before tinting, for texture roughness derivation
-    if (useTexture > 0) {
+    if (useTexture) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
 
         // Tile boundaries from vertex UVs (used by POM and AutoPBR neighbor clamping)
@@ -529,20 +529,20 @@ void main() {
     vec3 glint = vec3(0.0);
     vec4 overlayColor = vec4(0.0);
     if (!SIMPLIFIED_INDIRECT || mainRay.index <= 1) {
-        uint useGlint = v0.useGlint;
+        float useGlint = float((v0.flags & PBR_FLAG_USE_GLINT) != 0u);
         uint glintTexture = v0.glintTexture;
         vec2 glintUV = baryCoords.x * v0.glintUV + baryCoords.y * v1.glintUV + baryCoords.z * v2.glintUV;
         glintUV = (worldUbo.textureMat * vec4(glintUV, 0.0, 1.0)).xy;
         glint = useGlint * texture(textures[nonuniformEXT(glintTexture)], glintUV).rgb;
         glint = glint * glint;
 
-        uint useOverlay = v0.useOverlay;
-        ivec2 overlayUV = v0.overlayUV;
+        bool useOverlay = (v0.flags & PBR_FLAG_USE_OVERLAY) != 0u;
+        ivec2 overlayUV = ivec2(int(v0.overlayPacked & 0xFFFFu), int(v0.overlayPacked >> 16u));
         overlayColor = texelFetch(textures[nonuniformEXT(worldUbo.overlayTextureID)], overlayUV, 0);
     }
 
     vec3 tint;
-    if (v0.useOverlay > 0) {
+    if ((v0.flags & PBR_FLAG_USE_OVERLAY) != 0u) {
         tint = mix(overlayColor.rgb, albedoValue.rgb * colorLayer, overlayColor.a) + glint;
     } else {
         tint = albedoValue.rgb * colorLayer + glint;
@@ -1029,9 +1029,7 @@ void main() {
     // Ground truth: physical sun disk half-angle 0.267° → kappa ≈ 46000
     float kappa = PHYSICAL_SUN_DISK ? 46000.0 : ((prGetIsHand(mainRay)) ? 500.0 : 3000.0);
     if (sunDir.y < 0) { lightDir = normalize(skyUBO.moonDirection); }
-    vec2 vmfBN = (mainRay.index == 0)
-        ? blueNoise2DEx(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 66u)
-        : vec2(-1.0);
+    vec2 vmfBN = vec2(-1.0); // A/B test: force PCG, disable blue noise
     vec3 sampledLightDir = SampleVMF(mainRay.seed, lightDir, kappa, vmfBN);
     vec3 shadowBiasN = dot(sampledLightDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
     vec3 shadowRayOrigin = offset_ray(worldPos, shadowBiasN);
@@ -1127,9 +1125,7 @@ void main() {
 
             for (int c = 0; c < numCandidates; c++) {
                 // Blue noise light selection (first bounce), PCG fallback for indirect
-                float lightRand = (mainRay.index == 0)
-                    ? blueNoise1D(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 2u + uint(c))
-                    : rand(mainRay.seed);
+                float lightRand = rand(mainRay.seed); // A/B: PCG only
                 int tileSlot = int(lightRand * float(effectiveCount));
                 tileSlot = clamp(tileSlot, 0, effectiveCount - 1);
                 int idx = tileSlot;
@@ -1249,9 +1245,7 @@ void main() {
             if (currentRes.lightIdx >= 0) {
                 AreaLight al = areaLightBuffer.lights[currentRes.lightIdx];
 
-                vec2 cubeBN = (mainRay.index == 0)
-                    ? blueNoise2DEx(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 68u)
-                    : vec2(-1.0);
+                vec2 cubeBN = vec2(-1.0); // A/B: PCG only
                 CubeSample cs = sampleCubeLight(al, worldPos, pc.shadowSoftness, mainRay.seed, cubeBN);
                 vec3 toSample = cs.worldPos - worldPos;
                 float sDist = length(toSample);
@@ -1356,9 +1350,7 @@ void main() {
                 if (bestIdx[k] < 0) continue;
                 AreaLight al = areaLightBuffer.lights[bestIdx[k]];
 
-                vec2 cubeBN2 = (mainRay.index == 0)
-                    ? blueNoise2DEx(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 70u + uint(k) * 2u)
-                    : vec2(-1.0);
+                vec2 cubeBN2 = vec2(-1.0); // A/B: PCG only
                 CubeSample cs = sampleCubeLight(al, worldPos, pc.shadowSoftness, mainRay.seed, cubeBN2);
                 vec3 toSample = cs.worldPos - worldPos;
                 float sDist = length(toSample);
@@ -1417,9 +1409,7 @@ void main() {
         float sourcePdf = 1.0 / float(max(searchCount, 1));
 
         for (int c = 0; c < numCandidates; c++) {
-            float lightRand2 = (mainRay.index == 0)
-                ? blueNoise1D(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 34u + uint(c))
-                : rand(mainRay.seed);
+            float lightRand2 = rand(mainRay.seed); // A/B: PCG only
             int idx = clamp(int(lightRand2 * float(searchCount)), 0, searchCount - 1);
             AreaLight al = areaLightBuffer.lights[idx];
 
@@ -1530,9 +1520,7 @@ void main() {
         if (currentRes.lightIdx >= 0) {
             AreaLight al = areaLightBuffer.lights[currentRes.lightIdx];
 
-            vec2 cubeBN3 = (mainRay.index == 0)
-                ? blueNoise2DEx(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 74u)
-                : vec2(-1.0);
+            vec2 cubeBN3 = vec2(-1.0); // A/B: PCG only
             CubeSample cs = sampleCubeLight(al, worldPos, pc.shadowSoftness, mainRay.seed, cubeBN3);
             vec3 toSample = cs.worldPos - worldPos;
             float sDist = length(toSample);
@@ -1695,11 +1683,7 @@ void main() {
     vec3 sampleDir;
     float pdf;
     uint lobeType;
-    vec3 bsdfXi = (mainRay.index == 0)
-        ? vec3(blueNoise1D(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 77u),
-               blueNoise1D(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 78u),
-               blueNoise1D(gl_LaunchIDEXT.xy, pc.blueNoiseFrame, 76u))
-        : vec3(-1.0);
+    vec3 bsdfXi = vec3(-1.0); // A/B: PCG only
     vec3 bsdf = DisneySample(mat, viewDir, normal, sampleDir, pdf, mainRay.seed, lobeType, pc.flags, bsdfXi);
 
     prSetLobeType(mainRay, lobeType);

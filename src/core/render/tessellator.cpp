@@ -37,6 +37,18 @@ static inline glm::ivec2 bilerpIvec2(glm::ivec2 a, glm::ivec2 b, glm::ivec2 c, g
     return glm::ivec2(glm::round(result));
 }
 
+static inline glm::ivec2 unpackIvec2(uint32_t packed) {
+    return glm::ivec2(int16_t(packed & 0xFFFF), int16_t((packed >> 16) & 0xFFFF));
+}
+
+static inline uint32_t packIvec2(glm::ivec2 v) {
+    return (uint32_t(v.x) & 0xFFFF) | ((uint32_t(v.y) & 0xFFFF) << 16);
+}
+
+static inline uint32_t bilerpPacked(uint32_t a, uint32_t b, uint32_t c, uint32_t d, float u, float v) {
+    return packIvec2(bilerpIvec2(unpackIvec2(a), unpackIvec2(b), unpackIvec2(c), unpackIvec2(d), u, v));
+}
+
 // Map quad vertices v0,v1,v2,v3 to a consistent bilinear parameterization.
 // Quad index pattern: [v0,v1,v2, v2,v3,v0] — two triangles.
 // We need to find corner mapping: (0,0), (1,0), (1,1), (0,1) in UV space.
@@ -103,24 +115,18 @@ static QuadCorners mapCorners(const Tessellator::Input &input) {
 // Helper: interpolate all PBRTriangle fields at parametric (u,v) from quad corners
 static void interpVertex(vk::VertexFormat::PBRTriangle &vert, const QuadCorners &q, float u, float v) {
     vert.pos = bilerp(q.c00->pos, q.c10->pos, q.c01->pos, q.c11->pos, u, v);
+    vert.flags = q.c00->flags; // all booleans + coordinate: corner-copied
     vert.norm = q.c00->norm;
-    vert.useNorm = q.c00->useNorm;
-    vert.useColorLayer = q.c00->useColorLayer;
-    vert.colorLayer = bilerp(q.c00->colorLayer, q.c10->colorLayer, q.c01->colorLayer, q.c11->colorLayer, u, v);
-    vert.useTexture = q.c00->useTexture;
-    vert.useOverlay = q.c00->useOverlay;
-    vert.textureUV = bilerp(q.c00->textureUV, q.c10->textureUV, q.c01->textureUV, q.c11->textureUV, u, v);
-    vert.overlayUV = bilerpIvec2(q.c00->overlayUV, q.c10->overlayUV, q.c01->overlayUV, q.c11->overlayUV, u, v);
-    vert.useGlint = q.c00->useGlint;
-    vert.textureID = q.c00->textureID;
-    vert.glintUV = bilerp(q.c00->glintUV, q.c10->glintUV, q.c01->glintUV, q.c11->glintUV, u, v);
-    vert.glintTexture = q.c00->glintTexture;
-    vert.useLight = q.c00->useLight;
-    vert.lightUV = bilerpIvec2(q.c00->lightUV, q.c10->lightUV, q.c01->lightUV, q.c11->lightUV, u, v);
-    vert.coordinate = q.c00->coordinate;
     vert.albedoEmission = q.c00->albedoEmission;
+    vert.colorLayer = bilerp(q.c00->colorLayer, q.c10->colorLayer, q.c01->colorLayer, q.c11->colorLayer, u, v);
     vert.postBase = bilerp(q.c00->postBase, q.c10->postBase, q.c01->postBase, q.c11->postBase, u, v);
     vert.emissiveBlockType = q.c00->emissiveBlockType;
+    vert.textureUV = bilerp(q.c00->textureUV, q.c10->textureUV, q.c01->textureUV, q.c11->textureUV, u, v);
+    vert.glintUV = bilerp(q.c00->glintUV, q.c10->glintUV, q.c01->glintUV, q.c11->glintUV, u, v);
+    vert.textureID = q.c00->textureID;
+    vert.glintTexture = q.c00->glintTexture;
+    vert.overlayPacked = bilerpPacked(q.c00->overlayPacked, q.c10->overlayPacked, q.c01->overlayPacked, q.c11->overlayPacked, u, v);
+    vert.lightPacked = bilerpPacked(q.c00->lightPacked, q.c10->lightPacked, q.c01->lightPacked, q.c11->lightPacked, u, v);
 }
 
 Tessellator::Output Tessellator::tessellate(const Input &input) {

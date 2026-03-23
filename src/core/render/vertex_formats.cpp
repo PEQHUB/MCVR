@@ -75,23 +75,18 @@ vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PositionOnl
 template <>
 vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PBRTriangle>() {
     static std::vector<VertexAttribute> attributes = {
-        {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PBRTriangle, pos)},
-        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, useNorm)},
-        {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PBRTriangle, norm)},
-        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, useColorLayer)},
-        {VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(VertexFormat::PBRTriangle, colorLayer)},
-        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, useTexture)},
-        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, useOverlay)},
-        {VK_FORMAT_R32G32_SFLOAT, offsetof(VertexFormat::PBRTriangle, textureUV)},
-        {VK_FORMAT_R32G32_SINT, offsetof(VertexFormat::PBRTriangle, overlayUV)},
-        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, useGlint)},
-        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, textureID)},
-        {VK_FORMAT_R32G32_SFLOAT, offsetof(VertexFormat::PBRTriangle, glintUV)},
-        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, glintTexture)},
-        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, useLight)},
-        {VK_FORMAT_R32G32_SINT, offsetof(VertexFormat::PBRTriangle, lightUV)},
-        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, coordinate)},
-        {VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(VertexFormat::PBRTriangle, postBase)},
+        {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PBRTriangle, pos)},           // location 0
+        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, flags)},                  // location 1
+        {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PBRTriangle, norm)},           // location 2
+        {VK_FORMAT_R32_SFLOAT, offsetof(VertexFormat::PBRTriangle, albedoEmission)},       // location 3
+        {VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(VertexFormat::PBRTriangle, colorLayer)},  // location 4
+        {VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(VertexFormat::PBRTriangle, postBase)},    // location 5 (vec3 postBase + uint emissiveBlockType)
+        {VK_FORMAT_R32G32_SFLOAT, offsetof(VertexFormat::PBRTriangle, textureUV)},         // location 6
+        {VK_FORMAT_R32G32_SFLOAT, offsetof(VertexFormat::PBRTriangle, glintUV)},           // location 7
+        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, textureID)},              // location 8
+        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, glintTexture)},           // location 9
+        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, overlayPacked)},          // location 10
+        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangle, lightPacked)},            // location 11
     };
     static vk::VertexLayoutInfo vertexLayoutInfo = initVertexLayout<vk::VertexFormat::PBRTriangle>(attributes);
     return vertexLayoutInfo;

@@ -35,6 +35,7 @@ struct Options {
 
     uint32_t chunkBuildingBatchSize = 6;
     uint32_t chunkBuildingTotalBatches = 6;
+    static constexpr uint32_t ommBatchCap = 2; // Max chunks per GPU batch when OMM active (prevents TDR)
     uint32_t tonemappingMode = 1; // 0 = PBR Neutral, 1 = Reinhard Extended
     float minExposure = 1e-7f;         // Minimum exposure clamp (lowered for physical sun ~100k lux)
     float maxExposure = 2.0f;           // Moderate dark adaptation — caves dark but shadow detail visible
@@ -197,6 +198,7 @@ struct Options {
 
     // Diagnostics
     bool loggingEnabled = false;
+    bool gpuDiagnostics = false;   // GPU checkpoints for DEVICE_LOST debugging (zero cost when false)
 };
 
 class Renderer : public Singleton<Renderer> {

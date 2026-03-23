@@ -72,10 +72,10 @@ void main() {
     vec2 uv = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
     uint textureID = v0.textureID;
 
-    uint useTexture = v0.useTexture;
+    bool useTexture = (v0.flags & PBR_FLAG_USE_TEXTURE) != 0u;
     float alpha;
     ivec4 flags;
-    if (useTexture > 0) {
+    if (useTexture) {
         // ray cone
         float coneRadiusWorld = mainRay.coneWidth + gl_HitTEXT * mainRay.coneSpread;
         vec3 dposdu, dposdv;
@@ -103,9 +103,9 @@ void main() {
         return;
     }
 
-    uint useColorLayer = v0.useColorLayer;
+    bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
     float colorLayerAlpha;
-    if (useColorLayer > 0) {
+    if (useColorLayer) {
         colorLayerAlpha =
             (baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer).a;
     } else {

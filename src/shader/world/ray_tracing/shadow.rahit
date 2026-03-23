@@ -107,22 +107,22 @@ void main() {
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     vec2 uv = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
     uint textureID = v0.textureID;
-    uint useColorLayer = v0.useColorLayer;
+    bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
     vec4 colorLayer;
-    if (useColorLayer > 0) {
+    if (useColorLayer) {
         colorLayer = (baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer);
     } else {
         colorLayer = vec4(1.0);
     }
 
-    uint useTexture = v0.useTexture;
+    bool useTexture = (v0.flags & PBR_FLAG_USE_TEXTURE) != 0u;
     vec2 textureUV;
     vec4 albedo;
     ivec4 flags;
     vec4 specular = vec4(0.0);
     vec4 normalVal = vec4(0.0);
 
-    if (useTexture > 0) {
+    if (useTexture) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
         albedo = texture(textures[nonuniformEXT(textureID)], textureUV);
 
@@ -153,18 +153,18 @@ void main() {
     float alpha = (albedo * colorLayer).a;
 
     if (!SIMPLIFY_THIS_RAY) {
-        uint useGlint = v0.useGlint;
+        float useGlint = float((v0.flags & PBR_FLAG_USE_GLINT) != 0u);
         uint glintTexture = v0.glintTexture;
         vec2 glintUV = baryCoords.x * v0.glintUV + baryCoords.y * v1.glintUV + baryCoords.z * v2.glintUV;
         glintUV = (ubo.textureMat * vec4(glintUV, 0.0, 1.0)).xy;
         vec3 glint = useGlint * texture(textures[nonuniformEXT(glintTexture)], glintUV).rgb;
         glint = glint * glint;
 
-        uint useOverlay = v0.useOverlay;
-        ivec2 overlayUV = v0.overlayUV;
+        bool useOverlay = (v0.flags & PBR_FLAG_USE_OVERLAY) != 0u;
+        ivec2 overlayUV = ivec2(int(v0.overlayPacked & 0xFFFFu), int(v0.overlayPacked >> 16u));
         vec4 overlayColor = texelFetch(textures[nonuniformEXT(ubo.overlayTextureID)], overlayUV, 0);
 
-        if (useOverlay > 0) {
+        if (useOverlay) {
             tint = mix(overlayColor.rgb, tint, overlayColor.a) + glint;
         } else {
             tint += glint;

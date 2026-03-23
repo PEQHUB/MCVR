@@ -1,6 +1,7 @@
 #include "core/render/render_framework.hpp"
 
 #include "common/shared.hpp"
+#include "core/render/gpu_diagnostics.hpp"
 #include "core/render/buffers.hpp"
 #include "core/render/chunks.hpp"
 #include "core/render/entities.hpp"
@@ -322,6 +323,7 @@ void Framework::acquireContext() {
     if (!running_) return;
 
     g_crashRing.advanceFrame();
+    GpuDiag::setEnabled(Renderer::options.gpuDiagnostics);
     renderDiag("acquireContext frame=%llu decoupled=%d", g_crashRing.frameCount(), (int)decoupledPresent_);
 
     if (RadianceLogger::isEnabled()) {
@@ -363,7 +365,7 @@ void Framework::acquireContext() {
         VkResult fenceResult = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
         if (fenceResult != VK_SUCCESS) {
             waitDeviceIdle();
-            crashExit(fenceResult, "vkWaitForFences failed (decoupled)");
+            crashExitWithQueue(fenceResult, "vkWaitForFences failed (decoupled)", device_->mainVkQueue());
         }
     } else {
         // Standard: acquire swapchain image
@@ -388,7 +390,7 @@ void Framework::acquireContext() {
         VkResult fenceResult = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
         if (fenceResult != VK_SUCCESS) {
             waitDeviceIdle();
-            crashExit(fenceResult, "vkWaitForFences failed");
+            crashExitWithQueue(fenceResult, "vkWaitForFences failed", device_->mainVkQueue());
         }
     }
 
@@ -504,7 +506,7 @@ void Framework::submitCommand() {
     std::vector<VkSemaphore> signalSemaphores;
     if (!decoupledPresent_) {
         waitSemaphores.push_back(currentContext_->imageAcquiredSemaphore->vkSemaphore());
-        waitStageMasks.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        waitStageMasks.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
         signalSemaphores.push_back(currentContext_->commandProcessedSemaphore->vkSemaphore());
     }
     std::vector<VkCommandBuffer> commandbuffers = {
@@ -547,7 +549,7 @@ void Framework::submitCommand() {
 #endif
     if (submitResult != VK_SUCCESS) {
         waitDeviceIdle();
-        crashExit(submitResult, "vkQueueSubmit failed");
+        crashExitWithQueue(submitResult, "vkQueueSubmit failed", device_->mainVkQueue());
     }
 
     // Overlay present on render thread: wait for GPU, then D3D11 copy + DXGI present.
@@ -557,7 +559,7 @@ void Framework::submitCommand() {
         VkResult waitResult = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
         if (waitResult != VK_SUCCESS) {
             waitDeviceIdle();
-            crashExit(waitResult, "vkWaitForFences failed (overlay present)");
+            crashExitWithQueue(waitResult, "vkWaitForFences failed (overlay present)", device_->mainVkQueue());
         }
         overlayCompositor_->present();
         if (!overlayCompositor_->isActive()) {
@@ -634,7 +636,7 @@ void Framework::present() {
         }
     } else if (result != VK_SUCCESS) {
         waitDeviceIdle();
-        crashExit(result, "vkQueuePresentKHR failed");
+        crashExitWithQueue(result, "vkQueuePresentKHR failed", device_->mainVkQueue());
     }
 }
 

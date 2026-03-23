@@ -2,6 +2,7 @@
 
 #include "core/render/buffers.hpp"
 #include "core/render/entities.hpp"
+#include "core/render/gpu_diagnostics.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
@@ -282,9 +283,8 @@ static inline glm ::vec3 sampleUnitSphere(std::mt19937 &rng) {
 static inline vk::VertexFormat::PBRTriangle makeStarVertex(const glm ::vec3 dir, const glm ::vec4 color) {
     vk::VertexFormat::PBRTriangle v{};
     v.pos = dir;
-    v.useColorLayer = 1;
+    v.flags = vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER | (2u << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
     v.colorLayer = color;
-    v.coordinate = 2;
     return v;
 }
 
@@ -806,6 +806,7 @@ void PostRenderModuleContext::render() {
 
     auto module = postRenderModule.lock();
     if (!module) return;
+    GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::POST_RENDER);
 
     auto buffers = Renderer::instance().buffers();
 

@@ -1,5 +1,7 @@
 #include "core/vulkan/device.hpp"
 
+#include "core/render/gpu_diagnostics.hpp"
+#include "core/render/aftermath_integration.hpp"
 #include "core/render/modules/world/dlss/dlss_wrapper.hpp"
 #include "core/render/streamline_context.hpp"
 #include "core/vulkan/instance.hpp"
@@ -45,6 +47,10 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                                                    VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME,
                                                    // Shader clock: per-pixel profiling instrumentation
                                                    VK_KHR_SHADER_CLOCK_EXTENSION_NAME,
+                                                   // GPU diagnostics: breadcrumbs for DEVICE_LOST debugging
+                                                   VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME,
+                                                   VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME,
+                                                   VK_EXT_DEVICE_FAULT_EXTENSION_NAME,
 #ifdef _WIN32
                                                    // External memory: Vulkan-D3D11 texture sharing for DComp overlay
                                                    VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
@@ -193,13 +199,30 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     maintenance5Features.maintenance5 =
         hasExtension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME) ? supportedMaintenance5.maintenance5 : VK_FALSE;
 
+    // GPU diagnostics: NV checkpoints + EXT device fault (zero cost when not queried)
+    checkpointsSupported_ = hasExtension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    deviceFaultSupported_ = hasExtension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+
+    VkPhysicalDeviceDiagnosticsConfigFeaturesNV diagConfigFeatures{};
+    diagConfigFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DIAGNOSTICS_CONFIG_FEATURES_NV;
+    diagConfigFeatures.pNext = &maintenance5Features;
+    diagConfigFeatures.diagnosticsConfig = hasExtension(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME) ? VK_TRUE : VK_FALSE;
+
+    VkPhysicalDeviceFaultFeaturesEXT faultFeatures{};
+    faultFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
+    faultFeatures.pNext = &diagConfigFeatures;
+    faultFeatures.deviceFault = deviceFaultSupported_ ? VK_TRUE : VK_FALSE;
+    faultFeatures.deviceFaultVendorBinary = VK_FALSE;
+
     deviceCout() << "Opacity Micro Maps (OMM): " << (ommSupported_ ? "YES" : "NO") << std::endl;
     deviceCout() << "Shader Execution Reordering (SER): " << (serSupported_ ? "YES" : "NO") << std::endl;
     deviceCout() << "Shader Clock: " << (shaderClockSupported_ ? "YES" : "NO") << std::endl;
+    deviceCout() << "GPU Diagnostics Checkpoints: " << (checkpointsSupported_ ? "YES" : "NO") << std::endl;
+    deviceCout() << "GPU Device Fault: " << (deviceFaultSupported_ ? "YES" : "NO") << std::endl;
 
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vertexInputDynamicState{};
     vertexInputDynamicState.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT;
-    vertexInputDynamicState.pNext = &maintenance5Features;
+    vertexInputDynamicState.pNext = &faultFeatures;
     vertexInputDynamicState.vertexInputDynamicState = hasExtension(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME) ?
                                                           supportedVertexInputDynamicState.vertexInputDynamicState :
                                                           VK_FALSE;
@@ -305,10 +328,31 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     features.shaderFloat64 = supportedFeatures2.features.shaderFloat64;
     features.shaderInt16 = supportedFeatures2.features.shaderInt16;
 
+    // Aftermath-level diagnostics: shader debug info + resource tracking + auto checkpoints.
+    // Enables the NVIDIA driver to report exact shader source location and resource names
+    // on DEVICE_LOST via VK_EXT_device_fault. Zero overhead when no crash occurs.
+    VkDeviceDiagnosticsConfigCreateInfoNV diagCreateInfo{};
+    diagCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_DIAGNOSTICS_CONFIG_CREATE_INFO_NV;
+    diagCreateInfo.pNext = &rayTracingFeatures;
+    if (hasExtension(VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME)) {
+        diagCreateInfo.flags =
+            VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_DEBUG_INFO_BIT_NV |
+            VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_RESOURCE_TRACKING_BIT_NV |
+            VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_AUTOMATIC_CHECKPOINTS_BIT_NV |
+            VK_DEVICE_DIAGNOSTICS_CONFIG_ENABLE_SHADER_ERROR_REPORTING_BIT_NV;
+        deviceCout() << "GPU Diagnostics Config: shader debug + resource tracking + auto checkpoints ENABLED" << std::endl;
+    }
+
     VkPhysicalDeviceFeatures2 features2 = {};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    features2.pNext = &rayTracingFeatures;
+    features2.pNext = &diagCreateInfo;
     features2.features = features;
+
+    // Initialize Aftermath GPU crash dump collection before device creation
+    {
+        auto logsDir = std::filesystem::current_path() / "radiance" / "logs";
+        AftermathIntegration::init(logsDir);
+    }
 
     // Streamline interposer: use interposer's vkCreateDevice so it can track the VkDevice.
     // Without this, slSetVulkanInfo fails with eErrorInvalidIntegration because the
@@ -394,6 +438,9 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                      &secondaryQueue_);
 
     loadPipelineCache();
+
+    // Initialize GPU diagnostics (checkpoints + device fault)
+    GpuDiag::init(device_, physicalDevice_->vkPhysicalDevice(), checkpointsSupported_, deviceFaultSupported_);
 }
 
 vk::Device::~Device() {

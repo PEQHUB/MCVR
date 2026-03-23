@@ -1,6 +1,7 @@
 #include "upscaler_module.hpp"
 
 #include "core/render/buffers.hpp"
+#include "core/render/gpu_diagnostics.hpp"
 #include "core/render/modules/world/fsr_upscaler/fsr3_upscaler.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
@@ -739,6 +740,7 @@ void UpscalerModuleContext::render() {
     input.enableSharpening = true;
     input.sharpness = module->sharpness_;
 
+    GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::FSR_UPSCALE);
     module->fsr3_->dispatch(input);
     outputImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
 

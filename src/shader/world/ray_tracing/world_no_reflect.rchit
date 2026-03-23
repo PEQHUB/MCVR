@@ -104,7 +104,7 @@ void main() {
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     vec3 localPos = baryCoords.x * v0.pos + baryCoords.y * v1.pos + baryCoords.z * v2.pos;
     vec3 worldPos = vec4(localPos, 1.0) * gl_ObjectToWorld3x4EXT;
-    uint coordinate = v0.coordinate;
+    uint coordinate = (v0.flags >> PBR_FLAG_COORD_SHIFT) & 0x7u;
     vec3 normal = baryCoords.x * v0.norm + baryCoords.y * v1.norm + baryCoords.z * v2.norm;
     if (coordinate == 1) {
         normal = normalize(mat3(worldUbo.cameraViewMatInv) * normal);
@@ -112,15 +112,15 @@ void main() {
         normal = normalize(normal);
     }
 
-    uint useColorLayer = v0.useColorLayer;
+    bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
     vec3 colorLayer;
-    if (useColorLayer > 0) {
+    if (useColorLayer) {
         colorLayer = (baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer).rgb;
     } else {
         colorLayer = vec3(1.0);
     }
 
-    uint useTexture = v0.useTexture;
+    bool useTexture = (v0.flags & PBR_FLAG_USE_TEXTURE) != 0u;
     float albedoEmission =
         baryCoords.x * v0.albedoEmission + baryCoords.y * v1.albedoEmission + baryCoords.z * v2.albedoEmission;
     uint textureID = v0.textureID;
@@ -132,7 +132,7 @@ void main() {
     vec4 normalValue;
     ivec4 flagValue;
     vec2 textureUV;
-    if (useTexture > 0) {
+    if (useTexture) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
 
         // ray cone
@@ -166,19 +166,19 @@ void main() {
         flagValue = ivec4(0);
     }
 
-    uint useGlint = v0.useGlint;
+    float useGlint = float((v0.flags & PBR_FLAG_USE_GLINT) != 0u);
     uint glintTexture = v0.glintTexture;
     vec2 glintUV = baryCoords.x * v0.glintUV + baryCoords.y * v1.glintUV + baryCoords.z * v2.glintUV;
     glintUV = (worldUbo.textureMat * vec4(glintUV, 0.0, 1.0)).xy;
     vec3 glint = useGlint * texture(textures[nonuniformEXT(glintTexture)], glintUV).rgb;
     glint = glint * glint;
 
-    uint useOverlay = v0.useOverlay;
-    ivec2 overlayUV = v0.overlayUV;
+    bool useOverlay = (v0.flags & PBR_FLAG_USE_OVERLAY) != 0u;
+    ivec2 overlayUV = ivec2(int(v0.overlayPacked & 0xFFFFu), int(v0.overlayPacked >> 16u));
     vec4 overlayColor = texelFetch(textures[nonuniformEXT(worldUbo.overlayTextureID)], overlayUV, 0);
 
     vec3 tint;
-    if (useOverlay > 0) {
+    if (useOverlay) {
         tint = mix(overlayColor.rgb, albedoValue.rgb * colorLayer, overlayColor.a) + glint;
     } else {
         tint = albedoValue.rgb * colorLayer + glint;

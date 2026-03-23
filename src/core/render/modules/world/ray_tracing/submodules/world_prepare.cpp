@@ -1,6 +1,7 @@
 #include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
 
 #include "core/render/buffers.hpp"
+#include "core/render/gpu_diagnostics.hpp"
 #include "core/render/chunks.hpp"
 #include "core/render/entities.hpp"
 #include "core/render/lights.hpp"
@@ -61,35 +62,34 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
-    auto ensureBuffer = [&](std::shared_ptr<vk::DeviceLocalBuffer> &buf, size_t requiredSize) {
-        if (!buf || buf->size() < requiredSize) {
-            buf = vk::DeviceLocalBuffer::create(vma, device, requiredSize, metaUsage);
-        }
-    };
+    // Create NEW buffers each frame — the GC collects old ones after the GPU is done.
+    // Reusing buffers across frames causes write-after-read hazards since the previous
+    // frame's RT dispatch may still be reading the SSBO when the current frame overwrites it.
+    auto &gc = framework->gc();
+    if (blasOffsetsBuffer) gc.collect(blasOffsetsBuffer);
+    if (vertexBufferAddr) gc.collect(vertexBufferAddr);
+    if (indexBufferAddr) gc.collect(indexBufferAddr);
+    if (lastVertexBufferAddr) gc.collect(lastVertexBufferAddr);
+    if (lastIndexBufferAddr) gc.collect(lastIndexBufferAddr);
+    if (lastObjToWorldMat) gc.collect(lastObjToWorldMat);
 
-    size_t blasOffsetsSize = blasOffsets.size() * sizeof(uint32_t);
-    ensureBuffer(blasOffsetsBuffer, blasOffsetsSize);
-    blasOffsetsBuffer->uploadToStagingBuffer(blasOffsets.data(), blasOffsetsSize, 0);
+    blasOffsetsBuffer = vk::DeviceLocalBuffer::create(vma, device, blasOffsets.size() * sizeof(uint32_t), metaUsage);
+    blasOffsetsBuffer->uploadToStagingBuffer(blasOffsets.data());
 
-    size_t vertexAddrSize = vertexBufferAddrs.size() * sizeof(uint64_t);
-    ensureBuffer(vertexBufferAddr, vertexAddrSize);
-    vertexBufferAddr->uploadToStagingBuffer(vertexBufferAddrs.data(), vertexAddrSize, 0);
+    vertexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, vertexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
+    vertexBufferAddr->uploadToStagingBuffer(vertexBufferAddrs.data());
 
-    size_t indexAddrSize = indexBufferAddrs.size() * sizeof(uint64_t);
-    ensureBuffer(indexBufferAddr, indexAddrSize);
-    indexBufferAddr->uploadToStagingBuffer(indexBufferAddrs.data(), indexAddrSize, 0);
+    indexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, indexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
+    indexBufferAddr->uploadToStagingBuffer(indexBufferAddrs.data());
 
-    size_t lastVertexAddrSize = lastVertexBufferAddrs.size() * sizeof(uint64_t);
-    ensureBuffer(lastVertexBufferAddr, lastVertexAddrSize);
-    lastVertexBufferAddr->uploadToStagingBuffer(lastVertexBufferAddrs.data(), lastVertexAddrSize, 0);
+    lastVertexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, lastVertexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
+    lastVertexBufferAddr->uploadToStagingBuffer(lastVertexBufferAddrs.data());
 
-    size_t lastIndexAddrSize = lastIndexBufferAddrs.size() * sizeof(uint64_t);
-    ensureBuffer(lastIndexBufferAddr, lastIndexAddrSize);
-    lastIndexBufferAddr->uploadToStagingBuffer(lastIndexBufferAddrs.data(), lastIndexAddrSize, 0);
+    lastIndexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, lastIndexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
+    lastIndexBufferAddr->uploadToStagingBuffer(lastIndexBufferAddrs.data());
 
-    size_t lastObjSize = lastObjToWorldMats.size() * sizeof(glm::mat4);
-    ensureBuffer(lastObjToWorldMat, lastObjSize);
-    lastObjToWorldMat->uploadToStagingBuffer(lastObjToWorldMats.data(), lastObjSize, 0);
+    lastObjToWorldMat = vk::DeviceLocalBuffer::create(vma, device, lastObjToWorldMats.size() * sizeof(glm::mat4), metaUsage);
+    lastObjToWorldMat->uploadToStagingBuffer(lastObjToWorldMats.data());
 
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> rayTracingMetaData{{
         blasOffsetsBuffer,
@@ -155,11 +155,26 @@ void WorldPrepareContext::render() {
 
     if (chunks->chunkBuildScheduler() != nullptr) {
         chunks->chunkBuildScheduler()->tryCheckBatchesFinish();
-        chunks->chunkBuildScheduler()->tryScheduleBatches(
-            Renderer::instance().world()->chunks()->chunkBuildScheduler()->chunkBuildingBatchSize());
+        uint32_t batchSize = chunks->chunkBuildScheduler()->chunkBuildingBatchSize();
+        if (Renderer::options.ommEnabled) {
+            batchSize = std::min(batchSize, Renderer::options.ommBatchCap);
+        }
+        chunks->chunkBuildScheduler()->tryScheduleBatches(batchSize);
     }
 
+    // Barrier: ensure vertex/index buffer TRANSFER writes from uploadCommandBuffer
+    // are visible before BLAS builds read them. Without this, the GPU may speculatively
+    // start BLAS builds while staging→device copies are still in flight.
+    worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
+        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                         VK_ACCESS_2_SHADER_READ_BIT,
+    }});
+
     if (chunks->importantBLASBuilders().size() > 0) {
+        GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::BLAS_BUILD_IMPORTANT);
         auto &builders = chunks->importantBLASBuilders();
         // Cap important BLAS builds per frame to prevent GPU TDR on teleport/world load.
         // Extra builders stay in the vector and get submitted next frame.
@@ -175,7 +190,10 @@ void WorldPrepareContext::render() {
         }
     }
 
-    if (entities->blasBatchBuilder() != nullptr) { entities->blasBatchBuilder()->submit(worldCommandBuffer); }
+    if (entities->blasBatchBuilder() != nullptr) {
+        GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::BLAS_BUILD_ENTITY);
+        entities->blasBatchBuilder()->submit(worldCommandBuffer);
+    }
 
     worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
         .srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
@@ -478,9 +496,12 @@ void WorldPrepareContext::render() {
             }
         }
 
-        // All chunks data has been read into local vectors; release the lock
-        // before sorting, buffer uploads, TLAS build, and SBT setup.
-        lock.unlock();
+        // IMPORTANT: Do NOT unlock the chunks mutex here. Although chunk data has
+        // been read into local vectors, the underlying GPU resources (BLASes, vertex
+        // buffers) referenced by those addresses must remain alive through TLAS build
+        // and RT dispatch. Unlocking here allows the chunk build thread to free BLASes
+        // while the render thread still references them, causing DEVICE_LOST.
+        // The lock is released automatically at scope exit via RAII.
 
         // Sort by contribution (brightest/nearest first)
         std::sort(gatheredLights.begin(), gatheredLights.end(),
@@ -539,9 +560,10 @@ void WorldPrepareContext::render() {
     // Determine if UPDATE is possible: same instance count means no chunks added/removed.
     // We skip per-BLAS address comparison — if a chunk BLAS was rebuilt at the same index,
     // one frame of stale geometry in the TLAS is visually imperceptible at 60+ FPS.
-    bool canUpdate = (tlas != nullptr) &&
-                     (currentInstanceCount == prevTlasInstanceCount_) &&
-                     (tlasScratchBuffer_ != nullptr);
+    // TLAS UPDATE disabled: Vulkan spec requires identical BLAS handles for UPDATE mode.
+    // Chunk rebuilds change BLAS handles, making UPDATE read freed acceleration structures.
+    // TODO: track per-instance BLAS addresses and only UPDATE when all handles match.
+    bool canUpdate = false;
 
     constexpr VkBuildAccelerationStructureFlagsKHR tlasFlags =
         VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
@@ -553,6 +575,7 @@ void WorldPrepareContext::render() {
         instanceBuilder.endInstanceBuilder(device, vma);
         tlasBuilder->defineBuildProperty(tlasFlags);  // sets flags_ for the geometry info
 
+        GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::TLAS_UPDATE);
         tlasBuilder->updateAndSubmit(tlas, tlasScratchBuffer_, worldCommandBuffer);
         tlasUpdateCount++;
     } else {
@@ -561,6 +584,7 @@ void WorldPrepareContext::render() {
         tlasBuilder->defineBuildProperty(tlasFlags);
         tlasBuilder->querySizeInfo(device);
         tlasBuilder->allocateBuffers(physicalDevice, device, vma);
+        GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::TLAS_BUILD);
         tlas = tlasBuilder->buildAndSubmit(device, worldCommandBuffer);
 
         // Persist scratch buffer sized for max(build, update) for future UPDATE calls.

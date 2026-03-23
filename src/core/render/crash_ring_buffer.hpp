@@ -4,6 +4,7 @@
 #include <cstring>
 #include <chrono>
 #include <filesystem>
+#include <vulkan/vulkan.h>
 
 // Lockless crash-safe ring buffer. Always active, near-zero overhead.
 // Records the last 64 frame events so VK_ERROR_DEVICE_LOST crashes
@@ -49,3 +50,5 @@ inline CrashRingBuffer g_crashRing;
 
 // Helper: dump ring buffer + context, then exit.
 void crashExit(int vkResult, const char* context);
+// Same as crashExit but also queries GPU diagnostics from the given queue.
+void crashExitWithQueue(int vkResult, const char* context, VkQueue queue);

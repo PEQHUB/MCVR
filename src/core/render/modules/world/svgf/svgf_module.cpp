@@ -1,5 +1,6 @@
 #include "svgf_module.hpp"
 #include "core/render/buffers.hpp"
+#include "core/render/gpu_diagnostics.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
@@ -151,6 +152,7 @@ void SvgfModuleContext::render() {
     auto context = frameworkContext.lock();
     if (!context) return;
     auto worldCommandBuffer = context->worldCommandBuffer;
+    GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::SVGF_DENOISE);
 
     // Transition intermediate outputs to General layout before compute
     std::vector<vk::CommandBuffer::ImageMemoryBarrier> initBarriers;

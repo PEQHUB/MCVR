@@ -1,6 +1,7 @@
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 
 #include "core/render/buffers.hpp"
+#include "core/render/gpu_diagnostics.hpp"
 #include "core/render/lights.hpp"
 #include "core/render/modules/world/ray_tracing/submodules/atmosphere.hpp"
 #include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
@@ -191,6 +192,7 @@ void RayTracingModule::build() {
     initAccumulationPipeline();
 
     // Initialize blue noise buffers (Owen-scrambled Sobol + spatial scrambling tile)
+    // Upload immediately via important-upload path (synchronous staging→device before first RT dispatch)
     blueNoise_ = std::make_shared<BlueNoise>(framework->device(), framework->vma());
 
     for (int i = 0; i < size; i++) {
@@ -498,18 +500,6 @@ void RayTracingModule::initDescriptorTables() {
                     .descriptorCount = 1,
                     .stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
                 })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 13, // binding 13: Blue noise Sobol buffer (256 samples x 256 dims)
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 14, // binding 14: Blue noise scrambling tile (128x128x8)
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
-                })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
                 .beginDescriptorLayoutSet() // set 2
@@ -541,6 +531,18 @@ void RayTracingModule::initDescriptorTables() {
                 .defineDescriptorLayoutSetBinding({
                     .binding = 4, // binding 4: energy compensation LUT (multi-scatter GGX + EON diffuse)
                     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 9, // Blue noise Sobol (moved to set 2 to avoid set 1 binding count issue)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 10, // Blue noise scrambling tile
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     .descriptorCount = 1,
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
                 })
@@ -1038,6 +1040,17 @@ void RayTracingModule::initImages() {
         // Energy compensation LUT (set 2, binding 4) — sampler image, stays individual
         if (energyLUT_ && energyLUTSampler_) {
             rayTracingDescriptorTables_[i]->bindSamplerImageForShader(energyLUTSampler_, energyLUT_, 2, 4);
+        }
+
+        // Pre-bind blue noise SSBOs to ALL descriptor tables at init time.
+        // The render() path re-binds per-frame, but this ensures no descriptor
+        // is left dangling at set=1 bindings 13/14 before the first render.
+        if (blueNoise_) {
+            using BB = vk::DescriptorTable::BufferBinding;
+            rayTracingDescriptorTables_[i]->bindBufferBatch({
+                BB{blueNoise_->sobolBuffer(),      2, 9},
+                BB{blueNoise_->scramblingBuffer(), 2, 10},
+            });
         }
     }
 
@@ -1542,15 +1555,10 @@ void RayTracingModuleContext::render() {
     if (mcBuffer) {
         bufferBindings.push_back({mcBuffer, 1, 11});
     }
-    // Blue noise buffers (Owen-scrambled Sobol + spatial scrambling tile)
+    // Blue noise buffers (already uploaded at init time via queueImportantWorldUpload)
     if (module->blueNoise_) {
-        // One-time staging → device-local transfer on first frame
-        if (!module->blueNoiseUploaded_) {
-            module->blueNoise_->uploadToBuffer(worldCommandBuffer);
-            module->blueNoiseUploaded_ = true;
-        }
-        bufferBindings.push_back({module->blueNoise_->sobolBuffer(),      1, 13});
-        bufferBindings.push_back({module->blueNoise_->scramblingBuffer(), 1, 14});
+        bufferBindings.push_back({module->blueNoise_->sobolBuffer(),      2, 9});
+        bufferBindings.push_back({module->blueNoise_->scramblingBuffer(), 2, 10});
     }
     rayTracingDescriptorTable->bindBufferBatch(bufferBindings);
 
@@ -1888,6 +1896,7 @@ void RayTracingModuleContext::render() {
         && module->sharcHashEntries_) {
         worldCommandBuffer->beginLabel("RT:SHARC Update", 0.9f, 0.6f, 0.1f);
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
+        GpuDiag::checkpoint(cmd, GpuDiag::SHARC_UPDATE_RT);
 
         // Zero-fill SHARC buffers on first use
         if (!module->sharcBuffersInitialized_) {
@@ -1933,6 +1942,7 @@ void RayTracingModuleContext::render() {
 
         worldCommandBuffer->endLabel(); // end SHARC Update
         worldCommandBuffer->beginLabel("RT:SHARC Resolve", 0.9f, 0.7f, 0.2f);
+        GpuDiag::checkpoint(cmd, GpuDiag::SHARC_RESOLVE);
         // Pass 2: SHARC Resolve (compute — temporal blend + stale eviction)
         struct SharcResolvePushConstant {
             float cameraPositionPrevX, cameraPositionPrevY, cameraPositionPrevZ;
@@ -1997,6 +2007,7 @@ void RayTracingModuleContext::render() {
 
     // Pass 3: Main Render (existing RT dispatch — now queries SHARC cache on bounces >= 1)
     worldCommandBuffer->beginLabel("RT:MainTrace", 1.0f, 0.2f, 0.2f);
+    GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::RT_DISPATCH_MAIN);
     worldCommandBuffer->bindDescriptorTable(rayTracingDescriptorTable, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
         ->bindRTPipeline(module->rayTracingPipeline_)
         ->raytracing(sbt, hdrNoisyOutputImage->width(), hdrNoisyOutputImage->height(), 1);
@@ -2007,6 +2018,7 @@ void RayTracingModuleContext::render() {
         && module->reservoirImages_[0] && module->reservoirImages_[1]) {
         worldCommandBuffer->beginLabel("RT:ReSTIR Spatial", 0.2f, 0.8f, 0.8f);
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
+        GpuDiag::checkpoint(cmd, GpuDiag::RESTIR_SPATIAL);
 
         // Barrier: RT shader writes → compute shader reads
         VkMemoryBarrier spatialBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};

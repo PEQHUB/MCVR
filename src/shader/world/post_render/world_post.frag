@@ -19,30 +19,29 @@ layout(set = 2, binding = 0) readonly buffer TextureMappingBuffer {
 };
 
 layout(location = 0) in vec3 pos;
-layout(location = 1) flat in uint useNorm;
+layout(location = 1) flat in uint flags;
 layout(location = 2) in vec3 norm;
-layout(location = 3) flat in uint useColorLayer;
-layout(location = 4) in vec4 colorLayer;
-layout(location = 5) flat in uint useTexture;
-layout(location = 6) flat in uint useOverlay;
-layout(location = 7) in vec2 textureUV;
-layout(location = 8) flat in ivec2 overlayUV;
-layout(location = 9) flat in uint useGlint;
-layout(location = 10) flat in uint textureID;
-layout(location = 11) in vec2 glintUV;
-layout(location = 12) flat in uint glintTexture;
-layout(location = 13) flat in uint useLight;
-layout(location = 14) flat in ivec2 lightUV;
-layout(location = 15) in vec4 lightMapColor;
-layout(location = 16) in vec4 overlayColor;
+layout(location = 3) in vec4 colorLayer;
+layout(location = 4) in vec2 textureUV;
+layout(location = 5) flat in uint textureID;
+layout(location = 6) in vec2 glintUV;
+layout(location = 7) flat in uint glintTexture;
+layout(location = 8) in vec4 lightMapColor;
+layout(location = 9) in vec4 overlayColor;
 
 layout(location = 0) out vec4 fragColor;
 
 void main() {
+    // Unpack flags
+    bool useTexture    = (flags & PBR_FLAG_USE_TEXTURE) != 0u;
+    bool useColorLayer = (flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
+    bool useOverlay    = (flags & PBR_FLAG_USE_OVERLAY) != 0u;
+    bool useLight      = (flags & PBR_FLAG_USE_LIGHT) != 0u;
+
     vec4 color = vec4(0.0);
     float emission = 0.0;
     int specularTextureID = mapping.entries[textureID].specular;
-    if (useTexture > 0) {
+    if (useTexture) {
         color = texture(textures[nonuniformEXT(textureID)], textureUV);
         if (specularTextureID >= 0) {
             emission = texture(textures[nonuniformEXT(specularTextureID)], textureUV).a;
@@ -55,11 +54,11 @@ void main() {
         }
     }
     if (color.a < 0.1) { discard; }
-    if (useColorLayer > 0) { color *= colorLayer; }
-    if (useOverlay > 0) { color.rgb = mix(overlayColor.rgb, color.rgb, overlayColor.a); }
+    if (useColorLayer) { color *= colorLayer; }
+    if (useOverlay) { color.rgb = mix(overlayColor.rgb, color.rgb, overlayColor.a); }
 
     if (emission == 0.0) {
-        if (useLight == 0)
+        if (!useLight)
             fragColor = color;
         else
             fragColor = color * lightMapColor;

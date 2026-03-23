@@ -1,4 +1,6 @@
 #include "core/render/crash_ring_buffer.hpp"
+#include "core/render/gpu_diagnostics.hpp"
+#include "core/render/aftermath_integration.hpp"
 #include "core/render/renderer.hpp"
 
 #include <fstream>
@@ -48,11 +50,28 @@ void CrashRingBuffer::dumpToFile(const std::filesystem::path& dir) const {
 }
 
 void crashExit(int vkResult, const char* context) {
+    crashExitWithQueue(vkResult, context, VK_NULL_HANDLE);
+}
+
+void crashExitWithQueue(int vkResult, const char* context, VkQueue queue) {
     std::cerr << "[CRASH] " << context << " (VkResult=" << vkResult << ")" << std::endl;
     g_crashRing.record(context, vkResult);
 
     auto logsDir = Renderer::folderPath / "logs";
+
+    // GPU diagnostics: query checkpoints + device fault before dump
+    if (vkResult == -4 /* VK_ERROR_DEVICE_LOST */) {
+        GpuDiag::onDeviceLost(queue, logsDir, g_crashRing.frameCount());
+
+        // Wait for Aftermath to collect GPU crash dump (up to 5 seconds)
+        std::string dumpPath = AftermathIntegration::waitForCrashDump(5000);
+        if (!dumpPath.empty()) {
+            std::cerr << "[CRASH] Aftermath crash dump: " << dumpPath << std::endl;
+        }
+    }
+
     g_crashRing.dumpToFile(logsDir);
+    AftermathIntegration::shutdown();
 
     exit(EXIT_FAILURE);
 }

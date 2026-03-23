@@ -115,34 +115,61 @@ namespace VertexFormat {
         T_UINT normal; // first 3 bytes
     };
 
+    // PBRTriangle flags bitfield (bits 0-5: boolean enables, bits 8-10: coordinate)
+#ifdef __cplusplus
+    static constexpr uint32_t PBR_FLAG_USE_NORM        = 1u << 0;
+    static constexpr uint32_t PBR_FLAG_USE_COLOR_LAYER  = 1u << 1;
+    static constexpr uint32_t PBR_FLAG_USE_TEXTURE      = 1u << 2;
+    static constexpr uint32_t PBR_FLAG_USE_OVERLAY      = 1u << 3;
+    static constexpr uint32_t PBR_FLAG_USE_GLINT        = 1u << 4;
+    static constexpr uint32_t PBR_FLAG_USE_LIGHT        = 1u << 5;
+    static constexpr uint32_t PBR_FLAG_COORD_SHIFT      = 8u;
+    static constexpr uint32_t PBR_FLAG_COORD_MASK       = 0x7u << 8u; // 3 bits
+#else
+    #define PBR_FLAG_USE_NORM        (1u << 0)
+    #define PBR_FLAG_USE_COLOR_LAYER (1u << 1)
+    #define PBR_FLAG_USE_TEXTURE     (1u << 2)
+    #define PBR_FLAG_USE_OVERLAY     (1u << 3)
+    #define PBR_FLAG_USE_GLINT       (1u << 4)
+    #define PBR_FLAG_USE_LIGHT       (1u << 5)
+    #define PBR_FLAG_COORD_SHIFT     8u
+    #define PBR_FLAG_COORD_MASK      (0x7u << 8u)
+#endif
+
+    // 96 bytes per vertex, std430 aligned (6 x vec4)
+    // 96 bytes per vertex, std430 aligned (6 x vec4)
     struct PBRTriangle {
-        T_VEC3 pos;
-        T_UINT useNorm;
+        T_VEC3 pos;                 // 0..11
+        T_UINT flags;               // 12..15  (booleans + coordinate packed)
 
-        T_VEC3 norm;
-        T_UINT useColorLayer;
+        T_VEC3 norm;                // 16..27
+        T_FLOAT albedoEmission;     // 28..31
 
-        T_VEC4 colorLayer;
+        T_VEC4 colorLayer;          // 32..47
 
-        T_UINT useTexture;
-        T_UINT useOverlay;
-        T_VEC2 textureUV;
+        T_VEC3 postBase;            // 48..59
+        T_UINT emissiveBlockType;   // 60..63  EmissiveBlock ordinal (0-39), 255 = none/LabPBR
 
-        T_IVEC2 overlayUV;
-        T_UINT useGlint;
-        T_UINT textureID;
+        T_VEC2 textureUV;           // 64..71
+        T_VEC2 glintUV;             // 72..79
 
-        T_VEC2 glintUV;
-        T_UINT glintTexture;
-        T_UINT useLight;
-
-        T_IVEC2 lightUV;
-        T_UINT coordinate;
-        T_FLOAT albedoEmission;
-
-        T_VEC3 postBase;
-        T_UINT emissiveBlockType; // EmissiveBlock ordinal (0-39), 255 = none/LabPBR
+        T_UINT textureID;           // 80..83
+        T_UINT glintTexture;        // 84..87
+        T_UINT overlayPacked;       // 88..91  (overlay_u & 0xFFFF) | (overlay_v << 16)
+        T_UINT lightPacked;         // 92..95  (light_u & 0xFFFF) | (light_v << 16)
     };
+#ifdef __cplusplus
+    static_assert(sizeof(PBRTriangle) == 96, "PBRTriangle must be exactly 96 bytes");
+    static_assert(offsetof(PBRTriangle, flags) == 12, "flags offset mismatch");
+    static_assert(offsetof(PBRTriangle, norm) == 16, "norm offset mismatch");
+    static_assert(offsetof(PBRTriangle, albedoEmission) == 28, "albedoEmission offset mismatch");
+    static_assert(offsetof(PBRTriangle, colorLayer) == 32, "colorLayer offset mismatch");
+    static_assert(offsetof(PBRTriangle, postBase) == 48, "postBase offset mismatch");
+    static_assert(offsetof(PBRTriangle, textureUV) == 64, "textureUV offset mismatch");
+    static_assert(offsetof(PBRTriangle, textureID) == 80, "textureID offset mismatch");
+    static_assert(offsetof(PBRTriangle, overlayPacked) == 88, "overlayPacked offset mismatch");
+    static_assert(offsetof(PBRTriangle, lightPacked) == 92, "lightPacked offset mismatch");
+#endif
 #ifdef __cplusplus
 }; // namespace VertexFormat
 #endif

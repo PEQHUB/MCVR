@@ -998,22 +998,13 @@ ChunkBuildDataBatch::ChunkBuildDataBatch(uint32_t maxBatchSize,
         return chunks[a]->buildFactor(currentTime, cameraPos) > chunks[b]->buildFactor(currentTime, cameraPos);
     });
 
-    auto batchStart = std::chrono::steady_clock::now();
-    static constexpr auto TIME_BUDGET = std::chrono::microseconds(4000); // 4ms
-
     for (int i = 0; i < std::min((size_t)maxBatchSize, queuedIndices.size()); i++) {
-        // After the first chunk, enforce time budget to cap frame time spikes from OMM baking
-        if (i > 0) {
-            auto elapsed = std::chrono::steady_clock::now() - batchStart;
-            if (elapsed > TIME_BUDGET) break;
-        }
-
         auto iter = queuedIndexSet.find(queuedIndices[i]);
         if (iter != queuedIndexSet.end()) { queuedIndexSet.erase(iter); }
 
         auto data = chunkBuildDatas[queuedIndices[i]];
         data->build(true, false, cameraPos);
-        data->releaseHostGeometry();
+        // data->releaseHostGeometry(); // DISABLED: investigating staging buffer crash
         batchData.push_back(data);
     }
 }
@@ -1066,9 +1057,15 @@ void ChunkBuildScheduler::tryCheckBatchesFinish() {
 
             iterFence = buildingFences_.erase(iterFence);
             iterBatch = buildingBatches_.erase(iterBatch);
-        } else if (fenceResult != VK_TIMEOUT) {
+        } else if (fenceResult == VK_TIMEOUT) {
+            ++iterFence;
+            ++iterBatch;
+        } else {
             g_crashRing.record("chunkFenceFail", fenceResult);
             std::cout << "Chunk build fence failed with error: " << std::dec << fenceResult << std::endl;
+            // Device lost — all remaining fences are poison, drain them
+            buildingFences_.clear();
+            buildingBatches_.clear();
             break;
         }
     }
@@ -1104,6 +1101,9 @@ void ChunkBuildScheduler::waitAllBatchesFinish() {
         } else {
             g_crashRing.record("chunkWaitAllFail", fenceResult);
             std::cout << "Chunk build waitAll fence failed with error: " << std::dec << fenceResult << std::endl;
+            // Device lost — all remaining fences are poison, drain them
+            buildingFences_.clear();
+            buildingBatches_.clear();
             break;
         }
     }
@@ -1299,7 +1299,12 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
             vkSubmitInfo.signalSemaphoreCount = 0;
             vkSubmitInfo.pSignalSemaphores = nullptr;
 
-            vkQueueSubmit(device->secondaryQueue(), 1, &vkSubmitInfo, fence->vkFence());
+            VkResult submitResult = vkQueueSubmit(device->secondaryQueue(), 1, &vkSubmitInfo, fence->vkFence());
+            if (submitResult != VK_SUCCESS) {
+                g_crashRing.record("chunkSubmitFail", submitResult);
+                std::cout << "Chunk batch vkQueueSubmit failed with error: " << std::dec << submitResult << std::endl;
+                return;
+            }
 
             freeFences_.pop();
             buildingFences_.push_back(fence);
@@ -1371,7 +1376,7 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
     displacedFaceDataBuffer = chunkBuildData->displacedFaceDataBuffer;
     displacedBlas = chunkBuildData->displacedBlas;
     displacedFaceCount = chunkBuildData->displacedFaceCount;
-    // CPU vertex/index data already released by releaseHostGeometry() — not stored in Chunk1.
+    // CPU vertex/index data kept alive in ChunkBuildData (releaseHostGeometry disabled)
 }
 
 void Chunk1::invalidate() {
@@ -1561,7 +1566,7 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
         }
 
         // Release CPU vertex/index data now that GPU buffers are uploaded and async copy is made
-        chunkBuildData->releaseHostGeometry();
+        // chunkBuildData->releaseHostGeometry(); // DISABLED: investigating staging buffer crash
 
         chunks_[task.id]->enqueue(chunkBuildData);
 

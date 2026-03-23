@@ -88,20 +88,14 @@ void EntityBuildDataBatch::build(std::shared_ptr<vk::DeviceLocalBuffer> &pooledV
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
-    // Reuse pooled vertex buffer if capacity is sufficient (safe because acquireContext
-    // waited on the fence for this context, guaranteeing previous GPU work is done)
+    // Create new buffers each frame — old buffers are GC'd after the GPU is done.
+    // Buffer reuse causes write-after-read hazards: the previous frame's BLAS/TLAS
+    // still references the buffer by device address while this frame overwrites it.
     size_t requiredVBSize = totalVertexCount * sizeof(vk::VertexFormat::PBRTriangle);
-    if (!pooledVertexBuffer || pooledVertexBuffer->size() < requiredVBSize) {
-        pooledVertexBuffer = vk::DeviceLocalBuffer::create(vma, device, requiredVBSize, entityBufferUsage);
-    }
-    vertexBuffer = pooledVertexBuffer;
+    vertexBuffer = vk::DeviceLocalBuffer::create(vma, device, requiredVBSize, entityBufferUsage);
 
-    // Reuse pooled index buffer if capacity is sufficient
     size_t requiredIBSize = totalIndexCount * sizeof(uint32_t);
-    if (!pooledIndexBuffer || pooledIndexBuffer->size() < requiredIBSize) {
-        pooledIndexBuffer = vk::DeviceLocalBuffer::create(vma, device, requiredIBSize, entityBufferUsage);
-    }
-    indexBuffer = pooledIndexBuffer;
+    indexBuffer = vk::DeviceLocalBuffer::create(vma, device, requiredIBSize, entityBufferUsage);
 
     vk::VertexFormat::PBRTriangle *vertexPtr = static_cast<vk::VertexFormat::PBRTriangle *>(vertexBuffer->mappedPtr());
     uint32_t *indexPtr = static_cast<uint32_t *>(indexBuffer->mappedPtr());
@@ -305,7 +299,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                             vertex.pos = vertices[j].position;
 
-                            vertex.useColorLayer = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER;
                             vertex.colorLayer = glm::vec4{
                                 vertices[j].color & 0xFF,
                                 (vertices[j].color >> 8) & 0xFF,
@@ -314,16 +308,13 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                             };
                             vertex.colorLayer /= 255.0;
 
-                            vertex.useTexture = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_TEXTURE;
                             vertex.textureUV = vertices[j].uv0;
 
-                            vertex.useLight = 1;
-                            vertex.lightUV = glm::ivec2{
-                                vertices[j].uv2 & 0xFFFF,
-                                (vertices[j].uv2 >> 16) & 0xFFFF,
-                            };
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_LIGHT;
+                            vertex.lightPacked = (vertices[j].uv2 & 0xFFFF) | ((vertices[j].uv2 >> 16) << 16);
 
-                            vertex.useNorm = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_NORM;
                             vertex.norm = glm::vec3{
                                 (int8_t)(vertices[j].normal & 0xFF),
                                 (int8_t)((vertices[j].normal >> 8) & 0xFF),
@@ -339,7 +330,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                             vertex.pos = vertices[j].position;
 
-                            vertex.useColorLayer = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER;
                             vertex.colorLayer = glm::vec4{
                                 vertices[j].color & 0xFF,
                                 (vertices[j].color >> 8) & 0xFF,
@@ -348,19 +339,16 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                             };
                             vertex.colorLayer /= 255.0;
 
-                            vertex.useTexture = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_TEXTURE;
                             vertex.textureUV = vertices[j].uv0;
 
-                            vertex.useOverlay = 1;
-                            vertex.overlayUV = glm::ivec2{vertices[j].uv1 & 0xFFFF, (vertices[j].uv1 >> 16) & 0xFFFF};
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_OVERLAY;
+                            vertex.overlayPacked = (vertices[j].uv1 & 0xFFFF) | ((vertices[j].uv1 >> 16) << 16);
 
-                            vertex.useLight = 1;
-                            vertex.lightUV = glm::vec2{
-                                vertices[j].uv2 & 0xFFFF,
-                                (vertices[j].uv2 >> 16) & 0xFFFF,
-                            };
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_LIGHT;
+                            vertex.lightPacked = (vertices[j].uv2 & 0xFFFF) | ((vertices[j].uv2 >> 16) << 16);
 
-                            vertex.useNorm = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_NORM;
                             vertex.norm = glm::vec3{
                                 (int8_t)(vertices[j].normal & 0xFF),
                                 (int8_t)((vertices[j].normal >> 8) & 0xFF),
@@ -376,10 +364,10 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                             vertex.pos = vertices[j].position;
 
-                            vertex.useTexture = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_TEXTURE;
                             vertex.textureUV = vertices[j].uv0;
 
-                            vertex.useColorLayer = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER;
                             vertex.colorLayer = glm::vec4{
                                 vertices[j].color & 0xFF,
                                 (vertices[j].color >> 8) & 0xFF,
@@ -388,11 +376,8 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                             };
                             vertex.colorLayer /= 255.0;
 
-                            vertex.useLight = 1;
-                            vertex.lightUV = glm::vec2{
-                                vertices[j].uv2 & 0xFFFF,
-                                (vertices[j].uv2 >> 16) & 0xFFFF,
-                            };
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_LIGHT;
+                            vertex.lightPacked = (vertices[j].uv2 & 0xFFFF) | ((vertices[j].uv2 >> 16) << 16);
 
                             break;
                         }
@@ -410,7 +395,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                             vertex.pos = vertices[j].position;
 
-                            vertex.useColorLayer = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER;
                             vertex.colorLayer = glm::vec4{
                                 vertices[j].color & 0xFF,
                                 (vertices[j].color >> 8) & 0xFF,
@@ -427,7 +412,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                             vertex.pos = vertices[j].position;
 
-                            vertex.useColorLayer = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER;
                             vertex.colorLayer = glm::vec4{
                                 vertices[j].color & 0xFF,
                                 (vertices[j].color >> 8) & 0xFF,
@@ -436,7 +421,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                             };
                             vertex.colorLayer /= 255.0;
 
-                            vertex.useNorm = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_NORM;
                             vertex.norm = glm::vec3{
                                 (int8_t)(vertices[j].normal & 0xFF),
                                 (int8_t)((vertices[j].normal >> 8) & 0xFF),
@@ -451,7 +436,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                             vertex.pos = vertices[j].position;
 
-                            vertex.useColorLayer = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER;
                             vertex.colorLayer = glm::vec4{
                                 vertices[j].color & 0xFF,
                                 (vertices[j].color >> 8) & 0xFF,
@@ -460,11 +445,8 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                             };
                             vertex.colorLayer /= 255.0;
 
-                            vertex.useLight = 1;
-                            vertex.lightUV = glm::vec2{
-                                vertices[j].uv2 & 0xFFFF,
-                                (vertices[j].uv2 >> 16) & 0xFFFF,
-                            };
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_LIGHT;
+                            vertex.lightPacked = (vertices[j].uv2 & 0xFFFF) | ((vertices[j].uv2 >> 16) << 16);
 
                             break;
                         }
@@ -474,7 +456,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                             vertex.pos = vertices[j].position;
 
-                            vertex.useTexture = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_TEXTURE;
                             vertex.textureUV = vertices[j].uv;
 
                             break;
@@ -485,10 +467,10 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                             vertex.pos = vertices[j].position;
 
-                            vertex.useTexture = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_TEXTURE;
                             vertex.textureUV = vertices[j].uv;
 
-                            vertex.useColorLayer = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER;
                             vertex.colorLayer = glm::vec4{
                                 vertices[j].color & 0xFF,
                                 (vertices[j].color >> 8) & 0xFF,
@@ -506,7 +488,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                             vertex.pos = vertices[j].position;
 
-                            vertex.useColorLayer = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER;
                             vertex.colorLayer = glm::vec4{
                                 vertices[j].color & 0xFF,
                                 (vertices[j].color >> 8) & 0xFF,
@@ -515,14 +497,11 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                             };
                             vertex.colorLayer /= 255.0;
 
-                            vertex.useTexture = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_TEXTURE;
                             vertex.textureUV = vertices[j].uv0;
 
-                            vertex.useLight = 1;
-                            vertex.lightUV = glm::vec2{
-                                vertices[j].uv2 & 0xFFFF,
-                                (vertices[j].uv2 >> 16) & 0xFFFF,
-                            };
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_LIGHT;
+                            vertex.lightPacked = (vertices[j].uv2 & 0xFFFF) | ((vertices[j].uv2 >> 16) << 16);
 
                             break;
                         }
@@ -533,16 +512,13 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                             vertex.pos = vertices[j].position;
 
-                            vertex.useTexture = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_TEXTURE;
                             vertex.textureUV = vertices[j].uv0;
 
-                            vertex.useLight = 1;
-                            vertex.lightUV = glm::vec2{
-                                vertices[j].uv2 & 0xFFFF,
-                                (vertices[j].uv2 >> 16) & 0xFFFF,
-                            };
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_LIGHT;
+                            vertex.lightPacked = (vertices[j].uv2 & 0xFFFF) | ((vertices[j].uv2 >> 16) << 16);
 
-                            vertex.useColorLayer = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER;
                             vertex.colorLayer = glm::vec4{
                                 vertices[j].color & 0xFF,
                                 (vertices[j].color >> 8) & 0xFF,
@@ -560,10 +536,10 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                             vertex.pos = vertices[j].position;
 
-                            vertex.useTexture = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_TEXTURE;
                             vertex.textureUV = vertices[j].uv0;
 
-                            vertex.useColorLayer = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER;
                             vertex.colorLayer = glm::vec4{
                                 vertices[j].color & 0xFF,
                                 (vertices[j].color >> 8) & 0xFF,
@@ -572,7 +548,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                             };
                             vertex.colorLayer /= 255.0;
 
-                            vertex.useNorm = 1;
+                            vertex.flags |= vk::VertexFormat::PBR_FLAG_USE_NORM;
                             vertex.norm = glm::vec3{
                                 (int8_t)(vertices[j].normal & 0xFF),
                                 (int8_t)((vertices[j].normal >> 8) & 0xFF),
@@ -646,20 +622,20 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                         geometryIndices.push_back(j + 0);
 
                         if (task.normalOffset) {
-                            if (geometryVertices[j + 0].useNorm)
+                            if (geometryVertices[j + 0].flags & vk::VertexFormat::PBR_FLAG_USE_NORM)
                                 geometryVertices[j + 0].pos += 0.00001f * glm::normalize(geometryVertices[j + 0].norm);
-                            if (geometryVertices[j + 1].useNorm)
+                            if (geometryVertices[j + 1].flags & vk::VertexFormat::PBR_FLAG_USE_NORM)
                                 geometryVertices[j + 1].pos += 0.00001f * glm::normalize(geometryVertices[j + 1].norm);
-                            if (geometryVertices[j + 2].useNorm)
+                            if (geometryVertices[j + 2].flags & vk::VertexFormat::PBR_FLAG_USE_NORM)
                                 geometryVertices[j + 2].pos += 0.00001f * glm::normalize(geometryVertices[j + 2].norm);
-                            if (geometryVertices[j + 3].useNorm)
+                            if (geometryVertices[j + 3].flags & vk::VertexFormat::PBR_FLAG_USE_NORM)
                                 geometryVertices[j + 3].pos += 0.00001f * glm::normalize(geometryVertices[j + 3].norm);
                         }
 
-                        geometryVertices[j + 0].coordinate = coordinate;
-                        geometryVertices[j + 1].coordinate = coordinate;
-                        geometryVertices[j + 2].coordinate = coordinate;
-                        geometryVertices[j + 3].coordinate = coordinate;
+                        geometryVertices[j + 0].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
+                        geometryVertices[j + 1].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
+                        geometryVertices[j + 2].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
+                        geometryVertices[j + 3].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
 
                         if (post) {
                             geometryVertices[j + 0].postBase = {x, y, z};
@@ -668,7 +644,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                             geometryVertices[j + 3].postBase = {x, y, z};
                         }
 
-                        if (geometryVertices[j + 3].useTexture) {
+                        if (geometryVertices[j + 3].flags & vk::VertexFormat::PBR_FLAG_USE_TEXTURE) {
                             textureIDs.insert(geometryVertices[j + 0].textureID);
                             textureIDs.insert(geometryVertices[j + 1].textureID);
                             textureIDs.insert(geometryVertices[j + 2].textureID);
@@ -702,10 +678,10 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                         geometryIndices.push_back(j + 3);
                         geometryIndices.push_back(j + 0);
 
-                        geometryVertices[j + 0].coordinate = coordinate;
-                        geometryVertices[j + 1].coordinate = coordinate;
-                        geometryVertices[j + 2].coordinate = coordinate;
-                        geometryVertices[j + 3].coordinate = coordinate;
+                        geometryVertices[j + 0].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
+                        geometryVertices[j + 1].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
+                        geometryVertices[j + 2].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
+                        geometryVertices[j + 3].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
 
                         if (post) {
                             geometryVertices[j + 0].postBase = {x, y, z};
@@ -736,7 +712,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                         for (int k = 0; k < 8; k++) {
                             fixedVertices.push_back({
                                 .pos = cubePoints[k],
-                                .useColorLayer = 1,
+                                .flags = vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER,
                                 .colorLayer =
                                     k < 4 ? geometryVertices[j - 1].colorLayer : geometryVertices[j].colorLayer,
                             });
@@ -761,11 +737,11 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                     for (int j = 0; j < geometryVertices.size(); j++) {
                         if (task.normalOffset) {
-                            if (geometryVertices[j + 0].useNorm)
+                            if (geometryVertices[j + 0].flags & vk::VertexFormat::PBR_FLAG_USE_NORM)
                                 geometryVertices[j + 0].pos += 0.00001f * glm::normalize(geometryVertices[j + 0].norm);
                         }
 
-                        geometryVertices[j + 0].coordinate = coordinate;
+                        geometryVertices[j + 0].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
 
                         if (post) { geometryVertices[j + 0].postBase = {x, y, z}; }
                     }
@@ -796,7 +772,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                         for (int k = 0; k < 8; k++) {
                             fixedVertices.push_back({
                                 .pos = cubePoints[k],
-                                .useColorLayer = 1,
+                                .flags = vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER,
                                 .colorLayer =
                                     k < 4 ? geometryVertices[j - 1].colorLayer : geometryVertices[j].colorLayer,
                             });
@@ -821,11 +797,11 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                     for (int j = 0; j < geometryVertices.size(); j++) {
                         if (task.normalOffset) {
-                            if (geometryVertices[j + 0].useNorm)
+                            if (geometryVertices[j + 0].flags & vk::VertexFormat::PBR_FLAG_USE_NORM)
                                 geometryVertices[j + 0].pos += 0.00001f * glm::normalize(geometryVertices[j + 0].norm);
                         }
 
-                        geometryVertices[j + 0].coordinate = coordinate;
+                        geometryVertices[j + 0].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
 
                         if (post) { geometryVertices[j + 0].postBase = {x, y, z}; }
                     }
