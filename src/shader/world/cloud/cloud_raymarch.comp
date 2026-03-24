@@ -31,6 +31,80 @@ const float DETAIL_FREQ = 8.0;
 const float CURL_STRENGTH = 1.5;
 const float CURL_EPS = 1.0 / 128.0;  // One texel in noise UV space
 
+// ============================================================
+// Anti-Tiling System — toggle each technique independently
+// Rebuild shaders (step 1) to apply changes.
+// ============================================================
+const bool ANTI_TILE_WARP       = true;   // Solution 1: domain warping + irrational frequency ratios
+const bool ANTI_TILE_DUAL_SCALE = true;   // Solution 3: dual-scale mixing at incommensurate frequencies
+const bool ANTI_TILE_DIST_FADE  = true;   // Solution 4: distance-based LOD fade to lower frequency
+
+const float PHI   = 1.61803398875;        // golden ratio
+const float PHI2  = PHI * PHI;            // 2.618
+const float PHI3  = PHI * PHI * PHI;      // 4.236
+const float SQRT2 = 1.41421356237;
+
+// 45° rotation around Y axis — decorrelates dual-scale axes
+const mat3 ROT45Y = mat3(
+     0.7071, 0.0,  0.7071,
+     0.0,    1.0,  0.0,
+    -0.7071, 0.0,  0.7071
+);
+
+// Domain warp: displace UV by low-frequency noise at irrational scale.
+// Breaks tile alignment for ALL channels. Cost: +1 texture lookup.
+vec3 warpNoiseUV(sampler3D noiseTex, vec3 uv, float mip) {
+    if (!ANTI_TILE_WARP) return uv;
+    vec3 warpCoord = uv * (1.0 / PHI3);  // sample at ~0.236x base freq
+    vec3 warp = textureLod(noiseTex, warpCoord, max(mip, 2.0)).xyz * 2.0 - 1.0;
+    return uv + warp * 0.3;
+}
+
+// Full anti-tiled noise sample: warp + dual-scale + distance fade.
+// Returns RGBA noise (R=shape, GBA=erosion) with tiling artifacts removed.
+vec4 sampleNoiseAntiTile(sampler3D noiseTex, vec3 baseUV, float mip, float distFromCam) {
+    // Solution 1: Domain warp
+    vec3 uv = warpNoiseUV(noiseTex, baseUV, mip);
+
+    vec4 noise = textureLod(noiseTex, uv, mip);
+
+    // Solution 3: Dual-scale mixing at 1/phi frequency, 45° rotated
+    if (ANTI_TILE_DUAL_SCALE) {
+        vec3 altUV = ROT45Y * (baseUV / PHI);
+        altUV = warpNoiseUV(noiseTex, altUV, mip);  // warp the alt scale too
+        vec4 noise2 = textureLod(noiseTex, altUV, mip);
+        // Modulate: second scale varies amplitude of first (preserves statistics better than avg)
+        noise = mix(noise, noise * (0.5 + noise2), 0.5);
+    }
+
+    // Solution 4: Distance LOD fade — at far range, blend toward 0.25x freq (4x tile period)
+    if (ANTI_TILE_DIST_FADE) {
+        float fadeFactor = smoothstep(1500.0, 3500.0, distFromCam);
+        if (fadeFactor > 0.001) {
+            vec3 lowUV = warpNoiseUV(noiseTex, baseUV * 0.25, mip + 2.0);
+            vec4 lowNoise = textureLod(noiseTex, lowUV, mip + 2.0);
+            noise = mix(noise, lowNoise, fadeFactor);
+        }
+    }
+
+    return noise;
+}
+
+// Light-weight version for light march (warp only, no dual-scale or distance fade)
+vec4 sampleNoiseLightMarch(sampler3D noiseTex, vec3 baseUV, float mip) {
+    vec3 uv = warpNoiseUV(noiseTex, baseUV, mip);
+    return textureLod(noiseTex, uv, mip);
+}
+
+// Warp detail noise coordinates (same warp applied at detail frequency)
+vec3 warpDetailUV(sampler3D noiseTex, vec3 detailUV, float mip) {
+    if (!ANTI_TILE_WARP) return detailUV;
+    // Warp at coarser scale relative to detail frequency
+    vec3 warpCoord = detailUV * (1.0 / (PHI2 * DETAIL_FREQ));
+    vec3 warp = textureLod(noiseTex, warpCoord, max(mip, 2.0)).xyz * 2.0 - 1.0;
+    return detailUV + warp * 0.2;
+}
+
 float hash12(vec2 p) {
     vec3 p3 = fract(vec3(p.xyx) * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
@@ -134,7 +208,8 @@ void debugVisualize(ivec2 texel, vec2 uv, vec3 rayOrigin, vec3 rayDir, float clo
 float sampleFullDensity(vec3 pos, float cloudThick, out float outHeight) {
     float hFrac = clamp((pos.y - pc.cloudBase) / cloudThick, 0.0, 1.0);
     vec3 noiseUV = pos * NOISE_SCALE + windOffset(pc.windTime, hFrac);
-    vec4 noise = textureLod(uNoise3D, noiseUV, 1.0);
+    float dist = length(pos - getEyePos());
+    vec4 noise = sampleNoiseAntiTile(uNoise3D, noiseUV, 1.0, dist);
     vec4 weather = sampleWeather(uWeatherMap, pos);
 
     float baseDensity = getBaseDensity(pos, weather.r, weather.g, noise,
@@ -151,6 +226,7 @@ float sampleFullDensity(vec3 pos, float cloudThick, out float outHeight) {
 
     // Detail erosion [Frostnova GetDetailDensity]
     vec3 detailPos = (pos + curlDisp) * NOISE_SCALE * DETAIL_FREQ + windOffset(pc.windTime, hFrac);
+    detailPos = warpDetailUV(uNoise3D, detailPos, 0.0);
     vec4 detailNoise = textureLod(uNoise3D, detailPos, 0.0);
 
     return getDetailDensity(baseDensity, detailNoise, outHeight, pc.detailStrength);
@@ -196,7 +272,7 @@ float lightMarchCone(vec3 pos, vec3 lightDir, float cloudThick) {
 
         float lhFrac = clamp((samplePos.y - pc.cloudBase) / cloudThick, 0.0, 1.0);
         vec3 noisePos = samplePos * NOISE_SCALE + windOffset(pc.windTime, lhFrac);
-        vec4 noise = textureLod(uNoise3D, noisePos, 1.5);
+        vec4 noise = sampleNoiseLightMarch(uNoise3D, noisePos, 1.5);
         vec4 weather = sampleWeather(uWeatherMap, samplePos);
 
         float sampleH;
@@ -205,6 +281,7 @@ float lightMarchCone(vec3 pos, vec3 lightDir, float cloudThick) {
         // Detail erosion in light march [Frostnova SampleLight calls both base + detail]
         if (density > 0.0001) {
             vec3 detailPos = samplePos * NOISE_SCALE * DETAIL_FREQ + windOffset(pc.windTime, lhFrac);
+            detailPos = warpDetailUV(uNoise3D, detailPos, 2.0);
             vec4 detailNoise = textureLod(uNoise3D, detailPos, 2.0);
             density = getDetailDensity(density, detailNoise, sampleH, pc.detailStrength);
         }
@@ -231,7 +308,7 @@ float lightMarchLinear(vec3 pos, vec3 lightDir, uint steps, float cloudThick) {
     for (uint i = 0; i < steps; i++) {
         float lhFrac = clamp((samplePos.y - pc.cloudBase) / cloudThick, 0.0, 1.0);
         vec3 noisePos = samplePos * NOISE_SCALE + windOffset(pc.windTime, lhFrac);
-        vec4 noise = textureLod(uNoise3D, noisePos, 1.0);
+        vec4 noise = sampleNoiseLightMarch(uNoise3D, noisePos, 1.0);
         vec4 weather = sampleWeather(uWeatherMap, samplePos);
 
         float sampleH;
@@ -239,6 +316,7 @@ float lightMarchLinear(vec3 pos, vec3 lightDir, uint steps, float cloudThick) {
                                         pc.cloudBase, cloudThick, pc.densityMultiplier, sampleH);
         if (density > 0.0001) {
             vec3 detailPos = samplePos * NOISE_SCALE * DETAIL_FREQ + windOffset(pc.windTime, lhFrac);
+            detailPos = warpDetailUV(uNoise3D, detailPos, 2.0);
             vec4 detailNoise = textureLod(uNoise3D, detailPos, 2.0);
             density = getDetailDensity(density, detailNoise, sampleH, pc.detailStrength);
         }
@@ -361,9 +439,9 @@ void main() {
         float prelimH = clamp((pos.y - pc.cloudBase) / cloudThick, 0.0, 1.0);
         vec3 noiseUV = pos * NOISE_SCALE + windOffset(pc.windTime, prelimH);
 
-        // Distance-based LOD
+        // Distance-based LOD + anti-tiling
         float mipLevel = log2(1.0 + distFromCam * 0.002);
-        vec4 noise = textureLod(uNoise3D, noiseUV, mipLevel);
+        vec4 noise = sampleNoiseAntiTile(uNoise3D, noiseUV, mipLevel, distFromCam);
         vec4 weather = sampleWeather(uWeatherMap, pos);
 
         // Stage 1: Base density
@@ -411,6 +489,7 @@ void main() {
 
             float detailMip = max(mipLevel - 1.0, 0.0);  // Sharper than base for detail erosion
             vec3 detailPos = (pos + curl) * NOISE_SCALE * DETAIL_FREQ + windOffset(pc.windTime, prelimH);
+            detailPos = warpDetailUV(uNoise3D, detailPos, detailMip);
             vec4 detailNoise = textureLod(uNoise3D, detailPos, detailMip);
 
             float density = getDetailDensity(baseDensity, detailNoise, h, effectiveDetailStr);
