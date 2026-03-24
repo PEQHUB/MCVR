@@ -80,7 +80,7 @@ void main() {
     if (any(greaterThanEqual(texel, texSize))) return;
 
     vec3 uvw = (vec3(texel) + 0.5) / vec3(texSize);
-    vec3 p = uvw * float(texSize.x) / 16.0;  // Cells scale with resolution (128→8, 256→16, 512→32)
+    vec3 p = uvw * float(texSize.x) / 32.0;  // Cells scale with resolution (128→4, 256→8, 512→16)
 
     // R: Perlin-Worley blend [Schneider15] — connected large-scale shape.
     // remap(perlin, 0, 1, worley, 1) biases Perlin toward Worley in valleys,

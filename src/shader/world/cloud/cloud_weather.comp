@@ -100,13 +100,8 @@ void main() {
     // Schneider coverage remap [Nubis 2017 slide 40]:
     //   coverage = remap(noise, threshold, 1.0, 0.0, 1.0)
     // Higher effCoverage → lower threshold → more sky covered.
-    // The slider controls AREA of sky covered. Within cloud areas, coverage is
-    // remapped to [0.5, 1.0] so the density pipeline always has strong values.
-    // Frostnova's pre-authored weather has 0.5-0.9 in cloud areas; our FBM+threshold
-    // produces 0.0-0.12 without this boost, which the anvil bias crushes to zero.
     float threshold = 1.0 - effCoverage;
-    float rawCov = clamp((rawCoverage - threshold) / max(1.0 - threshold, 0.001), 0.0, 1.0);
-    float coverage = rawCov > 0.0 ? mix(0.5, 1.0, rawCov) : 0.0;
+    float coverage = clamp((rawCoverage - threshold) / max(1.0 - threshold, 0.001), 0.0, 1.0);
 
     // Edge fade at weather map boundary
     vec2 edgeDist = min(uv, 1.0 - uv);
