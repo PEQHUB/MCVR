@@ -322,12 +322,12 @@ bool StreamlineContext::init(const wchar_t *pluginPath) {
     pref.flags = pref.flags | sl::PreferenceFlags::eUseFrameBasedResourceTagging;
 
     // Features to load at init time.
-    // DLSS-G is NOT loaded here — its sl.dlss_g.dll hooks vkQueuePresentKHR at init,
-    // which crashes if the feature isn't fully configured. DLSS-G is loaded later via
-    // FrameGenManager::setFeatureLoaded() when the user explicitly enables frame gen.
-    sl::Feature features[] = {sl::kFeatureReflex, sl::kFeaturePCL};
+    // Load DLSS-G at init so we can query maxFramesToGenerate for UI visibility.
+    // Previous comment warned about present-hook crash, but with the interposer
+    // model the hook is safe when the feature is loaded but not activated (eOff).
+    sl::Feature features[] = {sl::kFeatureReflex, sl::kFeaturePCL, sl::kFeatureDLSS_G};
     pref.featuresToLoad = features;
-    pref.numFeaturesToLoad = 2;
+    pref.numFeaturesToLoad = 3;
 
     // Plugin search paths — where to find sl.reflex.dll, sl.pcl.dll, etc.
     pref.pathsToPlugins = &pluginPath;
