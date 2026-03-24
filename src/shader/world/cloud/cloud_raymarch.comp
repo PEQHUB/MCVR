@@ -54,13 +54,39 @@ const mat3 ROT45Y = mat3(
     -0.7071, 0.0,  0.7071
 );
 
-// Domain warp: displace UV by low-frequency noise at irrational scale.
-// Breaks tile alignment for ALL channels. Cost: +1 texture lookup.
+// Procedural 3D value noise — NEVER tiles (no texture, pure hash).
+// Used for domain warp so the warp itself doesn't have a repeat period.
+float hashWarp(vec3 p) {
+    p = fract(p * vec3(443.8975, 397.2973, 491.1871));
+    p += dot(p, p.yzx + 19.19);
+    return fract((p.x + p.y) * p.z);
+}
+
+float proceduralNoise3D(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(hashWarp(i),               hashWarp(i + vec3(1,0,0)), f.x),
+                   mix(hashWarp(i + vec3(0,1,0)), hashWarp(i + vec3(1,1,0)), f.x), f.y),
+               mix(mix(hashWarp(i + vec3(0,0,1)), hashWarp(i + vec3(1,0,1)), f.x),
+                   mix(hashWarp(i + vec3(0,1,1)), hashWarp(i + vec3(1,1,1)), f.x), f.y), f.z);
+}
+
+// Domain warp: displace UV by procedural noise that NEVER repeats.
+// The old version sampled the same tiling texture for the warp, so the warp
+// itself tiled at ~813 blocks (~5 visible repeats). This version uses a pure
+// hash-based noise with no period.
 vec3 warpNoiseUV(sampler3D noiseTex, vec3 uv, float mip) {
     if (!ANTI_TILE_WARP) return uv;
-    vec3 warpCoord = uv * (1.0 / PHI3);  // sample at ~0.236x base freq
-    vec3 warp = textureLod(noiseTex, warpCoord, max(mip, 2.0)).xyz * 2.0 - 1.0;
-    return uv + warp * 0.3;
+    // Convert UV back to world-ish scale for the procedural noise
+    // Sample at ~4 cells per tile period for good variation within each tile
+    vec3 warpP = uv * 3.7;  // irrational-ish multiplier, ~3.7 warp cells per noise tile
+    vec3 warp = vec3(
+        proceduralNoise3D(warpP),
+        proceduralNoise3D(warpP + vec3(31.7, 47.3, 73.1)),
+        proceduralNoise3D(warpP + vec3(97.3, 13.7, 59.1))
+    ) * 2.0 - 1.0;
+    return uv + warp * 0.35;
 }
 
 // Full anti-tiled noise sample: warp + dual-scale + distance fade.
@@ -99,12 +125,15 @@ vec4 sampleNoiseLightMarch(sampler3D noiseTex, vec3 baseUV, float mip) {
     return textureLod(noiseTex, uv, mip);
 }
 
-// Warp detail noise coordinates (same warp applied at detail frequency)
+// Warp detail noise coordinates (procedural, never tiles)
 vec3 warpDetailUV(sampler3D noiseTex, vec3 detailUV, float mip) {
     if (!ANTI_TILE_WARP) return detailUV;
-    // Warp at coarser scale relative to detail frequency
-    vec3 warpCoord = detailUV * (1.0 / (PHI2 * DETAIL_FREQ));
-    vec3 warp = textureLod(noiseTex, warpCoord, max(mip, 2.0)).xyz * 2.0 - 1.0;
+    vec3 warpP = detailUV * 0.47;  // ~0.47 warp cells per detail tile
+    vec3 warp = vec3(
+        proceduralNoise3D(warpP + vec3(11.3, 23.7, 41.9)),
+        proceduralNoise3D(warpP + vec3(67.1, 83.3, 17.9)),
+        proceduralNoise3D(warpP + vec3(53.7, 7.1, 89.3))
+    ) * 2.0 - 1.0;
     return detailUV + warp * 0.2;
 }
 
