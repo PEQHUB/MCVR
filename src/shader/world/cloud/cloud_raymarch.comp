@@ -39,6 +39,9 @@ const bool ANTI_TILE_WARP       = true;   // Solution 1: domain warping + irrati
 const bool ANTI_TILE_DUAL_SCALE = true;   // Solution 3: dual-scale mixing at incommensurate frequencies
 const bool ANTI_TILE_DIST_FADE  = true;   // Solution 4: distance-based LOD fade to lower frequency
 
+// Lighting model toggles
+const bool USE_FROSTNOVA_PHASE  = true;   // true = HG(0.2) single lobe, false = dual-lobe + silver
+
 const float PHI   = 1.61803398875;        // golden ratio
 const float PHI2  = PHI * PHI;            // 2.618
 const float PHI3  = PHI * PHI * PHI;      // 4.236
@@ -288,10 +291,9 @@ float lightMarchCone(vec3 pos, vec3 lightDir, float cloudThick) {
         rawDensitySum += density;
     }
 
-    // Convert raw sum to optical depth using actual mean cone path length
-    // Mean offset distance: (0.6+0.5+0.75+2.5+6.0+1.0)/6 = 1.89 * scale
-    float meanPath = 1.89 * scale;
-    return rawDensitySum * EXTINCTION * meanPath;
+    // Return raw density sum as optical depth [Frostnova: lightDensity += detailDensity; exp(-lightDensity)]
+    // No EXTINCTION * meanPath conversion — raw sum IS the OD for beer's law
+    return rawDensitySum;
 }
 
 // Fallback straight-line light march for adjustable step counts (quality presets)
@@ -320,7 +322,7 @@ float lightMarchLinear(vec3 pos, vec3 lightDir, uint steps, float cloudThick) {
             vec4 detailNoise = textureLod(uNoise3D, detailPos, 2.0);
             density = getDetailDensity(density, detailNoise, sampleH, pc.detailStrength);
         }
-        od += density * EXTINCTION * stepSize;
+        od += density;  // Raw density sum [Frostnova: no EXTINCTION, no stepSize]
 
         samplePos += lightDir * stepSize;
         if (od > 5.0) break;
@@ -415,13 +417,12 @@ void main() {
     }
     float cosAngle = dot(rayDir, lightDir);
 
-    // Cloud coloring [Nubis3 §8.7: warm/cool tints derived from sky + sun elevation]
-    vec3 skyNoSun = skyUBO.horizonColor.rgb * 0.5;
-    vec3 warmTint = mix(skyNoSun, vec3(1.0, 0.87, 0.65), clamp(lightDir.y + 0.2, 0.0, 1.0));
-    vec3 coolTint = mix(skyNoSun, vec3(0.23, 0.36, 0.47), clamp(lightDir.y + 0.5, 0.0, 1.0));
+    // Cloud base color [Frostnova: fixed warm white, NOT sky-derived]
+    // sky.a * vec3(0.97, 0.86, 0.8) — sun intensity × warm cream
+    const vec3 CLOUD_BASE_COLOR = vec3(0.97, 0.86, 0.8);
 
-    vec3 skyTop = skyUBO.baseColor * 0.4 * pc.ambientStrength;
-    vec3 skyHorizon = skyUBO.horizonColor.rgb * 0.3 * pc.ambientStrength + vec3(0.03 * pc.ambientStrength);
+    // Ambient: small fraction of background sky [Frostnova: 0.1 * bgColor]
+    vec3 ambientSky = skyUBO.horizonColor.rgb * 0.1 * pc.ambientStrength;
 
     // Adaptive stepping [Frostnova: noHits/misses system]
     bool inCloud = false;
@@ -514,23 +515,19 @@ void main() {
 
             float attenuation = beerPowder(lightOD, cosAngle);
 
-            // In-scatter term [Frostnova: 0.09 ambient floor + density/height-dependent boost]
-            // At base (h≈0.3): exponent≈0.5 → bright bases (powder effect)
-            // At top (h≈0.85): exponent≈2.0 → dimmer tops
+            // In-scatter term [Frostnova line 271]
             float inScatterExp = valueRemap(h, 0.3, 0.85, 0.5, 2.0);
             float inScatter = 0.09 + pow(max(baseDensity, 0.001), inScatterExp);
-            float phase = cloudPhase(cosAngle);
+            // Phase: Frostnova uses single HG(0.2). Our dual-lobe is more physical
+            // but gives different brightness distribution. Use Frostnova's for matching.
+            float phase = USE_FROSTNOVA_PHASE ? phaseHG(cosAngle, 0.2) : cloudPhase(cosAngle);
 
-            // In-scattered radiance: inScatter × phase × sun × transmittance_to_sun
-            vec3 source = inScatter * phase * lightColor * attenuation;
+            // Cloud radiance [Frostnova: inScatter × HG × beer × sunIntensity × cloudColor]
+            // No sky-derived tinting — fixed warm white base color
+            vec3 source = inScatter * phase * attenuation * lightColor * CLOUD_BASE_COLOR;
 
-            // Warm/cool tint based on illumination [Frostnova Nubis3 §8.7]
-            vec3 tint = mix(coolTint, warmTint, smoothstep(0.1, 0.6, attenuation));
-            source *= tint;
-
-            // Ambient: height-gradient sky color, stronger in shadow
-            vec3 ambientColor = mix(skyHorizon, skyTop, h);
-            source += ambientColor * (1.0 - attenuation) * 0.3;
+            // Ambient: small background sky contribution [Frostnova: 0.1 * bgColor * exp(-T)]
+            source += ambientSky * exp(-lightOD);
 
             // Beer's law transmittance with extinction coefficient
             float sigma = density * EXTINCTION;
