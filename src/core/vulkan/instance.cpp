@@ -20,6 +20,12 @@ const bool ENABLE_DEBUGGING = false;
 
 const char *DEBUG_LAYER = "VK_LAYER_KHRONOS_validation";
 
+static bool s_forceValidation = false;
+
+void vk::Instance::setForceValidation(bool enable) {
+    s_forceValidation = enable;
+}
+
 std::ostream &instanceCout() {
     return std::cout << "[Instance] ";
 }
@@ -194,7 +200,8 @@ vk::Instance::Instance() {
     createInfo.enabledExtensionCount = (uint32_t)extensions.size();
     createInfo.ppEnabledExtensionNames = extensions.data();
 
-    if (ENABLE_DEBUGGING) {
+    const bool useValidation = ENABLE_DEBUGGING || s_forceValidation;
+    if (useValidation) {
         createInfo.enabledLayerCount = 1;
         createInfo.ppEnabledLayerNames = &DEBUG_LAYER;
     }

@@ -199,6 +199,7 @@ struct Options {
     // Diagnostics
     bool loggingEnabled = false;
     bool gpuDiagnostics = false;   // GPU checkpoints for DEVICE_LOST debugging (zero cost when false)
+    bool validationLayers = false;
 };
 
 class Renderer : public Singleton<Renderer> {

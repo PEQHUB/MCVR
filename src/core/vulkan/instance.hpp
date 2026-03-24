@@ -5,6 +5,8 @@
 namespace vk {
 class Instance : public SharedObject<Instance> {
   public:
+    static void setForceValidation(bool enable);
+
     Instance();
     ~Instance();
 

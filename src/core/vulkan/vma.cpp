@@ -55,3 +55,23 @@ vk::VMA::~VMA() {
 VmaAllocator &vk::VMA::allocator() {
     return allocator_;
 }
+
+vk::VMA::VmaStatsSnapshot vk::VMA::getStats() const {
+    VmaStatsSnapshot snapshot{};
+
+    VmaTotalStatistics stats{};
+    vmaCalculateStatistics(allocator_, &stats);
+    snapshot.totalAllocBytes = stats.total.statistics.blockBytes;
+    snapshot.totalUsedBytes = stats.total.statistics.allocationBytes;
+    snapshot.allocationCount = stats.total.statistics.allocationCount;
+    snapshot.blockCount = stats.total.statistics.blockCount;
+
+    VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+    vmaGetHeapBudgets(allocator_, budgets);
+    for (uint32_t i = 0; i < VK_MAX_MEMORY_HEAPS; ++i) {
+        snapshot.budgetBytes += budgets[i].budget;
+        snapshot.budgetUsageBytes += budgets[i].usage;
+    }
+
+    return snapshot;
+}

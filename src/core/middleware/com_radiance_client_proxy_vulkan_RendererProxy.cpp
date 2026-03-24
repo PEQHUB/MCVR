@@ -9,6 +9,7 @@
 #include "core/render/renderer.hpp"
 #include "core/render/textures.hpp"
 #include "core/render/world.hpp"
+#include "core/vulkan/vma.hpp"
 
 #include <atomic>
 #include <mutex>
@@ -336,6 +337,31 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Rende
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeSetGpuProfileEnabled(
     JNIEnv *, jclass, jboolean enabled) {
     Renderer::gpuProfiler.setEnabled(enabled);
+}
+
+/**
+ * Returns VMA memory statistics as a CSV string.
+ */
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetVmaStats(
+    JNIEnv *env, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable()) return env->NewStringUTF("");
+    auto framework = Renderer::instance().framework();
+    if (!framework) return env->NewStringUTF("");
+    auto vma = framework->vma();
+    if (!vma) return env->NewStringUTF("");
+
+    auto stats = vma->getStats();
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "totalAllocMB:%.1f,usedMB:%.1f,budgetMB:%.1f,budgetUsageMB:%.1f,allocations:%u,blocks:%u",
+             stats.totalAllocBytes / (1024.0 * 1024.0),
+             stats.totalUsedBytes / (1024.0 * 1024.0),
+             stats.budgetBytes / (1024.0 * 1024.0),
+             stats.budgetUsageBytes / (1024.0 * 1024.0),
+             stats.allocationCount,
+             stats.blockCount);
+    return env->NewStringUTF(buf);
 }
 
 /**
