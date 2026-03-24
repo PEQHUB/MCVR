@@ -601,10 +601,10 @@ void Framework::present() {
     VkPresentInfoKHR presentInfo = {};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores = &currentContext_->commandProcessedSemaphore->vkSemaphore();
+    presentInfo.pWaitSemaphores = &waitSem;
 
     presentInfo.swapchainCount = 1;
-    presentInfo.pSwapchains = &swapchain_->vkSwapchain();
+    presentInfo.pSwapchains = &swapchainHandle;
     presentInfo.pImageIndices = &currentContext_->frameIndex;
 
     // PCL: bracket the present call

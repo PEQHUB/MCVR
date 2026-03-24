@@ -196,6 +196,28 @@ struct Options {
     uint32_t frameGenMode = 0;           // 0=Off, 1=On, 2=Auto (dynamic MFG)
     uint32_t frameGenMultiplier = 1;     // 1=2x, 2=3x, 3=4x (clamped to hardware max)
 
+    // Volumetric clouds
+    uint32_t cloudQuality = 3;        // 0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra, 5=Extreme
+    float cloudDensity = 1.0f;        // Density multiplier [0.1 - 3.0]
+    float cloudCoverage = 0.5f;       // Base coverage [0.0 - 1.0]
+    float cloudType = 0.67f;          // 0=Stratus, 0.33=Stratocumulus, 0.67=Cumulus, 1.0=Cumulonimbus
+    float cloudSpeed = 1.0f;          // Wind speed multiplier [0.0 - 5.0]
+    float cloudAltitude = 192.0f;     // Cloud base height in blocks [128 - 320]
+    float cloudThickness = 64.0f;     // Cloud layer thickness [32 - 128]
+    float cloudDetailStrength = 1.0f; // Detail erosion multiplier [0.0 - 2.0]
+    uint32_t cloudScatterOctaves = 3; // Multi-scatter octaves [1 - 8]
+    float cloudAmbientStrength = 1.0f;// Ambient occlusion [0.0 - 2.0]
+    float cloudTemporalBlend = -1.0f; // Temporal blend override (-1 = use quality default)
+    float cloudNoiseScale = 214.0f;   // Noise texture period in blocks [16 - 2048]
+    float cloudCellFrequency = 4.0f;  // Voronoi cell count across weather map [1 - 16]
+    float cloudAtmosphereFadeDist = 800.0f; // Cloud atmospheric fade distance [200 - 2000]
+    uint32_t cloudDebugMode = 0;      // 0=normal, 1-8=debug views (see cloud_raymarch.comp)
+    float cloudWindAngle = 0.0f;      // Wind direction in radians [0, 2π]
+    uint32_t cloudMarchStepsOverride = 0;  // 0=use quality preset, 32-256
+    uint32_t cloudLightStepsOverride = 0;  // 0=use quality preset, 1-12
+    uint32_t cloudResDivisorOverride = 0;  // 0=use quality preset, 1-4
+    float wetSurfaceStrength = 1.0f;  // Wet surface effect strength [0.0 - 2.0]
+
     // Diagnostics
     bool loggingEnabled = false;
     bool gpuDiagnostics = false;   // GPU checkpoints for DEVICE_LOST debugging (zero cost when false)

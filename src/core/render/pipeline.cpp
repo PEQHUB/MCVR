@@ -13,12 +13,12 @@
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/modules/world/svgf/svgf_module.hpp"
 #include "core/render/modules/world/temporal_accumulation/temporal_accumulation_module.hpp"
+#include "core/render/modules/world/cloud/cloud_module.hpp"
 #include "core/render/modules/world/tone_mapping/tone_mapping_module.hpp"
 
 #include "core/render/gpu_profiler.hpp"
 
 #include <cstdlib>
-#include <iomanip>
 #include <set>
 
 WorldPipelineBlueprint::WorldPipelineBlueprint(WorldPipelineBuildParams *params) {
@@ -60,19 +60,6 @@ WorldPipelineBlueprint::WorldPipelineBlueprint(WorldPipelineBuildParams *params)
 
 WorldPipeline::WorldPipeline() {}
 
-void WorldPipeline::dumpSharedImages(const char *label) const {
-    std::cerr << label << std::endl;
-    for (size_t frameIndex = 0; frameIndex < sharedImages_.size(); frameIndex++) {
-        for (size_t idx = 0; idx < sharedImages_[frameIndex].size(); idx++) {
-            auto &img = sharedImages_[frameIndex][idx];
-            if (!img) continue;
-            std::cerr << "  frame=" << frameIndex << " idx=" << idx << " size=" << img->width() << "x" << img->height()
-                      << " fmt=" << img->vkFormat() << " image=0x" << std::hex << (uint64_t)img->vkImage() << std::dec
-                      << std::endl;
-        }
-    }
-}
-
 void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<Pipeline> pipeline) {
     auto blueprint = pipeline->worldPipelineBlueprint();
     uint32_t frameNum = framework->swapchain()->imageCount();
@@ -90,7 +77,8 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
     size_t upscalerIndex = std::numeric_limits<size_t>::max();
     UpscalerModule::QualityMode upscalerMode = UpscalerModule::QualityMode::NativeAA;
     for (size_t i = 0; i < blueprint->moduleNames_.size(); i++) {
-        if (blueprint->moduleNames_[i] != UpscalerModule::NAME) continue;
+        if (blueprint->moduleNames_[i] != UpscalerModule::NAME &&
+            blueprint->moduleNames_[i] != DLSSModule::NAME) continue;
         upscalerIndex = i;
         const auto &kvs = blueprint->attributeKVs_[i];
         for (size_t k = 0; k + 1 < kvs.size(); k += 2) {
@@ -269,6 +257,7 @@ void WorldPipelineContext::render() {
         {"render_pipeline.module.post_render.name", "PostRender"},
         {"render_pipeline.module.temporal_accumulation.name", "TAA"},
         {"SVGF", "SVGF"},
+        {"render_pipeline.module.cloud.name", "Clouds"},
     };
 
     auto& profiler = Renderer::gpuProfiler;
@@ -405,6 +394,13 @@ void Pipeline::collectWorldModules() {
         }));
     worldModuleInOutImageNums.insert(std::make_pair(
         PostRenderModule::NAME, std::make_pair(PostRenderModule::inputImageNum, PostRenderModule::outputImageNum)));
+
+    worldModuleConstructors.insert(std::make_pair(
+        CloudModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+            return CloudModule::create(framework, worldPipeline);
+        }));
+    worldModuleInOutImageNums.insert(std::make_pair(
+        CloudModule::NAME, std::make_pair(CloudModule::inputImageNum, CloudModule::outputImageNum)));
 
     // TODO: invoke extension's collection
 }

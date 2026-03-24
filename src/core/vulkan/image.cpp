@@ -194,19 +194,25 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
                                        VkImageUsageFlags usage,
                                        VmaAllocationCreateFlags allocationFlags,
                                        VmaMemoryUsage vmaUsage,
-                                       VkImageCreateFlags imageCreateFlags)
+                                       VkImageCreateFlags imageCreateFlags,
+                                       VkImageType imageType)
     : device_(device),
       vma_(vma),
       width_(width),
       height_(height),
       layer_(layer),
       format_(format),
+      imageType_(imageType),
       persistStaging_(persistStaging),
       usage_(usage),
       allocationFlags_(allocationFlags),
       vmaUsage_(vmaUsage) {
+
+    bool is3D = (imageType_ == VK_IMAGE_TYPE_3D);
+
 #ifdef DEBUG
-    imageCout() << "Creating image with width: " << width << " height: " << height << " layer: " << layer
+    imageCout() << "Creating " << (is3D ? "3D" : "2D") << " image with width: " << width
+                << " height: " << height << (is3D ? " depth: " : " layer: ") << layer
                 << " channel: " << vk::formatToByte(format) << " mip level: " << mipLevels
                 << " staging: " << (persistStaging ? "enabled" : "disabled") << std::endl;
 #endif
@@ -235,11 +241,11 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
     VkImageCreateInfo imageInfo = {};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.flags = imageCreateFlags;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.imageType = imageType_;
     imageInfo.format = format_;
-    imageInfo.extent = {width_, height_, 1};
+    imageInfo.extent = is3D ? VkExtent3D{width_, height_, layer_} : VkExtent3D{width_, height_, 1};
     imageInfo.mipLevels = mipLevels;
-    imageInfo.arrayLayers = layer_;
+    imageInfo.arrayLayers = is3D ? 1 : layer_;
     imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | usage_;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -257,7 +263,11 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
     VkImageViewCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     createInfo.image = image_;
-    createInfo.viewType = layer_ == 1 ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    if (is3D) {
+        createInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
+    } else {
+        createInfo.viewType = layer_ == 1 ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    }
     createInfo.format = format_;
     createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
     createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
@@ -265,6 +275,14 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
     createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
     if (usage_ == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
         createInfo.subresourceRange = wholeDepthSubresourceRange;
+    } else if (is3D) {
+        createInfo.subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = VK_REMAINING_MIP_LEVELS,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
     } else {
         createInfo.subresourceRange = wholeColorSubresourceRange;
     }
@@ -273,6 +291,17 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
         imageCerr() << "failed to create image view for image" << std::endl;
         exit(EXIT_FAILURE);
     }
+}
+
+std::shared_ptr<vk::DeviceLocalImage> vk::DeviceLocalImage::create3D(
+    std::shared_ptr<Device> device, std::shared_ptr<VMA> vma,
+    uint32_t width, uint32_t height, uint32_t depth,
+    VkFormat format, VkImageUsageFlags usage) {
+
+    // depth is passed as 'layer' param — constructor handles 3D via imageType
+    return std::make_shared<DeviceLocalImage>(
+        device, vma, false, 1, width, height, depth, format, usage,
+        0, VMA_MEMORY_USAGE_AUTO, 0, VK_IMAGE_TYPE_3D);
 }
 
 vk::DeviceLocalImage::~DeviceLocalImage() {
