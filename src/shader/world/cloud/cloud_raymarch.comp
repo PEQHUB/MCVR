@@ -63,6 +63,7 @@ float hashWarp(vec3 p) {
 }
 
 float proceduralNoise3D(vec3 p) {
+    p = mod(p, 10000.0);  // Prevent float precision issues at extreme coordinates
     vec3 i = floor(p);
     vec3 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
