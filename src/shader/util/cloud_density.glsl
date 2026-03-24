@@ -18,6 +18,12 @@
 
 const float PI = 3.14159265358979;
 
+// Extinction coefficient: converts density [0-1] to optical thickness per block.
+// Tuned for Minecraft's 64-block cloud layer:
+//   Full-thickness cumulus (density 0.3, 64 blocks): OD = 0.3*0.04*64 = 0.77, T = 0.46
+//   Light path through 30 blocks (cone):             OD = 0.3*0.04*30 = 0.36, T = 0.70
+const float EXTINCTION = 0.04;
+
 // --- Utility ---
 
 // Unclamped remap [Frostnova ValueRemap] — for height gradients
@@ -37,23 +43,22 @@ float valueRemapClamped(float value, float low1, float high1, float low2, float 
 // We add cumulonimbus for thunderstorms.
 
 float gradientStratus(float h) {
-    // Frostnova: ramp 0.0→0.1 up, 0.2→0.3 down
-    return max(0.0, valueRemap(h, 0.0, 0.1, 0.0, 1.0) * valueRemap(h, 0.2, 0.3, 1.0, 0.0));
+    // Clamped [0,1] profiles — required for Beer-Lambert integration.
+    // Frostnova uses unclamped (density > 1.0) but their ad-hoc accumDensity model tolerates it.
+    // Our Beer-Lambert needs density gradients; unclamped saturates erosion to 1.0 → flat slabs.
+    return valueRemapClamped(h, 0.0, 0.1, 0.0, 1.0) * valueRemapClamped(h, 0.2, 0.3, 1.0, 0.0);
 }
 
 float gradientStratocumulus(float h) {
-    // Frostnova: ramp 0.0→0.2 up, 0.2→0.7 down
-    return max(0.0, valueRemap(h, 0.0, 0.2, 0.0, 1.0) * valueRemap(h, 0.2, 0.7, 1.0, 0.0));
+    return valueRemapClamped(h, 0.0, 0.2, 0.0, 1.0) * valueRemapClamped(h, 0.2, 0.7, 1.0, 0.0);
 }
 
 float gradientCumulus(float h) {
-    // Frostnova: ramp 0.0→0.2 up, 0.7→0.9 down
-    return max(0.0, valueRemap(h, 0.0, 0.2, 0.0, 1.0) * valueRemap(h, 0.7, 0.9, 1.0, 0.0));
+    return valueRemapClamped(h, 0.0, 0.2, 0.0, 1.0) * valueRemapClamped(h, 0.7, 0.9, 1.0, 0.0);
 }
 
 float gradientCumulonimbus(float h) {
-    // Tall tower for thunderstorms — extends nearly to top
-    return max(0.0, valueRemap(h, 0.0, 0.1, 0.0, 1.0) * valueRemap(h, 0.8, 0.95, 1.0, 0.0));
+    return valueRemapClamped(h, 0.0, 0.1, 0.0, 1.0) * valueRemapClamped(h, 0.8, 0.95, 1.0, 0.0);
 }
 
 // Blend types [Frostnova GetCloudLayerDensity blend formula]
@@ -102,7 +107,7 @@ float getBaseDensity(vec3 pos, float coverage, float type,
 
     // Coverage with anvil bias [Frostnova: pow(coverage, ValueRemap(h, 0.7, 0.8, 1.0, 0.8))]
     float anvilBias = valueRemap(h, 0.7, 0.8, 1.0, 0.8);
-    float adjCoverage = pow(max(coverage, 0.001), clamp(anvilBias, 0.5, 1.0));
+    float adjCoverage = pow(max(coverage, 0.001), anvilBias);
 
     // FBM erosion from G/B/A channels [Frostnova: 0.625*g + 0.25*b + 0.125*w]
     float erosion = 0.625 * noise.g + 0.25 * noise.b + 0.125 * noise.a;
@@ -158,49 +163,25 @@ float phaseHG(float cosTheta, float g) {
     return (1.0 - g2) / (4.0 * PI * denom * sqrt(denom));
 }
 
-// Dual-lobe HG [Nubis3 §8.5: max() of forward + silver-lining back lobe]
-// g1 = forward eccentricity (0.8 for first octave, decays per octave)
-// Silver lobe: g = 0.99 - 1.32 = -0.33 (mild back-scatter), boosted 1.27x
-float phaseDualHG(float cosTheta, float g1) {
-    const float SILVER_INTENSITY = 1.27;
-    const float SILVER_SPREAD    = 1.32;
-    float forward = phaseHG(cosTheta, g1);
-    float silver  = SILVER_INTENSITY * phaseHG(cosTheta, 0.99 - SILVER_SPREAD);
-    return max(forward, silver);
+// Dual-lobe cloud phase function [Schneider15, Frostnova Nubis2/3]
+// Broad forward scatter + mild back-scatter + sharp silver lining at edges
+float cloudPhase(float cosTheta) {
+    float forward = phaseHG(cosTheta, 0.6);    // Broad forward scatter
+    float back    = phaseHG(cosTheta, -0.3);    // Mild back-scatter (cloud interiors)
+    float silver  = phaseHG(cosTheta, 0.99);    // Sharp silver lining at edges
+    // 70% forward, 20% back-scatter base, with silver lining popping through
+    float base = 0.7 * forward + 0.2 * back;
+    return max(base, 1.3 * silver);
 }
 
-// --- Multi-scatter octave approximation [Wrenninge13, Hillaire16] ---
-
-float multiScatterEnergy(float opticalDepth, float cosTheta, uint octaves) {
-    const float ISOTROPIC_PHASE = 1.0 / (4.0 * PI);
-    const float A_DECAY = 0.5;
-    const float B_DECAY = 0.5;
-    const float C_DECAY = 0.5;
-
-    float energy = 0.0;
-    float a = 1.0, b = 1.0, c = 1.0;
-
-    for (uint n = 0; n < octaves; n++) {
-        float phase = phaseDualHG(cosTheta, 0.8 * c);
-        phase = mix(ISOTROPIC_PHASE, phase, c);
-
-        float od = opticalDepth * a;
-
-        // Dual-Beer attenuation [Nubis3 §8.3]
-        float primary   = exp(-od);
-        float secondary = exp(-od * 0.25) * 0.7;
-        // Angle-dependent: reduce secondary when looking toward sun (cos > 0.7)
-        float attenuation = max(
-            valueRemap(cosTheta, 0.7, 1.0, secondary, secondary * 0.25),
-            primary
-        );
-
-        energy += b * phase * attenuation;
-        a *= A_DECAY;
-        b *= B_DECAY;
-        c *= C_DECAY;
-    }
-    return energy;
+// Beer+Powder attenuation [Schneider15, Frostnova compute.comp]
+// Standard Beer's law with powder effect to brighten cloud edges when backlit.
+// The powder term (secondary) avoids the dark-center problem in thin clouds.
+float beerPowder(float opticalDepth, float cosTheta) {
+    float beer = exp(-opticalDepth);
+    float powder = exp(-opticalDepth * 0.25) * 0.7;
+    // Angle-dependent blend: more powder effect when backlit (cosTheta < 0)
+    return mix(beer, max(beer, powder), -cosTheta * 0.5 + 0.5);
 }
 
 #endif // CLOUD_DENSITY_GLSL

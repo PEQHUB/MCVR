@@ -337,15 +337,16 @@ void CloudModule::initImages() {
     if (!framework) return;
     uint32_t size = framework->swapchain()->imageCount();
 
-    // 128^3 RGBA8 3D noise texture (generated once at init)
+    // 3D noise texture — resolution configurable: 128 (8MB), 256 (64MB), 512 (512MB)
+    uint32_t noiseRes = std::clamp(Renderer::options.cloudNoiseRes, 128u, 512u);
     noiseTexture3D_ = vk::DeviceLocalImage::create3D(
-        framework->device(), framework->vma(), 128, 128, 128,
+        framework->device(), framework->vma(), noiseRes, noiseRes, noiseRes,
         VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
-    // 256x256 RGBA8 weather map
+    // 512x512 RGBA8 weather map (Nyquist-safe for FBM up to cellFreq=16)
     weatherMapImage_ = vk::DeviceLocalImage::create(
-        framework->device(), framework->vma(), false, 256, 256, 1,
+        framework->device(), framework->vma(), false, 512, 512, 1,
         VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
@@ -617,8 +618,8 @@ void CloudModuleContext::render() {
     // --- Pass 0: Noise generation (first frame only) ---
     if (!module->noiseGenerated_) {
         worldCommandBuffer->bindComputePipeline(module->noiseGenPipeline_);
-        // 128^3 / 4^3 = 32^3 = 32768 workgroups
-        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), 128 / 4, 128 / 4, 128 / 4);
+        uint32_t noiseRes = module->noiseTexture3D_->width();
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), noiseRes / 4, noiseRes / 4, noiseRes / 4);
 
         // Barrier: noise texture written
         worldCommandBuffer->barriersBufferImage({}, {{
@@ -636,9 +637,9 @@ void CloudModuleContext::render() {
         module->noiseGenerated_ = true;
     }
 
-    // --- Pass 1: Weather map update (256x256) ---
+    // --- Pass 1: Weather map update (512x512) ---
     worldCommandBuffer->bindComputePipeline(module->weatherPipeline_);
-    vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), 256 / 8, 256 / 8, 1);
+    vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), 512 / 8, 512 / 8, 1);
 
     // Barrier: weather map written, raymarch will sample it
     worldCommandBuffer->barriersBufferImage({}, {{

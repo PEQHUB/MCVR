@@ -76,17 +76,18 @@ float gradientNoise(vec3 p) {
 
 void main() {
     ivec3 texel = ivec3(gl_GlobalInvocationID.xyz);
-    if (any(greaterThanEqual(texel, ivec3(128)))) return;
+    ivec3 texSize = imageSize(uNoiseTexture);
+    if (any(greaterThanEqual(texel, texSize))) return;
 
-    vec3 uvw = (vec3(texel) + 0.5) / 128.0;
-    vec3 p = uvw * 4.0;  // 4 cells across the 128³ volume
+    vec3 uvw = (vec3(texel) + 0.5) / vec3(texSize);
+    vec3 p = uvw * float(texSize.x) / 32.0;  // Cells scale with resolution (128→4, 256→8, 512→16)
 
     // R: Perlin-Worley blend [Schneider15] — connected large-scale shape.
     // remap(perlin, 0, 1, worley, 1) biases Perlin toward Worley in valleys,
     // creating connected, puffy masses instead of isolated blobs.
     float perlin = gradientNoise(p);
     float worley = 1.0 - worleyF1(p);
-    float r = perlin + (worley - perlin) * (1.0 - perlin);  // remap(perlin, 0,1, worley, 1)
+    float r = worley + perlin * (1.0 - worley);  // remap(perlin, 0,1, worley, 1) [Schneider15]
 
     // G/B/A: Worley F1 erosion octaves at doubling frequencies [Schneider15]
     float g = 1.0 - worleyF1(p * 2.0);   // erosion octave 1

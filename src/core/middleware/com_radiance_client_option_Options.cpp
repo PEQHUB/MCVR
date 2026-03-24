@@ -915,6 +915,18 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     if (needRecreate && div > 0) Renderer::options.needRecreate = true;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCloudNoiseRes(
+    JNIEnv *, jclass, jint res, jboolean) {
+    // Allowed: 128, 256, 512. Triggers pipeline recreation to reallocate 3D texture.
+    uint32_t clamped = static_cast<uint32_t>(std::clamp(res, 128, 512));
+    // Snap to nearest power of 2
+    if (clamped <= 192) clamped = 128;
+    else if (clamped <= 384) clamped = 256;
+    else clamped = 512;
+    Renderer::options.cloudNoiseRes = clamped;
+    Renderer::options.needRecreate = true;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetWetSurfaceStrength(
     JNIEnv *, jclass, jfloat strength, jboolean) {
     Renderer::options.wetSurfaceStrength = std::clamp(strength, 0.0f, 2.0f);

@@ -216,6 +216,7 @@ struct Options {
     uint32_t cloudMarchStepsOverride = 0;  // 0=use quality preset, 32-256
     uint32_t cloudLightStepsOverride = 0;  // 0=use quality preset, 1-12
     uint32_t cloudResDivisorOverride = 0;  // 0=use quality preset, 1-4
+    uint32_t cloudNoiseRes = 128;         // 3D noise texture resolution: 128 (8MB), 256 (64MB), 512 (512MB)
     float wetSurfaceStrength = 1.0f;  // Wet surface effect strength [0.0 - 2.0]
 
     // Diagnostics

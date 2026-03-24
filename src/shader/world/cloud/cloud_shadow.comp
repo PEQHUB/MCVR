@@ -43,17 +43,21 @@ void main() {
         float y = pc.cloudBase + (float(i) + 0.5) * stepSize;
         vec3 pos = vec3(worldXZ.x, y, worldXZ.y);
 
-        // Offset by light angle (shadow projection)
+        // Offset by light angle (shadow projection) + perpendicular spread for soft penumbra
         float lightT = (y - pc.cloudBase) / max(lightDir.y, 0.05);
         pos.xz += lightDir.xz * lightT;
+        // Perpendicular spread grows with height — softens shadow edges
+        vec2 perpDir = vec2(-lightDir.z, lightDir.x);
+        pos.xz += perpDir * float(i) * 0.3;
 
-        vec3 noisePos = pos * NOISE_SCALE + windOffset(pc.windTime);
+        float hFrac = (float(i) + 0.5) / float(SHADOW_STEPS);
+        vec3 noisePos = pos * NOISE_SCALE + windOffset(pc.windTime, hFrac);
         vec4 noise = textureLod(uNoise3D, noisePos, 1.0);
         vec4 weather = sampleWeather(uWeatherMap, pos);
 
         float density = getBaseDensity(pos, weather.r, weather.g, noise,
                                        pc.cloudBase, cloudThick, pc.densityMultiplier);
-        opticalDepth += density * stepSize;
+        opticalDepth += density * EXTINCTION * stepSize;
 
         // Early termination: fully opaque shadow, remaining steps won't change result
         if (opticalDepth > 5.0) break;

@@ -125,7 +125,7 @@ layout(push_constant) uniform PushConstants {
     uint scatterOctaves;
     float ambientStrength;   // Density-based ambient occlusion [0-2]
     float noiseScale;        // Noise texture period in blocks [128-512]
-    float cellFrequency;     // Voronoi cell count across weather map [2-16]
+    float cellFrequency;     // Weather noise frequency scale [1-32]
     float atmosphereFadeDist; // Cloud atmospheric fade distance in blocks [200-2000]
     float windAngle;         // Wind direction in radians [0, 2π]
     uint debugMode;          // 0=normal, 1=weather cov, 2=weather type, 3-5=noise R/G/A, 6=hProfile, 7=raw density, 8=final density
@@ -139,13 +139,19 @@ layout(push_constant) uniform PushConstants {
 // Minecraft's typical 40-block cloud layer.
 #define NOISE_SCALE (1.0 / max(pc.noiseScale, 1.0))
 
-// Wind displacement applied to noise sampling position.
-// X-drift is 2x Z-drift for prevailing-wind asymmetry. [Schneider15 §3.3]
-// Tuned for Minecraft scale: ~1 block/sec at windSpeed=1.0.
-vec3 windOffset(float windTime) {
+// Wind displacement with height-dependent shear [Frostnova, Schneider15 §3.3].
+// Higher cloud layers drift faster and shift noise sampling position.
+vec3 windOffset(float windTime, float heightFraction) {
     float s = sin(pc.windAngle);
     float c = cos(pc.windAngle);
-    return vec3(windTime * 0.004 * c, windTime * 0.0005, windTime * 0.004 * s);
+    vec3 baseWind = vec3(c, 0.0, s);
+    vec3 shearWind = baseWind + heightFraction * vec3(0.0, 0.1, 0.0);
+    return 0.004 * shearWind * (windTime + heightFraction * 20.0);
+}
+
+// Zero-arg overload for contexts without height (weather map, noise gen, debug viz).
+vec3 windOffset(float windTime) {
+    return windOffset(windTime, 0.0);
 }
 
 // --- Shared helpers ---
@@ -173,18 +179,21 @@ float effectiveThickness() {
 // Sample weather map centered on camera.
 // Uses fixed extent so cloud placement is independent of fade distance.
 // uWeatherMap must be declared by the including shader.
+// Snap weather origin to texel grid — prevents sub-texel drift between frames
+// that causes cloud edge shimmer through RGBA8 quantization + smoothstep amplification.
+vec2 getSnappedEyeXZ() {
+    vec3 eyePos = getEyePos();
+    float texelSize = WEATHER_EXTENT / 512.0;
+    return floor(eyePos.xz / texelSize) * texelSize;
+}
+
 #ifdef CLOUD_HAS_WEATHER_SAMPLER
 vec4 sampleWeather(sampler2D weatherMap, vec3 worldPos) {
-    vec3 eyePos = getEyePos();
-    vec2 uv = (worldPos.xz - eyePos.xz) / WEATHER_EXTENT + 0.5;
-
-    // Fade coverage near weather map edges — prevents solid walls at boundary
-    vec2 edgeDist = min(uv, 1.0 - uv);
-    float edgeFade = smoothstep(0.0, 0.08, min(edgeDist.x, edgeDist.y));
-
-    vec4 weather = texture(weatherMap, uv);
-    weather.r *= edgeFade;
-    return weather;
+    // Use snapped origin — must match cloud_weather.comp
+    vec2 snappedEye = getSnappedEyeXZ();
+    vec2 uv = (worldPos.xz - snappedEye) / WEATHER_EXTENT + 0.5;
+    // Edge fade is baked into the weather map R channel — not applied here
+    return texture(weatherMap, uv);
 }
 #endif
 

@@ -102,10 +102,10 @@ void main() {
     m2 /= 9.0;
     vec4 sigma = sqrt(max(m2 - m1 * m1, vec4(0.0)));
 
-    // 1.5 sigma expansion gives jitter offsets room to accumulate
-    // while still preventing ghosting from disoccluded regions.
-    vec4 minVal = m1 - sigma * 1.5;
-    vec4 maxVal = m1 + sigma * 1.5;
+    // 2.0 sigma expansion gives jitter offsets room to accumulate with FBM weather.
+    // Wider than typical TAA (1.5) because cloud noise needs more frames to converge.
+    vec4 minVal = m1 - sigma * 2.0;
+    vec4 maxVal = m1 + sigma * 2.0;
 
     vec4 clampedHistory = clamp(history, minVal, maxVal);
 
@@ -117,7 +117,7 @@ void main() {
     vec3 prevEyePos = lastWorldUBO.prevCameraViewMatInv[3].xyz;
     float translationDelta = length(eyePos - prevEyePos);
 
-    float motion = rotationDelta * 50.0 + translationDelta * 0.01;
+    float motion = rotationDelta * 30.0 + translationDelta * 0.01;
     motion = clamp(motion, 0.0, 1.0);
 
     float adaptiveBlend = mix(pc.temporalBlend, 0.5, motion);
