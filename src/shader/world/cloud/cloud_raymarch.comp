@@ -450,7 +450,9 @@ void main() {
     const vec3 CLOUD_BASE_COLOR = vec3(0.97, 0.86, 0.8);
 
     // Ambient: small fraction of background sky [Frostnova: 0.1 * bgColor]
-    vec3 ambientSky = skyUBO.horizonColor.rgb * 0.1 * pc.ambientStrength;
+    // Ambient: small fraction of background sky [Frostnova: 0.1 * bgColor]
+    // Min floor of 0.03 ensures clouds are visible at night (moonRadiance is ~1M× dimmer than sun)
+    vec3 ambientSky = max(skyUBO.horizonColor.rgb * 0.1, vec3(0.03)) * pc.ambientStrength;
 
     // Adaptive stepping [Frostnova: noHits/misses system]
     bool inCloud = false;
