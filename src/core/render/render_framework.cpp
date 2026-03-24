@@ -598,6 +598,9 @@ void Framework::present() {
         return;
     }
 
+    VkSemaphore waitSem = currentContext_->commandProcessedSemaphore->vkSemaphore();
+    VkSwapchainKHR swapchainHandle = swapchain_->vkSwapchain();
+
     VkPresentInfoKHR presentInfo = {};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
