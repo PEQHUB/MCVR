@@ -208,7 +208,7 @@ struct Options {
     uint32_t cloudScatterOctaves = 3; // Multi-scatter octaves [1 - 8]
     float cloudAmbientStrength = 1.0f;// Ambient occlusion [0.0 - 2.0]
     float cloudTemporalBlend = -1.0f; // Temporal blend override (-1 = use quality default)
-    float cloudNoiseScale = 214.0f;   // Noise texture period in blocks [16 - 2048]
+    float cloudNoiseScale = 1000.0f;  // Noise texture period in blocks [64 - 4096]
     float cloudCellFrequency = 4.0f;  // Voronoi cell count across weather map [1 - 16]
     float cloudAtmosphereFadeDist = 800.0f; // Cloud atmospheric fade distance [200 - 2000]
     uint32_t cloudDebugMode = 0;      // 0=normal, 1-8=debug views (see cloud_raymarch.comp)

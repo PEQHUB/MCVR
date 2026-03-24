@@ -105,9 +105,14 @@ float getBaseDensity(vec3 pos, float coverage, float type,
     float density = hProfile * baseNoise;
     if (density < 0.0001) return 0.0;
 
-    // Coverage with anvil bias [Frostnova: pow(coverage, ValueRemap(h, 0.7, 0.8, 1.0, 0.8))]
+    // Coverage boost: our FBM weather produces lower values (0.0-0.4) than Frostnova's
+    // pre-authored texture (0.5-0.9 in cloud areas). Square root stretches the range up
+    // so the anvil bias has values it can work with.
+    float boostedCoverage = sqrt(max(coverage, 0.001));
+
+    // Anvil bias [Frostnova: pow(coverage, ValueRemap(h, 0.7, 0.8, 1.0, 0.8))]
     float anvilBias = valueRemap(h, 0.7, 0.8, 1.0, 0.8);
-    float adjCoverage = pow(max(coverage, 0.001), anvilBias);
+    float adjCoverage = pow(boostedCoverage, anvilBias);
 
     // FBM erosion from G/B/A channels [Frostnova: 0.625*g + 0.25*b + 0.125*w]
     float erosion = 0.625 * noise.g + 0.25 * noise.b + 0.125 * noise.a;

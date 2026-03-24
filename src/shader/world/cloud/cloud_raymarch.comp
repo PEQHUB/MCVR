@@ -20,11 +20,9 @@ layout(set = 0, binding = 8)           uniform sampler2D uWeatherMap;      // 25
 
 const float MARCH_CLAMP = 4000.0;
 
-// Detail noise frequency ratio. At 8x with 128³ noise:
-//   G (8 cells/tile): 64 cells → ~3 block features — good
-//   B (16 cells/tile): 128 cells → ~1.5 block features — fine
-//   A (32 cells/tile): 256 cells → ~0.75 block features — marginal, mipped
-const float DETAIL_FREQ = 8.0;
+// Detail noise frequency ratio [Frostnova: base 0.00002, detail 0.0004 → 20:1].
+// At noiseScale=1000, detail tiles at 50 blocks — fine grain for erosion.
+const float DETAIL_FREQ = 20.0;
 
 // Curl displacement strength. Inversely proportional to detail feature size.
 // At DETAIL_FREQ=8, features ~3 blocks, curl displaces ~0.5 features.
