@@ -4,6 +4,9 @@
 #include "common/singleton.hpp"
 #include "core/all_extern.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
+#include "core/render/world.hpp"
+
+#include <unordered_map>
 
 class Framework;
 class FrameworkContext;
@@ -52,6 +55,23 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         uint32_t instanceCount = 0;
     };
     TlasBlasSnapshot prevBlasSnapshot_;
+
+    // Mega-chunk system: groups distant chunks into single BLASes
+    struct MegaChunk {
+        int64_t key;                    // spatial hash of mega-chunk grid position
+        glm::dvec3 origin;             // world origin (min corner)
+        std::shared_ptr<vk::BLAS> blas;
+        uint64_t contentHash = 0;      // hash of constituent chunk generations (dirty detection)
+
+        // Flattened geometry metadata for SBT
+        std::vector<World::GeometryTypes> geometryTypes;
+        std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> vertexBuffers;
+        std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> indexBuffers;
+
+        // Per-sub-chunk transform buffers (3x4 VkTransformMatrixKHR each)
+        std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> transformBuffers;
+    };
+    std::unordered_map<int64_t, std::shared_ptr<MegaChunk>> megaChunkCache_;
 
     std::shared_ptr<vk::DeviceLocalBuffer> blasOffsetsBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> vertexBufferAddr;

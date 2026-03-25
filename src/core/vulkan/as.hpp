@@ -104,6 +104,16 @@ class BLASBuilder : public SharedObject<BLASBuilder> {
             const VkMicromapUsageEXT *usageCounts,
             uint32_t usageCountsCount);
 
+        // Per-geometry transform: offsets vertices within the BLAS (for mega-chunks)
+        template <typename T>
+        BLASGeometryBuilder &defineTriangleGeometryWithTransform(
+            std::shared_ptr<DeviceLocalBuffer> vertexBuffer,
+            uint32_t numVertices,
+            std::shared_ptr<DeviceLocalBuffer> indexBuffer,
+            uint32_t numIndices,
+            bool isOpaque,
+            VkDeviceAddress transformBufferAddress);
+
         BLASGeometryBuilder &definePlaceholderGeometry();
 
         BLASGeometryBuilder &defineAABBGeometry(std::shared_ptr<DeviceLocalBuffer> aabbBuffer,
@@ -360,6 +370,36 @@ vk::BLASBuilder::BLASGeometryBuilder::defineTriangleGeomrtryWithMicromap(
 
     geometries.push_back(geom);
     primitiveCounts.push_back(numTriangles);
+
+    return *this;
+}
+
+template <typename T>
+vk::BLASBuilder::BLASGeometryBuilder &
+vk::BLASBuilder::BLASGeometryBuilder::defineTriangleGeometryWithTransform(
+    std::shared_ptr<DeviceLocalBuffer> vertexBuffer,
+    uint32_t numVertices,
+    std::shared_ptr<DeviceLocalBuffer> indexBuffer,
+    uint32_t numIndices,
+    bool isOpaque,
+    VkDeviceAddress transformBufferAddress) {
+    VkAccelerationStructureGeometryKHR geom{};
+    geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geom.flags = isOpaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
+
+    auto &triangles = geom.geometry.triangles;
+    triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    triangles.vertexData.deviceAddress = vertexBuffer->bufferAddress();
+    triangles.vertexStride = sizeof(T);
+    triangles.maxVertex = numVertices - 1;
+    triangles.indexType = VK_INDEX_TYPE_UINT32;
+    triangles.indexData.deviceAddress = indexBuffer->bufferAddress();
+    triangles.transformData.deviceAddress = transformBufferAddress;
+
+    geometries.push_back(geom);
+    primitiveCounts.push_back(numIndices / 3);
 
     return *this;
 }
