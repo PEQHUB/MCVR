@@ -1056,7 +1056,7 @@ void ChunkBuildScheduler::tryCheckBatchesFinish() {
             freeFences_.push(*iterFence);
             freeCmdBuffers_.push(*iterCmd);
 
-            // Read BLAS compaction query results (measurement only — no compaction yet)
+            // BLAS compaction: read query results, allocate compact buffers, copy
             auto &batch = *iterBatch;
             if (batch->compactionQueryPool != VK_NULL_HANDLE && batch->compactionQueryCount > 0) {
                 std::vector<VkDeviceSize> compactedSizes(batch->compactionQueryCount);
@@ -1066,19 +1066,98 @@ void ChunkBuildScheduler::tryCheckBatchesFinish() {
                     sizeof(VkDeviceSize), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 
                 if (qr == VK_SUCCESS) {
+                    auto framework = Renderer::instance().framework();
+                    auto vma = framework->vma();
+                    auto physicalDevice = framework->physicalDevice();
+
+                    // Use the command buffer we just freed for the compaction copies
+                    auto compactCmd = freeCmdBuffers_.back();
+                    auto compactFence = freeFences_.back();
+                    compactCmd->begin();
+
+                    struct CompactEntry {
+                        std::shared_ptr<ChunkBuildData> cbd;
+                        std::shared_ptr<vk::DeviceLocalBuffer> compactBuffer;
+                        VkAccelerationStructureKHR compactAS;
+                    };
+                    std::vector<CompactEntry> entries;
+
                     static uint64_t totalOriginal = 0, totalCompacted = 0;
                     static uint32_t totalCount = 0;
                     uint32_t qi = 0;
                     for (auto &cbd : batch->batchData) {
-                        if (cbd->blas && qi < batch->compactionQueryCount) {
-                            uint64_t original = cbd->blas->blasBuffer()->size();
-                            uint64_t compacted = compactedSizes[qi];
-                            totalOriginal += original;
-                            totalCompacted += compacted;
+                        if (!cbd->blas || qi >= batch->compactionQueryCount) continue;
+                        VkDeviceSize compactSize = compactedSizes[qi++];
+                        VkDeviceSize originalSize = cbd->blas->blasBuffer()->size();
+
+                        // Skip if compaction saves less than 10%
+                        if (compactSize == 0 || compactSize >= originalSize * 9 / 10) {
+                            totalOriginal += originalSize;
+                            totalCompacted += originalSize;
                             totalCount++;
-                            qi++;
+                            continue;
                         }
+
+                        // Allocate compact buffer
+                        auto compactBuffer = vk::DeviceLocalBuffer::create(
+                            vma, device, false, compactSize,
+                            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                            0, VMA_MEMORY_USAGE_GPU_ONLY);
+
+                        // Create compact AS
+                        VkAccelerationStructureCreateInfoKHR createInfo{};
+                        createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+                        createInfo.buffer = compactBuffer->vkBuffer();
+                        createInfo.size = compactSize;
+                        createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+
+                        VkAccelerationStructureKHR compactAS;
+                        if (vkCreateAccelerationStructureKHR(device->vkDevice(), &createInfo,
+                                                              nullptr, &compactAS) != VK_SUCCESS) {
+                            totalOriginal += originalSize;
+                            totalCompacted += originalSize;
+                            totalCount++;
+                            continue;
+                        }
+
+                        // Record compaction copy
+                        VkCopyAccelerationStructureInfoKHR copyInfo{};
+                        copyInfo.sType = VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR;
+                        copyInfo.src = cbd->blas->blas();
+                        copyInfo.dst = compactAS;
+                        copyInfo.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+                        vkCmdCopyAccelerationStructureKHR(compactCmd->vkCommandBuffer(), &copyInfo);
+
+                        entries.push_back({cbd, compactBuffer, compactAS});
+                        totalOriginal += originalSize;
+                        totalCompacted += compactSize;
+                        totalCount++;
                     }
+
+                    if (!entries.empty()) {
+                        compactCmd->end();
+
+                        VkSubmitInfo si{};
+                        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                        si.commandBufferCount = 1;
+                        si.pCommandBuffers = &compactCmd->vkCommandBuffer();
+                        vkQueueSubmit(device->secondaryQueue(), 1, &si, compactFence->vkFence());
+                        vkWaitForFences(device->vkDevice(), 1, &compactFence->vkFence(), true, UINT64_MAX);
+                        vkResetFences(device->vkDevice(), 1, &compactFence->vkFence());
+
+                        // Swap each BLAS to its compacted version
+                        auto &gc = framework->gc();
+                        for (auto &e : entries) {
+                            gc.collect(e.cbd->blas);
+                            e.cbd->blas = vk::BLAS::create(device, e.compactAS, e.compactBuffer);
+                        }
+                    } else {
+                        // No copies needed, just reset
+                        compactCmd->begin();
+                        compactCmd->end();
+                    }
+
                     // Log every 50 chunks
                     if (totalCount > 0 && totalCount % 50 == 0) {
                         float pct = totalOriginal > 0 ? 100.0f * (1.0f - (float)totalCompacted / totalOriginal) : 0;
