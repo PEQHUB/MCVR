@@ -129,7 +129,9 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
     std::shared_ptr<vk::HostVisibleBuffer> &chunkPackedData_;
 
     std::queue<std::shared_ptr<vk::Fence>> freeFences_;
+    std::queue<std::shared_ptr<vk::CommandBuffer>> freeCmdBuffers_;  // paired with freeFences_
     std::list<std::shared_ptr<vk::Fence>> buildingFences_;
+    std::list<std::shared_ptr<vk::CommandBuffer>> buildingCmdBuffers_;  // paired with buildingFences_
     std::list<std::shared_ptr<ChunkBuildDataBatch>> buildingBatches_;
 
     uint32_t chunkBuildingBatchSize_;
@@ -166,6 +168,7 @@ struct Chunk1 : public SharedObject<Chunk1> {
 
     std::shared_ptr<vk::BLAS> blas;
     int64_t blasVersion = -1;
+    uint64_t blasGeneration = 0;  // incremented on each BLAS swap, for TLAS UPDATE change detection
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
 

@@ -13,7 +13,13 @@ VkDevice GpuDiag::device_ = VK_NULL_HANDLE;
 
 static const char* CHECKPOINT_NAMES[] = {
     "FRAME_BEGIN",
+    "UPLOAD_TEX_BEGIN",
+    "UPLOAD_TEX_END",
+    "UPLOAD_BUF_BEGIN",
+    "UPLOAD_BUF_END",
     "STAGING_UPLOADS",
+    "WORLD_PREPARE_BEGIN",
+    "CHUNK_SCHEDULE_DONE",
     "BLAS_BUILD_IMPORTANT",
     "BLAS_BUILD_BATCH",
     "BLAS_BUILD_ENTITY",
@@ -82,39 +88,7 @@ void GpuDiag::onDeviceLost(VkQueue queue, const std::filesystem::path& logsDir, 
 
     // --- NV Diagnostic Checkpoints ---
     if (checkpointsSupported_ && queue != VK_NULL_HANDLE) {
-        uint32_t count = 0;
-        vkGetQueueCheckpointDataNV(queue, &count, nullptr);
-        if (count > 0) {
-            std::vector<VkCheckpointDataNV> checkpoints(count);
-            for (auto& cp : checkpoints) {
-                cp.sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV;
-                cp.pNext = nullptr;
-            }
-            vkGetQueueCheckpointDataNV(queue, &count, checkpoints.data());
-
-            writeToAll("GPU Checkpoints (" + std::to_string(count) + " recovered):");
-            uint32_t lastId = UINT32_MAX;
-            for (uint32_t i = 0; i < count; i++) {
-                uint32_t id = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(checkpoints[i].pCheckpointMarker));
-                const char* name = checkpointName(id);
-                std::string stage;
-                switch (checkpoints[i].stage) {
-                    case VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: stage = "TOP_OF_PIPE"; break;
-                    case VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: stage = "BOTTOM_OF_PIPE"; break;
-                    default: stage = "stage=0x" + std::to_string(checkpoints[i].stage); break;
-                }
-                writeToAll("  [" + std::to_string(i) + "] " + name + " (id=" + std::to_string(id) + ", " + stage + ")");
-                if (lastId == UINT32_MAX || id > lastId) lastId = id;
-            }
-
-            if (lastId < _COUNT && lastId + 1 < _COUNT) {
-                writeToAll("");
-                writeToAll(">>> GPU completed: " + std::string(checkpointName(lastId)));
-                writeToAll(">>> Likely crash point: " + std::string(checkpointName(lastId + 1)));
-            }
-        } else {
-            writeToAll("GPU Checkpoints: none recovered (count=0)");
-        }
+        queryAndPrintCheckpoints(queue, "Main Queue", writeToAll);
     } else if (!checkpointsSupported_) {
         writeToAll("GPU Checkpoints: extension not available");
     } else {
@@ -190,5 +164,44 @@ void GpuDiag::onDeviceLost(VkQueue queue, const std::filesystem::path& logsDir, 
         out.flush();
         out.close();
         std::cerr << "[GpuDiag] Diagnostics written to " << (logsDir / "gpu_diagnostics.txt").string() << std::endl;
+    }
+}
+
+uint32_t GpuDiag::queryAndPrintCheckpoints(VkQueue queue, const char* queueName,
+                                            std::function<void(const std::string&)> writeToAll) {
+    uint32_t count = 0;
+    vkGetQueueCheckpointDataNV(queue, &count, nullptr);
+    if (count > 0) {
+        std::vector<VkCheckpointDataNV> checkpoints(count);
+        for (auto& cp : checkpoints) {
+            cp.sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV;
+            cp.pNext = nullptr;
+        }
+        vkGetQueueCheckpointDataNV(queue, &count, checkpoints.data());
+
+        writeToAll(std::string(queueName) + " Checkpoints (" + std::to_string(count) + " recovered):");
+        uint32_t lastId = UINT32_MAX;
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t id = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(checkpoints[i].pCheckpointMarker));
+            const char* name = checkpointName(id);
+            std::string stage;
+            switch (checkpoints[i].stage) {
+                case VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: stage = "TOP_OF_PIPE"; break;
+                case VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: stage = "BOTTOM_OF_PIPE"; break;
+                default: stage = "stage=0x" + std::to_string(checkpoints[i].stage); break;
+            }
+            writeToAll("  [" + std::to_string(i) + "] " + name + " (id=" + std::to_string(id) + ", " + stage + ")");
+            if (lastId == UINT32_MAX || id > lastId) lastId = id;
+        }
+
+        if (lastId < _COUNT && lastId + 1 < _COUNT) {
+            writeToAll("");
+            writeToAll(">>> " + std::string(queueName) + " completed: " + std::string(checkpointName(lastId)));
+            writeToAll(">>> " + std::string(queueName) + " likely crash point: " + std::string(checkpointName(lastId + 1)));
+        }
+        return lastId;
+    } else {
+        writeToAll(std::string(queueName) + " Checkpoints: none recovered (count=0)");
+        return UINT32_MAX;
     }
 }

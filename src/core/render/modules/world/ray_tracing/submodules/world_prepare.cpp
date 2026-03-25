@@ -73,22 +73,22 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
     if (lastIndexBufferAddr) gc.collect(lastIndexBufferAddr);
     if (lastObjToWorldMat) gc.collect(lastObjToWorldMat);
 
-    blasOffsetsBuffer = vk::DeviceLocalBuffer::create(vma, device, blasOffsets.size() * sizeof(uint32_t), metaUsage);
+    blasOffsetsBuffer = vk::DeviceLocalBuffer::create(vma, device, true, blasOffsets.size() * sizeof(uint32_t), metaUsage);
     blasOffsetsBuffer->uploadToStagingBuffer(blasOffsets.data());
 
-    vertexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, vertexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
+    vertexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, true, vertexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
     vertexBufferAddr->uploadToStagingBuffer(vertexBufferAddrs.data());
 
-    indexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, indexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
+    indexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, true, indexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
     indexBufferAddr->uploadToStagingBuffer(indexBufferAddrs.data());
 
-    lastVertexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, lastVertexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
+    lastVertexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, true, lastVertexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
     lastVertexBufferAddr->uploadToStagingBuffer(lastVertexBufferAddrs.data());
 
-    lastIndexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, lastIndexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
+    lastIndexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, true, lastIndexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
     lastIndexBufferAddr->uploadToStagingBuffer(lastIndexBufferAddrs.data());
 
-    lastObjToWorldMat = vk::DeviceLocalBuffer::create(vma, device, lastObjToWorldMats.size() * sizeof(glm::mat4), metaUsage);
+    lastObjToWorldMat = vk::DeviceLocalBuffer::create(vma, device, true, lastObjToWorldMats.size() * sizeof(glm::mat4), metaUsage);
     lastObjToWorldMat->uploadToStagingBuffer(lastObjToWorldMats.data());
 
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> rayTracingMetaData{{
@@ -151,6 +151,8 @@ void WorldPrepareContext::render() {
     auto entities = Renderer::instance().world()->entities();
     auto cameraPos = Renderer::instance().world()->getCameraPos();
 
+    GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::WORLD_PREPARE_BEGIN);
+
     std::unique_lock<std::recursive_mutex> lock(chunks->mutex());
 
     if (chunks->chunkBuildScheduler() != nullptr) {
@@ -161,6 +163,8 @@ void WorldPrepareContext::render() {
         }
         chunks->chunkBuildScheduler()->tryScheduleBatches(batchSize);
     }
+
+    GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::CHUNK_SCHEDULE_DONE);
 
     // Barrier: ensure vertex/index buffer TRANSFER writes from uploadCommandBuffer
     // are visible before BLAS builds read them. Without this, the GPU may speculatively
@@ -344,12 +348,26 @@ void WorldPrepareContext::render() {
         }
     }
 
+    // BLAS lifetime snapshot: keep shared_ptrs alive while GPU references the TLAS.
+    // prevBlasSnapshot_ from the last use of this swapchain context is safe to release
+    // (GPU finished with it before we re-acquired this context).
+    TlasBlasSnapshot currBlasSnapshot;
+
     // Chunk
     {
         auto &chunk1s = chunks->chunks();
+        float cullDist = Renderer::options.chunkCullDistance;
+        float cullDist2 = cullDist * cullDist;
+
         for (int i = 0; i < chunk1s.size(); i++) {
             auto &chunk1 = chunk1s[i];
             if (chunk1->blas == nullptr) continue;
+
+            // Distance culling: skip chunks beyond cull distance
+            float cx = static_cast<float>(static_cast<double>(chunk1->x) + 8.0 - cameraPos.x);
+            float cy = static_cast<float>(static_cast<double>(chunk1->y) + 8.0 - cameraPos.y);
+            float cz = static_cast<float>(static_cast<double>(chunk1->z) + 8.0 - cameraPos.z);
+            if (cx * cx + cy * cy + cz * cz > cullDist2) continue;
 
             VkTransformMatrixKHR transform = {
                 1, 0, 0, static_cast<float>(static_cast<double>(chunk1->x) - cameraPos.x), //
@@ -358,6 +376,10 @@ void WorldPrepareContext::render() {
             };
 
             instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0, chunk1->blas);
+
+            // Snapshot BLAS reference + generation for lifetime safety and UPDATE detection
+            currBlasSnapshot.blases.push_back(chunk1->blas);
+            currBlasSnapshot.generations.push_back(chunk1->blasGeneration);
 
             geometryTypes.push_back(World::GeometryTypes::SHADOW);
             geometryTypes.insert(geometryTypes.end(), chunk1->geometryTypes->begin(), chunk1->geometryTypes->end());
@@ -389,6 +411,10 @@ void WorldPrepareContext::render() {
             if (chunk1->displacedBlas && chunk1->displacedFaceDataBuffer) {
                 instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0,
                                                chunk1->displacedBlas);
+
+                // Snapshot displaced BLAS reference too
+                currBlasSnapshot.blases.push_back(chunk1->displacedBlas);
+                currBlasSnapshot.generations.push_back(chunk1->blasGeneration);
 
                 // Only 1 geometry: WORLD_DISPLACED (procedural hit group)
                 geometryTypes.push_back(World::GeometryTypes::WORLD_DISPLACED);
@@ -524,7 +550,7 @@ void WorldPrepareContext::render() {
         constexpr size_t AREA_LIGHT_BUFFER_CAPACITY = MAX_AREA_LIGHTS;
         if (!areaLightBuffer) {
             areaLightBuffer = vk::DeviceLocalBuffer::create(
-                vma, device, AREA_LIGHT_BUFFER_CAPACITY * sizeof(vk::Data::AreaLight),
+                vma, device, true, AREA_LIGHT_BUFFER_CAPACITY * sizeof(vk::Data::AreaLight),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         }
 
@@ -555,15 +581,15 @@ void WorldPrepareContext::render() {
     static uint32_t tlasUpdateCount = 0;
     static uint32_t tlasBuildCount = 0;
 
-    // Collect current BLAS device addresses for change detection
-    uint32_t currentInstanceCount = static_cast<uint32_t>(instanceBuilder.instances.size());
-    // Determine if UPDATE is possible: same instance count means no chunks added/removed.
-    // We skip per-BLAS address comparison — if a chunk BLAS was rebuilt at the same index,
-    // one frame of stale geometry in the TLAS is visually imperceptible at 60+ FPS.
-    // TLAS UPDATE disabled: Vulkan spec requires identical BLAS handles for UPDATE mode.
-    // Chunk rebuilds change BLAS handles, making UPDATE read freed acceleration structures.
-    // TODO: track per-instance BLAS addresses and only UPDATE when all handles match.
-    bool canUpdate = false;
+    // Determine if TLAS UPDATE is possible by comparing per-instance BLAS generations.
+    // UPDATE requires identical BLAS handles at each instance index. If any chunk BLAS
+    // was rebuilt (generation changed) or instance count changed, we must full BUILD.
+    currBlasSnapshot.instanceCount = static_cast<uint32_t>(instanceBuilder.instances.size());
+    uint32_t currentInstanceCount = currBlasSnapshot.instanceCount;
+
+    bool canUpdate = tlas != nullptr
+        && currBlasSnapshot.instanceCount == prevBlasSnapshot_.instanceCount
+        && currBlasSnapshot.generations == prevBlasSnapshot_.generations;
 
     constexpr VkBuildAccelerationStructureFlagsKHR tlasFlags =
         VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
@@ -622,7 +648,9 @@ void WorldPrepareContext::render() {
         tlasBuildCount++;
     }
 
-    // Save state for next frame's change detection
+    // Save BLAS snapshot: keeps shared_ptrs alive until this context is reused,
+    // preventing GC from freeing BLASes while the GPU still references their addresses.
+    prevBlasSnapshot_ = std::move(currBlasSnapshot);
     prevTlasInstanceCount_ = currentInstanceCount;
 
     if (++tlasLogCounter >= 120) {

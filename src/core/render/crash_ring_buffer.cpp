@@ -1,6 +1,7 @@
 #include "core/render/crash_ring_buffer.hpp"
 #include "core/render/gpu_diagnostics.hpp"
 #include "core/render/aftermath_integration.hpp"
+#include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
 #include <fstream>
@@ -61,6 +62,17 @@ void crashExitWithQueue(int vkResult, const char* context, VkQueue queue) {
 
     // GPU diagnostics: query checkpoints + device fault before dump
     if (vkResult == -4 /* VK_ERROR_DEVICE_LOST */) {
+        // Also query secondary queue checkpoints if available
+        auto framework = Renderer::instance().framework();
+        if (framework && framework->device()) {
+            VkQueue secQueue = framework->device()->secondaryQueue();
+            if (secQueue != VK_NULL_HANDLE && secQueue != queue) {
+                auto writeToStderr = [](const std::string& line) { std::cerr << line << std::endl; };
+                std::cerr << "\n--- Secondary Queue ---" << std::endl;
+                GpuDiag::queryAndPrintCheckpoints(secQueue, "Secondary Queue", writeToStderr);
+                std::cerr << "--- End Secondary Queue ---\n" << std::endl;
+            }
+        }
         GpuDiag::onDeviceLost(queue, logsDir, g_crashRing.frameCount());
 
         // Wait for Aftermath to collect GPU crash dump (up to 5 seconds)

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <volk.h>
 
 // GPU-side diagnostic breadcrumbs for DEVICE_LOST debugging.
@@ -12,7 +13,13 @@ class GpuDiag {
 public:
     enum Checkpoint : uint32_t {
         FRAME_BEGIN = 0,
+        UPLOAD_TEX_BEGIN,
+        UPLOAD_TEX_END,
+        UPLOAD_BUF_BEGIN,
+        UPLOAD_BUF_END,
         STAGING_UPLOADS,
+        WORLD_PREPARE_BEGIN,
+        CHUNK_SCHEDULE_DONE,
         BLAS_BUILD_IMPORTANT,
         BLAS_BUILD_BATCH,
         BLAS_BUILD_ENTITY,
@@ -51,6 +58,10 @@ public:
 
     // Call after VK_ERROR_DEVICE_LOST. Queries GPU checkpoints + device fault, dumps to file.
     static void onDeviceLost(VkQueue queue, const std::filesystem::path& logsDir, uint64_t frameNumber);
+
+    // Query checkpoints from a specific queue and print them. Returns last completed checkpoint ID.
+    static uint32_t queryAndPrintCheckpoints(VkQueue queue, const char* queueName,
+                                              std::function<void(const std::string&)> writeToAll);
 
     // Human-readable name for a checkpoint.
     static const char* checkpointName(uint32_t cp);

@@ -466,8 +466,13 @@ void Framework::submitCommand() {
 
     Renderer::instance().framework()->safeAcquireCurrentContext(); // ensure context is non nullptr
 
+    // Granular GPU checkpoints on the upload command buffer for crash diagnosis
+    GpuDiag::checkpoint(currentContext_->uploadCommandBuffer->vkCommandBuffer(), GpuDiag::UPLOAD_TEX_BEGIN);
     Renderer::instance().textures()->performQueuedUpload();
+    GpuDiag::checkpoint(currentContext_->uploadCommandBuffer->vkCommandBuffer(), GpuDiag::UPLOAD_TEX_END);
+    GpuDiag::checkpoint(currentContext_->uploadCommandBuffer->vkCommandBuffer(), GpuDiag::UPLOAD_BUF_BEGIN);
     Renderer::instance().buffers()->performQueuedUpload();
+    GpuDiag::checkpoint(currentContext_->uploadCommandBuffer->vkCommandBuffer(), GpuDiag::UPLOAD_BUF_END);
     Renderer::instance().buffers()->buildAndUploadOverlayUniformBuffer();
 
     auto pipelineContext = pipeline_->acquirePipelineContext(currentContext_);
@@ -1265,7 +1270,12 @@ OverlayCompositor *Framework::overlayCompositor() const {
 }
 
 GarbageCollector::GarbageCollector(std::shared_ptr<Framework> framework) : framework_(framework) {
-    collectors_.resize(framework->swapchain_->imageCount());
+    // Use more slots than swapchain imageCount to give GPU work on the secondary
+    // queue (chunk BLAS builds) time to complete before resources are freed.
+    // With imageCount=2-3, resources can be destroyed while the GPU still references
+    // them from in-flight BLAS/TLAS builds, causing WRITE_AFTER_DESTROY at address 0x0.
+    uint32_t gcSlots = std::max(framework->swapchain_->imageCount() * 3, 8u);
+    collectors_.resize(gcSlots);
 }
 
 void GarbageCollector::clear() {

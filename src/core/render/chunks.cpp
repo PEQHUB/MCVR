@@ -1025,9 +1025,13 @@ ChunkBuildScheduler::ChunkBuildScheduler(std::set<int64_t> &queuedIndex,
       chunkBuildingTotalBatches_(chunkBuildingTotalBatches) {
     auto framework = Renderer::instance().framework();
     auto device = framework->device();
+    auto asyncPool = framework->asyncCommandPool();
 
     uint32_t numFences = chunkBuildingTotalBatches_;
-    for (int i = 0; i < numFences; i++) { freeFences_.push(vk::Fence::create(device)); }
+    for (int i = 0; i < numFences; i++) {
+        freeFences_.push(vk::Fence::create(device));
+        freeCmdBuffers_.push(vk::CommandBuffer::create(device, asyncPool));
+    }
 }
 
 void ChunkBuildScheduler::tryCheckBatchesFinish() {
@@ -1036,12 +1040,14 @@ void ChunkBuildScheduler::tryCheckBatchesFinish() {
 
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     auto iterFence = buildingFences_.begin();
+    auto iterCmd = buildingCmdBuffers_.begin();
     auto iterBatch = buildingBatches_.begin();
     for (; iterFence != buildingFences_.end() && iterBatch != buildingBatches_.end();) {
         VkResult fenceResult = vkWaitForFences(device->vkDevice(), 1, &(*iterFence)->vkFence(), true, 0);
         if (fenceResult == VK_SUCCESS) {
             vkResetFences(device->vkDevice(), 1, &(*iterFence)->vkFence());
             freeFences_.push(*iterFence);
+            freeCmdBuffers_.push(*iterCmd);
 
             for (auto chunkBuildData : (*iterBatch)->batchData) {
                 if (chunkBuildData->id >= static_cast<int>(chunks_.size())) continue;
@@ -1056,15 +1062,18 @@ void ChunkBuildScheduler::tryCheckBatchesFinish() {
             }
 
             iterFence = buildingFences_.erase(iterFence);
+            iterCmd = buildingCmdBuffers_.erase(iterCmd);
             iterBatch = buildingBatches_.erase(iterBatch);
         } else if (fenceResult == VK_TIMEOUT) {
             ++iterFence;
+            ++iterCmd;
             ++iterBatch;
         } else {
             g_crashRing.record("chunkFenceFail", fenceResult);
             std::cout << "Chunk build fence failed with error: " << std::dec << fenceResult << std::endl;
             // Device lost — all remaining fences are poison, drain them
             buildingFences_.clear();
+            buildingCmdBuffers_.clear();
             buildingBatches_.clear();
             break;
         }
@@ -1077,12 +1086,14 @@ void ChunkBuildScheduler::waitAllBatchesFinish() {
 
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     auto iterFence = buildingFences_.begin();
+    auto iterCmd = buildingCmdBuffers_.begin();
     auto iterBatch = buildingBatches_.begin();
     for (; iterFence != buildingFences_.end() && iterBatch != buildingBatches_.end();) {
         VkResult fenceResult = vkWaitForFences(device->vkDevice(), 1, &(*iterFence)->vkFence(), true, UINT64_MAX);
         if (fenceResult == VK_SUCCESS) {
             vkResetFences(device->vkDevice(), 1, &(*iterFence)->vkFence());
             freeFences_.push(*iterFence);
+            freeCmdBuffers_.push(*iterCmd);
 
             for (auto chunkBuildData : (*iterBatch)->batchData) {
                 if (chunkBuildData->id >= static_cast<int>(chunks_.size())) continue;
@@ -1097,12 +1108,14 @@ void ChunkBuildScheduler::waitAllBatchesFinish() {
             }
 
             iterFence = buildingFences_.erase(iterFence);
+            iterCmd = buildingCmdBuffers_.erase(iterCmd);
             iterBatch = buildingBatches_.erase(iterBatch);
         } else {
             g_crashRing.record("chunkWaitAllFail", fenceResult);
             std::cout << "Chunk build waitAll fence failed with error: " << std::dec << fenceResult << std::endl;
             // Device lost — all remaining fences are poison, drain them
             buildingFences_.clear();
+            buildingCmdBuffers_.clear();
             buildingBatches_.clear();
             break;
         }
@@ -1114,6 +1127,7 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     if (!freeFences_.empty() && !queuedIndex_.empty()) {
         auto fence = freeFences_.front();
+        auto worldAsyncBuffer = freeCmdBuffers_.front();
 
         glm::vec3 cameraPos = Renderer::instance().world()->getCameraPos();
         auto chunkBuildDataBatch =
@@ -1124,8 +1138,6 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
         auto device = framework->device();
         auto physicalDevice = Renderer::instance().framework()->physicalDevice();
         auto secondaryQueueIndex = physicalDevice->secondaryQueueIndex();
-
-        auto worldAsyncBuffer = framework->worldAsyncCommandBuffer();
 
         if (chunkBuildDataBatch->batchData.size() > 0) {
             worldAsyncBuffer->begin();
@@ -1307,7 +1319,9 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
             }
 
             freeFences_.pop();
+            freeCmdBuffers_.pop();
             buildingFences_.push_back(fence);
+            buildingCmdBuffers_.push_back(worldAsyncBuffer);
             buildingBatches_.push_back(chunkBuildDataBatch);
         }
     }
@@ -1346,6 +1360,7 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
 
         gc.collect(blas);
         blas = chunkBuildData->blas;
+        blasGeneration++;
 
         gc.collect(vertexBuffers);
         vertexBuffers = std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
@@ -1386,6 +1401,7 @@ void Chunk1::invalidate() {
     lastUpdate = std::chrono::steady_clock::now();
 
     blasVersion = latestVersion++;
+    blasGeneration++;  // TLAS UPDATE detection: invalidation changes BLAS composition
 
     gc.collect(blas);
     blas = nullptr;
