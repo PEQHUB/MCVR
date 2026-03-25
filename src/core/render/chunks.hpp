@@ -97,6 +97,13 @@ struct ChunkBuildDataBatch : public SharedObject<ChunkBuildDataBatch> {
     std::vector<std::shared_ptr<ChunkBuildData>> batchData;
     glm::vec3 cameraPos;
 
+    // BLAS compaction: query pool for compacted sizes (one query per BLAS in batch)
+    VkQueryPool compactionQueryPool = VK_NULL_HANDLE;
+    uint32_t compactionQueryCount = 0;
+    std::shared_ptr<vk::Device> queryDevice;  // for cleanup
+
+    ~ChunkBuildDataBatch();
+
     ChunkBuildDataBatch(uint32_t maxBatchSize,
                         std::set<int64_t> &queuedIndex,
                         std::vector<std::shared_ptr<Chunk1>> &chunks,

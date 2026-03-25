@@ -928,7 +928,8 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
         }
     }
     blasGeometryBuilder->endGeometries();
-    blas = blasBuilder->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR)
+    blas = blasBuilder->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR |
+                                           VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR)
                ->querySizeInfo(device)
                ->allocateBuffers(physicalDevice, device, vma)
                ->build(device);
@@ -1009,6 +1010,12 @@ ChunkBuildDataBatch::ChunkBuildDataBatch(uint32_t maxBatchSize,
     }
 }
 
+ChunkBuildDataBatch::~ChunkBuildDataBatch() {
+    if (compactionQueryPool != VK_NULL_HANDLE && queryDevice) {
+        vkDestroyQueryPool(queryDevice->vkDevice(), compactionQueryPool, nullptr);
+    }
+}
+
 ChunkBuildScheduler::ChunkBuildScheduler(std::set<int64_t> &queuedIndex,
                                          std::vector<std::shared_ptr<Chunk1>> &chunks,
                                          std::vector<std::shared_ptr<ChunkBuildData>> &chunkBuildDatas,
@@ -1049,7 +1056,41 @@ void ChunkBuildScheduler::tryCheckBatchesFinish() {
             freeFences_.push(*iterFence);
             freeCmdBuffers_.push(*iterCmd);
 
-            for (auto chunkBuildData : (*iterBatch)->batchData) {
+            // Read BLAS compaction query results (measurement only — no compaction yet)
+            auto &batch = *iterBatch;
+            if (batch->compactionQueryPool != VK_NULL_HANDLE && batch->compactionQueryCount > 0) {
+                std::vector<VkDeviceSize> compactedSizes(batch->compactionQueryCount);
+                VkResult qr = vkGetQueryPoolResults(
+                    device->vkDevice(), batch->compactionQueryPool, 0, batch->compactionQueryCount,
+                    compactedSizes.size() * sizeof(VkDeviceSize), compactedSizes.data(),
+                    sizeof(VkDeviceSize), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+
+                if (qr == VK_SUCCESS) {
+                    static uint64_t totalOriginal = 0, totalCompacted = 0;
+                    static uint32_t totalCount = 0;
+                    uint32_t qi = 0;
+                    for (auto &cbd : batch->batchData) {
+                        if (cbd->blas && qi < batch->compactionQueryCount) {
+                            uint64_t original = cbd->blas->blasBuffer()->size();
+                            uint64_t compacted = compactedSizes[qi];
+                            totalOriginal += original;
+                            totalCompacted += compacted;
+                            totalCount++;
+                            qi++;
+                        }
+                    }
+                    // Log every 50 chunks
+                    if (totalCount > 0 && totalCount % 50 == 0) {
+                        float pct = totalOriginal > 0 ? 100.0f * (1.0f - (float)totalCompacted / totalOriginal) : 0;
+                        std::cout << "[Compaction] " << totalCount << " BLASes: "
+                                  << (totalOriginal / 1024) << " KB original, "
+                                  << (totalCompacted / 1024) << " KB compacted, "
+                                  << pct << "% savings" << std::endl;
+                    }
+                }
+            }
+
+            for (auto chunkBuildData : batch->batchData) {
                 if (chunkBuildData->id >= static_cast<int>(chunks_.size())) continue;
                 chunks_[chunkBuildData->id]->enqueue(chunkBuildData);
 
@@ -1298,6 +1339,35 @@ void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
                 }
             }
             vk::BLASBuilder::batchSubmit(builders, worldAsyncBuffer);
+
+            // BLAS compaction: query compacted sizes after build completes
+            {
+                // Collect all chunk BLASes (not displaced — those use AABB, compaction less useful)
+                std::vector<VkAccelerationStructureKHR> blasHandles;
+                for (auto &cbd : chunkBuildDataBatch->batchData) {
+                    if (cbd->blas) blasHandles.push_back(cbd->blas->blas());
+                }
+
+                if (!blasHandles.empty()) {
+                    VkQueryPoolCreateInfo qpci{};
+                    qpci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+                    qpci.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
+                    qpci.queryCount = static_cast<uint32_t>(blasHandles.size());
+
+                    VkQueryPool qp;
+                    if (vkCreateQueryPool(device->vkDevice(), &qpci, nullptr, &qp) == VK_SUCCESS) {
+                        vkCmdResetQueryPool(worldAsyncBuffer->vkCommandBuffer(), qp, 0, qpci.queryCount);
+                        vkCmdWriteAccelerationStructuresPropertiesKHR(
+                            worldAsyncBuffer->vkCommandBuffer(),
+                            static_cast<uint32_t>(blasHandles.size()), blasHandles.data(),
+                            VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+                            qp, 0);
+                        chunkBuildDataBatch->compactionQueryPool = qp;
+                        chunkBuildDataBatch->compactionQueryCount = qpci.queryCount;
+                        chunkBuildDataBatch->queryDevice = device;
+                    }
+                }
+            }
 
             worldAsyncBuffer->end();
 
