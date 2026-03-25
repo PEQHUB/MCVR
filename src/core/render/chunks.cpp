@@ -71,7 +71,7 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
 
     for (int i = 0; i < geometryCount; i++) {
         auto vertexBuffer =
-            vk::DeviceLocalBuffer::create(vma, device, vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle),
+            vk::DeviceLocalBuffer::create(vma, device, true, vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle),
                                           VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
                                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -79,7 +79,7 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
         vertexBuffers.push_back(vertexBuffer);
 
         auto indexBuffer =
-            vk::DeviceLocalBuffer::create(vma, device, indices[i].size() * sizeof(uint32_t),
+            vk::DeviceLocalBuffer::create(vma, device, true, indices[i].size() * sizeof(uint32_t),
                                           VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
                                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -113,7 +113,7 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                     }
                 }
                 auto ommIdxBuffer = vk::DeviceLocalBuffer::create(
-                    vma, device, numTriangles * sizeof(int32_t),
+                    vma, device, true, numTriangles * sizeof(int32_t),
                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
                         VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
@@ -250,7 +250,7 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
 
             // Upload OMM index buffer (always needed if useOMM)
             auto ommIdxBuffer = vk::DeviceLocalBuffer::create(
-                vma, device, numTriangles * sizeof(int32_t),
+                vma, device, true, numTriangles * sizeof(int32_t),
                 VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                     VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
                     VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
@@ -262,14 +262,14 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
 
                 // Upload OMM array data
                 gd.arrayBuffer = vk::DeviceLocalBuffer::create(
-                    vma, device, mergedArrayData.size(),
+                    vma, device, true, mergedArrayData.size(),
                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                         VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
                 gd.arrayBuffer->uploadToStagingBuffer(mergedArrayData.data());
 
                 // Upload OMM descriptor array (VkMicromapTriangleEXT)
                 gd.descBuffer = vk::DeviceLocalBuffer::create(
-                    vma, device, mergedDescs.size() * sizeof(VkMicromapTriangleEXT),
+                    vma, device, true, mergedDescs.size() * sizeof(VkMicromapTriangleEXT),
                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                         VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
                 gd.descBuffer->uploadToStagingBuffer(mergedDescs.data());
@@ -338,7 +338,7 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
             uint32_t numTriangles = static_cast<uint32_t>(indices[i].size()) / 3;
             std::vector<int32_t> ommIndices(numTriangles, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT);
             auto ommIdxBuffer = vk::DeviceLocalBuffer::create(
-                vma, device, numTriangles * sizeof(int32_t),
+                vma, device, true, numTriangles * sizeof(int32_t),
                 VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                     VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
                     VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
@@ -880,14 +880,14 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
 
                 // Rebuild vertex and index buffers with expanded data
                 vertexBuffers[i] = vk::DeviceLocalBuffer::create(
-                    vma, device, verts.size() * sizeof(vk::VertexFormat::PBRTriangle),
+                    vma, device, true, verts.size() * sizeof(vk::VertexFormat::PBRTriangle),
                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
                 vertexBuffers[i]->uploadToStagingBuffer(verts.data());
 
                 indexBuffers[i] = vk::DeviceLocalBuffer::create(
-                    vma, device, idx.size() * sizeof(uint32_t),
+                    vma, device, true, idx.size() * sizeof(uint32_t),
                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -936,13 +936,13 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
     // Build separate AABB BLAS for DDA displaced faces
     if (!displacedAABBs.empty()) {
         displacedAABBBuffer = vk::DeviceLocalBuffer::create(
-            vma, device, displacedAABBs.size() * sizeof(VkAabbPositionsKHR),
+            vma, device, true, displacedAABBs.size() * sizeof(VkAabbPositionsKHR),
             VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                 VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
         displacedAABBBuffer->uploadToStagingBuffer(displacedAABBs.data());
 
         displacedFaceDataBuffer = vk::DeviceLocalBuffer::create(
-            vma, device, displacedFaceData.size() * sizeof(vk::Data::DisplacedFaceData),
+            vma, device, true, displacedFaceData.size() * sizeof(vk::Data::DisplacedFaceData),
             VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         displacedFaceDataBuffer->uploadToStagingBuffer(displacedFaceData.data());
 
