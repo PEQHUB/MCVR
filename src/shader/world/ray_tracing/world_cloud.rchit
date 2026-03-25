@@ -98,8 +98,7 @@ void main() {
     PBRTriangle v2 = vertexBuffer.vertices[i2];
 
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
-    vec3 localPos = baryCoords.x * v0.pos + baryCoords.y * v1.pos + baryCoords.z * v2.pos;
-    vec3 worldPos = vec4(localPos, 1.0) * gl_ObjectToWorld3x4EXT;
+    vec3 worldPos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
     uint coordinate = (v0.flags >> PBR_FLAG_COORD_SHIFT) & 0x7u;
     vec3 normal = baryCoords.x * v0.norm + baryCoords.y * v1.norm + baryCoords.z * v2.norm;
     if (coordinate == 1) {

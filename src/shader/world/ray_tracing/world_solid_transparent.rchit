@@ -459,8 +459,10 @@ void main() {
     PBRTriangle v2 = vertexBuffer.vertices[i2];
 
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
-    vec3 localPos = baryCoords.x * v0.pos + baryCoords.y * v1.pos + baryCoords.z * v2.pos;
-    vec3 worldPos = vec4(localPos, 1.0) * gl_ObjectToWorld3x4EXT;
+    // Compute world-space hit position from ray parameters instead of vertex buffer positions.
+    // This correctly handles per-geometry transforms (mega-BLAS) where vertex buffer positions
+    // are in chunk-local space but gl_ObjectToWorldEXT reflects the mega-chunk TLAS transform.
+    vec3 worldPos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
 
     bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
     vec3 colorLayer;

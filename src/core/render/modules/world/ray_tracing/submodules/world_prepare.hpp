@@ -69,9 +69,14 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> indexBuffers;
 
         // Per-sub-chunk transform buffers (3x4 VkTransformMatrixKHR each)
-        std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> transformBuffers;
+        // HostVisibleBuffer avoids staging copy issues and guarantees alignment
+        std::vector<std::shared_ptr<vk::HostVisibleBuffer>> transformBuffers;
     };
     std::unordered_map<int64_t, std::shared_ptr<MegaChunk>> megaChunkCache_;
+
+    // Dedicated secondary-queue resources for mega-BLAS builds
+    std::shared_ptr<vk::CommandBuffer> megaCmdBuffer_;
+    std::shared_ptr<vk::Fence> megaFence_;
 
     std::shared_ptr<vk::DeviceLocalBuffer> blasOffsetsBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> vertexBufferAddr;

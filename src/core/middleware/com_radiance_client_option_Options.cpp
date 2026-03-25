@@ -504,6 +504,12 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.chunkCullDistance = static_cast<float>(std::clamp(distance, 64, 1024));
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMegaMergeDistance(
+    JNIEnv *, jclass, jint distance, jboolean write) {
+    Renderer::options.megaMergeDistance = static_cast<float>(std::clamp(distance, 0, 512));
+    std::cout << "[MegaBLAS] megaMergeDistance set to " << Renderer::options.megaMergeDistance << std::endl;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetShadowSoftness(
     JNIEnv *, jclass, jfloat softness, jboolean write) {
     Renderer::options.shadowSoftness = std::clamp(softness, 0.0f, 2.0f);

@@ -36,7 +36,7 @@ struct Options {
     uint32_t chunkBuildingBatchSize = 6;
     uint32_t chunkBuildingTotalBatches = 6;
     float chunkCullDistance = 384.0f;  // Max chunk distance in blocks (64-1024), chunks beyond are excluded from TLAS
-    float megaMergeDistance = 128.0f;  // Beyond this distance (blocks), chunks are merged into mega-BLASes (0=disabled)
+    float megaMergeDistance = 0.0f;  // Beyond this distance (blocks), chunks are merged into mega-BLASes (0=disabled)
     static constexpr uint32_t ommBatchCap = 2; // Max chunks per GPU batch when OMM active (prevents TDR)
     uint32_t tonemappingMode = 1; // 0 = PBR Neutral, 1 = Reinhard Extended
     float minExposure = 1e-7f;         // Minimum exposure clamp (lowered for physical sun ~100k lux)
