@@ -124,6 +124,9 @@ void CloudModule::setAttributes(int attributeCount, std::vector<std::string> &at
 }
 
 void CloudModule::build() {
+    // TEMPORARY: Force clouds off to stabilize game while cloud system is rebuilt
+    Renderer::options.cloudQuality = 0;
+
     auto framework = framework_.lock();
     if (!framework) return;
     auto worldPipeline = worldPipeline_.lock();

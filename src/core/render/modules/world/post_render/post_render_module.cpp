@@ -363,7 +363,7 @@ void PostRenderModule::initBuffers() {
     }
 
     starFieldVertexBuffer = vk::DeviceLocalBuffer::create(
-        vma, device, verts.size() * sizeof(vk::VertexFormat::PBRTriangle), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        vma, device, true, verts.size() * sizeof(vk::VertexFormat::PBRTriangle), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
 
     starFieldVertexBuffer->uploadToStagingBuffer(verts.data());
 

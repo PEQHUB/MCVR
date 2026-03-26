@@ -91,3 +91,33 @@ vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PBRTriangle
     static vk::VertexLayoutInfo vertexLayoutInfo = initVertexLayout<vk::VertexFormat::PBRTriangle>(attributes);
     return vertexLayoutInfo;
 }
+
+template <>
+vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PBRTriangleCompact>() {
+    static std::vector<VertexAttribute> attributes = {
+        {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PBRTriangleCompact, pos)},         // location 0
+        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangleCompact, packed0)},              // location 1
+        {VK_FORMAT_R32G32_SFLOAT, offsetof(VertexFormat::PBRTriangleCompact, textureUV)},      // location 2
+        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangleCompact, colorPacked)},          // location 3
+        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangleCompact, packed1)},              // location 4
+    };
+    static vk::VertexLayoutInfo vertexLayoutInfo = initVertexLayout<vk::VertexFormat::PBRTriangleCompact>(attributes);
+    return vertexLayoutInfo;
+}
+
+template <>
+vk::VertexLayoutInfo &vk::Vertex::vertexLayoutInfo<vk::VertexFormat::PBRTriangleLossless>() {
+    static std::vector<VertexAttribute> attributes = {
+        {VK_FORMAT_R32G32B32_SFLOAT, offsetof(VertexFormat::PBRTriangleLossless, pos)},              // location 0
+        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangleLossless, flags)},                     // location 1
+        {VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(VertexFormat::PBRTriangleLossless, colorLayer)},     // location 2
+        {VK_FORMAT_R32G32_SFLOAT, offsetof(VertexFormat::PBRTriangleLossless, textureUV)},            // location 3
+        {VK_FORMAT_R32G32_SFLOAT, offsetof(VertexFormat::PBRTriangleLossless, glintUV)},              // location 4
+        {VK_FORMAT_R32_SFLOAT, offsetof(VertexFormat::PBRTriangleLossless, albedoEmission)},          // location 5
+        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangleLossless, emissiveBlockType)},         // location 6
+        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangleLossless, textureID_glint)},           // location 7
+        {VK_FORMAT_R32_UINT, offsetof(VertexFormat::PBRTriangleLossless, overlayPacked)},             // location 8
+    };
+    static vk::VertexLayoutInfo vertexLayoutInfo = initVertexLayout<vk::VertexFormat::PBRTriangleLossless>(attributes);
+    return vertexLayoutInfo;
+}

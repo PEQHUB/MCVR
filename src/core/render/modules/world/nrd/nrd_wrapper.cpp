@@ -262,7 +262,7 @@ bool NrdWrapper::init(std::shared_ptr<vk::Device> device,
     }
 
     m_constantBuffer =
-        vk::DeviceLocalBuffer::create(m_vma, m_device, iDesc->constantBufferMaxDataSize,
+        vk::DeviceLocalBuffer::create(m_vma, m_device, true, iDesc->constantBufferMaxDataSize,
                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
     if (!createSamplers()) return false;

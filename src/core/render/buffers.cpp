@@ -92,7 +92,7 @@ void Buffers::initializeBuffer(uint32_t id, uint32_t size, VkBufferUsageFlags us
     if (buffer == nullptr || currentSize != buffer->size()) {
         framework->gc().collect(buffer);
         overlayIndexVertexBuffer_[context->frameIndex].at(id) =
-            vk::DeviceLocalBuffer::create(vma, device, currentSize, usageFlags);
+            vk::DeviceLocalBuffer::create(vma, device, true, currentSize, usageFlags);
     }
 }
 

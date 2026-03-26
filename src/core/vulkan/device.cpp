@@ -44,7 +44,9 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                                                    // OMM: Opacity Micro Maps for hardware-resolved alpha testing
                                                    VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME,
                                                    // SER: Shader Execution Reordering for material coherence
+                                                   // Try EXT first (promoted), fall back to NV (original)
                                                    VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME,
+                                                   VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME,
                                                    // Shader clock: per-pixel profiling instrumentation
                                                    VK_KHR_SHADER_CLOCK_EXTENSION_NAME,
                                                    // GPU diagnostics: breadcrumbs for DEVICE_LOST debugging
@@ -175,7 +177,9 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     ommFeatures.micromap = ommSupported_ ? VK_TRUE : VK_FALSE;
 
     // SER: Shader Execution Reordering for material coherence in RT
-    serSupported_ = hasExtension(VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME) &&
+    // Accept either EXT (promoted) or NV (original) extension
+    serSupported_ = (hasExtension(VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME) ||
+                     hasExtension(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME)) &&
                     supportedSERFeatures.rayTracingInvocationReorder == VK_TRUE;
 
     VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV serFeatures{};
@@ -215,7 +219,10 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     faultFeatures.deviceFaultVendorBinary = VK_FALSE;
 
     deviceCout() << "Opacity Micro Maps (OMM): " << (ommSupported_ ? "YES" : "NO") << std::endl;
-    deviceCout() << "Shader Execution Reordering (SER): " << (serSupported_ ? "YES" : "NO") << std::endl;
+    deviceCout() << "Shader Execution Reordering (SER): " << (serSupported_ ? "YES" : "NO")
+                 << " (EXT=" << hasExtension(VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME)
+                 << " NV=" << hasExtension(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME)
+                 << " feature=" << supportedSERFeatures.rayTracingInvocationReorder << ")" << std::endl;
     deviceCout() << "Shader Clock: " << (shaderClockSupported_ ? "YES" : "NO") << std::endl;
     deviceCout() << "GPU Diagnostics Checkpoints: " << (checkpointsSupported_ ? "YES" : "NO") << std::endl;
     deviceCout() << "GPU Device Fault: " << (deviceFaultSupported_ ? "YES" : "NO") << std::endl;

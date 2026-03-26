@@ -206,8 +206,8 @@ EntityPost::EntityPost(std::shared_ptr<EntityBuildData> chunkBuildData) {
 
     for (int i = 0; i < geometryCount; i++) {
         auto vertexBuffer = vk::DeviceLocalBuffer::create(
-            vma, device, vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        auto indexBuffer = vk::DeviceLocalBuffer::create(vma, device, indices[i].size() * sizeof(uint32_t),
+            vma, device, true, vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        auto indexBuffer = vk::DeviceLocalBuffer::create(vma, device, true, indices[i].size() * sizeof(uint32_t),
                                                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 
         vertexBuffer->uploadToStagingBuffer(vertices[i].data());

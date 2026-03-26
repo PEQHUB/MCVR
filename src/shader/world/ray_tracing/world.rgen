@@ -74,6 +74,8 @@ layout(set = 1, binding = 9) readonly buffer TileLightBuffer {
     uint data[];
 } tileLightBuffer;
 
+#include "../util/vertex_fetch.glsl"
+
 const int TILE_SIZE = 16;
 const int MAX_LIGHTS_PER_TILE = 128;
 
@@ -586,13 +588,9 @@ void main() {
                 uint i1 = indexBuffer.indices[indexBaseID + 1];
                 uint i2 = indexBuffer.indices[indexBaseID + 2];
 
-                VertexBuffer vertexBuffer = VertexBuffer(lastVertexBufferAddr);
-                PBRTriangle v0 = vertexBuffer.vertices[i0];
-                PBRTriangle v1 = vertexBuffer.vertices[i1];
-                PBRTriangle v2 = vertexBuffer.vertices[i2];
-
                 vec3 baryCoords = mainRay.baryCoords;
-                vec3 prevLocalPos = baryCoords.x * v0.pos + baryCoords.y * v1.pos + baryCoords.z * v2.pos;
+                VertexBuffer vb = VertexBuffer(lastVertexBufferAddr);
+                vec3 prevLocalPos = baryCoords.x * vb.vertices[i0].pos + baryCoords.y * vb.vertices[i1].pos + baryCoords.z * vb.vertices[i2].pos;
 
                 mat4 lastModelMat = lastObjToWorldMats.mat[instanceID];
                 vec3 lastModelRotLocal = mat3(lastModelMat) * prevLocalPos;
