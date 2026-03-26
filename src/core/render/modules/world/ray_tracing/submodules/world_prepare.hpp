@@ -78,6 +78,22 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     std::shared_ptr<vk::CommandBuffer> megaCmdBuffer_;
     std::shared_ptr<vk::Fence> megaFence_;
 
+    // Cached per-chunk instance metadata — only regenerated when blasGeneration changes.
+    // Eliminates shared_ptr dereferences and vector copies on stable frames.
+    struct CachedChunkData {
+        uint64_t blasGeneration = UINT64_MAX; // invalid → forces rebuild
+        std::shared_ptr<vk::BLAS> blas;
+        std::shared_ptr<vk::BLAS> displacedBlas;
+        std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
+        int x, y, z;
+        uint32_t geometryCount = 0;
+        std::vector<World::GeometryTypes> geoTypes; // SHADOW prefix + chunk types
+        std::vector<uint64_t> vertBufAddrs;
+        std::vector<uint64_t> idxBufAddrs;
+        bool hasDisplaced = false;
+    };
+    std::vector<CachedChunkData> cachedChunks_;
+
     std::shared_ptr<vk::DeviceLocalBuffer> blasOffsetsBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> vertexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> indexBufferAddr;

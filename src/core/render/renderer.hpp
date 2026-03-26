@@ -7,6 +7,7 @@
 #include <filesystem>
 
 #include "core/render/gpu_profiler.hpp"
+#include "core/render/thread_pool.hpp"
 
 class Textures;
 class Framework;
@@ -264,6 +265,7 @@ class Renderer : public Singleton<Renderer> {
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> emissionImages;  // RT emission, read by tone mapping
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> renderResHdrImages;  // DLSS input (render-res HDR), read by tone mapping histogram
     static GpuProfiler gpuProfiler;
+    static ThreadPool threadPool;
 
     // Frame Generation: images set by pipeline modules, read by render_framework for SL tagging
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> frameGenDepthImages;        // Linear depth (render res)

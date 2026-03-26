@@ -60,6 +60,19 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     std::vector<OMMGeometryData> ommGeometryData;
     uint8_t vertexFormat = 2; // 0=full entity, 1=compact far, 2=lossless near
 
+    // CPU-side OMM results computed in prepareCPU(), consumed by uploadGPU()
+    struct OMMCpuResult {
+        std::vector<int32_t> ommIndices;           // per-triangle opacity classification
+        std::vector<uint8_t> mergedArrayData;       // Phase 2: baked OMM bit data
+        std::vector<VkMicromapTriangleEXT> mergedDescs; // Phase 2: per-block descriptors
+        std::vector<VkMicromapUsageEXT> descHistogram;
+        std::vector<VkMicromapUsageEXT> indexHistogram;
+        bool bakingDone = false;
+        bool isTransparentOMM = false;              // geometry had OMM processing
+        bool isOpaqueOMM = false;                   // WORLD_SOLID all-opaque shortcut
+    };
+    std::vector<OMMCpuResult> ommCpuResults;
+
     std::shared_ptr<vk::BLAS> blas;
     std::shared_ptr<vk::BLASBuilder> blasBuilder;
 
@@ -88,6 +101,12 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
 
     void build(bool allowMicromapBake = true, bool skipOMM = false, glm::vec3 cameraPos = glm::vec3(0));
 
+    // Split build into two phases for parallelization:
+    // prepareCPU() — greedy meshing, OMM classification, tessellation (no Vulkan calls, thread-safe)
+    // uploadGPU()  — VMA allocation, staging uploads, BLAS builder setup (render thread only)
+    void prepareCPU(bool allowMicromapBake, bool skipOMM, glm::vec3 cameraPos);
+    void uploadGPU();
+
     // Release CPU-side vertex/index data after GPU upload + BLAS build.
     // Frees ~4GB of RAM across all loaded chunks.
     void releaseHostGeometry();
@@ -106,6 +125,10 @@ struct ChunkBuildDataBatch : public SharedObject<ChunkBuildDataBatch> {
 
     ~ChunkBuildDataBatch();
 
+    // Default constructor for pre-built batches (Phase 1: background workers fill batchData)
+    ChunkBuildDataBatch() = default;
+
+    // Legacy constructor (dequeues + prepareCPU + uploadGPU inline — used for important chunks)
     ChunkBuildDataBatch(uint32_t maxBatchSize,
                         std::set<int64_t> &queuedIndex,
                         std::vector<std::shared_ptr<Chunk1>> &chunks,
@@ -115,36 +138,65 @@ struct ChunkBuildDataBatch : public SharedObject<ChunkBuildDataBatch> {
 
 class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
   public:
-    ChunkBuildScheduler(std::set<int64_t> &queuedIndex,
-                        std::vector<std::shared_ptr<Chunk1>> &chunks,
+    ChunkBuildScheduler(std::vector<std::shared_ptr<Chunk1>> &chunks,
                         std::vector<std::shared_ptr<ChunkBuildData>> &chunkBuildDatas,
                         std::recursive_mutex &mutex,
                         std::shared_ptr<vk::HostVisibleBuffer> &chunkPackedData,
-                        uint32_t chunkBuildingBatchSize,
-                        uint32_t chunkBuildingTotalBatches);
+                        uint32_t chunkBuildingBatchSize);
+    ~ChunkBuildScheduler();
 
-    void tryCheckBatchesFinish();
-    void waitAllBatchesFinish();
-    void tryScheduleBatches(uint32_t maxBatchSize);
+    // Render thread only: drain completed chunks into Chunk1 (zero Vulkan work)
+    void integrateCompleted();
+    void waitAllFinish();
+
+    // Push a chunk for background processing (called from JNI thread)
+    void enqueue(std::shared_ptr<ChunkBuildData> data, glm::vec3 cameraPos, bool important = false);
+    void updateCameraPos(glm::vec3 pos);
 
     uint32_t chunkBuildingBatchSize();
-    uint32_t chunkBuildingTotalBatches();
 
   private:
-    std::set<int64_t> &queuedIndex_;
     std::vector<std::shared_ptr<Chunk1>> &chunks_;
     std::vector<std::shared_ptr<ChunkBuildData>> &chunkBuildDatas_;
     std::recursive_mutex &mutex_;
     std::shared_ptr<vk::HostVisibleBuffer> &chunkPackedData_;
-
-    std::queue<std::shared_ptr<vk::Fence>> freeFences_;
-    std::queue<std::shared_ptr<vk::CommandBuffer>> freeCmdBuffers_;  // paired with freeFences_
-    std::list<std::shared_ptr<vk::Fence>> buildingFences_;
-    std::list<std::shared_ptr<vk::CommandBuffer>> buildingCmdBuffers_;  // paired with buildingFences_
-    std::list<std::shared_ptr<ChunkBuildDataBatch>> buildingBatches_;
-
     uint32_t chunkBuildingBatchSize_;
-    uint32_t chunkBuildingTotalBatches_;
+
+    // Background BLAS builder thread — sole owner of secondary queue.
+    // Does everything: CPU geometry → VMA alloc → cmd recording → submit → fence wait → compaction.
+    // Hands off fully-built, compacted BLASes to render thread via completedQueue_.
+    std::thread blasThread_;
+    std::atomic<bool> stop_{false};
+    std::atomic<float> cameraPosX_{0}, cameraPosY_{0}, cameraPosZ_{0};
+
+    // Input queue: JNI pushes chunks, BLAS thread consumes them.
+    struct WorkerTask {
+        std::shared_ptr<ChunkBuildData> data;
+        float priority;
+    };
+    std::mutex inputMtx_;
+    std::condition_variable inputCv_;
+    std::deque<WorkerTask> inputQueue_;
+
+    // Output queue: BLAS thread pushes completed chunks, render thread drains them.
+    std::mutex completedMtx_;
+    std::deque<std::shared_ptr<ChunkBuildData>> completedQueue_;
+
+    // In-flight batches on GPU — BLAS thread owns these exclusively (no mutex needed)
+    struct InFlightBatch {
+        std::shared_ptr<vk::Fence> fence;
+        std::shared_ptr<vk::CommandBuffer> cmd;
+        std::vector<std::shared_ptr<ChunkBuildData>> chunks;
+        VkQueryPool compactionQP = VK_NULL_HANDLE;
+        uint32_t compactionCount = 0;
+    };
+    std::deque<InFlightBatch> inFlight_;
+
+    // BLAS thread fence/cmd pool — owned exclusively, no mutex
+    std::queue<std::shared_ptr<vk::Fence>> fencePool_;
+    std::queue<std::shared_ptr<vk::CommandBuffer>> cmdPool_;
+
+    void blasThreadLoop();
 };
 
 struct ChunkRenderData : public SharedObject<ChunkRenderData> {

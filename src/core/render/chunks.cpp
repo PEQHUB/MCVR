@@ -108,11 +108,15 @@ ChunkBuildData::~ChunkBuildData() {
 }
 
 void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 cameraPos) {
-    auto framework = Renderer::instance().framework();
-    auto vma = framework->vma();
-    auto device = framework->device();
-    auto physicalDevice = framework->physicalDevice();
+    prepareCPU(allowMicromapBake, skipOMM, cameraPos);
+    uploadGPU();
+}
+
+// ---- CPU PHASE: greedy meshing, OMM classification/baking, tessellation ----
+// No Vulkan or VMA calls. Safe to call from worker threads.
+void ChunkBuildData::prepareCPU(bool allowMicromapBake, bool skipOMM, glm::vec3 cameraPos) {
     auto textures = Renderer::instance().textures();
+    auto device = Renderer::instance().framework()->device();
     bool useOMM = !skipOMM && device->hasOMM() && Renderer::options.ommEnabled && textures != nullptr;
 
 #ifdef MCVR_ENABLE_OMM
@@ -124,6 +128,7 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
 #endif
 
     ommGeometryData.resize(geometryCount);
+    ommCpuResults.resize(geometryCount);
 
     // Greedy meshing: merge coplanar block faces for WORLD_SOLID (50-70% triangle reduction)
     if (Renderer::options.greedyMeshingEnabled) {
@@ -136,286 +141,138 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
         }
     }
 
-    // Upload original 96-byte PBRTriangle (compact vertex format pending stride bug investigation)
+    // CPU-only OMM classification: compute per-triangle opacity indices without VMA/Vulkan calls.
+    // Results stored in ommCpuResults[], consumed by uploadGPU().
     vertexFormat = 0; // 0 = full PBRTriangle
 
     for (int i = 0; i < geometryCount; i++) {
-        auto vertexBuffer =
-            vk::DeviceLocalBuffer::create(vma, device, true, vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle),
-                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        vertexBuffer->uploadToStagingBuffer(vertices[i].data());
-        vertexBuffers.push_back(vertexBuffer);
+        auto &cr = ommCpuResults[i];
 
-        auto indexBuffer =
-            vk::DeviceLocalBuffer::create(vma, device, true, indices[i].size() * sizeof(uint32_t),
-                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        indexBuffer->uploadToStagingBuffer(indices[i].data());
-        indexBuffers.push_back(indexBuffer);
-
-        // OMM: per-triangle opacity for WORLD_TRANSPARENT geometry
         if (useOMM && geometryTypes[i] == World::WORLD_TRANSPARENT) {
 #ifdef MCVR_ENABLE_OMM
+            cr.isTransparentOMM = true;
             uint32_t numTriangles = static_cast<uint32_t>(indices[i].size()) / 3;
 
             if (!allowMicromapBake) {
-                // Phase 1 fallback: special indices only (for important/immediate chunks)
-                std::vector<int32_t> ommIndices(numTriangles);
+                // Phase 1 fallback: special indices only
+                cr.ommIndices.resize(numTriangles);
                 for (uint32_t t = 0; t < numTriangles; t++) {
                     uint32_t vertIdx = indices[i][t * 3];
                     uint32_t texId = vertices[i][vertIdx].textureID;
                     auto alphaClass = textures->getTextureAlphaClass(texId);
                     switch (alphaClass) {
                         case Textures::AlphaClass::FULLY_OPAQUE:
-                            ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT;
-                            break;
-                        case Textures::AlphaClass::FULLY_TRANSPARENT:
-                            // Translucent textures (e.g. water) have no fully-opaque pixels but ARE
-                            // visible. Fall back to AHS instead of marking invisible.
-                            ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
+                            cr.ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT;
                             break;
                         default:
-                            ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
+                            cr.ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
                             break;
                     }
                 }
-                auto ommIdxBuffer = vk::DeviceLocalBuffer::create(
-                    vma, device, true, numTriangles * sizeof(int32_t),
-                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                        VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
-                ommIdxBuffer->uploadToStagingBuffer(ommIndices.data());
-                ommIndexBuffers.push_back(ommIdxBuffer);
             } else {
+                // Phase 2: full per-micro-triangle baking (CPU-only computation)
+                std::map<uint32_t, std::vector<uint32_t>> texGroups;
+                for (uint32_t t = 0; t < numTriangles; t++) {
+                    uint32_t vertIdx = indices[i][t * 3];
+                    uint32_t texId = vertices[i][vertIdx].textureID;
+                    texGroups[texId].push_back(t);
+                }
 
-            // Phase 2: full per-micro-triangle baking
-            bool bakingDone = false;
+                cr.ommIndices.assign(numTriangles, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT);
+                std::map<uint64_t, uint32_t> descHistMap, indexHistMap;
 
-            // Group triangles by textureID to bake each texture group separately
-            std::map<uint32_t, std::vector<uint32_t>> texGroups; // texID -> list of tri indices
-            for (uint32_t t = 0; t < numTriangles; t++) {
-                uint32_t vertIdx = indices[i][t * 3];
-                uint32_t texId = vertices[i][vertIdx].textureID;
-                texGroups[texId].push_back(t);
-            }
+                for (auto &[texId, triList] : texGroups) {
+                    const auto *alphaData = textures->getTextureAlphaData(texId);
+                    if (!alphaData || alphaData->alpha.empty()) {
+                        for (uint32_t t : triList) {
+                            auto alphaClass = textures->getTextureAlphaClass(texId);
+                            cr.ommIndices[t] = (alphaClass == Textures::AlphaClass::FULLY_OPAQUE)
+                                ? VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT
+                                : VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
+                        }
+                        continue;
+                    }
 
-            // Per-triangle OMM index buffer (maps each triangle to an OMM block or special index)
-            std::vector<int32_t> ommIndices(numTriangles, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT);
-            // Merged OMM array data and descriptors across all texture groups
-            std::vector<uint8_t> mergedArrayData;
-            std::vector<VkMicromapTriangleEXT> mergedDescs;
-            // Track usage counts
-            std::map<uint64_t, uint32_t> descHistMap, indexHistMap; // key = (subdiv << 16 | format)
+                    auto alphaClass = textures->getTextureAlphaClass(texId);
+                    if (alphaClass == Textures::AlphaClass::FULLY_TRANSPARENT) {
+                        for (uint32_t t : triList) {
+                            cr.ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
+                        }
+                        continue;
+                    }
 
-            for (auto &[texId, triList] : texGroups) {
-                const auto *alphaData = textures->getTextureAlphaData(texId);
-                if (!alphaData || alphaData->alpha.empty()) {
-                    // No alpha data or animated → fall back to special index
+                    std::vector<uint32_t> localIndices;
+                    localIndices.reserve(triList.size() * 3);
                     for (uint32_t t : triList) {
-                        auto alphaClass = textures->getTextureAlphaClass(texId);
-                        switch (alphaClass) {
-                            case Textures::AlphaClass::FULLY_OPAQUE:
-                                ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT;
-                                break;
-                            case Textures::AlphaClass::FULLY_TRANSPARENT:
-                                // Translucent textures (e.g. water) have no fully-opaque pixels but ARE
-                                // visible. Fall back to AHS instead of marking invisible.
-                                ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
-                                break;
-                            default:
-                                ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
-                                break;
+                        localIndices.push_back(indices[i][t * 3 + 0]);
+                        localIndices.push_back(indices[i][t * 3 + 1]);
+                        localIndices.push_back(indices[i][t * 3 + 2]);
+                    }
+
+                    OMMBaker::BakeInput input{};
+                    input.alphaData = alphaData->alpha.data();
+                    input.texWidth = alphaData->width;
+                    input.texHeight = alphaData->height;
+                    input.uvData = &vertices[i][0].textureUV;
+                    input.uvStrideBytes = sizeof(vk::VertexFormat::PBRTriangle);
+                    input.indexData = localIndices.data();
+                    input.indexCount = static_cast<uint32_t>(localIndices.size());
+                    input.alphaCutoff = 0.05f;
+                    input.maxSubdivisionLevel = Renderer::options.ommBakerLevel;
+
+                    OMMBaker::BakeResult result;
+                    if (tlBaker && tlBaker->bake(input, result)) {
+                        cr.bakingDone = true;
+                        uint32_t baseOffset = static_cast<uint32_t>(cr.mergedArrayData.size());
+                        uint32_t baseDescIndex = static_cast<uint32_t>(cr.mergedDescs.size());
+
+                        cr.mergedArrayData.insert(cr.mergedArrayData.end(), result.arrayData.begin(), result.arrayData.end());
+                        for (uint32_t d = 0; d < result.descArrayCount; d++) {
+                            VkMicromapTriangleEXT desc{};
+                            desc.dataOffset = result.descOffsets[d] + baseOffset;
+                            desc.subdivisionLevel = result.descSubdivisionLevels[d];
+                            desc.format = result.descFormats[d];
+                            cr.mergedDescs.push_back(desc);
+                        }
+                        for (uint32_t li = 0; li < triList.size(); li++) {
+                            int32_t idx = result.indexBuffer[li];
+                            cr.ommIndices[triList[li]] = (idx >= 0) ? idx + static_cast<int32_t>(baseDescIndex) : idx;
+                        }
+                        for (auto &uc : result.descArrayHistogram) {
+                            descHistMap[(static_cast<uint64_t>(uc.subdivisionLevel) << 16) | uc.format] += uc.count;
+                        }
+                        for (auto &uc : result.indexHistogram) {
+                            indexHistMap[(static_cast<uint64_t>(uc.subdivisionLevel) << 16) | uc.format] += uc.count;
+                        }
+                    } else {
+                        for (uint32_t t : triList) {
+                            cr.ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
                         }
                     }
-                    // Update index histogram for special indices
-                    for (uint32_t t : triList) {
-                        // Special indices don't contribute to desc histogram, only index histogram
-                        // Vulkan spec: special indices counted with subdivisionLevel=0, format matching
-                    }
-                    continue;
                 }
 
-                // Translucent textures (e.g. water): all alpha < 255 but visible.
-                // The OMM baker would mark them OPAQUE (alpha > cutoff), which
-                // skips AHS and blocks shadow rays. Use UNKNOWN_OPAQUE to force AHS.
-                auto alphaClass = textures->getTextureAlphaClass(texId);
-                if (alphaClass == Textures::AlphaClass::FULLY_TRANSPARENT) {
-                    for (uint32_t t : triList) {
-                        ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
-                    }
-                    continue;
-                }
-
-                // Build local index buffer for this texture group
-                std::vector<uint32_t> localIndices;
-                localIndices.reserve(triList.size() * 3);
-                for (uint32_t t : triList) {
-                    localIndices.push_back(indices[i][t * 3 + 0]);
-                    localIndices.push_back(indices[i][t * 3 + 1]);
-                    localIndices.push_back(indices[i][t * 3 + 2]);
-                }
-
-                OMMBaker::BakeInput input{};
-                input.alphaData = alphaData->alpha.data();
-                input.texWidth = alphaData->width;
-                input.texHeight = alphaData->height;
-                input.uvData = &vertices[i][0].textureUV;
-                input.uvStrideBytes = sizeof(vk::VertexFormat::PBRTriangle);
-                input.indexData = localIndices.data();
-                input.indexCount = static_cast<uint32_t>(localIndices.size());
-                input.alphaCutoff = 0.05f;
-                input.maxSubdivisionLevel = Renderer::options.ommBakerLevel;
-
-                OMMBaker::BakeResult result;
-                if (tlBaker && tlBaker->bake(input, result)) {
-                    bakingDone = true;
-                    uint32_t baseOffset = static_cast<uint32_t>(mergedArrayData.size());
-                    uint32_t baseDescIndex = static_cast<uint32_t>(mergedDescs.size());
-
-                    // Append array data
-                    mergedArrayData.insert(mergedArrayData.end(), result.arrayData.begin(), result.arrayData.end());
-
-                    // Append descriptors with adjusted offsets
-                    for (uint32_t d = 0; d < result.descArrayCount; d++) {
-                        VkMicromapTriangleEXT desc{};
-                        desc.dataOffset = result.descOffsets[d] + baseOffset;
-                        desc.subdivisionLevel = result.descSubdivisionLevels[d];
-                        desc.format = result.descFormats[d];
-                        mergedDescs.push_back(desc);
-                    }
-
-                    // Map per-triangle indices back to the original triangle positions
-                    // result.indexBuffer has one entry per triangle in triList order
-                    for (uint32_t li = 0; li < triList.size(); li++) {
-                        int32_t idx = result.indexBuffer[li];
-                        if (idx >= 0) {
-                            // Remap to merged desc array
-                            ommIndices[triList[li]] = idx + static_cast<int32_t>(baseDescIndex);
-                        } else {
-                            // Special index, keep as-is
-                            ommIndices[triList[li]] = idx;
-                        }
-                    }
-
-                    // Accumulate desc array histogram
-                    for (auto &uc : result.descArrayHistogram) {
-                        uint64_t key = (static_cast<uint64_t>(uc.subdivisionLevel) << 16) | uc.format;
-                        descHistMap[key] += uc.count;
-                    }
-                    // Accumulate index histogram
-                    for (auto &uc : result.indexHistogram) {
-                        uint64_t key = (static_cast<uint64_t>(uc.subdivisionLevel) << 16) | uc.format;
-                        indexHistMap[key] += uc.count;
-                    }
-                } else {
-                    // Bake failed → fallback to special indices
-                    for (uint32_t t : triList) {
-                        ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
-                    }
-                }
-            }
-
-            // Upload OMM index buffer (always needed if useOMM)
-            auto ommIdxBuffer = vk::DeviceLocalBuffer::create(
-                vma, device, true, numTriangles * sizeof(int32_t),
-                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                    VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
-            ommIdxBuffer->uploadToStagingBuffer(ommIndices.data());
-            ommIndexBuffers.push_back(ommIdxBuffer);
-
-            if (bakingDone && !mergedDescs.empty()) {
-                auto &gd = ommGeometryData[i];
-
-                // Upload OMM array data
-                gd.arrayBuffer = vk::DeviceLocalBuffer::create(
-                    vma, device, true, mergedArrayData.size(),
-                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                        VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
-                gd.arrayBuffer->uploadToStagingBuffer(mergedArrayData.data());
-
-                // Upload OMM descriptor array (VkMicromapTriangleEXT)
-                gd.descBuffer = vk::DeviceLocalBuffer::create(
-                    vma, device, true, mergedDescs.size() * sizeof(VkMicromapTriangleEXT),
-                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                        VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
-                gd.descBuffer->uploadToStagingBuffer(mergedDescs.data());
-
-                // Convert histograms
+                // Convert histograms to Vulkan structs (CPU data, no Vulkan calls)
                 for (auto &[key, count] : descHistMap) {
                     VkMicromapUsageEXT usage{};
                     usage.count = count;
                     usage.subdivisionLevel = static_cast<uint32_t>(key >> 16);
                     usage.format = static_cast<uint32_t>(key & 0xFFFF);
-                    gd.descHistogram.push_back(usage);
+                    cr.descHistogram.push_back(usage);
                 }
                 for (auto &[key, count] : indexHistMap) {
                     VkMicromapUsageEXT usage{};
                     usage.count = count;
                     usage.subdivisionLevel = static_cast<uint32_t>(key >> 16);
                     usage.format = static_cast<uint32_t>(key & 0xFFFF);
-                    gd.indexHistogram.push_back(usage);
+                    cr.indexHistogram.push_back(usage);
                 }
-
-                // Query micromap build sizes
-                VkMicromapBuildInfoEXT buildInfo{};
-                buildInfo.sType = VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT;
-                buildInfo.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
-                buildInfo.mode = VK_BUILD_MICROMAP_MODE_BUILD_EXT;
-                buildInfo.usageCountsCount = static_cast<uint32_t>(gd.descHistogram.size());
-                buildInfo.pUsageCounts = gd.descHistogram.data();
-
-                VkMicromapBuildSizesInfoEXT sizeInfo{};
-                sizeInfo.sType = VK_STRUCTURE_TYPE_MICROMAP_BUILD_SIZES_INFO_EXT;
-                vkGetMicromapBuildSizesEXT(device->vkDevice(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-                                           &buildInfo, &sizeInfo);
-
-                // Allocate micromap buffer and scratch
-                VkDeviceSize micromapSize = (sizeInfo.micromapSize + 255) & ~255ULL; // 256-byte align
-                gd.micromapBuffer = vk::DeviceLocalBuffer::create(
-                    vma, device, micromapSize,
-                    VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-
-                if (sizeInfo.buildScratchSize > 0) {
-                    VkDeviceSize scratchSize = (sizeInfo.buildScratchSize + 255) & ~255ULL;
-                    gd.micromapScratchBuffer = vk::DeviceLocalBuffer::create(
-                        vma, device, scratchSize,
-                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-                }
-
-                // Create VkMicromapEXT
-                VkMicromapCreateInfoEXT createInfo{};
-                createInfo.sType = VK_STRUCTURE_TYPE_MICROMAP_CREATE_INFO_EXT;
-                createInfo.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
-                createInfo.size = sizeInfo.micromapSize;
-                createInfo.buffer = gd.micromapBuffer->vkBuffer();
-                createInfo.offset = 0;
-                vkCreateMicromapEXT(device->vkDevice(), &createInfo, nullptr, &gd.micromap);
-                gd.device = device;
-
-                gd.hasMicromap = true;
             }
-
-            } // end Phase 2 (allowMicromapBake)
 #endif
         } else if (useOMM) {
             // WORLD_SOLID with OMM enabled: all-opaque special indices
-            // When pipeline has VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_EXT,
-            // ALL geometries in the BLAS must have OMM pNext attached
+            cr.isOpaqueOMM = true;
             uint32_t numTriangles = static_cast<uint32_t>(indices[i].size()) / 3;
-            std::vector<int32_t> ommIndices(numTriangles, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT);
-            auto ommIdxBuffer = vk::DeviceLocalBuffer::create(
-                vma, device, true, numTriangles * sizeof(int32_t),
-                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                    VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
-            ommIdxBuffer->uploadToStagingBuffer(ommIndices.data());
-            ommIndexBuffers.push_back(ommIdxBuffer);
-        } else {
-            ommIndexBuffers.push_back(nullptr);
+            cr.ommIndices.assign(numTriangles, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT);
         }
     }
 
@@ -947,24 +804,112 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                 // Combine kept + tessellated indices
                 keptIndices.insert(keptIndices.end(), newIndices.begin(), newIndices.end());
                 idx = std::move(keptIndices);
-
-                // Rebuild vertex and index buffers with expanded data
-                vertexBuffers[i] = vk::DeviceLocalBuffer::create(
-                    vma, device, true, verts.size() * sizeof(vk::VertexFormat::PBRTriangle),
-                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-                vertexBuffers[i]->uploadToStagingBuffer(verts.data());
-
-                indexBuffers[i] = vk::DeviceLocalBuffer::create(
-                    vma, device, true, idx.size() * sizeof(uint32_t),
-                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-                indexBuffers[i]->uploadToStagingBuffer(idx.data());
+                // Buffer creation deferred to uploadGPU()
             }
         }
     }
+
+    // Cache the face count before any potential releaseHostGeometry()
+    displacedFaceCount = static_cast<uint32_t>(displacedFaceData.size());
+}
+
+// ---- GPU PHASE: VMA allocation, staging uploads, BLAS builder setup ----
+// Must run on render thread (single-threaded Vulkan access).
+void ChunkBuildData::uploadGPU() {
+    auto framework = Renderer::instance().framework();
+    auto vma = framework->vma();
+    auto device = framework->device();
+    auto physicalDevice = framework->physicalDevice();
+
+    // Create vertex/index buffers from final geometry (post-mesh, post-tessellation)
+    for (int i = 0; i < geometryCount; i++) {
+        auto vertexBuffer =
+            vk::DeviceLocalBuffer::create(vma, device, true, vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle),
+                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        vertexBuffer->uploadToStagingBuffer(vertices[i].data());
+        vertexBuffers.push_back(vertexBuffer);
+
+        auto indexBuffer =
+            vk::DeviceLocalBuffer::create(vma, device, true, indices[i].size() * sizeof(uint32_t),
+                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        indexBuffer->uploadToStagingBuffer(indices[i].data());
+        indexBuffers.push_back(indexBuffer);
+
+        // Upload OMM data from CPU results
+        auto &cr = ommCpuResults[i];
+        if (cr.isTransparentOMM || cr.isOpaqueOMM) {
+            auto ommIdxBuffer = vk::DeviceLocalBuffer::create(
+                vma, device, true, cr.ommIndices.size() * sizeof(int32_t),
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                    VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
+            ommIdxBuffer->uploadToStagingBuffer(cr.ommIndices.data());
+            ommIndexBuffers.push_back(ommIdxBuffer);
+
+            // Phase 2 OMM: create micromap from baked data
+            if (cr.bakingDone && !cr.mergedDescs.empty()) {
+                auto &gd = ommGeometryData[i];
+                gd.arrayBuffer = vk::DeviceLocalBuffer::create(
+                    vma, device, true, cr.mergedArrayData.size(),
+                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                        VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
+                gd.arrayBuffer->uploadToStagingBuffer(cr.mergedArrayData.data());
+
+                gd.descBuffer = vk::DeviceLocalBuffer::create(
+                    vma, device, true, cr.mergedDescs.size() * sizeof(VkMicromapTriangleEXT),
+                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                        VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
+                gd.descBuffer->uploadToStagingBuffer(cr.mergedDescs.data());
+
+                gd.descHistogram = std::move(cr.descHistogram);
+                gd.indexHistogram = std::move(cr.indexHistogram);
+
+                VkMicromapBuildInfoEXT buildInfo{};
+                buildInfo.sType = VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT;
+                buildInfo.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
+                buildInfo.mode = VK_BUILD_MICROMAP_MODE_BUILD_EXT;
+                buildInfo.usageCountsCount = static_cast<uint32_t>(gd.descHistogram.size());
+                buildInfo.pUsageCounts = gd.descHistogram.data();
+
+                VkMicromapBuildSizesInfoEXT sizeInfo{};
+                sizeInfo.sType = VK_STRUCTURE_TYPE_MICROMAP_BUILD_SIZES_INFO_EXT;
+                vkGetMicromapBuildSizesEXT(device->vkDevice(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                                           &buildInfo, &sizeInfo);
+
+                VkDeviceSize micromapSize = (sizeInfo.micromapSize + 255) & ~255ULL;
+                gd.micromapBuffer = vk::DeviceLocalBuffer::create(
+                    vma, device, micromapSize,
+                    VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+
+                if (sizeInfo.buildScratchSize > 0) {
+                    VkDeviceSize scratchSize = (sizeInfo.buildScratchSize + 255) & ~255ULL;
+                    gd.micromapScratchBuffer = vk::DeviceLocalBuffer::create(
+                        vma, device, scratchSize,
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+                }
+
+                VkMicromapCreateInfoEXT createInfo{};
+                createInfo.sType = VK_STRUCTURE_TYPE_MICROMAP_CREATE_INFO_EXT;
+                createInfo.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
+                createInfo.size = sizeInfo.micromapSize;
+                createInfo.buffer = gd.micromapBuffer->vkBuffer();
+                createInfo.offset = 0;
+                vkCreateMicromapEXT(device->vkDevice(), &createInfo, nullptr, &gd.micromap);
+                gd.device = device;
+                gd.hasMicromap = true;
+            }
+        } else {
+            ommIndexBuffers.push_back(nullptr);
+        }
+    }
+
+    // Free CPU-side OMM results now that they're uploaded
+    ommCpuResults.clear();
+    ommCpuResults.shrink_to_fit();
 
     blasBuilder = vk::BLASBuilder::create();
     auto blasGeometryBuilder = blasBuilder->beginGeometries();
@@ -1028,9 +973,6 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
                             ->allocateBuffers(physicalDevice, device, vma)
                             ->build(device);
     }
-
-    // Cache the face count before releaseHostGeometry() clears the vector
-    displacedFaceCount = static_cast<uint32_t>(displacedFaceData.size());
 }
 
 void ChunkBuildData::releaseHostGeometry() {
@@ -1069,14 +1011,26 @@ ChunkBuildDataBatch::ChunkBuildDataBatch(uint32_t maxBatchSize,
         return chunks[a]->buildFactor(currentTime, cameraPos) > chunks[b]->buildFactor(currentTime, cameraPos);
     });
 
-    for (int i = 0; i < std::min((size_t)maxBatchSize, queuedIndices.size()); i++) {
+    // Two-phase build: CPU work parallelized across thread pool, GPU work sequential.
+    // prepareCPU() has zero Vulkan/VMA calls — safe for concurrent execution.
+    // uploadGPU() does all VMA allocation + staging uploads on the render thread.
+    size_t count = std::min(static_cast<size_t>(maxBatchSize), queuedIndices.size());
+    batchData.resize(count);
+    for (size_t i = 0; i < count; i++) {
         auto iter = queuedIndexSet.find(queuedIndices[i]);
         if (iter != queuedIndexSet.end()) { queuedIndexSet.erase(iter); }
+        batchData[i] = chunkBuildDatas[queuedIndices[i]];
+    }
 
-        auto data = chunkBuildDatas[queuedIndices[i]];
-        data->build(true, false, cameraPos);
-        // data->releaseHostGeometry(); // DISABLED: investigating staging buffer crash
-        batchData.push_back(data);
+    // Two-phase build: CPU work parallelized, GPU work sequential.
+    // prepareCPU() has zero Vulkan/VMA calls — safe for concurrent execution.
+    // SharedState in parallelFor lives on the heap to prevent use-after-free.
+    Renderer::threadPool.parallelFor(static_cast<uint32_t>(count), [&](uint32_t i) {
+        batchData[i]->prepareCPU(true, false, cameraPos);
+    });
+
+    for (size_t i = 0; i < count; i++) {
+        batchData[i]->uploadGPU();
     }
 }
 
@@ -1086,472 +1040,340 @@ ChunkBuildDataBatch::~ChunkBuildDataBatch() {
     }
 }
 
-ChunkBuildScheduler::ChunkBuildScheduler(std::set<int64_t> &queuedIndex,
-                                         std::vector<std::shared_ptr<Chunk1>> &chunks,
+ChunkBuildScheduler::ChunkBuildScheduler(std::vector<std::shared_ptr<Chunk1>> &chunks,
                                          std::vector<std::shared_ptr<ChunkBuildData>> &chunkBuildDatas,
                                          std::recursive_mutex &mutex,
                                          std::shared_ptr<vk::HostVisibleBuffer> &chunkPackedData,
-                                         uint32_t chunkBuildingBatchSize,
-                                         uint32_t chunkBuildingTotalBatches)
-    : queuedIndex_(queuedIndex),
-      chunks_(chunks),
+                                         uint32_t chunkBuildingBatchSize)
+    : chunks_(chunks),
       chunkBuildDatas_(chunkBuildDatas),
       mutex_(mutex),
       chunkPackedData_(chunkPackedData),
-      chunkBuildingBatchSize_(chunkBuildingBatchSize),
-      chunkBuildingTotalBatches_(chunkBuildingTotalBatches) {
+      chunkBuildingBatchSize_(chunkBuildingBatchSize) {
+    blasThread_ = std::thread(&ChunkBuildScheduler::blasThreadLoop, this);
+}
+
+ChunkBuildScheduler::~ChunkBuildScheduler() {
+    stop_.store(true);
+    inputCv_.notify_one();
+    if (blasThread_.joinable()) blasThread_.join();
+}
+
+void ChunkBuildScheduler::enqueue(std::shared_ptr<ChunkBuildData> data, glm::vec3 cameraPos, bool important) {
+    float dx = data->x * 16.0f + 8.0f - cameraPos.x;
+    float dy = data->y * 16.0f + 8.0f - cameraPos.y;
+    float dz = data->z * 16.0f + 8.0f - cameraPos.z;
+    float priority = 1.0f / (1.0f + (dx * dx + dy * dy + dz * dz) * 0.001f);
+    if (important) priority *= 10.0f;  // important chunks processed first
+    {
+        std::lock_guard<std::mutex> lock(inputMtx_);
+        inputQueue_.push_back({std::move(data), priority});
+    }
+    inputCv_.notify_one();
+}
+
+void ChunkBuildScheduler::updateCameraPos(glm::vec3 pos) {
+    cameraPosX_.store(pos.x, std::memory_order_relaxed);
+    cameraPosY_.store(pos.y, std::memory_order_relaxed);
+    cameraPosZ_.store(pos.z, std::memory_order_relaxed);
+}
+
+// Render thread only: integrate completed chunks from BLAS thread into Chunk1.
+// Zero Vulkan work — just pointer swaps.
+void ChunkBuildScheduler::integrateCompleted() {
+    std::deque<std::shared_ptr<ChunkBuildData>> completed;
+    {
+        std::lock_guard<std::mutex> lock(completedMtx_);
+        completed.swap(completedQueue_);
+    }
+
+    if (completed.empty()) return;
+
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    for (auto &cbd : completed) {
+        if (cbd->id >= static_cast<int64_t>(chunks_.size())) continue;
+        chunks_[cbd->id]->enqueue(cbd);
+
+        ChunkPackedData data = { .geometryCount = cbd->geometryCount };
+        chunkPackedData_->uploadToBuffer(&data, sizeof(ChunkPackedData),
+                                         cbd->id * sizeof(ChunkPackedData));
+    }
+}
+
+void ChunkBuildScheduler::waitAllFinish() {
+    // Signal stop, join, then integrate remaining
+    stop_.store(true);
+    inputCv_.notify_one();
+    if (blasThread_.joinable()) blasThread_.join();
+    integrateCompleted();
+}
+
+// BLAS builder thread: sole owner of the secondary Vulkan queue.
+// Runs the complete chunk pipeline synchronously: CPU → GPU → fence wait → compaction.
+// Blocking waits are free because this is a dedicated thread.
+void ChunkBuildScheduler::blasThreadLoop() {
     auto framework = Renderer::instance().framework();
+    auto vma = framework->vma();
     auto device = framework->device();
+    auto physicalDevice = framework->physicalDevice();
     auto asyncPool = framework->asyncCommandPool();
+    auto secondaryQueueIndex = physicalDevice->secondaryQueueIndex();
 
-    uint32_t numFences = chunkBuildingTotalBatches_;
-    for (int i = 0; i < numFences; i++) {
-        freeFences_.push(vk::Fence::create(device));
-        freeCmdBuffers_.push(vk::CommandBuffer::create(device, asyncPool));
+    // Pre-allocate fence/cmd pool — sole owner, no mutex needed
+    constexpr uint32_t MAX_IN_FLIGHT = 8;
+    for (uint32_t i = 0; i < MAX_IN_FLIGHT; i++) {
+        fencePool_.push(vk::Fence::create(device));
+        cmdPool_.push(vk::CommandBuffer::create(device, asyncPool));
     }
-}
+    // Dedicated compaction resources
+    auto compactFence = vk::Fence::create(device);
+    auto compactCmd = vk::CommandBuffer::create(device, asyncPool);
+    static uint64_t totalOrig = 0, totalComp = 0;
+    static uint32_t totalN = 0;
 
-void ChunkBuildScheduler::tryCheckBatchesFinish() {
-    auto framework = Renderer::instance().framework();
-    auto device = framework->device();
+    while (!stop_.load()) {
+        // ---- POLL: check completed batches (non-blocking) ----
+        while (!inFlight_.empty()) {
+            auto &front = inFlight_.front();
+            VkResult fr = vkWaitForFences(device->vkDevice(), 1, &front.fence->vkFence(), true, 0);
+            if (fr != VK_SUCCESS) break;  // oldest not done yet — stop checking
 
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
-    auto iterFence = buildingFences_.begin();
-    auto iterCmd = buildingCmdBuffers_.begin();
-    auto iterBatch = buildingBatches_.begin();
-    for (; iterFence != buildingFences_.end() && iterBatch != buildingBatches_.end();) {
-        VkResult fenceResult = vkWaitForFences(device->vkDevice(), 1, &(*iterFence)->vkFence(), true, 0);
-        if (fenceResult == VK_SUCCESS) {
-            vkResetFences(device->vkDevice(), 1, &(*iterFence)->vkFence());
-            freeFences_.push(*iterFence);
-            freeCmdBuffers_.push(*iterCmd);
+            vkResetFences(device->vkDevice(), 1, &front.fence->vkFence());
 
-            // BLAS compaction: read query results, allocate compact buffers, copy
-            auto &batch = *iterBatch;
-            if (batch->compactionQueryPool != VK_NULL_HANDLE && batch->compactionQueryCount > 0) {
-                std::vector<VkDeviceSize> compactedSizes(batch->compactionQueryCount);
-                VkResult qr = vkGetQueryPoolResults(
-                    device->vkDevice(), batch->compactionQueryPool, 0, batch->compactionQueryCount,
-                    compactedSizes.size() * sizeof(VkDeviceSize), compactedSizes.data(),
-                    sizeof(VkDeviceSize), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+            // Compaction (synchronous — blocks this thread only, secondary queue sole owner)
+            if (front.compactionQP && front.compactionCount > 0) {
+                std::vector<VkDeviceSize> sizes(front.compactionCount);
+                if (vkGetQueryPoolResults(device->vkDevice(), front.compactionQP, 0, front.compactionCount,
+                        sizes.size() * sizeof(VkDeviceSize), sizes.data(),
+                        sizeof(VkDeviceSize), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
 
-                if (qr == VK_SUCCESS) {
-                    auto framework = Renderer::instance().framework();
-                    auto vma = framework->vma();
-                    auto physicalDevice = framework->physicalDevice();
-
-                    // Use the command buffer we just freed for the compaction copies
-                    auto compactCmd = freeCmdBuffers_.back();
-                    auto compactFence = freeFences_.back();
                     compactCmd->begin();
-
-                    struct CompactEntry {
-                        std::shared_ptr<ChunkBuildData> cbd;
-                        std::shared_ptr<vk::DeviceLocalBuffer> compactBuffer;
-                        VkAccelerationStructureKHR compactAS;
-                    };
-                    std::vector<CompactEntry> entries;
-
-                    static uint64_t totalOriginal = 0, totalCompacted = 0;
-                    static uint32_t totalCount = 0;
+                    auto &gc = framework->gc();
                     uint32_t qi = 0;
-                    for (auto &cbd : batch->batchData) {
-                        if (!cbd->blas || qi >= batch->compactionQueryCount) continue;
-                        VkDeviceSize compactSize = compactedSizes[qi++];
-                        VkDeviceSize originalSize = cbd->blas->blasBuffer()->size();
-
-                        // Skip if compaction saves less than 10%
-                        if (compactSize == 0 || compactSize >= originalSize * 9 / 10) {
-                            totalOriginal += originalSize;
-                            totalCompacted += originalSize;
-                            totalCount++;
-                            continue;
+                    for (auto &cbd : front.chunks) {
+                        if (!cbd->blas || qi >= front.compactionCount) continue;
+                        VkDeviceSize compSz = sizes[qi++], origSz = cbd->blas->blasBuffer()->size();
+                        if (compSz == 0 || compSz >= origSz * 9 / 10) {
+                            totalOrig += origSz; totalComp += origSz; totalN++; continue;
                         }
-
-                        // Allocate compact buffer
-                        auto compactBuffer = vk::DeviceLocalBuffer::create(
-                            vma, device, false, compactSize,
-                            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
-                            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                        auto buf = vk::DeviceLocalBuffer::create(vma, device, false, compSz,
+                            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                             0, VMA_MEMORY_USAGE_GPU_ONLY);
-
-                        // Create compact AS
-                        VkAccelerationStructureCreateInfoKHR createInfo{};
-                        createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
-                        createInfo.buffer = compactBuffer->vkBuffer();
-                        createInfo.size = compactSize;
-                        createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-
-                        VkAccelerationStructureKHR compactAS;
-                        if (vkCreateAccelerationStructureKHR(device->vkDevice(), &createInfo,
-                                                              nullptr, &compactAS) != VK_SUCCESS) {
-                            totalOriginal += originalSize;
-                            totalCompacted += originalSize;
-                            totalCount++;
-                            continue;
+                        VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+                        ci.buffer = buf->vkBuffer(); ci.size = compSz; ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+                        VkAccelerationStructureKHR as;
+                        if (vkCreateAccelerationStructureKHR(device->vkDevice(), &ci, nullptr, &as) == VK_SUCCESS) {
+                            VkCopyAccelerationStructureInfoKHR cp{VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR};
+                            cp.src = cbd->blas->blas(); cp.dst = as; cp.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+                            vkCmdCopyAccelerationStructureKHR(compactCmd->vkCommandBuffer(), &cp);
+                            gc.collect(cbd->blas);
+                            cbd->blas = vk::BLAS::create(device, as, buf);
                         }
-
-                        // Record compaction copy
-                        VkCopyAccelerationStructureInfoKHR copyInfo{};
-                        copyInfo.sType = VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR;
-                        copyInfo.src = cbd->blas->blas();
-                        copyInfo.dst = compactAS;
-                        copyInfo.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
-                        vkCmdCopyAccelerationStructureKHR(compactCmd->vkCommandBuffer(), &copyInfo);
-
-                        entries.push_back({cbd, compactBuffer, compactAS});
-                        totalOriginal += originalSize;
-                        totalCompacted += compactSize;
-                        totalCount++;
+                        totalOrig += origSz; totalComp += compSz; totalN++;
                     }
+                    compactCmd->end();
+                    VkSubmitInfo csi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                    csi.commandBufferCount = 1; csi.pCommandBuffers = &compactCmd->vkCommandBuffer();
+                    vkQueueSubmit(device->secondaryQueue(), 1, &csi, compactFence->vkFence());
+                    vkWaitForFences(device->vkDevice(), 1, &compactFence->vkFence(), true, UINT64_MAX);
+                    vkResetFences(device->vkDevice(), 1, &compactFence->vkFence());
 
-                    if (!entries.empty()) {
-                        compactCmd->end();
-
-                        VkSubmitInfo si{};
-                        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-                        si.commandBufferCount = 1;
-                        si.pCommandBuffers = &compactCmd->vkCommandBuffer();
-                        vkQueueSubmit(device->secondaryQueue(), 1, &si, compactFence->vkFence());
-                        vkWaitForFences(device->vkDevice(), 1, &compactFence->vkFence(), true, UINT64_MAX);
-                        vkResetFences(device->vkDevice(), 1, &compactFence->vkFence());
-
-                        // Swap each BLAS to its compacted version
-                        auto &gc = framework->gc();
-                        for (auto &e : entries) {
-                            gc.collect(e.cbd->blas);
-                            e.cbd->blas = vk::BLAS::create(device, e.compactAS, e.compactBuffer);
-                        }
-                    } else {
-                        // No copies needed, just reset
-                        compactCmd->begin();
-                        compactCmd->end();
-                    }
-
-                    // Log every 50 chunks
-                    if (totalCount > 0 && totalCount % 50 == 0) {
-                        float pct = totalOriginal > 0 ? 100.0f * (1.0f - (float)totalCompacted / totalOriginal) : 0;
-                        std::cout << "[Compaction] " << totalCount << " BLASes: "
-                                  << (totalOriginal / 1024) << " KB original, "
-                                  << (totalCompacted / 1024) << " KB compacted, "
-                                  << pct << "% savings" << std::endl;
+                    if (totalN > 0 && totalN % 50 == 0) {
+                        float pct = totalOrig > 0 ? 100.0f * (1.0f - (float)totalComp / totalOrig) : 0;
+                        std::cout << "[Compaction] " << totalN << " BLASes: " << (totalOrig/1024)
+                                  << " KB -> " << (totalComp/1024) << " KB (" << pct << "% savings)" << std::endl;
                     }
                 }
+                vkDestroyQueryPool(device->vkDevice(), front.compactionQP, nullptr);
             }
 
-            for (auto chunkBuildData : batch->batchData) {
-                if (chunkBuildData->id >= static_cast<int>(chunks_.size())) continue;
-                chunks_[chunkBuildData->id]->enqueue(chunkBuildData);
-
-                ChunkPackedData data = {
-                    .geometryCount = chunkBuildData->geometryCount,
-                };
-
-                chunkPackedData_->uploadToBuffer(&data, sizeof(ChunkPackedData),
-                                                 chunkBuildData->id * sizeof(ChunkPackedData));
-            }
-
-            iterFence = buildingFences_.erase(iterFence);
-            iterCmd = buildingCmdBuffers_.erase(iterCmd);
-            iterBatch = buildingBatches_.erase(iterBatch);
-        } else if (fenceResult == VK_TIMEOUT) {
-            ++iterFence;
-            ++iterCmd;
-            ++iterBatch;
-        } else {
-            g_crashRing.record("chunkFenceFail", fenceResult);
-            std::cout << "Chunk build fence failed with error: " << std::dec << fenceResult << std::endl;
-            // Device lost — all remaining fences are poison, drain them
-            buildingFences_.clear();
-            buildingCmdBuffers_.clear();
-            buildingBatches_.clear();
-            break;
-        }
-    }
-}
-
-void ChunkBuildScheduler::waitAllBatchesFinish() {
-    auto framework = Renderer::instance().framework();
-    auto device = framework->device();
-
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
-    auto iterFence = buildingFences_.begin();
-    auto iterCmd = buildingCmdBuffers_.begin();
-    auto iterBatch = buildingBatches_.begin();
-    for (; iterFence != buildingFences_.end() && iterBatch != buildingBatches_.end();) {
-        VkResult fenceResult = vkWaitForFences(device->vkDevice(), 1, &(*iterFence)->vkFence(), true, UINT64_MAX);
-        if (fenceResult == VK_SUCCESS) {
-            vkResetFences(device->vkDevice(), 1, &(*iterFence)->vkFence());
-            freeFences_.push(*iterFence);
-            freeCmdBuffers_.push(*iterCmd);
-
-            for (auto chunkBuildData : (*iterBatch)->batchData) {
-                if (chunkBuildData->id >= static_cast<int>(chunks_.size())) continue;
-                chunks_[chunkBuildData->id]->enqueue(chunkBuildData);
-
-                ChunkPackedData data = {
-                    .geometryCount = chunkBuildData->geometryCount,
-                };
-
-                chunkPackedData_->uploadToBuffer(&data, sizeof(ChunkPackedData),
-                                                 chunkBuildData->id * sizeof(ChunkPackedData));
-            }
-
-            iterFence = buildingFences_.erase(iterFence);
-            iterCmd = buildingCmdBuffers_.erase(iterCmd);
-            iterBatch = buildingBatches_.erase(iterBatch);
-        } else {
-            g_crashRing.record("chunkWaitAllFail", fenceResult);
-            std::cout << "Chunk build waitAll fence failed with error: " << std::dec << fenceResult << std::endl;
-            // Device lost — all remaining fences are poison, drain them
-            buildingFences_.clear();
-            buildingCmdBuffers_.clear();
-            buildingBatches_.clear();
-            break;
-        }
-    }
-}
-
-void ChunkBuildScheduler::tryScheduleBatches(uint32_t maxBatchSize) {
-    if (!Renderer::instance().framework()->isRunning()) return;
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
-    if (!freeFences_.empty() && !queuedIndex_.empty()) {
-        auto fence = freeFences_.front();
-        auto worldAsyncBuffer = freeCmdBuffers_.front();
-
-        glm::vec3 cameraPos = Renderer::instance().world()->getCameraPos();
-        auto chunkBuildDataBatch =
-            ChunkBuildDataBatch::create(maxBatchSize, queuedIndex_, chunks_, chunkBuildDatas_, cameraPos);
-
-        auto framework = Renderer::instance().framework();
-        auto vma = framework->vma();
-        auto device = framework->device();
-        auto physicalDevice = Renderer::instance().framework()->physicalDevice();
-        auto secondaryQueueIndex = physicalDevice->secondaryQueueIndex();
-
-        if (chunkBuildDataBatch->batchData.size() > 0) {
-            worldAsyncBuffer->begin();
-
-            // Upload all buffers (vertex, index, OMM, displaced)
-            for (auto chunkBuildData : chunkBuildDataBatch->batchData) {
-                for (int i = 0; i < chunkBuildData->geometryCount; i++) {
-                    chunkBuildData->vertexBuffers[i]->uploadToBuffer(worldAsyncBuffer);
-                    chunkBuildData->indexBuffers[i]->uploadToBuffer(worldAsyncBuffer);
-                    if (chunkBuildData->ommIndexBuffers[i] != nullptr) {
-                        chunkBuildData->ommIndexBuffers[i]->uploadToBuffer(worldAsyncBuffer);
-                    }
-                    // Upload Phase 2 OMM data buffers
-                    auto &gd = chunkBuildData->ommGeometryData[i];
-                    if (gd.hasMicromap) {
-                        gd.arrayBuffer->uploadToBuffer(worldAsyncBuffer);
-                        gd.descBuffer->uploadToBuffer(worldAsyncBuffer);
-                    }
-                }
-                // DDA displacement buffer uploads
-                if (chunkBuildData->displacedAABBBuffer) {
-                    chunkBuildData->displacedAABBBuffer->uploadToBuffer(worldAsyncBuffer);
-                }
-                if (chunkBuildData->displacedFaceDataBuffer) {
-                    chunkBuildData->displacedFaceDataBuffer->uploadToBuffer(worldAsyncBuffer);
-                }
-            }
-
-            // Barrier: transfer → micromap build + BLAS build
-            std::vector<vk::CommandBuffer::BufferMemoryBarrier> bufferBarriers;
-            for (auto chunkBuildData : chunkBuildDataBatch->batchData) {
-                for (int i = 0; i < chunkBuildData->geometryCount; i++) {
-                    VkPipelineStageFlags2 dstStage = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-                    auto &gd = chunkBuildData->ommGeometryData[i];
-                    if (gd.hasMicromap) {
-                        dstStage |= VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT;
-                    }
-
-                    bufferBarriers.push_back(vk::CommandBuffer::BufferMemoryBarrier{
-                        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .dstStageMask = dstStage,
-                        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .srcQueueFamilyIndex = secondaryQueueIndex,
-                        .dstQueueFamilyIndex = secondaryQueueIndex,
-                        .buffer = chunkBuildData->vertexBuffers[i],
-                    });
-
-                    bufferBarriers.push_back(vk::CommandBuffer::BufferMemoryBarrier{
-                        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .dstStageMask = dstStage,
-                        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .srcQueueFamilyIndex = secondaryQueueIndex,
-                        .dstQueueFamilyIndex = secondaryQueueIndex,
-                        .buffer = chunkBuildData->indexBuffers[i],
-                    });
-
-                    if (chunkBuildData->ommIndexBuffers[i] != nullptr) {
-                        bufferBarriers.push_back(vk::CommandBuffer::BufferMemoryBarrier{
-                            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                            .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                            .dstStageMask = dstStage,
-                            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                            .srcQueueFamilyIndex = secondaryQueueIndex,
-                            .dstQueueFamilyIndex = secondaryQueueIndex,
-                            .buffer = chunkBuildData->ommIndexBuffers[i],
-                        });
-                    }
-
-                    if (gd.hasMicromap) {
-                        bufferBarriers.push_back(vk::CommandBuffer::BufferMemoryBarrier{
-                            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                            .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                            .dstStageMask = VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT,
-                            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                            .srcQueueFamilyIndex = secondaryQueueIndex,
-                            .dstQueueFamilyIndex = secondaryQueueIndex,
-                            .buffer = gd.arrayBuffer,
-                        });
-                        bufferBarriers.push_back(vk::CommandBuffer::BufferMemoryBarrier{
-                            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                            .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                            .dstStageMask = VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT,
-                            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                            .srcQueueFamilyIndex = secondaryQueueIndex,
-                            .dstQueueFamilyIndex = secondaryQueueIndex,
-                            .buffer = gd.descBuffer,
-                        });
-                    }
-                }
-            }
-            // Add barriers for displaced AABB buffers
-            for (auto chunkBuildData : chunkBuildDataBatch->batchData) {
-                if (chunkBuildData->displacedAABBBuffer) {
-                    bufferBarriers.push_back(vk::CommandBuffer::BufferMemoryBarrier{
-                        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                        .srcQueueFamilyIndex = secondaryQueueIndex,
-                        .dstQueueFamilyIndex = secondaryQueueIndex,
-                        .buffer = chunkBuildData->displacedAABBBuffer,
-                    });
-                }
-            }
-            worldAsyncBuffer->barriersBufferImage(bufferBarriers, {});
-
-            // Build micromaps (before BLAS build)
-            bool anyMicromaps = false;
-            for (auto chunkBuildData : chunkBuildDataBatch->batchData) {
-                for (int i = 0; i < chunkBuildData->geometryCount; i++) {
-                    auto &gd = chunkBuildData->ommGeometryData[i];
-                    if (!gd.hasMicromap) continue;
-                    anyMicromaps = true;
-
-                    VkMicromapBuildInfoEXT buildInfo{};
-                    buildInfo.sType = VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT;
-                    buildInfo.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
-                    buildInfo.flags = VK_BUILD_MICROMAP_PREFER_FAST_TRACE_BIT_EXT;
-                    buildInfo.mode = VK_BUILD_MICROMAP_MODE_BUILD_EXT;
-                    buildInfo.dstMicromap = gd.micromap;
-                    buildInfo.data.deviceAddress = gd.arrayBuffer->bufferAddress();
-                    buildInfo.triangleArray.deviceAddress = gd.descBuffer->bufferAddress();
-                    buildInfo.triangleArrayStride = sizeof(VkMicromapTriangleEXT);
-                    buildInfo.usageCountsCount = static_cast<uint32_t>(gd.descHistogram.size());
-                    buildInfo.pUsageCounts = gd.descHistogram.data();
-                    if (gd.micromapScratchBuffer) {
-                        buildInfo.scratchData.deviceAddress = gd.micromapScratchBuffer->bufferAddress();
-                    }
-
-                    vkCmdBuildMicromapsEXT(worldAsyncBuffer->vkCommandBuffer(), 1, &buildInfo);
-                }
-            }
-
-            // Barrier: micromap build → BLAS build
-            if (anyMicromaps) {
-                VkMemoryBarrier2 mmBarrier{};
-                mmBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-                mmBarrier.srcStageMask = VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT;
-                mmBarrier.srcAccessMask = VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT;
-                mmBarrier.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-                mmBarrier.dstAccessMask = VK_ACCESS_2_MICROMAP_READ_BIT_EXT;
-
-                VkDependencyInfo depInfo{};
-                depInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-                depInfo.memoryBarrierCount = 1;
-                depInfo.pMemoryBarriers = &mmBarrier;
-                vkCmdPipelineBarrier2(worldAsyncBuffer->vkCommandBuffer(), &depInfo);
-            }
-
-            // Build BLAS (regular + displaced)
-            std::vector<std::shared_ptr<vk::BLASBuilder>> builders;
-            for (auto chunkBuildData : chunkBuildDataBatch->batchData) {
-                builders.push_back(chunkBuildData->blasBuilder);
-                if (chunkBuildData->displacedBlasBuilder) {
-                    builders.push_back(chunkBuildData->displacedBlasBuilder);
-                }
-            }
-            vk::BLASBuilder::batchSubmit(builders, worldAsyncBuffer);
-
-            // BLAS compaction: query compacted sizes after build completes
+            // Hand off to render thread
             {
-                // Collect all chunk BLASes (not displaced — those use AABB, compaction less useful)
-                std::vector<VkAccelerationStructureKHR> blasHandles;
-                for (auto &cbd : chunkBuildDataBatch->batchData) {
-                    if (cbd->blas) blasHandles.push_back(cbd->blas->blas());
+                std::lock_guard<std::mutex> lock(completedMtx_);
+                for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
+            }
+
+            // Recycle fence + cmd
+            fencePool_.push(std::move(front.fence));
+            cmdPool_.push(std::move(front.cmd));
+            inFlight_.pop_front();
+        }
+
+        // ---- SUBMIT: prepare + submit new batch if we have work AND a free fence ----
+        bool hasWork = false;
+        {
+            std::lock_guard<std::mutex> lock(inputMtx_);
+            hasWork = !inputQueue_.empty();
+        }
+
+        if (hasWork && !fencePool_.empty()) {
+            // Dequeue batch
+            std::vector<std::shared_ptr<ChunkBuildData>> batch;
+            {
+                std::lock_guard<std::mutex> lock(inputMtx_);
+                std::sort(inputQueue_.begin(), inputQueue_.end(),
+                          [](const WorkerTask &a, const WorkerTask &b) { return a.priority > b.priority; });
+                uint32_t count = std::min(chunkBuildingBatchSize_, static_cast<uint32_t>(inputQueue_.size()));
+                for (uint32_t i = 0; i < count; i++) {
+                    batch.push_back(std::move(inputQueue_.front().data));
+                    inputQueue_.pop_front();
+                }
+            }
+
+            if (!batch.empty()) {
+                glm::vec3 cameraPos(cameraPosX_.load(std::memory_order_relaxed),
+                                    cameraPosY_.load(std::memory_order_relaxed),
+                                    cameraPosZ_.load(std::memory_order_relaxed));
+
+                // CPU phase (parallel)
+                Renderer::threadPool.parallelFor(static_cast<uint32_t>(batch.size()), [&](uint32_t i) {
+                    batch[i]->prepareCPU(true, false, cameraPos);
+                });
+                for (auto &cbd : batch) cbd->uploadGPU();
+
+                // Take fence + cmd from pool
+                auto fence = std::move(fencePool_.front()); fencePool_.pop();
+                auto cmd = std::move(cmdPool_.front()); cmdPool_.pop();
+
+                // Record
+                cmd->begin();
+                for (auto &cbd : batch) {
+                    for (int i = 0; i < cbd->geometryCount; i++) {
+                        cbd->vertexBuffers[i]->uploadToBuffer(cmd);
+                        cbd->indexBuffers[i]->uploadToBuffer(cmd);
+                        if (cbd->ommIndexBuffers[i]) cbd->ommIndexBuffers[i]->uploadToBuffer(cmd);
+                        auto &gd = cbd->ommGeometryData[i];
+                        if (gd.hasMicromap) { gd.arrayBuffer->uploadToBuffer(cmd); gd.descBuffer->uploadToBuffer(cmd); }
+                    }
+                    if (cbd->displacedAABBBuffer) cbd->displacedAABBBuffer->uploadToBuffer(cmd);
+                    if (cbd->displacedFaceDataBuffer) cbd->displacedFaceDataBuffer->uploadToBuffer(cmd);
                 }
 
-                if (!blasHandles.empty()) {
-                    VkQueryPoolCreateInfo qpci{};
-                    qpci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-                    qpci.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
-                    qpci.queryCount = static_cast<uint32_t>(blasHandles.size());
-
-                    VkQueryPool qp;
-                    if (vkCreateQueryPool(device->vkDevice(), &qpci, nullptr, &qp) == VK_SUCCESS) {
-                        vkCmdResetQueryPool(worldAsyncBuffer->vkCommandBuffer(), qp, 0, qpci.queryCount);
-                        vkCmdWriteAccelerationStructuresPropertiesKHR(
-                            worldAsyncBuffer->vkCommandBuffer(),
-                            static_cast<uint32_t>(blasHandles.size()), blasHandles.data(),
-                            VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
-                            qp, 0);
-                        chunkBuildDataBatch->compactionQueryPool = qp;
-                        chunkBuildDataBatch->compactionQueryCount = qpci.queryCount;
-                        chunkBuildDataBatch->queryDevice = device;
+                // Barriers
+                std::vector<vk::CommandBuffer::BufferMemoryBarrier> barriers;
+                for (auto &cbd : batch) {
+                    for (int i = 0; i < cbd->geometryCount; i++) {
+                        VkPipelineStageFlags2 dst = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+                        if (cbd->ommGeometryData[i].hasMicromap) dst |= VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT;
+                        auto bar = [&](std::shared_ptr<vk::DeviceLocalBuffer> &b) {
+                            barriers.push_back({VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT, dst,
+                                VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                secondaryQueueIndex, secondaryQueueIndex, b});
+                        };
+                        bar(cbd->vertexBuffers[i]); bar(cbd->indexBuffers[i]);
+                        if (cbd->ommIndexBuffers[i]) bar(cbd->ommIndexBuffers[i]);
+                        if (cbd->ommGeometryData[i].hasMicromap) {
+                            auto mm = VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT;
+                            barriers.push_back({VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                mm, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                secondaryQueueIndex, secondaryQueueIndex, cbd->ommGeometryData[i].arrayBuffer});
+                            barriers.push_back({VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                mm, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                secondaryQueueIndex, secondaryQueueIndex, cbd->ommGeometryData[i].descBuffer});
+                        }
+                    }
+                    if (cbd->displacedAABBBuffer) {
+                        barriers.push_back({VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
+                            VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
+                            secondaryQueueIndex, secondaryQueueIndex, cbd->displacedAABBBuffer});
                     }
                 }
+                cmd->barriersBufferImage(barriers, {});
+
+                // Micromaps
+                bool anyMM = false;
+                for (auto &cbd : batch) {
+                    for (int i = 0; i < cbd->geometryCount; i++) {
+                        auto &gd = cbd->ommGeometryData[i];
+                        if (!gd.hasMicromap) continue;
+                        anyMM = true;
+                        VkMicromapBuildInfoEXT bi{VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT};
+                        bi.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT; bi.flags = VK_BUILD_MICROMAP_PREFER_FAST_TRACE_BIT_EXT;
+                        bi.mode = VK_BUILD_MICROMAP_MODE_BUILD_EXT; bi.dstMicromap = gd.micromap;
+                        bi.data.deviceAddress = gd.arrayBuffer->bufferAddress();
+                        bi.triangleArray.deviceAddress = gd.descBuffer->bufferAddress();
+                        bi.triangleArrayStride = sizeof(VkMicromapTriangleEXT);
+                        bi.usageCountsCount = static_cast<uint32_t>(gd.descHistogram.size());
+                        bi.pUsageCounts = gd.descHistogram.data();
+                        if (gd.micromapScratchBuffer) bi.scratchData.deviceAddress = gd.micromapScratchBuffer->bufferAddress();
+                        vkCmdBuildMicromapsEXT(cmd->vkCommandBuffer(), 1, &bi);
+                    }
+                }
+                if (anyMM) {
+                    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+                    mb.srcStageMask = VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT; mb.srcAccessMask = VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT;
+                    mb.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR; mb.dstAccessMask = VK_ACCESS_2_MICROMAP_READ_BIT_EXT;
+                    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.memoryBarrierCount = 1; dep.pMemoryBarriers = &mb;
+                    vkCmdPipelineBarrier2(cmd->vkCommandBuffer(), &dep);
+                }
+
+                // BLAS builds
+                std::vector<std::shared_ptr<vk::BLASBuilder>> builders;
+                for (auto &cbd : batch) {
+                    builders.push_back(cbd->blasBuilder);
+                    if (cbd->displacedBlasBuilder) builders.push_back(cbd->displacedBlasBuilder);
+                }
+                vk::BLASBuilder::batchSubmit(builders, cmd);
+
+                // Compaction queries
+                VkQueryPool qp = VK_NULL_HANDLE; uint32_t qpCount = 0;
+                {
+                    std::vector<VkAccelerationStructureKHR> handles;
+                    for (auto &cbd : batch) { if (cbd->blas) handles.push_back(cbd->blas->blas()); }
+                    if (!handles.empty()) {
+                        VkQueryPoolCreateInfo qpci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+                        qpci.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
+                        qpci.queryCount = static_cast<uint32_t>(handles.size());
+                        if (vkCreateQueryPool(device->vkDevice(), &qpci, nullptr, &qp) == VK_SUCCESS) {
+                            qpCount = qpci.queryCount;
+                            vkCmdResetQueryPool(cmd->vkCommandBuffer(), qp, 0, qpCount);
+                            vkCmdWriteAccelerationStructuresPropertiesKHR(cmd->vkCommandBuffer(),
+                                static_cast<uint32_t>(handles.size()), handles.data(),
+                                VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, qp, 0);
+                        }
+                    }
+                }
+
+                cmd->end();
+
+                // Submit (sole owner of secondary queue — no mutex)
+                VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                si.commandBufferCount = 1; si.pCommandBuffers = &cmd->vkCommandBuffer();
+                VkResult r = vkQueueSubmit(device->secondaryQueue(), 1, &si, fence->vkFence());
+                if (r != VK_SUCCESS) {
+                    g_crashRing.record("blasThreadSubmitFail", r);
+                    fencePool_.push(std::move(fence)); cmdPool_.push(std::move(cmd));
+                    if (qp) vkDestroyQueryPool(device->vkDevice(), qp, nullptr);
+                    continue;
+                }
+
+                // Track in-flight
+                inFlight_.push_back({std::move(fence), std::move(cmd), std::move(batch), qp, qpCount});
             }
-
-            worldAsyncBuffer->end();
-
-            VkSubmitInfo vkSubmitInfo = {};
-            vkSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            vkSubmitInfo.waitSemaphoreCount = 0;
-            vkSubmitInfo.pWaitSemaphores = nullptr;
-            vkSubmitInfo.pWaitDstStageMask = nullptr;
-            vkSubmitInfo.commandBufferCount = 1;
-            vkSubmitInfo.pCommandBuffers = &worldAsyncBuffer->vkCommandBuffer();
-            vkSubmitInfo.signalSemaphoreCount = 0;
-            vkSubmitInfo.pSignalSemaphores = nullptr;
-
-            VkResult submitResult = vkQueueSubmit(device->secondaryQueue(), 1, &vkSubmitInfo, fence->vkFence());
-            if (submitResult != VK_SUCCESS) {
-                g_crashRing.record("chunkSubmitFail", submitResult);
-                std::cout << "Chunk batch vkQueueSubmit failed with error: " << std::dec << submitResult << std::endl;
-                return;
-            }
-
-            freeFences_.pop();
-            freeCmdBuffers_.pop();
-            buildingFences_.push_back(fence);
-            buildingCmdBuffers_.push_back(worldAsyncBuffer);
-            buildingBatches_.push_back(chunkBuildDataBatch);
+        } else if (!hasWork && inFlight_.empty()) {
+            // Nothing to do — wait for input
+            std::unique_lock<std::mutex> lock(inputMtx_);
+            inputCv_.wait_for(lock, std::chrono::milliseconds(5), [this] {
+                return stop_.load() || !inputQueue_.empty();
+            });
+        } else {
+            // In-flight batches but no new work or no free fences — brief yield
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
+    }
+
+    // Drain remaining in-flight batches on shutdown
+    for (auto &f : inFlight_) {
+        vkWaitForFences(device->vkDevice(), 1, &f.fence->vkFence(), true, UINT64_MAX);
+        if (f.compactionQP) vkDestroyQueryPool(device->vkDevice(), f.compactionQP, nullptr);
+        std::lock_guard<std::mutex> lock(completedMtx_);
+        for (auto &cbd : f.chunks) completedQueue_.push_back(std::move(cbd));
     }
 }
 
 uint32_t ChunkBuildScheduler::chunkBuildingBatchSize() {
     return chunkBuildingBatchSize_;
-}
-
-uint32_t ChunkBuildScheduler::chunkBuildingTotalBatches() {
-    return chunkBuildingTotalBatches_;
 }
 
 float Chunk1::buildFactor(std::chrono::steady_clock::time_point currentTime, glm::vec3 cameraPos) {
@@ -1681,10 +1503,9 @@ void Chunks::reset(uint32_t numChunks) {
     }
 
     uint32_t chunkBuildingBatchSize = Renderer::instance().options.chunkBuildingBatchSize;
-    uint32_t chunkBuildingTotalBatches = Renderer::instance().options.chunkBuildingTotalBatches;
     chunkBuildScheduler_ =
-        ChunkBuildScheduler::create(queuedIndex_, chunks_, chunkBuildDatas_, mutex_, chunkPackedData_,
-                                    chunkBuildingBatchSize, chunkBuildingTotalBatches);
+        ChunkBuildScheduler::create(chunks_, chunkBuildDatas_, mutex_, chunkPackedData_,
+                                    chunkBuildingBatchSize);
 }
 
 void Chunks::resetScheduler() {
@@ -1692,13 +1513,12 @@ void Chunks::resetScheduler() {
 
     if (chunkBuildScheduler_ == nullptr) return;
 
-    chunkBuildScheduler_->waitAllBatchesFinish();
+    chunkBuildScheduler_->waitAllFinish();
 
     uint32_t chunkBuildingBatchSize = Renderer::instance().options.chunkBuildingBatchSize;
-    uint32_t chunkBuildingTotalBatches = Renderer::instance().options.chunkBuildingTotalBatches;
     chunkBuildScheduler_ =
-        ChunkBuildScheduler::create(queuedIndex_, chunks_, chunkBuildDatas_, mutex_, chunkPackedData_,
-                                    chunkBuildingBatchSize, chunkBuildingTotalBatches);
+        ChunkBuildScheduler::create(chunks_, chunkBuildDatas_, mutex_, chunkPackedData_,
+                                    chunkBuildingBatchSize);
 }
 
 void Chunks::resetFrame() {
@@ -1765,61 +1585,13 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
         task.id, task.x, task.y, task.z, chunks_[task.id]->latestVersion++, allVertexCount, allIndexCount,
         task.geometryCount, std::move(geometryTypes), std::move(vertices), std::move(indices));
 
-    if (task.isImportant) {
-        bool ommEnabled = device->hasOMM() && Renderer::options.ommEnabled;
-        // Skip OMM entirely for important chunks when OMM is enabled — avoids
-        // VK_NULL_HANDLE micromap in BLAS pNext which causes invisibility on some drivers.
-        // The chunk is queued for async Phase 2 rebuild below.
-        glm::vec3 importantCameraPos = Renderer::instance().world() ? glm::vec3(Renderer::instance().world()->getCameraPos()) : glm::vec3(0);
-        chunkBuildData->build(false, ommEnabled, importantCameraPos);
-        for (int i = 0; i < chunkBuildData->geometryCount; i++) {
-            Renderer::instance().buffers()->queueImportantWorldUpload(chunkBuildData->vertexBuffers[i],
-                                                                      chunkBuildData->indexBuffers[i]);
-            if (chunkBuildData->ommIndexBuffers[i] != nullptr) {
-                Renderer::instance().buffers()->queueImportantWorldUpload(chunkBuildData->ommIndexBuffers[i],
-                                                                          nullptr);
-            }
-        }
-        importantBLASBuilders_->push_back(chunkBuildData->blasBuilder);
-
-        // DDA displacement: upload AABB buffer and queue displaced BLAS build
-        if (chunkBuildData->displacedBlasBuilder) {
-            Renderer::instance().buffers()->queueImportantWorldUpload(chunkBuildData->displacedAABBBuffer, nullptr);
-            Renderer::instance().buffers()->queueImportantWorldUpload(chunkBuildData->displacedFaceDataBuffer, nullptr);
-            importantBLASBuilders_->push_back(chunkBuildData->displacedBlasBuilder);
-        }
-
-        // Copy geometry data BEFORE releasing host data (enqueue no longer stores CPU data)
-        std::shared_ptr<ChunkBuildData> asyncRebuildData;
-        if (ommEnabled) {
-            asyncRebuildData = ChunkBuildData::create(
-                task.id, task.x, task.y, task.z,
-                chunks_[task.id]->latestVersion++, // higher version → will replace Phase 1 BLAS
-                allVertexCount, allIndexCount, task.geometryCount,
-                std::vector<World::GeometryTypes>(chunkBuildData->geometryTypes),
-                std::vector<std::vector<vk::VertexFormat::PBRTriangle>>(chunkBuildData->vertices),
-                std::vector<std::vector<uint32_t>>(chunkBuildData->indices));
-        }
-
-        // Release CPU vertex/index data now that GPU buffers are uploaded and async copy is made
-        // chunkBuildData->releaseHostGeometry(); // DISABLED: investigating staging buffer crash
-
-        chunks_[task.id]->enqueue(chunkBuildData);
-
-        // Queue async Phase 2 rebuild with full OMM baking
-        if (asyncRebuildData) {
-            queuedIndex_.insert(task.id);
-            chunkBuildDatas_[task.id] = asyncRebuildData;
-        }
-
-        ChunkPackedData data = {
-            .geometryCount = chunkBuildData->geometryCount,
-        };
-
-        chunkPackedData_->uploadToBuffer(&data, sizeof(ChunkPackedData), chunkBuildData->id * sizeof(ChunkPackedData));
-    } else {
-        queuedIndex_.insert(task.id);
-        chunkBuildDatas_[task.id] = chunkBuildData;
+    // ALL chunks go to the BLAS thread — render thread does zero chunk building.
+    // Important chunks get higher priority (2x) but are still async.
+    // This means chunks appear 1-2 frames later but the render thread never stalls.
+    chunkBuildDatas_[task.id] = chunkBuildData;
+    glm::vec3 camPos = Renderer::instance().world() ? glm::vec3(Renderer::instance().world()->getCameraPos()) : glm::vec3(0);
+    if (chunkBuildScheduler_) {
+        chunkBuildScheduler_->enqueue(chunkBuildData, camPos, task.isImportant);
     }
 }
 

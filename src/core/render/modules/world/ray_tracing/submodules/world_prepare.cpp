@@ -12,8 +12,10 @@
 #include "core/render/world.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <unordered_map>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -153,17 +155,26 @@ void WorldPrepareContext::render() {
 
     GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::WORLD_PREPARE_BEGIN);
 
+    // CPU profiling: accumulate sub-phase timing (logged every 120 frames with TLAS stats)
+    using Clock = std::chrono::steady_clock;
+    static float cpuAccCheck = 0, cpuAccSchedule = 0, cpuAccImportant = 0;
+    static float cpuAccEntity = 0, cpuAccInstances = 0, cpuAccTlas = 0, cpuAccTotal = 0;
+    static uint32_t cpuFrameCount = 0;
+    auto cpuT0 = Clock::now();
+    auto cpuMsSince = [](Clock::time_point t0) {
+        return std::chrono::duration<float, std::milli>(Clock::now() - t0).count();
+    };
+
     std::unique_lock<std::recursive_mutex> lock(chunks->mutex());
 
+    auto cpuT1 = Clock::now();
     if (chunks->chunkBuildScheduler() != nullptr) {
-        chunks->chunkBuildScheduler()->tryCheckBatchesFinish();
-        uint32_t batchSize = chunks->chunkBuildScheduler()->chunkBuildingBatchSize();
-        if (Renderer::options.ommEnabled) {
-            batchSize = std::min(batchSize, Renderer::options.ommBatchCap);
-        }
-        chunks->chunkBuildScheduler()->tryScheduleBatches(batchSize);
+        chunks->chunkBuildScheduler()->updateCameraPos(cameraPos);
+        chunks->chunkBuildScheduler()->integrateCompleted();
+        cpuAccCheck += cpuMsSince(cpuT1);
     }
 
+    auto cpuT3 = Clock::now();
     GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::CHUNK_SCHEDULE_DONE);
 
     // Barrier: ensure vertex/index buffer TRANSFER writes from uploadCommandBuffer
@@ -177,6 +188,7 @@ void WorldPrepareContext::render() {
                          VK_ACCESS_2_SHADER_READ_BIT,
     }});
 
+    auto cpuT4 = Clock::now();
     if (chunks->importantBLASBuilders().size() > 0) {
         GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::BLAS_BUILD_IMPORTANT);
         auto &builders = chunks->importantBLASBuilders();
@@ -193,11 +205,14 @@ void WorldPrepareContext::render() {
             builders.erase(builders.begin(), builders.begin() + MAX_IMPORTANT_BLAS_PER_FRAME);
         }
     }
+    cpuAccImportant += cpuMsSince(cpuT4);
 
+    auto cpuT5 = Clock::now();
     if (entities->blasBatchBuilder() != nullptr) {
         GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::BLAS_BUILD_ENTITY);
         entities->blasBatchBuilder()->submit(worldCommandBuffer);
     }
+    cpuAccEntity += cpuMsSince(cpuT5);
 
     worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
         .srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
@@ -207,6 +222,7 @@ void WorldPrepareContext::render() {
         .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
     }});
 
+    auto cpuT6 = Clock::now();
     uint32_t blasAccu = 0, blasGroupAccu = 0;
     std::vector<uint32_t> blasOffset;
     std::vector<uint32_t> geometryTypes;
@@ -353,7 +369,7 @@ void WorldPrepareContext::render() {
     // (GPU finished with it before we re-acquired this context).
     TlasBlasSnapshot currBlasSnapshot;
 
-    // Chunk
+    // Chunk — cached + parallel instance population
     {
         auto &chunk1s = chunks->chunks();
         float cullDist = Renderer::options.chunkCullDistance;
@@ -362,8 +378,7 @@ void WorldPrepareContext::render() {
         float mergeDist2 = mergeDist * mergeDist;
         bool megaEnabled = mergeDist > 0 && mergeDist < cullDist;
 
-        // Mega-BLAS debug: collect far chunks for merging
-        constexpr int MEGA_SIZE = 64; // 4x4x4 sections
+        constexpr int MEGA_SIZE = 64;
         auto megaKey = [](int x, int y, int z) -> int64_t {
             int mx = (x >= 0) ? x / MEGA_SIZE : (x - MEGA_SIZE + 1) / MEGA_SIZE;
             int my = (y >= 0) ? y / MEGA_SIZE : (y - MEGA_SIZE + 1) / MEGA_SIZE;
@@ -372,92 +387,128 @@ void WorldPrepareContext::render() {
         };
         std::unordered_map<int64_t, std::vector<int>> farChunksByMega;
 
-        for (int i = 0; i < chunk1s.size(); i++) {
-            auto &chunk1 = chunk1s[i];
-            if (chunk1->blas == nullptr) continue;
+        // Update cache: only recompute metadata when blasGeneration changes
+        if (cachedChunks_.size() != chunk1s.size()) cachedChunks_.resize(chunk1s.size());
 
-            // Distance culling: skip chunks beyond cull distance
-            float cx = static_cast<float>(static_cast<double>(chunk1->x) + 8.0 - cameraPos.x);
-            float cy = static_cast<float>(static_cast<double>(chunk1->y) + 8.0 - cameraPos.y);
-            float cz = static_cast<float>(static_cast<double>(chunk1->z) + 8.0 - cameraPos.z);
-            float dist2 = cx * cx + cy * cy + cz * cz;
-            if (dist2 > cullDist2) continue;
+        // Parallel pass 1: update cache + distance cull → collect visible chunk indices
+        // Each thread fills a local list of visible chunk indices
+        uint32_t numChunks = static_cast<uint32_t>(chunk1s.size());
+        uint32_t numThreads = std::max(1u, Renderer::threadPool.threadCount());
+        struct LocalResult {
+            std::vector<int> visibleNear;
+            std::vector<std::pair<int64_t, int>> visibleFar; // megaKey, chunkIndex
+        };
+        std::vector<LocalResult> locals(numThreads);
 
-            // Partition: near chunks get individual instances, far chunks grouped for mega-BLAS
-            if (megaEnabled && dist2 >= mergeDist2) {
-                int64_t mk = megaKey(chunk1->x, chunk1->y, chunk1->z);
-                farChunksByMega[mk].push_back(i);
-                continue; // skip individual instance — will be part of mega-BLAS
+        Renderer::threadPool.parallelFor(numThreads, [&](uint32_t t) {
+            uint32_t start = t * numChunks / numThreads;
+            uint32_t end = (t + 1) * numChunks / numThreads;
+            auto &local = locals[t];
+
+            for (uint32_t i = start; i < end; i++) {
+                auto &chunk1 = chunk1s[i];
+                if (chunk1->blas == nullptr) continue;
+
+                // Update cache if generation changed
+                auto &cc = cachedChunks_[i];
+                if (cc.blasGeneration != chunk1->blasGeneration) {
+                    cc.blasGeneration = chunk1->blasGeneration;
+                    cc.blas = chunk1->blas;
+                    cc.x = chunk1->x; cc.y = chunk1->y; cc.z = chunk1->z;
+                    cc.geometryCount = chunk1->geometryCount;
+                    cc.geoTypes.clear();
+                    cc.geoTypes.push_back(World::GeometryTypes::SHADOW);
+                    cc.geoTypes.insert(cc.geoTypes.end(), chunk1->geometryTypes->begin(), chunk1->geometryTypes->end());
+                    cc.vertBufAddrs.clear();
+                    cc.idxBufAddrs.clear();
+                    for (uint32_t j = 0; j < chunk1->geometryCount; j++) {
+                        cc.vertBufAddrs.push_back((*chunk1->vertexBuffers)[j]->bufferAddress());
+                        cc.idxBufAddrs.push_back((*chunk1->indexBuffers)[j]->bufferAddress());
+                    }
+                    cc.displacedBlas = chunk1->displacedBlas;
+                    cc.displacedFaceDataBuffer = chunk1->displacedFaceDataBuffer;
+                    cc.hasDisplaced = chunk1->displacedBlas && chunk1->displacedFaceDataBuffer;
+                }
+
+                // Distance cull
+                float cx = static_cast<float>(static_cast<double>(cc.x) + 8.0 - cameraPos.x);
+                float cy = static_cast<float>(static_cast<double>(cc.y) + 8.0 - cameraPos.y);
+                float cz = static_cast<float>(static_cast<double>(cc.z) + 8.0 - cameraPos.z);
+                float dist2 = cx * cx + cy * cy + cz * cz;
+                if (dist2 > cullDist2) continue;
+
+                if (megaEnabled && dist2 >= mergeDist2) {
+                    local.visibleFar.push_back({megaKey(cc.x, cc.y, cc.z), static_cast<int>(i)});
+                } else {
+                    local.visibleNear.push_back(static_cast<int>(i));
+                }
             }
+        });
 
-            VkTransformMatrixKHR transform = {
-                1, 0, 0, static_cast<float>(static_cast<double>(chunk1->x) - cameraPos.x), //
-                0, 1, 0, static_cast<float>(static_cast<double>(chunk1->y) - cameraPos.y), //
-                0, 0, 1, static_cast<float>(static_cast<double>(chunk1->z) - cameraPos.z), //
-            };
+        // Sequential merge: build instance + SBT data from cached metadata
+        // Pre-reserve based on previous frame count to avoid reallocation
+        uint32_t estInstances = prevTlasInstanceCount_ > 0 ? prevTlasInstanceCount_ * 2 : numChunks;
+        geometryTypes.reserve(estInstances * 3);
+        vertexBufferAddrs.reserve(estInstances * 3);
+        indexBufferAddrs.reserve(estInstances * 3);
+        lastVertexBufferAddrs.reserve(estInstances * 3);
+        lastIndexBufferAddrs.reserve(estInstances * 3);
+        lastObjToWorldMats.reserve(estInstances);
+        blasOffset.reserve(estInstances);
 
-            instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0, chunk1->blas);
+        for (auto &local : locals) {
+            for (int idx : local.visibleNear) {
+                auto &cc = cachedChunks_[idx];
 
-            // Snapshot BLAS reference + generation for lifetime safety and UPDATE detection
-            currBlasSnapshot.blases.push_back(chunk1->blas);
-            currBlasSnapshot.generations.push_back(chunk1->blasGeneration);
+                VkTransformMatrixKHR transform = {
+                    1, 0, 0, static_cast<float>(static_cast<double>(cc.x) - cameraPos.x),
+                    0, 1, 0, static_cast<float>(static_cast<double>(cc.y) - cameraPos.y),
+                    0, 0, 1, static_cast<float>(static_cast<double>(cc.z) - cameraPos.z),
+                };
 
-            geometryTypes.push_back(World::GeometryTypes::SHADOW);
-            geometryTypes.insert(geometryTypes.end(), chunk1->geometryTypes->begin(), chunk1->geometryTypes->end());
+                instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0, cc.blas);
+                currBlasSnapshot.blases.push_back(cc.blas);
+                currBlasSnapshot.generations.push_back(cc.blasGeneration);
 
-            for (int j = 0; j < chunk1->geometryCount; j++) {
-                vertexBufferAddrs.push_back((*chunk1->vertexBuffers)[j]->bufferAddress());
-                indexBufferAddrs.push_back((*chunk1->indexBuffers)[j]->bufferAddress());
-                lastVertexBufferAddrs.push_back(0);
-                lastIndexBufferAddrs.push_back(0);
-            }
+                geometryTypes.insert(geometryTypes.end(), cc.geoTypes.begin(), cc.geoTypes.end());
+                for (uint32_t j = 0; j < cc.geometryCount; j++) {
+                    vertexBufferAddrs.push_back(cc.vertBufAddrs[j]);
+                    indexBufferAddrs.push_back(cc.idxBufAddrs[j]);
+                    lastVertexBufferAddrs.push_back(0);
+                    lastIndexBufferAddrs.push_back(0);
+                }
 
-            // read (fake, since chunk is not moving) previous render data
-            {
                 glm::mat4 lastObjToWorldMat = glm::transpose(glm::mat4(
-                    glm::vec4(1.0f, 0.0f, 0.0f, static_cast<float>(static_cast<double>(chunk1->x) - cameraPos.x)), //
-                    glm::vec4(0.0f, 1.0f, 0.0f, static_cast<float>(static_cast<double>(chunk1->y) - cameraPos.y)), //
-                    glm::vec4(0.0f, 0.0f, 1.0f, static_cast<float>(static_cast<double>(chunk1->z) - cameraPos.z)), //
-                    glm::vec4(0.0f, 0.0f, 0.0f, 1.0f)));
-                lastObjToWorldMats.push_back(lastObjToWorldMat);
-            }
-
-            blasOffset.push_back(blasAccu);
-            blasAccu += chunk1->geometryCount;
-            blasGroupAccu += chunk1->geometryCount + 1; // shadow
-
-            blasIndex++;
-
-            // DDA displacement: add separate TLAS instance for the AABB BLAS
-            if (chunk1->displacedBlas && chunk1->displacedFaceDataBuffer) {
-                instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0,
-                                               chunk1->displacedBlas);
-
-                // Snapshot displaced BLAS reference too
-                currBlasSnapshot.blases.push_back(chunk1->displacedBlas);
-                currBlasSnapshot.generations.push_back(chunk1->blasGeneration);
-
-                // Only 1 geometry: WORLD_DISPLACED (procedural hit group)
-                geometryTypes.push_back(World::GeometryTypes::WORLD_DISPLACED);
-
-                // Face data buffer address for the intersection shader
-                vertexBufferAddrs.push_back(chunk1->displacedFaceDataBuffer->bufferAddress());
-                indexBufferAddrs.push_back(0); // AABBs don't use index buffers
-                lastVertexBufferAddrs.push_back(0);
-                lastIndexBufferAddrs.push_back(0);
-
-                glm::mat4 lastObjToWorldMat = glm::transpose(glm::mat4(
-                    glm::vec4(1, 0, 0, static_cast<float>(static_cast<double>(chunk1->x) - cameraPos.x)),
-                    glm::vec4(0, 1, 0, static_cast<float>(static_cast<double>(chunk1->y) - cameraPos.y)),
-                    glm::vec4(0, 0, 1, static_cast<float>(static_cast<double>(chunk1->z) - cameraPos.z)),
+                    glm::vec4(1, 0, 0, static_cast<float>(static_cast<double>(cc.x) - cameraPos.x)),
+                    glm::vec4(0, 1, 0, static_cast<float>(static_cast<double>(cc.y) - cameraPos.y)),
+                    glm::vec4(0, 0, 1, static_cast<float>(static_cast<double>(cc.z) - cameraPos.z)),
                     glm::vec4(0, 0, 0, 1)));
                 lastObjToWorldMats.push_back(lastObjToWorldMat);
 
                 blasOffset.push_back(blasAccu);
-                blasAccu += 1; // 1 geometry
-                blasGroupAccu += 1; // no SHADOW prefix for displaced BLAS
-
+                blasAccu += cc.geometryCount;
+                blasGroupAccu += cc.geometryCount + 1;
                 blasIndex++;
+
+                if (cc.hasDisplaced) {
+                    instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0, cc.displacedBlas);
+                    currBlasSnapshot.blases.push_back(cc.displacedBlas);
+                    currBlasSnapshot.generations.push_back(cc.blasGeneration);
+                    geometryTypes.push_back(World::GeometryTypes::WORLD_DISPLACED);
+                    vertexBufferAddrs.push_back(cc.displacedFaceDataBuffer->bufferAddress());
+                    indexBufferAddrs.push_back(0);
+                    lastVertexBufferAddrs.push_back(0);
+                    lastIndexBufferAddrs.push_back(0);
+                    lastObjToWorldMats.push_back(lastObjToWorldMat);
+                    blasOffset.push_back(blasAccu);
+                    blasAccu += 1;
+                    blasGroupAccu += 1;
+                    blasIndex++;
+                }
+            }
+            // Collect far chunks for mega-BLAS
+            for (auto &[mk, chunkIdx] : local.visibleFar) {
+                farChunksByMega[mk].push_back(chunkIdx);
             }
         }
 
@@ -775,6 +826,8 @@ void WorldPrepareContext::render() {
         }
     }
 
+    cpuAccInstances += cpuMsSince(cpuT6);
+
     if (instanceBuilder.instances.empty()) {
         tlas = nullptr;
         prevTlasInstanceCount_ = 0;
@@ -786,6 +839,7 @@ void WorldPrepareContext::render() {
     static uint32_t tlasUpdateCount = 0;
     static uint32_t tlasBuildCount = 0;
 
+    auto cpuT7 = Clock::now();
     // Determine if TLAS UPDATE is possible by comparing per-instance BLAS generations.
     // UPDATE requires identical BLAS handles at each instance index. If any chunk BLAS
     // was rebuilt (generation changed) or instance count changed, we must full BUILD.
@@ -853,17 +907,50 @@ void WorldPrepareContext::render() {
         tlasBuildCount++;
     }
 
+    cpuAccTlas += cpuMsSince(cpuT7);
+    cpuAccTotal += cpuMsSince(cpuT0);
+    cpuFrameCount++;
+
     // Save BLAS snapshot: keeps shared_ptrs alive until this context is reused,
     // preventing GC from freeing BLASes while the GPU still references their addresses.
     prevBlasSnapshot_ = std::move(currBlasSnapshot);
     prevTlasInstanceCount_ = currentInstanceCount;
 
     if (++tlasLogCounter >= 120) {
+        float n = static_cast<float>(cpuFrameCount);
         std::cout << "[Profiler] TLAS instances: " << currentInstanceCount
                   << "  builds: " << tlasBuildCount << "  updates: " << tlasUpdateCount << std::endl;
+        if (cpuFrameCount > 0) {
+            std::cout << "[CPU] WorldPrepare avg(ms): check=" << (cpuAccCheck / n)
+                      << " schedule=" << (cpuAccSchedule / n)
+                      << " important=" << (cpuAccImportant / n)
+                      << " entity=" << (cpuAccEntity / n)
+                      << " instances=" << (cpuAccInstances / n)
+                      << " tlas=" << (cpuAccTlas / n)
+                      << " TOTAL=" << (cpuAccTotal / n) << std::endl;
+            // Also write to file since C++ stdout may not reach Minecraft log
+            std::ofstream cpuLog("C:/RadSER/results/cpu_timing.log", std::ios::app);
+            if (cpuLog.is_open()) {
+                cpuLog << "[CPU] instances=" << currentInstanceCount
+                       << " check=" << (cpuAccCheck / n)
+                       << " schedule=" << (cpuAccSchedule / n)
+                       << " important=" << (cpuAccImportant / n)
+                       << " entity=" << (cpuAccEntity / n)
+                       << " instances_pop=" << (cpuAccInstances / n)
+                       << " tlas=" << (cpuAccTlas / n)
+                       << " TOTAL=" << (cpuAccTotal / n)
+                       << " builds=" << tlasBuildCount
+                       << " updates=" << tlasUpdateCount
+                       << " threads=" << Renderer::threadPool.threadCount()
+                       << "\n";
+            }
+        }
         tlasLogCounter = 0;
         tlasUpdateCount = 0;
         tlasBuildCount = 0;
+        cpuAccCheck = cpuAccSchedule = cpuAccImportant = 0;
+        cpuAccEntity = cpuAccInstances = cpuAccTlas = cpuAccTotal = 0;
+        cpuFrameCount = 0;
     }
 
     worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{

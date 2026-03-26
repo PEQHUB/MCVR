@@ -29,6 +29,7 @@ bool Renderer::emissionComposePipelineReady = false;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::emissionImages;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::renderResHdrImages;
 GpuProfiler Renderer::gpuProfiler;
+ThreadPool Renderer::threadPool;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::frameGenDepthImages;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::frameGenMotionVectorImages;
 
