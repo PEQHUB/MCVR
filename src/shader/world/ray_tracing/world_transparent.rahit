@@ -34,6 +34,8 @@ layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
     TextureMapping mapping;
 };
 
+#include "../util/vertex_fetch.glsl"
+
 layout(set = 2, binding = 0) uniform Uniform {
     WorldUBO ubo;
 };
@@ -63,14 +65,27 @@ void main() {
     uint i1 = indexBuffer.indices[indexBaseID + 1];
     uint i2 = indexBuffer.indices[indexBaseID + 2];
 
-    VertexBuffer vertexBuffer = VertexBuffer(vertexBufferAddrs.addrs[blasOffset + geometryID]);
-    PBRTriangle v0 = vertexBuffer.vertices[i0];
-    PBRTriangle v1 = vertexBuffer.vertices[i1];
-    PBRTriangle v2 = vertexBuffer.vertices[i2];
+    UnpackedVertex v0, v1, v2;
+    {
+        VertexBuffer vb = VertexBuffer(vertexBufferAddrs.addrs[blasOffset + geometryID]);
+        v0 = unpackFullVertex(vb.vertices[i0]);
+        v1 = unpackFullVertex(vb.vertices[i1]);
+        v2 = unpackFullVertex(vb.vertices[i2]);
+    }
 
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     vec2 uv = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
     uint textureID = v0.textureID;
+
+    // Greedy-merged quads: tile UVs back into sprite bounds (stored in vertex data)
+    if ((v0.flags & PBR_FLAG_GREEDY_MERGED) != 0u) {
+        vec2 spriteMin = v0.glintUV;
+        vec2 spriteSize = vec2(uintBitsToFloat(v0.overlayPacked), uintBitsToFloat(v0.lightPacked));
+        uv = mod(uv - spriteMin, spriteSize) + spriteMin;
+        float htU = 0.5 / float(textureSize(textures[nonuniformEXT(textureID)], 0).x);
+        float htV = 0.5 / float(textureSize(textures[nonuniformEXT(textureID)], 0).y);
+        uv = clamp(uv, spriteMin + vec2(htU, htV), spriteMin + spriteSize - vec2(htU, htV));
+    }
 
     bool useTexture = (v0.flags & PBR_FLAG_USE_TEXTURE) != 0u;
     float alpha;
@@ -107,7 +122,7 @@ void main() {
     float colorLayerAlpha;
     if (useColorLayer) {
         colorLayerAlpha =
-            (baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer).a;
+            baryCoords.x * v0.colorLayerAlpha + baryCoords.y * v1.colorLayerAlpha + baryCoords.z * v2.colorLayerAlpha;
     } else {
         colorLayerAlpha = 1.0;
     }

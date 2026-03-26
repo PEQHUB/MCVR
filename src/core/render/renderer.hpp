@@ -25,6 +25,7 @@ struct Options {
     uint32_t rayBounces = 16;
     bool ommEnabled = false; // Opacity Micro Maps (disabled by default until Phase 1 validated)
     uint32_t ommBakerLevel = 4; // OMM baker max subdivision level (1-8)
+    bool greedyMeshingEnabled = true; // Merge coplanar block faces (50-70% triangle reduction)
     bool simplifiedIndirect = false; // Skip detail textures on indirect bounces + simplify shadow AHS
     bool outputScale2x = false;     // Render world at 2x display resolution, FSR1 EASU downscale
     bool reflexEnabled = false;     // NVIDIA Reflex low-latency mode (VK_NV_low_latency2)
@@ -36,6 +37,7 @@ struct Options {
     uint32_t chunkBuildingBatchSize = 6;
     uint32_t chunkBuildingTotalBatches = 6;
     float chunkCullDistance = 384.0f;  // Max chunk distance in blocks (64-1024), chunks beyond are excluded from TLAS
+    float chunkLodDistance = 160.0f;  // LOD boundary in blocks (64-512): ≤ = lossless 64B vertex, > = compact 32B
     float megaMergeDistance = 0.0f;  // Beyond this distance (blocks), chunks are merged into mega-BLASes (0=disabled)
     static constexpr uint32_t ommBatchCap = 2; // Max chunks per GPU batch when OMM active (prevents TDR)
     uint32_t tonemappingMode = 1; // 0 = PBR Neutral, 1 = Reinhard Extended
@@ -145,7 +147,9 @@ struct Options {
     int blockLightMode[50] = {};         // Per-block light mode: 0=Auto, 1=ForceAreaLight, 2=ForceEmissive
 
     // SER: Shader Execution Reordering
-    bool serEnabled = true;       // hit-object reordering (disable for A/B testing)
+    // Disabled by default: Minecraft's material uniformity means SER overhead exceeds coherence gain.
+    // Profiled 2026-03-25: SER ON harms perf vs OFF. Keep option for future re-evaluation.
+    bool serEnabled = false;
     bool serHintsEnabled = true;  // explicit geometry-based coherence hints (on top of driver reorder)
 
     // SHARC radiance cache

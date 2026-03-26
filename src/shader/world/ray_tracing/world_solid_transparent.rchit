@@ -71,6 +71,8 @@ layout(set = 1, binding = 9) readonly buffer TileLightBuffer {
     uint data[];
 } tileLightBuffer;
 
+#include "../util/vertex_fetch.glsl"
+
 const int TILE_SIZE = 16;
 const int MAX_LIGHTS_PER_TILE = 512;
 
@@ -453,10 +455,14 @@ void main() {
     uint i1 = indexBuffer.indices[indexBaseID + 1];
     uint i2 = indexBuffer.indices[indexBaseID + 2];
 
-    VertexBuffer vertexBuffer = VertexBuffer(vertexBufferAddrs.addrs[blasOffset + geometryID]);
-    PBRTriangle v0 = vertexBuffer.vertices[i0];
-    PBRTriangle v1 = vertexBuffer.vertices[i1];
-    PBRTriangle v2 = vertexBuffer.vertices[i2];
+    // Vertex fetch via UnpackedVertex abstraction (format switching ready for future use)
+    UnpackedVertex v0, v1, v2;
+    {
+        VertexBuffer vb = VertexBuffer(vertexBufferAddrs.addrs[blasOffset + geometryID]);
+        v0 = unpackFullVertex(vb.vertices[i0]);
+        v1 = unpackFullVertex(vb.vertices[i1]);
+        v2 = unpackFullVertex(vb.vertices[i2]);
+    }
 
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     // Compute world-space hit position from ray parameters instead of vertex buffer positions.
@@ -467,7 +473,7 @@ void main() {
     bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
     vec3 colorLayer;
     if (useColorLayer) {
-        colorLayer = (baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer).rgb;
+        colorLayer = baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer;
     } else {
         colorLayer = vec3(1.0);
     }
@@ -489,6 +495,17 @@ void main() {
     vec3 rawAlbedoLinear = vec3(1.0); // raw albedo before tinting, for texture roughness derivation
     if (useTexture) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
+
+        // Greedy-merged quads: tile UVs back into sprite bounds (stored in repurposed vertex fields)
+        if ((v0.flags & PBR_FLAG_GREEDY_MERGED) != 0u) {
+            vec2 spriteMin = v0.glintUV;
+            vec2 spriteSize = vec2(uintBitsToFloat(v0.overlayPacked), uintBitsToFloat(v0.lightPacked));
+            textureUV = mod(textureUV - spriteMin, spriteSize) + spriteMin;
+            // Clamp inward by half-texel to prevent bilinear filter bleeding across atlas sprite edges
+            float htU = 0.5 / float(textureSize(textures[nonuniformEXT(textureID)], 0).x);
+            float htV = 0.5 / float(textureSize(textures[nonuniformEXT(textureID)], 0).y);
+            textureUV = clamp(textureUV, spriteMin + vec2(htU, htV), spriteMin + spriteSize - vec2(htU, htV));
+        }
 
         // Tile boundaries from vertex UVs (used by POM and AutoPBR neighbor clamping)
         uvMin = min(min(v0.textureUV, v1.textureUV), v2.textureUV);

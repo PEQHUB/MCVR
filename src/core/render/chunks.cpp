@@ -2,6 +2,7 @@
 
 #include "core/render/buffers.hpp"
 #include "core/render/crash_ring_buffer.hpp"
+#include "core/render/greedy_mesher.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/tessellator.hpp"
@@ -16,6 +17,61 @@
 #include <iostream>
 #include <map>
 #include <set>
+
+#include <glm/gtc/packing.hpp>
+
+// Convert full PBRTriangle vertices to compact 32-byte format.
+// Drops norm, postBase, lightPacked, glintUV/glintTexture, overlayPacked.
+// Compresses colorLayer to RGBA8, albedoEmission to fp16.
+static std::vector<vk::VertexFormat::PBRTriangleCompact>
+packCompactVertices(const std::vector<vk::VertexFormat::PBRTriangle> &src) {
+    std::vector<vk::VertexFormat::PBRTriangleCompact> dst(src.size());
+    for (size_t j = 0; j < src.size(); j++) {
+        auto &s = src[j];
+        auto &d = dst[j];
+        d.pos = s.pos;
+        // packed0: flags (bits 0-10) | vivid flag (bit 11) | textureID (bits 16-31)
+        // Clear USE_GLINT and USE_OVERLAY — compact format zeros those data fields,
+        // so leaving the flags set would cause the shader to sample garbage.
+        uint32_t flags = s.flags & 0x7FFu; // preserve bits 0-10
+        flags &= ~(vk::VertexFormat::PBR_FLAG_USE_GLINT | vk::VertexFormat::PBR_FLAG_USE_OVERLAY);
+        if (s.emissiveBlockType & 0x10000u) flags |= vk::VertexFormat::PBR_FLAG_COMPACT_VIVID;
+        d.packed0 = flags | ((s.textureID & 0xFFFFu) << 16);
+        d.textureUV = s.textureUV;
+        // colorLayer vec4 → RGBA8
+        uint8_t r = static_cast<uint8_t>(glm::clamp(s.colorLayer.r * 255.0f, 0.0f, 255.0f));
+        uint8_t g = static_cast<uint8_t>(glm::clamp(s.colorLayer.g * 255.0f, 0.0f, 255.0f));
+        uint8_t b = static_cast<uint8_t>(glm::clamp(s.colorLayer.b * 255.0f, 0.0f, 255.0f));
+        uint8_t a = static_cast<uint8_t>(glm::clamp(s.colorLayer.a * 255.0f, 0.0f, 255.0f));
+        d.colorPacked = uint32_t(r) | (uint32_t(g) << 8) | (uint32_t(b) << 16) | (uint32_t(a) << 24);
+        // packed1: albedoEmission as fp16 (lower 16) | emissiveBlockType bits 0-15 (upper 16)
+        uint32_t halfEmission = glm::packHalf2x16(glm::vec2(s.albedoEmission, 0.0f)) & 0xFFFFu;
+        d.packed1 = halfEmission | ((s.emissiveBlockType & 0xFFFFu) << 16);
+    }
+    return dst;
+}
+
+// Convert full PBRTriangle vertices to lossless 64-byte format.
+// Drops only dead fields: norm, postBase, lightPacked.
+// All shader-read fields preserved at full precision — bit-identical output.
+static std::vector<vk::VertexFormat::PBRTriangleLossless>
+packLosslessVertices(const std::vector<vk::VertexFormat::PBRTriangle> &src) {
+    std::vector<vk::VertexFormat::PBRTriangleLossless> dst(src.size());
+    for (size_t j = 0; j < src.size(); j++) {
+        auto &s = src[j];
+        auto &d = dst[j];
+        d.pos = s.pos;
+        d.flags = s.flags;
+        d.colorLayer = s.colorLayer;
+        d.textureUV = s.textureUV;
+        d.glintUV = s.glintUV;
+        d.albedoEmission = s.albedoEmission;
+        d.emissiveBlockType = s.emissiveBlockType;
+        d.textureID_glint = (s.textureID & 0xFFFFu) | ((s.glintTexture & 0xFFFFu) << 16);
+        d.overlayPacked = s.overlayPacked;
+    }
+    return dst;
+}
 
 ChunkBuildData::ChunkBuildData(int64_t id,
                                int x,
@@ -68,6 +124,20 @@ void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 camer
 #endif
 
     ommGeometryData.resize(geometryCount);
+
+    // Greedy meshing: merge coplanar block faces for WORLD_SOLID (50-70% triangle reduction)
+    if (Renderer::options.greedyMeshingEnabled) {
+        for (int i = 0; i < geometryCount; i++) {
+            if (geometryTypes[i] == World::WORLD_SOLID) {
+                auto merged = GreedyMesher::merge(vertices[i], indices[i]);
+                vertices[i] = std::move(merged.vertices);
+                indices[i] = std::move(merged.indices);
+            }
+        }
+    }
+
+    // Upload original 96-byte PBRTriangle (compact vertex format pending stride bug investigation)
+    vertexFormat = 0; // 0 = full PBRTriangle
 
     for (int i = 0; i < geometryCount; i++) {
         auto vertexBuffer =
@@ -1506,6 +1576,7 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
 
     if (chunkBuildData->version > blasVersion) {
         blasVersion = chunkBuildData->version;
+        vertexFormat = chunkBuildData->vertexFormat;
 
         gc.collect(blas);
         blas = chunkBuildData->blas;

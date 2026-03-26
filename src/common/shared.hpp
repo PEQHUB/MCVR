@@ -123,8 +123,11 @@ namespace VertexFormat {
     static constexpr uint32_t PBR_FLAG_USE_OVERLAY      = 1u << 3;
     static constexpr uint32_t PBR_FLAG_USE_GLINT        = 1u << 4;
     static constexpr uint32_t PBR_FLAG_USE_LIGHT        = 1u << 5;
+    static constexpr uint32_t PBR_FLAG_GREEDY_MERGED    = 1u << 6; // UV tiling needed (greedy-merged quad)
     static constexpr uint32_t PBR_FLAG_COORD_SHIFT      = 8u;
     static constexpr uint32_t PBR_FLAG_COORD_MASK       = 0x7u << 8u; // 3 bits
+    // Compact format: vivid flag relocated from emissiveBlockType bit 16 to flags bit 11
+    static constexpr uint32_t PBR_FLAG_COMPACT_VIVID    = 1u << 11;
 #else
     #define PBR_FLAG_USE_NORM        (1u << 0)
     #define PBR_FLAG_USE_COLOR_LAYER (1u << 1)
@@ -132,8 +135,10 @@ namespace VertexFormat {
     #define PBR_FLAG_USE_OVERLAY     (1u << 3)
     #define PBR_FLAG_USE_GLINT       (1u << 4)
     #define PBR_FLAG_USE_LIGHT       (1u << 5)
+    #define PBR_FLAG_GREEDY_MERGED   (1u << 6)
     #define PBR_FLAG_COORD_SHIFT     8u
     #define PBR_FLAG_COORD_MASK      (0x7u << 8u)
+    #define PBR_FLAG_COMPACT_VIVID   (1u << 11)
 #endif
 
     // 96 bytes per vertex, std430 aligned (6 x vec4)
@@ -169,6 +174,55 @@ namespace VertexFormat {
     static_assert(offsetof(PBRTriangle, textureID) == 80, "textureID offset mismatch");
     static_assert(offsetof(PBRTriangle, overlayPacked) == 88, "overlayPacked offset mismatch");
     static_assert(offsetof(PBRTriangle, lightPacked) == 92, "lightPacked offset mismatch");
+#endif
+
+    // 32 bytes per vertex, std430 aligned (2 x vec4)
+    // Compact format for world chunk geometry. Drops norm, postBase, lightPacked,
+    // glintUV, glintTexture, overlayPacked. Compresses colorLayer to RGBA8,
+    // albedoEmission to fp16. Entities keep full PBRTriangle.
+    struct PBRTriangleCompact {
+        T_VEC3 pos;            // 0..11   float32 world position (required by VK AS)
+        T_UINT packed0;        // 12..15  flags:12 | pad:4 | textureID:16
+                               //         flags bits 0-10 = original, bit 11 = vivid (from emissiveBlockType bit 16)
+        T_VEC2 textureUV;      // 16..23  float32 atlas UVs
+        T_UINT colorPacked;    // 24..27  R:8 | G:8 | B:8 | A:8
+        T_UINT packed1;        // 28..31  albedoEmission_half:16 | emissiveBlockType:16
+    };
+#ifdef __cplusplus
+    static_assert(sizeof(PBRTriangleCompact) == 32, "PBRTriangleCompact must be exactly 32 bytes");
+    static_assert(offsetof(PBRTriangleCompact, pos) == 0, "compact pos offset mismatch");
+    static_assert(offsetof(PBRTriangleCompact, packed0) == 12, "compact packed0 offset mismatch");
+    static_assert(offsetof(PBRTriangleCompact, textureUV) == 16, "compact textureUV offset mismatch");
+    static_assert(offsetof(PBRTriangleCompact, colorPacked) == 24, "compact colorPacked offset mismatch");
+    static_assert(offsetof(PBRTriangleCompact, packed1) == 28, "compact packed1 offset mismatch");
+#endif
+
+    // 64 bytes per vertex, std430 aligned (4 x vec4)
+    // Lossless format: drops only dead fields (norm, postBase, lightPacked).
+    // Every field the shader reads is at full precision — bit-identical output.
+    // Packs textureID + glintTexture into one uint32 (16 bits each).
+    struct PBRTriangleLossless {
+        T_VEC3 pos;                // 0..11   float32 world position
+        T_UINT flags;              // 12..15  full uint32 (all flag bits intact)
+        T_VEC4 colorLayer;         // 16..31  full vec4 (alpha preserved for glass)
+        T_VEC2 textureUV;          // 32..39  float32 atlas UVs
+        T_VEC2 glintUV;            // 40..47  float32 (enchantment shimmer preserved)
+        T_FLOAT albedoEmission;    // 48..51  float32 (full precision, area lights exact)
+        T_UINT emissiveBlockType;  // 52..55  full uint32 (vivid bit 16 in place)
+        T_UINT textureID_glint;    // 56..59  textureID:16 | glintTexture:16
+        T_UINT overlayPacked;      // 60..63  full uint32 (mining cracks preserved)
+    };
+#ifdef __cplusplus
+    static_assert(sizeof(PBRTriangleLossless) == 64, "PBRTriangleLossless must be exactly 64 bytes");
+    static_assert(offsetof(PBRTriangleLossless, pos) == 0, "lossless pos offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, flags) == 12, "lossless flags offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, colorLayer) == 16, "lossless colorLayer offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, textureUV) == 32, "lossless textureUV offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, glintUV) == 40, "lossless glintUV offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, albedoEmission) == 48, "lossless albedoEmission offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, emissiveBlockType) == 52, "lossless emissiveBlockType offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, textureID_glint) == 56, "lossless textureID_glint offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, overlayPacked) == 60, "lossless overlayPacked offset mismatch");
 #endif
 #ifdef __cplusplus
 }; // namespace VertexFormat
@@ -359,13 +413,17 @@ namespace Data {
         T_VEC4 cloudLighting;
     };
 
-    // Hot path: 20 bytes per entry, read by every ray hit
+    // 36 bytes per entry, read by every ray hit
     struct TextureMapEntry {
         T_INT specular;
         T_INT normal;
         T_INT flag;
         T_INT properties;    // bit 0: has height map
         T_INT maskTexture;   // bindless index of R8_UNORM material class mask, -1 = none
+        T_FLOAT _reserved0;  // padding (sprite bounds moved to per-vertex data)
+        T_FLOAT _reserved1;
+        T_FLOAT _reserved2;
+        T_FLOAT _reserved3;
     };
 
 #ifdef __cplusplus
