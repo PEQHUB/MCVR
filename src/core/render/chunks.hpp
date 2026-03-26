@@ -75,6 +75,7 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
 
     std::shared_ptr<vk::BLAS> blas;
     std::shared_ptr<vk::BLASBuilder> blasBuilder;
+    std::shared_ptr<vk::BLAS> preCompactionBlas;  // kept alive until render thread GCs via Chunk1::enqueue()
 
     // DDA displacement: separate AABB BLAS (can't mix with triangle BLAS due to shadow stride=0).
     // Face data accessible via BDA in the intersection shader.

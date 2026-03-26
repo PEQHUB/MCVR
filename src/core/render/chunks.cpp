@@ -1148,7 +1148,6 @@ void ChunkBuildScheduler::blasThreadLoop() {
                         sizeof(VkDeviceSize), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
 
                     compactCmd->begin();
-                    auto &gc = framework->gc();
                     uint32_t qi = 0;
                     for (auto &cbd : front.chunks) {
                         if (!cbd->blas || qi >= front.compactionCount) continue;
@@ -1166,7 +1165,9 @@ void ChunkBuildScheduler::blasThreadLoop() {
                             VkCopyAccelerationStructureInfoKHR cp{VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR};
                             cp.src = cbd->blas->blas(); cp.dst = as; cp.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
                             vkCmdCopyAccelerationStructureKHR(compactCmd->vkCommandBuffer(), &cp);
-                            gc.collect(cbd->blas);
+                            // Keep old BLAS alive — render thread's TLAS may still reference it.
+                            // Chunk1::enqueue() will GC it at the correct time.
+                            cbd->preCompactionBlas = cbd->blas;
                             cbd->blas = vk::BLAS::create(device, as, buf);
                         }
                         totalOrig += origSz; totalComp += compSz; totalN++;
@@ -1401,6 +1402,8 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
         vertexFormat = chunkBuildData->vertexFormat;
 
         gc.collect(blas);
+        // GC the pre-compaction BLAS (from BLAS thread) — GPU TLAS may still reference it
+        if (chunkBuildData->preCompactionBlas) gc.collect(chunkBuildData->preCompactionBlas);
         blas = chunkBuildData->blas;
         blasGeneration++;
 
@@ -1413,6 +1416,7 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
             std::move(chunkBuildData->indexBuffers));
     } else {
         gc.collect(chunkBuildData->blas);
+        if (chunkBuildData->preCompactionBlas) gc.collect(chunkBuildData->preCompactionBlas);
         if (chunkBuildData->displacedBlas) gc.collect(chunkBuildData->displacedBlas);
         if (chunkBuildData->displacedFaceDataBuffer) gc.collect(chunkBuildData->displacedFaceDataBuffer);
 

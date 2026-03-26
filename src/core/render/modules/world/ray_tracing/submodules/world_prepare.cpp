@@ -445,20 +445,62 @@ void WorldPrepareContext::render() {
             }
         });
 
-        // Sequential merge: build instance + SBT data from cached metadata
-        // Pre-reserve based on previous frame count to avoid reallocation
-        uint32_t estInstances = prevTlasInstanceCount_ > 0 ? prevTlasInstanceCount_ * 2 : numChunks;
-        geometryTypes.reserve(estInstances * 3);
-        vertexBufferAddrs.reserve(estInstances * 3);
-        indexBufferAddrs.reserve(estInstances * 3);
-        lastVertexBufferAddrs.reserve(estInstances * 3);
-        lastIndexBufferAddrs.reserve(estInstances * 3);
-        lastObjToWorldMats.reserve(estInstances);
-        blasOffset.reserve(estInstances);
-
+        // Flatten visible chunks + collect far chunks for mega-BLAS
+        std::vector<int> allVisible;
         for (auto &local : locals) {
-            for (int idx : local.visibleNear) {
-                auto &cc = cachedChunks_[idx];
+            allVisible.insert(allVisible.end(), local.visibleNear.begin(), local.visibleNear.end());
+            for (auto &[mk, chunkIdx] : local.visibleFar) {
+                farChunksByMega[mk].push_back(chunkIdx);
+            }
+        }
+
+        // Prefix sums: compute exact offsets for every visible chunk (sequential, ~50µs)
+        uint32_t chunkVisCount = static_cast<uint32_t>(allVisible.size());
+        std::vector<uint32_t> prefixInst(chunkVisCount);   // instance index
+        std::vector<uint32_t> prefixGeo(chunkVisCount);    // geometry data offset
+        std::vector<uint32_t> prefixSbt(chunkVisCount);    // SBT group offset
+        uint32_t totalChunkInst = 0, totalChunkGeo = 0, totalChunkSbt = 0;
+
+        for (uint32_t vi = 0; vi < chunkVisCount; vi++) {
+            auto &cc = cachedChunks_[allVisible[vi]];
+            prefixInst[vi] = totalChunkInst;
+            prefixGeo[vi] = totalChunkGeo;
+            prefixSbt[vi] = totalChunkSbt;
+            uint32_t instForChunk = 1 + (cc.hasDisplaced ? 1 : 0);
+            totalChunkInst += instForChunk;
+            totalChunkGeo += cc.geometryCount + (cc.hasDisplaced ? 1 : 0); // +1 for displaced geo
+            totalChunkSbt += cc.geometryCount + instForChunk; // +instForChunk for SHADOW entries
+        }
+
+        // Pre-allocate all arrays to exact sizes (entity prefix already accumulated)
+        uint32_t chunkInstBase = blasIndex;
+        uint32_t chunkGeoBase = static_cast<uint32_t>(vertexBufferAddrs.size());
+        uint32_t chunkSbtBase = blasGroupAccu;
+        uint32_t chunkBlasBase = blasAccu;
+
+        instanceBuilder.instances.resize(chunkInstBase + totalChunkInst);
+        currBlasSnapshot.blases.resize(chunkInstBase + totalChunkInst);
+        currBlasSnapshot.generations.resize(chunkInstBase + totalChunkInst);
+        geometryTypes.resize(chunkSbtBase + totalChunkSbt);
+        vertexBufferAddrs.resize(chunkGeoBase + totalChunkGeo);
+        indexBufferAddrs.resize(chunkGeoBase + totalChunkGeo);
+        lastVertexBufferAddrs.resize(chunkGeoBase + totalChunkGeo, 0);
+        lastIndexBufferAddrs.resize(chunkGeoBase + totalChunkGeo, 0);
+        lastObjToWorldMats.resize(chunkInstBase + totalChunkInst);
+        blasOffset.resize(chunkInstBase + totalChunkInst);
+
+        // Parallel fill: each thread writes to pre-computed offsets (zero contention)
+        Renderer::threadPool.parallelFor(numThreads, [&](uint32_t t) {
+            uint32_t start = t * chunkVisCount / numThreads;
+            uint32_t end = (t + 1) * chunkVisCount / numThreads;
+
+            for (uint32_t vi = start; vi < end; vi++) {
+                auto &cc = cachedChunks_[allVisible[vi]];
+                uint32_t instIdx = chunkInstBase + prefixInst[vi];
+                uint32_t geoIdx = chunkGeoBase + prefixGeo[vi];
+                uint32_t sbtIdx = chunkSbtBase + prefixSbt[vi];
+                // blasAccu for this chunk = chunkBlasBase + prefixGeo[vi] (geometry data is 1:1 with blasAccu)
+                uint32_t myBlasAccu = chunkBlasBase + prefixGeo[vi];
 
                 VkTransformMatrixKHR transform = {
                     1, 0, 0, static_cast<float>(static_cast<double>(cc.x) - cameraPos.x),
@@ -466,51 +508,59 @@ void WorldPrepareContext::render() {
                     0, 0, 1, static_cast<float>(static_cast<double>(cc.z) - cameraPos.z),
                 };
 
-                instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0, cc.blas);
-                currBlasSnapshot.blases.push_back(cc.blas);
-                currBlasSnapshot.generations.push_back(cc.blasGeneration);
+                // Instance
+                instanceBuilder.instances[instIdx] = std::make_tuple(
+                    transform, instIdx, uint32_t(0x01), sbtIdx,
+                    VkGeometryInstanceFlagsKHR(0), cc.blas);
+                currBlasSnapshot.blases[instIdx] = cc.blas;
+                currBlasSnapshot.generations[instIdx] = cc.blasGeneration;
 
-                geometryTypes.insert(geometryTypes.end(), cc.geoTypes.begin(), cc.geoTypes.end());
-                for (uint32_t j = 0; j < cc.geometryCount; j++) {
-                    vertexBufferAddrs.push_back(cc.vertBufAddrs[j]);
-                    indexBufferAddrs.push_back(cc.idxBufAddrs[j]);
-                    lastVertexBufferAddrs.push_back(0);
-                    lastIndexBufferAddrs.push_back(0);
+                // SBT geometry types: SHADOW + chunk types
+                geometryTypes[sbtIdx] = World::GeometryTypes::SHADOW;
+                for (uint32_t g = 0; g < cc.geometryCount; g++) {
+                    geometryTypes[sbtIdx + 1 + g] = cc.geoTypes[g + 1]; // skip cached SHADOW
                 }
 
-                glm::mat4 lastObjToWorldMat = glm::transpose(glm::mat4(
+                // Buffer addresses
+                for (uint32_t g = 0; g < cc.geometryCount; g++) {
+                    vertexBufferAddrs[geoIdx + g] = cc.vertBufAddrs[g];
+                    indexBufferAddrs[geoIdx + g] = cc.idxBufAddrs[g];
+                }
+
+                // Per-instance metadata
+                glm::mat4 mat = glm::transpose(glm::mat4(
                     glm::vec4(1, 0, 0, static_cast<float>(static_cast<double>(cc.x) - cameraPos.x)),
                     glm::vec4(0, 1, 0, static_cast<float>(static_cast<double>(cc.y) - cameraPos.y)),
                     glm::vec4(0, 0, 1, static_cast<float>(static_cast<double>(cc.z) - cameraPos.z)),
                     glm::vec4(0, 0, 0, 1)));
-                lastObjToWorldMats.push_back(lastObjToWorldMat);
+                lastObjToWorldMats[instIdx] = mat;
+                blasOffset[instIdx] = myBlasAccu;
 
-                blasOffset.push_back(blasAccu);
-                blasAccu += cc.geometryCount;
-                blasGroupAccu += cc.geometryCount + 1;
-                blasIndex++;
-
+                // DDA displacement instance
                 if (cc.hasDisplaced) {
-                    instanceBuilder.defineInstance(transform, blasIndex, 0x01, blasGroupAccu, 0, cc.displacedBlas);
-                    currBlasSnapshot.blases.push_back(cc.displacedBlas);
-                    currBlasSnapshot.generations.push_back(cc.blasGeneration);
-                    geometryTypes.push_back(World::GeometryTypes::WORLD_DISPLACED);
-                    vertexBufferAddrs.push_back(cc.displacedFaceDataBuffer->bufferAddress());
-                    indexBufferAddrs.push_back(0);
-                    lastVertexBufferAddrs.push_back(0);
-                    lastIndexBufferAddrs.push_back(0);
-                    lastObjToWorldMats.push_back(lastObjToWorldMat);
-                    blasOffset.push_back(blasAccu);
-                    blasAccu += 1;
-                    blasGroupAccu += 1;
-                    blasIndex++;
+                    uint32_t dInstIdx = instIdx + 1;
+                    uint32_t dGeoIdx = geoIdx + cc.geometryCount;
+                    uint32_t dSbtIdx = sbtIdx + cc.geometryCount + 1;
+                    uint32_t dBlasAccu = myBlasAccu + cc.geometryCount;
+
+                    instanceBuilder.instances[dInstIdx] = std::make_tuple(
+                        transform, dInstIdx, uint32_t(0x01), dSbtIdx,
+                        VkGeometryInstanceFlagsKHR(0), cc.displacedBlas);
+                    currBlasSnapshot.blases[dInstIdx] = cc.displacedBlas;
+                    currBlasSnapshot.generations[dInstIdx] = cc.blasGeneration;
+                    geometryTypes[dSbtIdx] = World::GeometryTypes::WORLD_DISPLACED;
+                    vertexBufferAddrs[dGeoIdx] = cc.displacedFaceDataBuffer->bufferAddress();
+                    indexBufferAddrs[dGeoIdx] = 0;
+                    lastObjToWorldMats[dInstIdx] = mat;
+                    blasOffset[dInstIdx] = dBlasAccu;
                 }
             }
-            // Collect far chunks for mega-BLAS
-            for (auto &[mk, chunkIdx] : local.visibleFar) {
-                farChunksByMega[mk].push_back(chunkIdx);
-            }
-        }
+        });
+
+        // Update accumulators for mega-BLAS pass that follows
+        blasIndex += totalChunkInst;
+        blasAccu += totalChunkGeo;
+        blasGroupAccu += totalChunkSbt;
 
         // Mega-BLAS: build merged BLASes for far chunk groups
         // Each mega-chunk group gets a single TLAS instance with all sub-chunk geometries.
