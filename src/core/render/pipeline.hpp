@@ -117,6 +117,9 @@ class Pipeline : public SharedObject<Pipeline> {
 
     bool needRecreate = false;
 
+    // Read-only access to existing pipeline contexts (does NOT create new ones).
+    std::vector<std::shared_ptr<PipelineContext>> &existingContexts() { return *contexts_; }
+
   private:
     std::weak_ptr<Framework> framework_;
 

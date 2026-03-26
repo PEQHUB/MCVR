@@ -105,6 +105,19 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
 
     WorldPrepareContext(std::shared_ptr<FrameworkContext> frameworkContext, std::shared_ptr<WorldPrepare> worldprepare);
 
+    // Called after vkDeviceWaitIdle during render distance change.
+    // Releases all acceleration structure state so the next frame does a clean rebuild.
+    void resetChunkState() {
+        tlas = nullptr;
+        tlasBuilder = nullptr;
+        prevBlasSnapshot_ = {};
+        prevTlasInstanceCount_ = 0;
+        tlasScratchBuffer_ = nullptr;
+        tlasScratchSize_ = 0;
+        megaChunkCache_.clear();
+        cachedChunks_.clear();
+    }
+
     void uploadBuffer(std::vector<uint32_t> &blasOffsets,
                       std::vector<uint64_t> &vertexBufferAddrs,
                       std::vector<uint64_t> &indexBufferAddrs,

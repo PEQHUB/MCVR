@@ -3,10 +3,13 @@
 #include "core/render/buffers.hpp"
 #include "core/render/crash_ring_buffer.hpp"
 #include "core/render/greedy_mesher.hpp"
+#include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/tessellator.hpp"
 #include "core/render/textures.hpp"
+#include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
+#include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
 #ifdef MCVR_ENABLE_OMM
 #include "core/render/omm_baker.hpp"
 #endif
@@ -1482,11 +1485,28 @@ Chunks::Chunks(std::shared_ptr<Framework> framework) {
 void Chunks::reset(uint32_t numChunks) {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
 
+    // 1. Stop BLAS builder thread — drains in-flight GPU work on secondary queue
+    if (chunkBuildScheduler_) {
+        chunkBuildScheduler_->waitAllFinish();
+        chunkBuildScheduler_.reset();
+    }
+
     auto framework = Renderer::instance().framework();
     auto device = framework->device();
     auto vma = framework->vma();
-    vkQueueWaitIdle(device->mainVkQueue());
-    vkQueueWaitIdle(device->secondaryQueue());
+
+    // 2. Wait for ALL GPU work across all queues and all frames in flight.
+    //    After this, no command buffer references old BLASes or vertex buffers.
+    vkDeviceWaitIdle(device->vkDevice());
+
+    // GC flush intentionally omitted — shared_ptrs naturally prevent use-after-free,
+    // and the frame-indexed ring will clean up when each slot is reused.
+
+    // Note: prevBlasSnapshot_ in WorldPrepareContexts still holds shared_ptrs to old
+    // BLASes — that's fine, it keeps them alive. The stale cachedChunks_ will be resized
+    // on the next render() call when chunk1s.size() changes. The TLAS UPDATE check will
+    // fail (instance count changed) and force a full BUILD. No explicit cleanup needed
+    // because vkDeviceWaitIdle above guarantees no GPU work references the old data.
 
     int size = Renderer::instance().framework()->swapchain()->imageCount();
 
@@ -1585,6 +1605,10 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
 
     std::unique_lock<std::recursive_mutex> lock(mutex_);
 
+    // Bounds check under lock: after render distance change, stale Java background
+    // threads may submit builds with old chunk indices that exceed the resized array.
+    if (task.id < 0 || task.id >= static_cast<int64_t>(chunks_.size())) return;
+
     std::shared_ptr<ChunkBuildData> chunkBuildData = ChunkBuildData::create(
         task.id, task.x, task.y, task.z, chunks_[task.id]->latestVersion++, allVertexCount, allIndexCount,
         task.geometryCount, std::move(geometryTypes), std::move(vertices), std::move(indices));
@@ -1601,6 +1625,7 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
 
 bool Chunks::isChunkReady(int64_t id) {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
+    if (id < 0 || id >= static_cast<int64_t>(chunks_.size())) return false;
     auto chunkRenderData = chunks_[id]->tryGetValid();
     return chunkRenderData->blas != nullptr;
 }
