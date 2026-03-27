@@ -64,34 +64,30 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
-    // Create NEW buffers each frame — the GC collects old ones after the GPU is done.
-    // Reusing buffers across frames causes write-after-read hazards since the previous
-    // frame's RT dispatch may still be reading the SSBO when the current frame overwrites it.
-    auto &gc = framework->gc();
-    if (blasOffsetsBuffer) gc.collect(blasOffsetsBuffer);
-    if (vertexBufferAddr) gc.collect(vertexBufferAddr);
-    if (indexBufferAddr) gc.collect(indexBufferAddr);
-    if (lastVertexBufferAddr) gc.collect(lastVertexBufferAddr);
-    if (lastIndexBufferAddr) gc.collect(lastIndexBufferAddr);
-    if (lastObjToWorldMat) gc.collect(lastObjToWorldMat);
+    // Persistent per-context buffers: reuse when size matches, reallocate when size changes.
+    // Safe because acquireContext() waits for this context's previous GPU work before reuse.
+    // Exact-size: no over-allocation, no stale BDA addresses in buffer tail.
+    auto ensureBuffer = [&](std::shared_ptr<vk::DeviceLocalBuffer> &buf,
+                            VkDeviceSize &prevSize, const void *data, VkDeviceSize dataSize) {
+        if (!buf || prevSize != dataSize) {
+            buf = vk::DeviceLocalBuffer::create(vma, device, true, dataSize, metaUsage);
+            prevSize = dataSize;
+        }
+        buf->uploadToStagingBuffer(const_cast<void*>(data));
+    };
 
-    blasOffsetsBuffer = vk::DeviceLocalBuffer::create(vma, device, true, blasOffsets.size() * sizeof(uint32_t), metaUsage);
-    blasOffsetsBuffer->uploadToStagingBuffer(blasOffsets.data());
-
-    vertexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, true, vertexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
-    vertexBufferAddr->uploadToStagingBuffer(vertexBufferAddrs.data());
-
-    indexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, true, indexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
-    indexBufferAddr->uploadToStagingBuffer(indexBufferAddrs.data());
-
-    lastVertexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, true, lastVertexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
-    lastVertexBufferAddr->uploadToStagingBuffer(lastVertexBufferAddrs.data());
-
-    lastIndexBufferAddr = vk::DeviceLocalBuffer::create(vma, device, true, lastIndexBufferAddrs.size() * sizeof(uint64_t), metaUsage);
-    lastIndexBufferAddr->uploadToStagingBuffer(lastIndexBufferAddrs.data());
-
-    lastObjToWorldMat = vk::DeviceLocalBuffer::create(vma, device, true, lastObjToWorldMats.size() * sizeof(glm::mat4), metaUsage);
-    lastObjToWorldMat->uploadToStagingBuffer(lastObjToWorldMats.data());
+    ensureBuffer(blasOffsetsBuffer, blasOffsetsCapacity_,
+                 blasOffsets.data(), blasOffsets.size() * sizeof(uint32_t));
+    ensureBuffer(vertexBufferAddr, vertexBufferAddrCapacity_,
+                 vertexBufferAddrs.data(), vertexBufferAddrs.size() * sizeof(uint64_t));
+    ensureBuffer(indexBufferAddr, indexBufferAddrCapacity_,
+                 indexBufferAddrs.data(), indexBufferAddrs.size() * sizeof(uint64_t));
+    ensureBuffer(lastVertexBufferAddr, lastVertexBufferAddrCapacity_,
+                 lastVertexBufferAddrs.data(), lastVertexBufferAddrs.size() * sizeof(uint64_t));
+    ensureBuffer(lastIndexBufferAddr, lastIndexBufferAddrCapacity_,
+                 lastIndexBufferAddrs.data(), lastIndexBufferAddrs.size() * sizeof(uint64_t));
+    ensureBuffer(lastObjToWorldMat, lastObjToWorldMatCapacity_,
+                 lastObjToWorldMats.data(), lastObjToWorldMats.size() * sizeof(glm::mat4));
 
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> rayTracingMetaData{{
         blasOffsetsBuffer,
@@ -425,6 +421,8 @@ void WorldPrepareContext::render() {
                         cc.vertBufAddrs.push_back((*chunk1->vertexBuffers)[j]->bufferAddress());
                         cc.idxBufAddrs.push_back((*chunk1->indexBuffers)[j]->bufferAddress());
                     }
+                    cc.vertexBuffers = chunk1->vertexBuffers;
+                    cc.indexBuffers = chunk1->indexBuffers;
                     cc.displacedBlas = chunk1->displacedBlas;
                     cc.displacedFaceDataBuffer = chunk1->displacedFaceDataBuffer;
                     cc.hasDisplaced = chunk1->displacedBlas && chunk1->displacedFaceDataBuffer;
@@ -481,6 +479,8 @@ void WorldPrepareContext::render() {
         instanceBuilder.instances.resize(chunkInstBase + totalChunkInst);
         currBlasSnapshot.blases.resize(chunkInstBase + totalChunkInst);
         currBlasSnapshot.generations.resize(chunkInstBase + totalChunkInst);
+        currBlasSnapshot.vertexBuffers.resize(chunkInstBase + totalChunkInst);
+        currBlasSnapshot.indexBuffers.resize(chunkInstBase + totalChunkInst);
         geometryTypes.resize(chunkSbtBase + totalChunkSbt);
         vertexBufferAddrs.resize(chunkGeoBase + totalChunkGeo);
         indexBufferAddrs.resize(chunkGeoBase + totalChunkGeo);
@@ -514,6 +514,8 @@ void WorldPrepareContext::render() {
                     VkGeometryInstanceFlagsKHR(0), cc.blas);
                 currBlasSnapshot.blases[instIdx] = cc.blas;
                 currBlasSnapshot.generations[instIdx] = cc.blasGeneration;
+                currBlasSnapshot.vertexBuffers[instIdx] = cc.vertexBuffers;
+                currBlasSnapshot.indexBuffers[instIdx] = cc.indexBuffers;
 
                 // SBT geometry types: SHADOW + chunk types
                 geometryTypes[sbtIdx] = World::GeometryTypes::SHADOW;

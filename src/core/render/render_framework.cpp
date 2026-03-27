@@ -1380,7 +1380,7 @@ GarbageCollector::GarbageCollector(std::shared_ptr<Framework> framework) : frame
     // queue (chunk BLAS builds) time to complete before resources are freed.
     // With imageCount=2-3, resources can be destroyed while the GPU still references
     // them from in-flight BLAS/TLAS builds, causing WRITE_AFTER_DESTROY at address 0x0.
-    uint32_t gcSlots = std::max(framework->swapchain_->imageCount() * 3, 8u);
+    uint32_t gcSlots = std::max(framework->swapchain_->imageCount() * 3, 32u);
     collectors_.resize(gcSlots);
 }
 

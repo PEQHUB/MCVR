@@ -53,6 +53,9 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         std::vector<std::shared_ptr<vk::BLAS>> blases;
         std::vector<uint64_t> generations;  // Chunk1::blasGeneration per instance
         uint32_t instanceCount = 0;
+        // Keep vertex/index buffers alive — RT shader reads them via BDA from SSBO
+        std::vector<std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>> vertexBuffers;
+        std::vector<std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>> indexBuffers;
     };
     TlasBlasSnapshot prevBlasSnapshot_;
 
@@ -90,16 +93,27 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         std::vector<World::GeometryTypes> geoTypes; // SHADOW prefix + chunk types
         std::vector<uint64_t> vertBufAddrs;
         std::vector<uint64_t> idxBufAddrs;
+        std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
+        std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
         bool hasDisplaced = false;
     };
     std::vector<CachedChunkData> cachedChunks_;
 
+    // Persistent per-context SSBO buffers — reused across frames, grow-only.
+    // Safe because acquireContext() waits for previous GPU work on this context before reuse.
     std::shared_ptr<vk::DeviceLocalBuffer> blasOffsetsBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> vertexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> indexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastVertexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastIndexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> lastObjToWorldMat;
+    VkDeviceSize blasOffsetsCapacity_ = 0;
+    VkDeviceSize vertexBufferAddrCapacity_ = 0;
+    VkDeviceSize indexBufferAddrCapacity_ = 0;
+    VkDeviceSize lastVertexBufferAddrCapacity_ = 0;
+    VkDeviceSize lastIndexBufferAddrCapacity_ = 0;
+    VkDeviceSize lastObjToWorldMatCapacity_ = 0;
+
     std::shared_ptr<vk::DeviceLocalBuffer> areaLightBuffer;
     int areaLightCount = 0;
 
@@ -116,6 +130,12 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         tlasScratchSize_ = 0;
         megaChunkCache_.clear();
         cachedChunks_.clear();
+        blasOffsetsBuffer = nullptr; blasOffsetsCapacity_ = 0;
+        vertexBufferAddr = nullptr; vertexBufferAddrCapacity_ = 0;
+        indexBufferAddr = nullptr; indexBufferAddrCapacity_ = 0;
+        lastVertexBufferAddr = nullptr; lastVertexBufferAddrCapacity_ = 0;
+        lastIndexBufferAddr = nullptr; lastIndexBufferAddrCapacity_ = 0;
+        lastObjToWorldMat = nullptr; lastObjToWorldMatCapacity_ = 0;
     }
 
     void uploadBuffer(std::vector<uint32_t> &blasOffsets,
