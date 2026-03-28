@@ -32,6 +32,22 @@ struct ChunkBuildTask {
     bool isImportant;
 };
 
+/// Block-state-based chunk build task (Phase 2: C++ meshing).
+/// Sends ~12KB of block state data instead of ~200-500KB of pre-meshed vertices.
+struct ChunkBuildTaskV2 {
+    int x, y, z;
+    int64_t id;
+    uint32_t blockStates[4096];    // palette-decoded global state IDs
+    uint16_t biomes[64];           // 4x4x4 biome grid
+    uint32_t neighborStates[6][256]; // neighbor block states per face
+    uint32_t blockAtlasTextureId;  // GL texture ID for block atlas
+    bool isImportant;
+    // Per-section biome colors (packed 0x00RRGGBB) for shader-side tinting
+    uint32_t biomeGrassColor;
+    uint32_t biomeFoliageColor;
+    uint32_t biomeWaterColor;
+};
+
 struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     int64_t id;
     int x, y, z;
@@ -72,6 +88,11 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
         bool isOpaqueOMM = false;                   // WORLD_SOLID all-opaque shortcut
     };
     std::vector<OMMCpuResult> ommCpuResults;
+
+    // Per-section biome colors for shader-side tinting (packed 0x00RRGGBB)
+    uint32_t biomeGrassColor = 0x91BD59;
+    uint32_t biomeFoliageColor = 0x77AB2F;
+    uint32_t biomeWaterColor = 0x3F76E4;
 
     std::shared_ptr<vk::BLAS> blas;
     std::shared_ptr<vk::BLASBuilder> blasBuilder;
@@ -156,6 +177,12 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
 
     uint32_t chunkBuildingBatchSize();
 
+    // Queue depth for Java-side adaptive throttling
+    uint32_t getInputQueueSize() {
+        std::lock_guard<std::mutex> lock(inputMtx_);
+        return static_cast<uint32_t>(inputQueue_.size());
+    }
+
   private:
     std::vector<std::shared_ptr<Chunk1>> &chunks_;
     std::vector<std::shared_ptr<ChunkBuildData>> &chunkBuildDatas_;
@@ -190,6 +217,7 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
         std::vector<std::shared_ptr<ChunkBuildData>> chunks;
         VkQueryPool compactionQP = VK_NULL_HANDLE;
         uint32_t compactionCount = 0;
+        bool isCompaction = false; // true = compaction phase, false = build phase
     };
     std::deque<InFlightBatch> inFlight_;
 
@@ -246,6 +274,11 @@ struct Chunk1 : public SharedObject<Chunk1> {
 
     std::vector<ChunkLightEntry> lightSources;
 
+    // Per-section biome colors for shader-side tinting (packed 0x00RRGGBB)
+    uint32_t biomeGrassColor = 0x91BD59;    // default plains green
+    uint32_t biomeFoliageColor = 0x77AB2F;  // default foliage
+    uint32_t biomeWaterColor = 0x3F76E4;    // default water blue
+
     float buildFactor(std::chrono::steady_clock::time_point currentTime, glm::vec3 cameraPos);
 
     void enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData);
@@ -268,8 +301,10 @@ class Chunks : public SharedObject<Chunks> {
     void resetFrame();
     void invalidateChunk(int id);
     void queueChunkBuild(ChunkBuildTask task);
+    void queueBlockStateBuild(ChunkBuildTaskV2 task);
 
     bool isChunkReady(int64_t id);
+    uint32_t getInputQueueSize();
 
     void setChunkLights(int64_t id, const std::vector<ChunkLightEntry> &lights);
     void close();

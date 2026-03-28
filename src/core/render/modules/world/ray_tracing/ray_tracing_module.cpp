@@ -408,6 +408,30 @@ void RayTracingModule::initDescriptorTables() {
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_FRAGMENT_BIT,
                 })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 3, // block sprite albedo sampler2DArray
+                    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                                  VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
+                                  VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 4, // block sprite specular sampler2DArray
+                    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                                  VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
+                                  VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 5, // block sprite normal sampler2DArray
+                    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                                  VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
+                                  VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
+                })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
                 .beginDescriptorLayoutSet() // set 1
@@ -499,6 +523,14 @@ void RayTracingModule::initDescriptorTables() {
                     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     .descriptorCount = 1,
                     .stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 13, // binding 13: SpriteRegistry SSBO (texture array metadata)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                                  VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
+                                  VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
                 })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
@@ -1550,10 +1582,19 @@ void RayTracingModuleContext::render() {
     if (module->tileLightBuffer_) {
         bufferBindings.push_back({module->tileLightBuffer_, 1, 9});
     }
+    // Per-section biome colors for shader-side tinting
+    if (worldPrepareContext->biomeColorBuffer) {
+        bufferBindings.push_back({worldPrepareContext->biomeColorBuffer, 1, 10});
+    }
     // Always bind Material Class Mapping buffer (may be real data or dummy)
     auto mcBuffer = buffers->materialClassMappingBuffer();
     if (mcBuffer) {
         bufferBindings.push_back({mcBuffer, 1, 11});
+    }
+    // SpriteRegistry SSBO for texture array metadata
+    auto spriteRegBuffer = Renderer::spriteRegistry.getBuffer();
+    if (spriteRegBuffer) {
+        bufferBindings.push_back({spriteRegBuffer, 1, 13});
     }
     // Blue noise buffers (already uploaded at init time via queueImportantWorldUpload)
     if (module->blueNoise_) {
@@ -1594,6 +1635,36 @@ void RayTracingModuleContext::render() {
         }
     }
     rayTracingDescriptorTable->bindImages(frameImageBindings);
+
+    // Bind block sprite texture arrays (set 0, bindings 3-5)
+    auto& texArrayMgr = Renderer::textureArrayManager;
+    // Flush any pending texture array uploads (staged from Java thread, executed here on render thread)
+    // Uses selective mipgen: only regenerates mipmaps for layers that were updated
+    // (initial load = all layers, per-tick animation = only changed animated sprites)
+    if (texArrayMgr.hasPendingUploads()) {
+        auto vma = framework->vma();
+        auto device = framework->device();
+        texArrayMgr.flushAndMipgenDirtyLayers(0, vma, device, worldCommandBuffer);
+    }
+    // Array ID 0 = block albedo (created in finalizeTextureArrays)
+    auto* albedoArray = texArrayMgr.getArray(0);
+    if (albedoArray && albedoArray->image) {
+        rayTracingDescriptorTable->bindSamplerImage(
+            albedoArray->sampler, albedoArray->image,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 3, 0);
+    }
+    auto* specArray = texArrayMgr.getArray(1);
+    if (specArray && specArray->image) {
+        rayTracingDescriptorTable->bindSamplerImage(
+            specArray->sampler, specArray->image,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 4, 0);
+    }
+    auto* normArray = texArrayMgr.getArray(2);
+    if (normArray && normArray->image) {
+        rayTracingDescriptorTable->bindSamplerImage(
+            normArray->sampler, normArray->image,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 5, 0);
+    }
 
     bool accumulating = Renderer::options.offlineState == 2;
 

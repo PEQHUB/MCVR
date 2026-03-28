@@ -124,15 +124,7 @@ layout(set = 3, binding = 28, r16f)    uniform image2D gbufferShadingModelIdImag
 layout(set = 3, binding = 29, r16f)    uniform image2D gbufferMaterialIdImage;
 layout(set = 3, binding = 30, rgba32f) uniform image2D positionViewSpaceImage;
 
-layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer VertexBuffer {
-    PBRTriangle vertices[];
-}
-vertexBuffer;
-
-layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer IndexBuffer {
-    uint indices[];
-}
-indexBuffer;
+// VertexBuffer and IndexBuffer declared in vertex_fetch.glsl
 
 layout(push_constant) uniform PushConstant {
     int numRayBounces;
@@ -577,20 +569,17 @@ void main() {
             uint instanceID = mainRay.instanceIndex;
             uint geometryID = mainRay.geometryIndex;
 
-            uint blasOffset = blasOffsets.offsets[instanceID];
+            uint rawOffset = blasOffsets.offsets[instanceID];
+            uint vtxFormat = rawOffset >> 30u;
+            uint blasOffset = decodeBlasOffset(rawOffset);
 
             uint64_t lastIndexBufferAddr = lastIndexBufferAddrs.addrs[blasOffset + geometryID];
             uint64_t lastVertexBufferAddr = lastVertexBufferAddrs.addrs[blasOffset + geometryID];
             if (lastIndexBufferAddr > 0 && lastVertexBufferAddr > 0) {
-                IndexBuffer indexBuffer = IndexBuffer(lastIndexBufferAddr);
-                uint indexBaseID = 3 * mainRay.primitiveIndex;
-                uint i0 = indexBuffer.indices[indexBaseID];
-                uint i1 = indexBuffer.indices[indexBaseID + 1];
-                uint i2 = indexBuffer.indices[indexBaseID + 2];
-
                 vec3 baryCoords = mainRay.baryCoords;
-                VertexBuffer vb = VertexBuffer(lastVertexBufferAddr);
-                vec3 prevLocalPos = baryCoords.x * vb.vertices[i0].pos + baryCoords.y * vb.vertices[i1].pos + baryCoords.z * vb.vertices[i2].pos;
+                vec3 prevLocalPos;
+                fetchTrianglePositions(vtxFormat, lastVertexBufferAddr, lastIndexBufferAddr,
+                                       mainRay.primitiveIndex, baryCoords, prevLocalPos);
 
                 mat4 lastModelMat = lastObjToWorldMats.mat[instanceID];
                 vec3 lastModelRotLocal = mat3(lastModelMat) * prevLocalPos;

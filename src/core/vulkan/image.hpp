@@ -12,6 +12,7 @@ class Buffer;
 class CommandBuffer;
 
 size_t formatToByte(VkFormat format);
+bool formatIsBlockCompressed(VkFormat format);
 
 static VkImageSubresourceRange wholeColorSubresourceRange = {
     .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,

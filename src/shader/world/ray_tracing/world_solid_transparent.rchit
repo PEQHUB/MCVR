@@ -21,6 +21,7 @@
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
+#include "../util/sprite_fetch.glsl"
 #include "../util/pom.glsl"
 
 #include "../util/clouds.glsl"
@@ -71,6 +72,10 @@ layout(set = 1, binding = 9) readonly buffer TileLightBuffer {
     uint data[];
 } tileLightBuffer;
 
+layout(set = 1, binding = 10) readonly buffer BiomeColorBuffer {
+    uvec4 data[];  // .x=grass, .y=foliage, .z=water (packed 0x00RRGGBB)
+} biomeColors;
+
 #include "../util/vertex_fetch.glsl"
 
 const int TILE_SIZE = 16;
@@ -88,15 +93,7 @@ layout(set = 2, binding = 2) uniform SkyUniform {
     SkyUBO skyUBO;
 };
 
-layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer VertexBuffer {
-    PBRTriangle vertices[];
-}
-vertexBuffer;
-
-layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer IndexBuffer {
-    uint indices[];
-}
-indexBuffer;
+// VertexBuffer and IndexBuffer declared in vertex_fetch.glsl
 
 layout(push_constant) uniform PushConstant {
     int numRayBounces;
@@ -447,22 +444,10 @@ void main() {
     uint instanceID = gl_InstanceCustomIndexEXT;
     uint geometryID = gl_GeometryIndexEXT;
 
-    uint blasOffset = blasOffsets.offsets[instanceID];
-
-    IndexBuffer indexBuffer = IndexBuffer(indexBufferAddrs.addrs[blasOffset + geometryID]);
-    uint indexBaseID = 3 * gl_PrimitiveID;
-    uint i0 = indexBuffer.indices[indexBaseID];
-    uint i1 = indexBuffer.indices[indexBaseID + 1];
-    uint i2 = indexBuffer.indices[indexBaseID + 2];
-
-    // Vertex fetch via UnpackedVertex abstraction (format switching ready for future use)
+    uint blasOffset;
+    uint vertexFormat;
     UnpackedVertex v0, v1, v2;
-    {
-        VertexBuffer vb = VertexBuffer(vertexBufferAddrs.addrs[blasOffset + geometryID]);
-        v0 = unpackFullVertex(vb.vertices[i0]);
-        v1 = unpackFullVertex(vb.vertices[i1]);
-        v2 = unpackFullVertex(vb.vertices[i2]);
-    }
+    fetchTriangleVertices(instanceID, geometryID, gl_PrimitiveID, v0, v1, v2, blasOffset, vertexFormat);
 
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     // Compute world-space hit position from ray parameters instead of vertex buffer positions.
@@ -470,21 +455,26 @@ void main() {
     // are in chunk-local space but gl_ObjectToWorldEXT reflects the mega-chunk TLAS transform.
     vec3 worldPos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
 
-    bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
-    vec3 colorLayer;
-    if (useColorLayer) {
+    // Biome tint: shader-side resolution from per-section SSBO (bits 12-13 of flags)
+    // 0=none, 1=grass, 2=foliage, 3=water. Replaces per-vertex colorLayer for biome tints.
+    vec3 colorLayer = vec3(1.0);
+    uint biomeTintType = (v0.flags >> PBR_FLAG_BIOME_TINT_SHIFT) & 0x3u;
+    if (biomeTintType != 0u) {
+        uint packed = biomeColors.data[instanceID][biomeTintType - 1u];
+        colorLayer = vec3(
+            float((packed >> 16u) & 0xFFu) / 255.0,
+            float((packed >> 8u) & 0xFFu) / 255.0,
+            float(packed & 0xFFu) / 255.0
+        );
+    } else if ((v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u) {
+        // Fixed-color tint (birch/spruce leaves, etc.) — per-vertex colorLayer
         colorLayer = baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer;
-    } else {
-        colorLayer = vec3(1.0);
     }
 
     bool useTexture = (v0.flags & PBR_FLAG_USE_TEXTURE) != 0u;
     float albedoEmission =
         baryCoords.x * v0.albedoEmission + baryCoords.y * v1.albedoEmission + baryCoords.z * v2.albedoEmission;
     uint textureID = v0.textureID;
-    int specularTextureID = mapping.entries[textureID].specular;
-    int normalTextureID = mapping.entries[textureID].normal;
-    int flagTextureID = mapping.entries[textureID].flag;
     vec4 albedoValue;
     vec4 specularValue;
     vec4 normalValue;
@@ -492,51 +482,69 @@ void main() {
     vec2 textureUV;
     vec2 uvMin = vec2(0.0);
     vec2 uvMax = vec2(1.0);
-    vec3 rawAlbedoLinear = vec3(1.0); // raw albedo before tinting, for texture roughness derivation
+    vec3 rawAlbedoLinear = vec3(1.0);
+    bool isBlockGeometry = (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
+    int specularTextureID = -1;
+    int normalTextureID = -1;
+    int flagTextureID = -1;
+
     if (useTexture) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
 
-        // Greedy-merged quads: tile UVs back into sprite bounds (stored in repurposed vertex fields)
-        if ((v0.flags & PBR_FLAG_GREEDY_MERGED) != 0u) {
-            vec2 spriteMin = v0.glintUV;
-            vec2 spriteSize = vec2(uintBitsToFloat(v0.overlayPacked), uintBitsToFloat(v0.lightPacked));
-            textureUV = mod(textureUV - spriteMin, spriteSize) + spriteMin;
-            // Clamp inward by half-texel to prevent bilinear filter bleeding across atlas sprite edges
-            float htU = 0.5 / float(textureSize(textures[nonuniformEXT(textureID)], 0).x);
-            float htV = 0.5 / float(textureSize(textures[nonuniformEXT(textureID)], 0).y);
-            textureUV = clamp(textureUV, spriteMin + vec2(htU, htV), spriteMin + spriteSize - vec2(htU, htV));
-        }
+        if (isBlockGeometry) {
+            // === BLOCK GEOMETRY: texture array sampling via SpriteRegistry ===
+            uint spriteId = textureID; // textureID now holds sequential spriteId for blocks
 
-        // Tile boundaries from vertex UVs (used by POM and AutoPBR neighbor clamping)
-        uvMin = min(min(v0.textureUV, v1.textureUV), v2.textureUV);
-        uvMax = max(max(v0.textureUV, v1.textureUV), v2.textureUV);
+            // Greedy-merged quads: UVs extend beyond [0,1]. fract() tiles them.
+            if ((v0.flags & PBR_FLAG_GREEDY_MERGED) != 0u) {
+                textureUV = fract(textureUV);
+            }
 
-        // POM removed — displacement is now handled by tessellation (method 2) or DDA intersection (method 1)
+            uvMin = vec2(0.0);
+            uvMax = vec2(1.0);
 
-        // ray cone
-        float coneRadiusWorld = mainRay.coneWidth + gl_HitTEXT * mainRay.coneSpread;
-        vec3 dposdu, dposdv;
-        computedposduDv(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, dposdu, dposdv);
-        // lod still has issues, temporally disable
-        float lod = 0; // lodWithCone(textures[nonuniformEXT(textureID)], textureUV, coneRadiusWorld, dposdu, dposdv);
+            float lod = 0;
+            albedoValue = fetchBlockAlbedoLod(spriteId, textureUV, worldUbo.animTick, lod);
 
-        albedoValue = textureLod(textures[nonuniformEXT(textureID)], textureUV, lod);
-        rawAlbedoLinear = albedoValue.rgb; // save before tinting for texture roughness derivation
-        if (specularTextureID >= 0) {
-            specularValue = textureLod(textures[nonuniformEXT(specularTextureID)], textureUV, lod);
+            rawAlbedoLinear = albedoValue.rgb;
+            specularValue = fetchBlockSpecularLod(spriteId, textureUV, lod);
+            normalValue = fetchBlockNormalLod(spriteId, textureUV, lod);
+            flagValue = ivec4(0); // TODO: flag arrays in Phase 4
+
+            // Grass block side overlay: use SpriteRegistry.overlaySprite
+            SpriteEntry se = spriteEntries[spriteId];
+            if (se.overlaySprite >= 0 && biomeTintType != 0u) {
+                float overlayAlpha = fetchOverlayAlpha(spriteId, textureUV, worldUbo.animTick);
+                colorLayer = mix(vec3(1.0), colorLayer, smoothstep(0.1, 0.9, overlayAlpha));
+            }
         } else {
-            specularValue = vec4(0.0);
-        }
-        if (normalTextureID >= 0) {
-            normalValue = textureLod(textures[nonuniformEXT(normalTextureID)], textureUV, lod);
-        } else {
-            normalValue = vec4(0.0);
-        }
-        if (flagTextureID >= 0) {
-            vec4 floatFlagValue = textureLod(textures[nonuniformEXT(flagTextureID)], textureUV, ceil(lod));
-            flagValue = ivec4(round(floatFlagValue * 255.0));
-        } else {
-            flagValue = ivec4(0);
+            // === ENTITY GEOMETRY: legacy atlas sampling via textures[] ===
+            specularTextureID = mapping.entries[textureID].specular;
+            normalTextureID = mapping.entries[textureID].normal;
+            flagTextureID = mapping.entries[textureID].flag;
+
+            uvMin = min(min(v0.textureUV, v1.textureUV), v2.textureUV);
+            uvMax = max(max(v0.textureUV, v1.textureUV), v2.textureUV);
+
+            float lod = 0;
+            albedoValue = textureLod(textures[nonuniformEXT(textureID)], textureUV, lod);
+            rawAlbedoLinear = albedoValue.rgb;
+            if (specularTextureID >= 0) {
+                specularValue = textureLod(textures[nonuniformEXT(specularTextureID)], textureUV, lod);
+            } else {
+                specularValue = vec4(0.0);
+            }
+            if (normalTextureID >= 0) {
+                normalValue = textureLod(textures[nonuniformEXT(normalTextureID)], textureUV, lod);
+            } else {
+                normalValue = vec4(0.0);
+            }
+            if (flagTextureID >= 0) {
+                vec4 floatFlagValue = textureLod(textures[nonuniformEXT(flagTextureID)], textureUV, ceil(lod));
+                flagValue = ivec4(round(floatFlagValue * 255.0));
+            } else {
+                flagValue = ivec4(0);
+            }
         }
     } else {
         albedoValue = vec4(1.0);
@@ -548,20 +556,23 @@ void main() {
     vec3 glint = vec3(0.0);
     vec4 overlayColor = vec4(0.0);
     if (!SIMPLIFIED_INDIRECT || mainRay.index <= 1) {
-        float useGlint = float((v0.flags & PBR_FLAG_USE_GLINT) != 0u);
-        uint glintTexture = v0.glintTexture;
-        vec2 glintUV = baryCoords.x * v0.glintUV + baryCoords.y * v1.glintUV + baryCoords.z * v2.glintUV;
-        glintUV = (worldUbo.textureMat * vec4(glintUV, 0.0, 1.0)).xy;
-        glint = useGlint * texture(textures[nonuniformEXT(glintTexture)], glintUV).rgb;
-        glint = glint * glint;
+        if (!isBlockGeometry) {
+            // Entity glint and overlay (blocks don't use these)
+            float useGlint = float((v0.flags & PBR_FLAG_USE_GLINT) != 0u);
+            uint glintTexture = v0.glintTexture;
+            vec2 glintUV = baryCoords.x * v0.glintUV + baryCoords.y * v1.glintUV + baryCoords.z * v2.glintUV;
+            glintUV = (worldUbo.textureMat * vec4(glintUV, 0.0, 1.0)).xy;
+            glint = useGlint * texture(textures[nonuniformEXT(glintTexture)], glintUV).rgb;
+            glint = glint * glint;
 
-        bool useOverlay = (v0.flags & PBR_FLAG_USE_OVERLAY) != 0u;
-        ivec2 overlayUV = ivec2(int(v0.overlayPacked & 0xFFFFu), int(v0.overlayPacked >> 16u));
-        overlayColor = texelFetch(textures[nonuniformEXT(worldUbo.overlayTextureID)], overlayUV, 0);
+            bool useOverlay = (v0.flags & PBR_FLAG_USE_OVERLAY) != 0u;
+            ivec2 overlayUV = ivec2(int(v0.overlayPacked & 0xFFFFu), int(v0.overlayPacked >> 16u));
+            overlayColor = texelFetch(textures[nonuniformEXT(worldUbo.overlayTextureID)], overlayUV, 0);
+        }
     }
 
     vec3 tint;
-    if ((v0.flags & PBR_FLAG_USE_OVERLAY) != 0u) {
+    if ((v0.flags & PBR_FLAG_USE_OVERLAY) != 0u && !isBlockGeometry) {
         tint = mix(overlayColor.rgb, albedoValue.rgb * colorLayer, overlayColor.a) + glint;
     } else {
         tint = albedoValue.rgb * colorLayer + glint;

@@ -15,6 +15,8 @@
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
+#include "../util/sprite_fetch.glsl"
+
 layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
 
 layout(set = 1, binding = 1) readonly buffer BLASOffsets {
@@ -51,6 +53,8 @@ layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
     TextureMapping mapping;
 };
 
+#include "../util/vertex_fetch.glsl"
+
 layout(set = 2, binding = 0) uniform WorldUniform {
     WorldUBO worldUbo;
 };
@@ -69,15 +73,7 @@ layout(set = 3, binding = 3, rgba32f) uniform image2D normalRoughnessImage;
 layout(set = 3, binding = 4, rg32f) uniform image2D motionVectorImage;
 layout(set = 3, binding = 5, r32f) uniform image2D linearDepthImage;
 
-layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer VertexBuffer {
-    PBRTriangle vertices[];
-}
-vertexBuffer;
-
-layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer IndexBuffer {
-    uint indices[];
-}
-indexBuffer;
+// VertexBuffer and IndexBuffer declared in vertex_fetch.glsl
 
 layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
 hitAttributeEXT vec2 attribs;
@@ -88,33 +84,26 @@ void main() {
     uint instanceID = gl_InstanceCustomIndexEXT;
     uint geometryID = gl_GeometryIndexEXT;
 
-    uint blasOffset = blasOffsets.offsets[instanceID];
-
-    IndexBuffer indexBuffer = IndexBuffer(indexBufferAddrs.addrs[blasOffset + geometryID]);
-    uint indexBaseID = 3 * gl_PrimitiveID;
-    uint i0 = indexBuffer.indices[indexBaseID];
-    uint i1 = indexBuffer.indices[indexBaseID + 1];
-    uint i2 = indexBuffer.indices[indexBaseID + 2];
-
-    VertexBuffer vertexBuffer = VertexBuffer(vertexBufferAddrs.addrs[blasOffset + geometryID]);
-    PBRTriangle v0 = vertexBuffer.vertices[i0];
-    PBRTriangle v1 = vertexBuffer.vertices[i1];
-    PBRTriangle v2 = vertexBuffer.vertices[i2];
+    uint blasOffset;
+    uint vertexFormat;
+    UnpackedVertex v0, v1, v2;
+    fetchTriangleVertices(instanceID, geometryID, gl_PrimitiveID, v0, v1, v2, blasOffset, vertexFormat);
 
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     vec3 worldPos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
     uint coordinate = (v0.flags >> PBR_FLAG_COORD_SHIFT) & 0x7u;
-    vec3 normal = baryCoords.x * v0.norm + baryCoords.y * v1.norm + baryCoords.z * v2.norm;
+    // Compute geometric normal from triangle edges (norm field not stored in compact/lossless)
+    vec3 edge1 = v1.pos - v0.pos;
+    vec3 edge2 = v2.pos - v0.pos;
+    vec3 normal = normalize(cross(edge1, edge2));
     if (coordinate == 1) {
         normal = normalize(mat3(worldUbo.cameraViewMatInv) * normal);
-    } else {
-        normal = normalize(normal);
     }
 
     bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
     vec3 colorLayer;
     if (useColorLayer) {
-        colorLayer = (baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer).rgb;
+        colorLayer = baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer;
     } else {
         colorLayer = vec3(1.0);
     }
@@ -123,40 +112,54 @@ void main() {
     float albedoEmission =
         baryCoords.x * v0.albedoEmission + baryCoords.y * v1.albedoEmission + baryCoords.z * v2.albedoEmission;
     uint textureID = v0.textureID;
-    int specularTextureID = mapping.entries[textureID].specular;
-    int normalTextureID = mapping.entries[textureID].normal;
-    int flagTextureID = mapping.entries[textureID].flag;
     vec4 albedoValue;
     vec4 specularValue;
     vec4 normalValue;
     ivec4 flagValue;
     vec2 textureUV;
+    bool isBlockGeometry = (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
+
     if (useTexture) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
 
-        // ray cone
-        float coneRadiusWorld = mainRay.coneWidth + gl_HitTEXT * mainRay.coneSpread;
-        vec3 dposdu, dposdv;
-        computedposduDv(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, dposdu, dposdv);
-        // lod still has issues, temporally disable
-        float lod = 0; // lodWithCone(textures[nonuniformEXT(textureID)], textureUV, coneRadiusWorld, dposdu, dposdv);
+        if (isBlockGeometry) {
+            // === BLOCK GEOMETRY: texture array sampling via SpriteRegistry ===
+            uint spriteId = textureID;
 
-        vec4 albedoValue = textureLod(textures[nonuniformEXT(textureID)], textureUV, lod);
-        if (specularTextureID >= 0) {
-            specularValue = textureLod(textures[nonuniformEXT(specularTextureID)], textureUV, lod);
-        } else {
-            specularValue = vec4(0.0);
-        }
-        if (normalTextureID >= 0) {
-            normalValue = textureLod(textures[nonuniformEXT(normalTextureID)], textureUV, lod);
-        } else {
-            normalValue = vec4(0.0);
-        }
-        if (flagTextureID >= 0) {
-            vec4 floatFlagValue = textureLod(textures[nonuniformEXT(flagTextureID)], textureUV, ceil(lod));
-            flagValue = ivec4(round(floatFlagValue * 255.0));
-        } else {
+            // Greedy-merged quads: UVs extend beyond [0,1]. fract() tiles them.
+            if ((v0.flags & PBR_FLAG_GREEDY_MERGED) != 0u) {
+                textureUV = fract(textureUV);
+            }
+
+            float lod = 0;
+            albedoValue = fetchBlockAlbedoLod(spriteId, textureUV, worldUbo.animTick, lod);
+            specularValue = fetchBlockSpecularLod(spriteId, textureUV, lod);
+            normalValue = fetchBlockNormalLod(spriteId, textureUV, lod);
             flagValue = ivec4(0);
+        } else {
+            // === ENTITY GEOMETRY: legacy atlas sampling via textures[] ===
+            int specularTextureID = mapping.entries[textureID].specular;
+            int normalTextureID = mapping.entries[textureID].normal;
+            int flagTextureID = mapping.entries[textureID].flag;
+
+            float lod = 0;
+            albedoValue = textureLod(textures[nonuniformEXT(textureID)], textureUV, lod);
+            if (specularTextureID >= 0) {
+                specularValue = textureLod(textures[nonuniformEXT(specularTextureID)], textureUV, lod);
+            } else {
+                specularValue = vec4(0.0);
+            }
+            if (normalTextureID >= 0) {
+                normalValue = textureLod(textures[nonuniformEXT(normalTextureID)], textureUV, lod);
+            } else {
+                normalValue = vec4(0.0);
+            }
+            if (flagTextureID >= 0) {
+                vec4 floatFlagValue = textureLod(textures[nonuniformEXT(flagTextureID)], textureUV, ceil(lod));
+                flagValue = ivec4(round(floatFlagValue * 255.0));
+            } else {
+                flagValue = ivec4(0);
+            }
         }
     } else {
         albedoValue = vec4(1.0);
@@ -165,19 +168,26 @@ void main() {
         flagValue = ivec4(0);
     }
 
-    float useGlint = float((v0.flags & PBR_FLAG_USE_GLINT) != 0u);
-    uint glintTexture = v0.glintTexture;
-    vec2 glintUV = baryCoords.x * v0.glintUV + baryCoords.y * v1.glintUV + baryCoords.z * v2.glintUV;
-    glintUV = (worldUbo.textureMat * vec4(glintUV, 0.0, 1.0)).xy;
-    vec3 glint = useGlint * texture(textures[nonuniformEXT(glintTexture)], glintUV).rgb;
-    glint = glint * glint;
+    vec3 glint = vec3(0.0);
+    vec4 overlayColor = vec4(0.0);
+    if (!isBlockGeometry) {
+        // Entity glint and overlay (blocks don't use these)
+        float useGlint = float((v0.flags & PBR_FLAG_USE_GLINT) != 0u);
+        uint glintTexture = v0.glintTexture;
+        vec2 glintUV = baryCoords.x * v0.glintUV + baryCoords.y * v1.glintUV + baryCoords.z * v2.glintUV;
+        glintUV = (worldUbo.textureMat * vec4(glintUV, 0.0, 1.0)).xy;
+        glint = useGlint * texture(textures[nonuniformEXT(glintTexture)], glintUV).rgb;
+        glint = glint * glint;
 
-    bool useOverlay = (v0.flags & PBR_FLAG_USE_OVERLAY) != 0u;
-    ivec2 overlayUV = ivec2(int(v0.overlayPacked & 0xFFFFu), int(v0.overlayPacked >> 16u));
-    vec4 overlayColor = texelFetch(textures[nonuniformEXT(worldUbo.overlayTextureID)], overlayUV, 0);
+        bool useOverlay = (v0.flags & PBR_FLAG_USE_OVERLAY) != 0u;
+        if (useOverlay) {
+            ivec2 overlayUV = ivec2(int(v0.overlayPacked & 0xFFFFu), int(v0.overlayPacked >> 16u));
+            overlayColor = texelFetch(textures[nonuniformEXT(worldUbo.overlayTextureID)], overlayUV, 0);
+        }
+    }
 
     vec3 tint;
-    if (useOverlay) {
+    if ((v0.flags & PBR_FLAG_USE_OVERLAY) != 0u && !isBlockGeometry) {
         tint = mix(overlayColor.rgb, albedoValue.rgb * colorLayer, overlayColor.a) + glint;
     } else {
         tint = albedoValue.rgb * colorLayer + glint;

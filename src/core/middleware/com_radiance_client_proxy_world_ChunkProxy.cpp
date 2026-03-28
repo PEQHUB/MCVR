@@ -3,6 +3,7 @@
 #include "core/render/chunks.hpp"
 #include "core/render/renderer.hpp"
 
+#include <cstring>
 #include <iostream>
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_initNative(JNIEnv *, jclass, jint chunkNum) {
@@ -37,6 +38,55 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
         .vertices = reinterpret_cast<vk::VertexFormat::PBRTriangle **>(vertexAddrs),
         .isImportant = static_cast<bool>(important),
     });
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_rebuildSingleBlockStates(
+    JNIEnv *, jclass,
+    jint originX, jint originY, jint originZ, jlong index,
+    jlong blockStateArrayPtr, jlong palettePtr, jint paletteSize,
+    jlong biomeDataPtr, jlong neighborFacesPtr, jint blockAtlasTextureId,
+    jboolean important,
+    jint biomeGrassColor, jint biomeFoliageColor, jint biomeWaterColor) {
+
+    auto world = Renderer::instance().world();
+    if (world == nullptr) return;
+
+    ChunkBuildTaskV2 task;
+    task.x = originX;
+    task.y = originY;
+    task.z = originZ;
+    task.id = index;
+    task.blockAtlasTextureId = static_cast<uint32_t>(blockAtlasTextureId);
+    task.isImportant = static_cast<bool>(important);
+    task.biomeGrassColor = static_cast<uint32_t>(biomeGrassColor);
+    task.biomeFoliageColor = static_cast<uint32_t>(biomeFoliageColor);
+    task.biomeWaterColor = static_cast<uint32_t>(biomeWaterColor);
+
+
+    // Decode palette-indexed block states to global state IDs
+    const uint16_t* paletteIndices = reinterpret_cast<const uint16_t*>(blockStateArrayPtr);
+    const uint32_t* palette = reinterpret_cast<const uint32_t*>(palettePtr);
+    for (int i = 0; i < 4096; i++) {
+        uint16_t idx = paletteIndices[i];
+        task.blockStates[i] = (idx < paletteSize) ? palette[idx] : 0;
+    }
+
+    // Copy biome data
+    if (biomeDataPtr != 0) {
+        std::memcpy(task.biomes, reinterpret_cast<const void*>(biomeDataPtr), sizeof(task.biomes));
+    } else {
+        std::memset(task.biomes, 0, sizeof(task.biomes));
+    }
+
+    // Copy neighbor face data
+    if (neighborFacesPtr != 0) {
+        std::memcpy(task.neighborStates, reinterpret_cast<const void*>(neighborFacesPtr),
+                    sizeof(task.neighborStates));
+    } else {
+        std::memset(task.neighborStates, 0, sizeof(task.neighborStates));
+    }
+
+    world->chunks()->queueBlockStateBuild(std::move(task));
 }
 
 extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_isChunkReady(JNIEnv *, jclass, jlong id) {

@@ -124,10 +124,16 @@ namespace VertexFormat {
     static constexpr uint32_t PBR_FLAG_USE_GLINT        = 1u << 4;
     static constexpr uint32_t PBR_FLAG_USE_LIGHT        = 1u << 5;
     static constexpr uint32_t PBR_FLAG_GREEDY_MERGED    = 1u << 6; // UV tiling needed (greedy-merged quad)
+    static constexpr uint32_t PBR_FLAG_OVERLAY_ALPHA_MASK = 1u << 7; // colorLayer holds overlay sprite bounds for alpha-masked biome tinting
     static constexpr uint32_t PBR_FLAG_COORD_SHIFT      = 8u;
     static constexpr uint32_t PBR_FLAG_COORD_MASK       = 0x7u << 8u; // 3 bits
     // Compact format: vivid flag relocated from emissiveBlockType bit 16 to flags bit 11
     static constexpr uint32_t PBR_FLAG_COMPACT_VIVID    = 1u << 11;
+    // Biome tint type in bits 12-13: 0=none, 1=grass, 2=foliage, 3=water
+    // Resolved in shader from per-section SSBO — NOT baked into vertex colorLayer
+    static constexpr uint32_t PBR_FLAG_BIOME_TINT_SHIFT = 12u;
+    static constexpr uint32_t PBR_FLAG_BIOME_TINT_MASK  = 0x3u << 12u;
+    static constexpr uint32_t PBR_FLAG_BLOCK_GEOMETRY   = 1u << 14; // block chunk: use texture array, not bindless atlas
 #else
     #define PBR_FLAG_USE_NORM        (1u << 0)
     #define PBR_FLAG_USE_COLOR_LAYER (1u << 1)
@@ -136,9 +142,13 @@ namespace VertexFormat {
     #define PBR_FLAG_USE_GLINT       (1u << 4)
     #define PBR_FLAG_USE_LIGHT       (1u << 5)
     #define PBR_FLAG_GREEDY_MERGED   (1u << 6)
+    #define PBR_FLAG_OVERLAY_ALPHA_MASK (1u << 7)
     #define PBR_FLAG_COORD_SHIFT     8u
     #define PBR_FLAG_COORD_MASK      (0x7u << 8u)
     #define PBR_FLAG_COMPACT_VIVID   (1u << 11)
+    #define PBR_FLAG_BIOME_TINT_SHIFT 12u
+    #define PBR_FLAG_BIOME_TINT_MASK  (0x3u << 12u)
+    #define PBR_FLAG_BLOCK_GEOMETRY   (1u << 14)
 #endif
 
     // 96 bytes per vertex, std430 aligned (6 x vec4)
@@ -326,7 +336,7 @@ namespace Data {
 
         T_UINT endSkyTextureID;
         T_UINT endPortalTextureID;
-        T_UINT pad4;
+        T_UINT animTick;    // Global animation tick counter (incremented per game tick)
         T_UINT pad5;
 
         T_VEC4 emissionData[50]; // Per-block: .rgb = BT.2020 color override (0,0,0 = use texture), .a = scalar multiplier
@@ -434,6 +444,36 @@ namespace Data {
 
     struct TextureMapping {
         TextureMapEntry entries[4096];
+    };
+
+    // Per-sprite metadata for texture array lookups.
+    // 32 bytes, std430 aligned. Indexed by sequential spriteId assigned at resource load.
+    struct SpriteEntry {
+        T_UINT  baseLayer;       // First albedo layer in the texture array (animation frames start here)
+        T_UINT  frameCount;      // 1 = static, N = animated (N consecutive layers)
+        T_UINT  tickRate;        // Game ticks per animation frame (1 = every tick)
+        T_UINT  flags;           // bit 0: hasSpecular, bit 1: hasNormal, bit 2: hasHeight
+        T_INT   specularLayer;   // Layer in specular array (-1 = no specular)
+        T_INT   normalLayer;     // Layer in normal array (-1 = no normal)
+        T_INT   overlaySprite;   // spriteId of overlay texture (-1 = none) [grass block sides]
+        T_INT   maskLayer;       // Material class mask layer (-1 = none)
+    };
+
+#ifdef __cplusplus
+    static constexpr uint32_t SPRITE_FLAG_HAS_SPECULAR = 1u << 0;
+    static constexpr uint32_t SPRITE_FLAG_HAS_NORMAL   = 1u << 1;
+    static constexpr uint32_t SPRITE_FLAG_HAS_HEIGHT   = 1u << 2;
+    static constexpr uint32_t SPRITE_MAX_ENTRIES        = 2048u;
+    static_assert(sizeof(SpriteEntry) == 32, "SpriteEntry must be exactly 32 bytes");
+#else
+    #define SPRITE_FLAG_HAS_SPECULAR (1u << 0)
+    #define SPRITE_FLAG_HAS_NORMAL   (1u << 1)
+    #define SPRITE_FLAG_HAS_HEIGHT   (1u << 2)
+    #define SPRITE_MAX_ENTRIES       2048u
+#endif
+
+    struct SpriteRegistry {
+        SpriteEntry entries[2048];
     };
 
     // Unified material class: full Disney BRDF parameters for a material category.

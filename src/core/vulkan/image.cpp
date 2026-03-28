@@ -132,9 +132,25 @@ size_t vk::formatToByte(VkFormat format) {
         case VK_FORMAT_R32G32B32A32_SINT:
         case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
 
+        // Block-compressed: BC7 = 16 bytes per 4x4 block = 1 byte/texel effective.
+        // For staging buffer sizing (width * height * layer * bpp), returning 1 gives
+        // the correct total when dimensions are multiples of 4.
+        case VK_FORMAT_BC7_UNORM_BLOCK:
+        case VK_FORMAT_BC7_SRGB_BLOCK: return 1;
+
         default: {
             throw std::runtime_error("Format not allowed: " + std::to_string(format));
         }
+    }
+}
+
+bool vk::formatIsBlockCompressed(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_BC7_UNORM_BLOCK:
+        case VK_FORMAT_BC7_SRGB_BLOCK:
+            return true;
+        default:
+            return false;
     }
 }
 

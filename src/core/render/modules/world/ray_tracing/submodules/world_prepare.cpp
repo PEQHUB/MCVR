@@ -49,7 +49,8 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
                                        std::vector<uint64_t> &indexBufferAddrs,
                                        std::vector<uint64_t> &lastVertexBufferAddrs,
                                        std::vector<uint64_t> &lastIndexBufferAddrs,
-                                       std::vector<glm::mat4> &lastObjToWorldMats) {
+                                       std::vector<glm::mat4> &lastObjToWorldMats,
+                                       std::vector<glm::uvec4> &biomeColors) {
     auto context = frameworkContext.lock();
     if (!context) return;
     auto framework = context->framework.lock();
@@ -88,6 +89,8 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
                  lastIndexBufferAddrs.data(), lastIndexBufferAddrs.size() * sizeof(uint64_t));
     ensureBuffer(lastObjToWorldMat, lastObjToWorldMatCapacity_,
                  lastObjToWorldMats.data(), lastObjToWorldMats.size() * sizeof(glm::mat4));
+    ensureBuffer(biomeColorBuffer, biomeColorCapacity_,
+                 biomeColors.data(), biomeColors.size() * sizeof(glm::uvec4));
 
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> rayTracingMetaData{{
         blasOffsetsBuffer,
@@ -97,6 +100,7 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
         lastIndexBufferAddr,
         lastObjToWorldMat,
         areaLightBuffer,
+        biomeColorBuffer,
     }};
 
     std::vector<vk::CommandBuffer::BufferMemoryBarrier> uploadPreBufferBarriers, uploadPostBufferBarriers;
@@ -225,6 +229,7 @@ void WorldPrepareContext::render() {
     std::vector<uint64_t> vertexBufferAddrs, indexBufferAddrs;
     std::vector<uint64_t> lastVertexBufferAddrs, lastIndexBufferAddrs;
     std::vector<glm::mat4> lastObjToWorldMats;
+    std::vector<glm::uvec4> biomeColors;
 
     tlasBuilder = vk::TLASBuilder::create();
     auto &instanceBuilder = tlasBuilder->beginInstanceBuilder();
@@ -411,6 +416,9 @@ void WorldPrepareContext::render() {
                     cc.blasGeneration = chunk1->blasGeneration;
                     cc.blas = chunk1->blas;
                     cc.x = chunk1->x; cc.y = chunk1->y; cc.z = chunk1->z;
+                    cc.biomeGrassColor = chunk1->biomeGrassColor;
+                    cc.biomeFoliageColor = chunk1->biomeFoliageColor;
+                    cc.biomeWaterColor = chunk1->biomeWaterColor;
                     cc.geometryCount = chunk1->geometryCount;
                     cc.geoTypes.clear();
                     cc.geoTypes.push_back(World::GeometryTypes::SHADOW);
@@ -426,6 +434,7 @@ void WorldPrepareContext::render() {
                     cc.displacedBlas = chunk1->displacedBlas;
                     cc.displacedFaceDataBuffer = chunk1->displacedFaceDataBuffer;
                     cc.hasDisplaced = chunk1->displacedBlas && chunk1->displacedFaceDataBuffer;
+                    cc.vertexFormat = chunk1->vertexFormat;
                 }
 
                 // Distance cull
@@ -488,6 +497,7 @@ void WorldPrepareContext::render() {
         lastIndexBufferAddrs.resize(chunkGeoBase + totalChunkGeo, 0);
         lastObjToWorldMats.resize(chunkInstBase + totalChunkInst);
         blasOffset.resize(chunkInstBase + totalChunkInst);
+        biomeColors.resize(chunkInstBase + totalChunkInst);
 
         // Parallel fill: each thread writes to pre-computed offsets (zero contention)
         Renderer::threadPool.parallelFor(numThreads, [&](uint32_t t) {
@@ -536,7 +546,9 @@ void WorldPrepareContext::render() {
                     glm::vec4(0, 0, 1, static_cast<float>(static_cast<double>(cc.z) - cameraPos.z)),
                     glm::vec4(0, 0, 0, 1)));
                 lastObjToWorldMats[instIdx] = mat;
-                blasOffset[instIdx] = myBlasAccu;
+                // Encode vertex format in upper 2 bits of blasOffset (shader extracts via >> 30)
+                blasOffset[instIdx] = myBlasAccu | (static_cast<uint32_t>(cc.vertexFormat) << 30);
+                biomeColors[instIdx] = glm::uvec4(cc.biomeGrassColor, cc.biomeFoliageColor, cc.biomeWaterColor, 0);
 
                 // DDA displacement instance
                 if (cc.hasDisplaced) {
@@ -555,6 +567,7 @@ void WorldPrepareContext::render() {
                     indexBufferAddrs[dGeoIdx] = 0;
                     lastObjToWorldMats[dInstIdx] = mat;
                     blasOffset[dInstIdx] = dBlasAccu;
+                    biomeColors[dInstIdx] = glm::uvec4(cc.biomeGrassColor, cc.biomeFoliageColor, cc.biomeWaterColor, 0);
                 }
             }
         });
@@ -1020,5 +1033,5 @@ void WorldPrepareContext::render() {
     }
 
     uploadBuffer(blasOffset, vertexBufferAddrs, indexBufferAddrs, lastVertexBufferAddrs, lastIndexBufferAddrs,
-                 lastObjToWorldMats);
+                 lastObjToWorldMats, biomeColors);
 }

@@ -96,6 +96,11 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
         std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
         bool hasDisplaced = false;
+        uint8_t vertexFormat = 0; // 0=full, 1=compact, 2=lossless
+        // Per-section biome colors (packed 0x00RRGGBB) for shader-side tinting
+        uint32_t biomeGrassColor = 0x91BD59;
+        uint32_t biomeFoliageColor = 0x77AB2F;
+        uint32_t biomeWaterColor = 0x3F76E4;
     };
     std::vector<CachedChunkData> cachedChunks_;
 
@@ -117,6 +122,10 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     std::shared_ptr<vk::DeviceLocalBuffer> areaLightBuffer;
     int areaLightCount = 0;
 
+    // Per-instance biome colors for shader-side tinting (binding 10)
+    std::shared_ptr<vk::DeviceLocalBuffer> biomeColorBuffer;
+    VkDeviceSize biomeColorCapacity_ = 0;
+
     WorldPrepareContext(std::shared_ptr<FrameworkContext> frameworkContext, std::shared_ptr<WorldPrepare> worldprepare);
 
     // Called after vkDeviceWaitIdle during render distance change.
@@ -136,6 +145,7 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         lastVertexBufferAddr = nullptr; lastVertexBufferAddrCapacity_ = 0;
         lastIndexBufferAddr = nullptr; lastIndexBufferAddrCapacity_ = 0;
         lastObjToWorldMat = nullptr; lastObjToWorldMatCapacity_ = 0;
+        biomeColorBuffer = nullptr; biomeColorCapacity_ = 0;
     }
 
     void uploadBuffer(std::vector<uint32_t> &blasOffsets,
@@ -143,6 +153,7 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
                       std::vector<uint64_t> &indexBufferAddrs,
                       std::vector<uint64_t> &lastVertexBufferAddrs,
                       std::vector<uint64_t> &lastIndexBufferAddrs,
-                      std::vector<glm::mat4> &lastObjToWorldMats);
+                      std::vector<glm::mat4> &lastObjToWorldMats,
+                      std::vector<glm::uvec4> &biomeColors);
     void render();
 };

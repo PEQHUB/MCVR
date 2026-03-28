@@ -1,5 +1,6 @@
 #include "core/render/chunks.hpp"
 
+#include "core/render/block_mesher.hpp"
 #include "core/render/buffers.hpp"
 #include "core/render/crash_ring_buffer.hpp"
 #include "core/render/greedy_mesher.hpp"
@@ -34,10 +35,11 @@ packCompactVertices(const std::vector<vk::VertexFormat::PBRTriangle> &src) {
         auto &d = dst[j];
         d.pos = s.pos;
         // packed0: flags (bits 0-10) | vivid flag (bit 11) | textureID (bits 16-31)
-        // Clear USE_GLINT and USE_OVERLAY — compact format zeros those data fields,
-        // so leaving the flags set would cause the shader to sample garbage.
-        uint32_t flags = s.flags & 0x7FFu; // preserve bits 0-10
-        flags &= ~(vk::VertexFormat::PBR_FLAG_USE_GLINT | vk::VertexFormat::PBR_FLAG_USE_OVERLAY);
+        // Clear USE_GLINT, USE_OVERLAY, and GREEDY_MERGED — compact format zeros those data
+        // fields, so leaving the flags set would cause the shader to sample garbage or divide by zero.
+        uint32_t flags = s.flags & 0x77FFu; // preserve bits 0-10 + 12-13 (BIOME_TINT) + 14 (BLOCK_GEOMETRY)
+        flags &= ~(vk::VertexFormat::PBR_FLAG_USE_GLINT | vk::VertexFormat::PBR_FLAG_USE_OVERLAY |
+                    vk::VertexFormat::PBR_FLAG_GREEDY_MERGED);
         if (s.emissiveBlockType & 0x10000u) flags |= vk::VertexFormat::PBR_FLAG_COMPACT_VIVID;
         d.packed0 = flags | ((s.textureID & 0xFFFFu) << 16);
         d.textureUV = s.textureUV;
@@ -144,9 +146,12 @@ void ChunkBuildData::prepareCPU(bool allowMicromapBake, bool skipOMM, glm::vec3 
         }
     }
 
+    // Full 96-byte PBRTriangle — lossless format has struct layout issues.
+    // Block vs entity is identified via PBR_FLAG_BLOCK_GEOMETRY in vertex flags.
+    vertexFormat = 0;
+
     // CPU-only OMM classification: compute per-triangle opacity indices without VMA/Vulkan calls.
     // Results stored in ommCpuResults[], consumed by uploadGPU().
-    vertexFormat = 0; // 0 = full PBRTriangle
 
     for (int i = 0; i < geometryCount; i++) {
         auto &cr = ommCpuResults[i];
@@ -824,14 +829,40 @@ void ChunkBuildData::uploadGPU() {
     auto device = framework->device();
     auto physicalDevice = framework->physicalDevice();
 
+    // Pack vertices into the selected format before uploading
+    std::vector<std::vector<vk::VertexFormat::PBRTriangleCompact>> compactVerts;
+    std::vector<std::vector<vk::VertexFormat::PBRTriangleLossless>> losslessVerts;
+    if (vertexFormat == 1) {
+        compactVerts.resize(geometryCount);
+        for (int i = 0; i < geometryCount; i++)
+            compactVerts[i] = packCompactVertices(vertices[i]);
+    } else if (vertexFormat == 2) {
+        losslessVerts.resize(geometryCount);
+        for (int i = 0; i < geometryCount; i++)
+            losslessVerts[i] = packLosslessVertices(vertices[i]);
+    }
+
     // Create vertex/index buffers from final geometry (post-mesh, post-tessellation)
     for (int i = 0; i < geometryCount; i++) {
+        VkDeviceSize bufSize;
+        const void *bufData;
+        if (vertexFormat == 1) {
+            bufSize = compactVerts[i].size() * sizeof(vk::VertexFormat::PBRTriangleCompact);
+            bufData = compactVerts[i].data();
+        } else if (vertexFormat == 2) {
+            bufSize = losslessVerts[i].size() * sizeof(vk::VertexFormat::PBRTriangleLossless);
+            bufData = losslessVerts[i].data();
+        } else {
+            bufSize = vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle);
+            bufData = vertices[i].data();
+        }
+
         auto vertexBuffer =
-            vk::DeviceLocalBuffer::create(vma, device, true, vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle),
+            vk::DeviceLocalBuffer::create(vma, device, true, bufSize,
                                           VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
                                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        vertexBuffer->uploadToStagingBuffer(vertices[i].data());
+        vertexBuffer->uploadToStagingBuffer(const_cast<void *>(bufData));
         vertexBuffers.push_back(vertexBuffer);
 
         auto indexBuffer =
@@ -916,9 +947,52 @@ void ChunkBuildData::uploadGPU() {
 
     blasBuilder = vk::BLASBuilder::create();
     auto blasGeometryBuilder = blasBuilder->beginGeometries();
+
+    // Lambda: define BLAS geometry with correct vertex stride template
+    auto defineGeom = [&](int i, bool isOpaque, uint32_t numVerts, uint32_t numIndices) {
+        if (vertexFormat == 1) {
+            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangleCompact>(
+                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque);
+        } else if (vertexFormat == 2) {
+            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangleLossless>(
+                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque);
+        } else {
+            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangle>(
+                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque);
+        }
+    };
+    auto defineGeomOMM = [&](int i, bool isOpaque, uint32_t numVerts, uint32_t numIndices,
+                             VkDeviceAddress ommAddr, uint32_t numTris) {
+        if (vertexFormat == 1) {
+            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangleCompact>(
+                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris);
+        } else if (vertexFormat == 2) {
+            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangleLossless>(
+                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris);
+        } else {
+            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangle>(
+                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris);
+        }
+    };
+    auto defineGeomMicromap = [&](int i, bool isOpaque, uint32_t numVerts, uint32_t numIndices,
+                                  VkDeviceAddress ommAddr, uint32_t numTris,
+                                  VkMicromapEXT mm, const VkMicromapUsageEXT *uc, uint32_t ucc) {
+        if (vertexFormat == 1) {
+            blasGeometryBuilder->defineTriangleGeomrtryWithMicromap<vk::VertexFormat::PBRTriangleCompact>(
+                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris, mm, uc, ucc);
+        } else if (vertexFormat == 2) {
+            blasGeometryBuilder->defineTriangleGeomrtryWithMicromap<vk::VertexFormat::PBRTriangleLossless>(
+                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris, mm, uc, ucc);
+        } else {
+            blasGeometryBuilder->defineTriangleGeomrtryWithMicromap<vk::VertexFormat::PBRTriangle>(
+                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris, mm, uc, ucc);
+        }
+    };
+
     for (int i = 0; i < geometryCount; i++) {
         bool isOpaque = geometryTypes[i] == World::WORLD_SOLID;
         uint32_t indexCount = static_cast<uint32_t>(indices[i].size());
+        uint32_t vertCount = static_cast<uint32_t>(vertices[i].size());
 
         if (indexCount == 0) {
             blasGeometryBuilder->definePlaceholderGeometry();
@@ -928,21 +1002,17 @@ void ChunkBuildData::uploadGPU() {
         if (ommIndexBuffers[i] != nullptr) {
             uint32_t numTriangles = indexCount / 3;
             if (ommGeometryData[i].hasMicromap) {
-                blasGeometryBuilder->defineTriangleGeomrtryWithMicromap<vk::VertexFormat::PBRTriangle>(
-                    vertexBuffers[i], vertices[i].size(), indexBuffers[i], indices[i].size(),
-                    isOpaque, ommIndexBuffers[i]->bufferAddress(), numTriangles,
+                defineGeomMicromap(i, isOpaque, vertCount, indexCount,
+                    ommIndexBuffers[i]->bufferAddress(), numTriangles,
                     ommGeometryData[i].micromap,
                     ommGeometryData[i].indexHistogram.data(),
                     static_cast<uint32_t>(ommGeometryData[i].indexHistogram.size()));
             } else {
-                blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangle>(
-                    vertexBuffers[i], vertices[i].size(), indexBuffers[i], indices[i].size(),
-                    isOpaque, ommIndexBuffers[i]->bufferAddress(), numTriangles);
+                defineGeomOMM(i, isOpaque, vertCount, indexCount,
+                    ommIndexBuffers[i]->bufferAddress(), numTriangles);
             }
         } else {
-            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangle>(
-                vertexBuffers[i], vertices[i].size(), indexBuffers[i], indexCount,
-                isOpaque);
+            defineGeom(i, isOpaque, vertCount, indexCount);
         }
     }
     blasGeometryBuilder->endGeometries();
@@ -1122,15 +1192,13 @@ void ChunkBuildScheduler::blasThreadLoop() {
     auto asyncPool = framework->asyncCommandPool();
     auto secondaryQueueIndex = physicalDevice->secondaryQueueIndex();
 
-    // Pre-allocate fence/cmd pool — sole owner, no mutex needed
-    constexpr uint32_t MAX_IN_FLIGHT = 8;
+    // Pre-allocate fence/cmd pool — sole owner, no mutex needed.
+    // 12 slots: up to 8 build batches + 4 concurrent compaction batches.
+    constexpr uint32_t MAX_IN_FLIGHT = 12;
     for (uint32_t i = 0; i < MAX_IN_FLIGHT; i++) {
         fencePool_.push(vk::Fence::create(device));
         cmdPool_.push(vk::CommandBuffer::create(device, asyncPool));
     }
-    // Dedicated compaction resources
-    auto compactFence = vk::Fence::create(device);
-    auto compactCmd = vk::CommandBuffer::create(device, asyncPool);
     static uint64_t totalOrig = 0, totalComp = 0;
     static uint32_t totalN = 0;
 
@@ -1143,14 +1211,40 @@ void ChunkBuildScheduler::blasThreadLoop() {
 
             vkResetFences(device->vkDevice(), 1, &front.fence->vkFence());
 
-            // Compaction (synchronous — blocks this thread only, secondary queue sole owner)
-            if (front.compactionQP && front.compactionCount > 0) {
-                std::vector<VkDeviceSize> sizes(front.compactionCount);
-                if (vkGetQueryPoolResults(device->vkDevice(), front.compactionQP, 0, front.compactionCount,
-                        sizes.size() * sizeof(VkDeviceSize), sizes.data(),
-                        sizeof(VkDeviceSize), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            if (front.isCompaction) {
+                // Compaction phase complete — destroy query pool and hand off
+                if (front.compactionQP) vkDestroyQueryPool(device->vkDevice(), front.compactionQP, nullptr);
 
-                    compactCmd->begin();
+                if (totalN > 0 && totalN % 50 == 0) {
+                    float pct = totalOrig > 0 ? 100.0f * (1.0f - (float)totalComp / totalOrig) : 0;
+                    std::cout << "[Compaction] " << totalN << " BLASes: " << (totalOrig/1024)
+                              << " KB -> " << (totalComp/1024) << " KB (" << pct << "% savings)" << std::endl;
+                }
+
+                // Hand off to render thread
+                {
+                    std::lock_guard<std::mutex> lock(completedMtx_);
+                    for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
+                }
+                fencePool_.push(std::move(front.fence));
+                cmdPool_.push(std::move(front.cmd));
+                inFlight_.pop_front();
+
+            } else if (front.compactionQP && front.compactionCount > 0 && !fencePool_.empty()) {
+                // Build phase complete with compaction queries — submit compaction async
+                std::vector<VkDeviceSize> sizes(front.compactionCount);
+                bool queriesOk = vkGetQueryPoolResults(device->vkDevice(), front.compactionQP, 0,
+                    front.compactionCount, sizes.size() * sizeof(VkDeviceSize), sizes.data(),
+                    sizeof(VkDeviceSize), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS;
+
+                if (queriesOk) {
+                    // Recycle build fence+cmd, take fresh ones for compaction
+                    fencePool_.push(std::move(front.fence));
+                    cmdPool_.push(std::move(front.cmd));
+                    auto compFence = std::move(fencePool_.front()); fencePool_.pop();
+                    auto compCmd = std::move(cmdPool_.front()); cmdPool_.pop();
+
+                    compCmd->begin();
                     uint32_t qi = 0;
                     for (auto &cbd : front.chunks) {
                         if (!cbd->blas || qi >= front.compactionCount) continue;
@@ -1167,40 +1261,60 @@ void ChunkBuildScheduler::blasThreadLoop() {
                         if (vkCreateAccelerationStructureKHR(device->vkDevice(), &ci, nullptr, &as) == VK_SUCCESS) {
                             VkCopyAccelerationStructureInfoKHR cp{VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR};
                             cp.src = cbd->blas->blas(); cp.dst = as; cp.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
-                            vkCmdCopyAccelerationStructureKHR(compactCmd->vkCommandBuffer(), &cp);
-                            // Keep old BLAS alive — render thread's TLAS may still reference it.
-                            // Chunk1::enqueue() will GC it at the correct time.
+                            vkCmdCopyAccelerationStructureKHR(compCmd->vkCommandBuffer(), &cp);
                             cbd->preCompactionBlas = cbd->blas;
                             cbd->blas = vk::BLAS::create(device, as, buf);
                         }
                         totalOrig += origSz; totalComp += compSz; totalN++;
                     }
-                    compactCmd->end();
+                    compCmd->end();
+
                     VkSubmitInfo csi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-                    csi.commandBufferCount = 1; csi.pCommandBuffers = &compactCmd->vkCommandBuffer();
-                    vkQueueSubmit(device->secondaryQueue(), 1, &csi, compactFence->vkFence());
-                    vkWaitForFences(device->vkDevice(), 1, &compactFence->vkFence(), true, UINT64_MAX);
-                    vkResetFences(device->vkDevice(), 1, &compactFence->vkFence());
-
-                    if (totalN > 0 && totalN % 50 == 0) {
-                        float pct = totalOrig > 0 ? 100.0f * (1.0f - (float)totalComp / totalOrig) : 0;
-                        std::cout << "[Compaction] " << totalN << " BLASes: " << (totalOrig/1024)
-                                  << " KB -> " << (totalComp/1024) << " KB (" << pct << "% savings)" << std::endl;
+                    csi.commandBufferCount = 1; csi.pCommandBuffers = &compCmd->vkCommandBuffer();
+                    VkResult cr = vkQueueSubmit(device->secondaryQueue(), 1, &csi, compFence->vkFence());
+                    if (cr == VK_SUCCESS) {
+                        // Re-enqueue as compaction phase — will be polled on next iteration
+                        auto chunks = std::move(front.chunks);
+                        auto qp = front.compactionQP;
+                        auto qpCount = front.compactionCount;
+                        inFlight_.pop_front();
+                        inFlight_.push_back({std::move(compFence), std::move(compCmd),
+                            std::move(chunks), qp, qpCount, true});
+                    } else {
+                        // Submit failed — hand off uncompacted chunks
+                        g_crashRing.record("compactionSubmitFail", cr);
+                        if (front.compactionQP) vkDestroyQueryPool(device->vkDevice(), front.compactionQP, nullptr);
+                        {
+                            std::lock_guard<std::mutex> lock(completedMtx_);
+                            for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
+                        }
+                        fencePool_.push(std::move(compFence));
+                        cmdPool_.push(std::move(compCmd));
+                        inFlight_.pop_front();
                     }
+                } else {
+                    // Query failed — hand off without compaction
+                    if (front.compactionQP) vkDestroyQueryPool(device->vkDevice(), front.compactionQP, nullptr);
+                    {
+                        std::lock_guard<std::mutex> lock(completedMtx_);
+                        for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
+                    }
+                    fencePool_.push(std::move(front.fence));
+                    cmdPool_.push(std::move(front.cmd));
+                    inFlight_.pop_front();
                 }
-                vkDestroyQueryPool(device->vkDevice(), front.compactionQP, nullptr);
-            }
 
-            // Hand off to render thread
-            {
-                std::lock_guard<std::mutex> lock(completedMtx_);
-                for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
+            } else {
+                // Build phase complete, no compaction needed — hand off directly
+                if (front.compactionQP) vkDestroyQueryPool(device->vkDevice(), front.compactionQP, nullptr);
+                {
+                    std::lock_guard<std::mutex> lock(completedMtx_);
+                    for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
+                }
+                fencePool_.push(std::move(front.fence));
+                cmdPool_.push(std::move(front.cmd));
+                inFlight_.pop_front();
             }
-
-            // Recycle fence + cmd
-            fencePool_.push(std::move(front.fence));
-            cmdPool_.push(std::move(front.cmd));
-            inFlight_.pop_front();
         }
 
         // ---- SUBMIT: prepare + submit new batch if we have work AND a free fence ----
@@ -1434,6 +1548,9 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
     allIndexCount = chunkBuildData->allIndexCount;
     geometryCount = chunkBuildData->geometryCount;
     geometryTypes = std::make_shared<std::vector<World::GeometryTypes>>(std::move(chunkBuildData->geometryTypes));
+    biomeGrassColor = chunkBuildData->biomeGrassColor;
+    biomeFoliageColor = chunkBuildData->biomeFoliageColor;
+    biomeWaterColor = chunkBuildData->biomeWaterColor;
     // Defer destruction of old displaced resources (GPU may still reference from in-flight frames)
     if (displacedBlas) gc.collect(displacedBlas);
     if (displacedFaceDataBuffer) gc.collect(displacedFaceDataBuffer);
@@ -1621,6 +1738,91 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
     if (chunkBuildScheduler_) {
         chunkBuildScheduler_->enqueue(chunkBuildData, camPos, task.isImportant);
     }
+}
+
+void Chunks::queueBlockStateBuild(ChunkBuildTaskV2 task) {
+    if (!Renderer::blockModelTable.isLoaded()) {
+        // Model table not ready — can't mesh in C++
+        return;
+    }
+
+    // Build mesher input from task data
+    BlockMesher::SectionInput input;
+    std::memcpy(input.blockStates, task.blockStates, sizeof(input.blockStates));
+    std::memcpy(input.biomes, task.biomes, sizeof(input.biomes));
+    std::memcpy(input.neighborStates, task.neighborStates, sizeof(input.neighborStates));
+    input.originX = task.x;
+    input.originY = task.y;
+    input.originZ = task.z;
+    input.blockAtlasTextureId = task.blockAtlasTextureId;
+
+    // C++ meshing — generates identical PBRTriangle output
+    auto meshOutput = BlockMesher::mesh(input, Renderer::blockModelTable);
+
+    // Build geometry arrays matching the existing ChunkBuildData format
+    std::vector<World::GeometryTypes> geometryTypes;
+    std::vector<std::vector<vk::VertexFormat::PBRTriangle>> vertices;
+    std::vector<std::vector<uint32_t>> indices;
+    uint32_t allVertexCount = 0, allIndexCount = 0;
+
+    if (!meshOutput.solidVertices.empty()) {
+        geometryTypes.push_back(World::WORLD_SOLID);
+        allVertexCount += static_cast<uint32_t>(meshOutput.solidVertices.size());
+        allIndexCount += static_cast<uint32_t>(meshOutput.solidIndices.size());
+        vertices.push_back(std::move(meshOutput.solidVertices));
+        indices.push_back(std::move(meshOutput.solidIndices));
+    }
+    if (!meshOutput.cutoutVertices.empty()) {
+        geometryTypes.push_back(World::WORLD_TRANSPARENT);
+        allVertexCount += static_cast<uint32_t>(meshOutput.cutoutVertices.size());
+        allIndexCount += static_cast<uint32_t>(meshOutput.cutoutIndices.size());
+        vertices.push_back(std::move(meshOutput.cutoutVertices));
+        indices.push_back(std::move(meshOutput.cutoutIndices));
+    }
+    if (!meshOutput.translucentVertices.empty()) {
+        geometryTypes.push_back(World::WORLD_TRANSPARENT);
+        allVertexCount += static_cast<uint32_t>(meshOutput.translucentVertices.size());
+        allIndexCount += static_cast<uint32_t>(meshOutput.translucentIndices.size());
+        vertices.push_back(std::move(meshOutput.translucentVertices));
+        indices.push_back(std::move(meshOutput.translucentIndices));
+    }
+
+    if (geometryTypes.empty()) {
+        // Empty section (all air) — invalidate
+        invalidateChunk(task.id);
+        return;
+    }
+
+    auto framework = Renderer::instance().framework();
+
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    if (task.id < 0 || task.id >= static_cast<int64_t>(chunks_.size())) return;
+
+    int geomCount = static_cast<int>(geometryTypes.size());
+    auto chunkBuildData = ChunkBuildData::create(
+        task.id, task.x, task.y, task.z, chunks_[task.id]->latestVersion++,
+        allVertexCount, allIndexCount, geomCount,
+        std::move(geometryTypes), std::move(vertices), std::move(indices));
+    chunkBuildData->biomeGrassColor = task.biomeGrassColor;
+    chunkBuildData->biomeFoliageColor = task.biomeFoliageColor;
+    chunkBuildData->biomeWaterColor = task.biomeWaterColor;
+
+    chunkBuildDatas_[task.id] = chunkBuildData;
+    glm::vec3 camPos = Renderer::instance().world()
+        ? glm::vec3(Renderer::instance().world()->getCameraPos()) : glm::vec3(0);
+    if (chunkBuildScheduler_) {
+        chunkBuildScheduler_->enqueue(chunkBuildData, camPos, task.isImportant);
+    }
+
+    // Set chunk lights
+    if (!meshOutput.lights.empty()) {
+        setChunkLights(task.id, meshOutput.lights);
+    }
+}
+
+uint32_t Chunks::getInputQueueSize() {
+    if (!chunkBuildScheduler_) return 0;
+    return chunkBuildScheduler_->getInputQueueSize();
 }
 
 bool Chunks::isChunkReady(int64_t id) {

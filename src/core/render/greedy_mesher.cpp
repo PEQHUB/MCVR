@@ -62,10 +62,14 @@ static int safeLocalCoord(float worldCoord) {
 // Mask for material-relevant flag bits: USE_TEXTURE, USE_COLOR_LAYER, COORD bits.
 // Excludes per-instance flags (USE_NORM, USE_OVERLAY, USE_GLINT, USE_LIGHT, GREEDY_MERGED)
 // that don't affect material identity.
+// NOTE: Biome tint bits (12-13) are excluded — all grass blocks share the same tintType,
+// and different block types can't merge anyway (different textureID/emissiveBlockType).
 static constexpr uint32_t MATERIAL_FLAGS_MASK =
     vk::VertexFormat::PBR_FLAG_USE_TEXTURE |
     vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER |
-    vk::VertexFormat::PBR_FLAG_COORD_MASK;
+    vk::VertexFormat::PBR_FLAG_OVERLAY_ALPHA_MASK |
+    vk::VertexFormat::PBR_FLAG_COORD_MASK |
+    vk::VertexFormat::PBR_FLAG_BIOME_TINT_MASK;
 
 // Compute UV orientation: encodes how texture UV axes map to face tangent axes.
 // Blocks with different UV rotations (Minecraft randomizes for visual variety) get
@@ -147,9 +151,9 @@ static constexpr glm::vec3 FACE_NORMALS[6] = {
     {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}
 };
 
-// Max merge size for biome-tinted blocks (USE_COLOR_LAYER).
-// Limits bilinear approximation stretch to within biome blending radius.
-static constexpr int MAX_TINTED_MERGE = 8;
+// Max merge size for blocks with per-vertex colorLayer (fixed-color blocks only).
+// Biome-tinted blocks use shader-side tinting and merge fully (no cap).
+static constexpr int MAX_TINTED_MERGE = 16;
 
 } // anonymous namespace
 
@@ -398,12 +402,10 @@ GreedyMesher::Result GreedyMesher::merge(
                     // Face normal for merged vertices
                     glm::vec3 faceNormal = FACE_NORMALS[d];
 
-                    // Sprite bounds from vertex UVs (one tile)
-                    glm::vec2 spriteMin = glm::min(glm::min(uvs[0], uvs[1]), glm::min(uvs[2], uvs[3]));
-                    glm::vec2 spriteMax = glm::max(glm::max(uvs[0], uvs[1]), glm::max(uvs[2], uvs[3]));
-                    glm::vec2 spriteSize = spriteMax - spriteMin;
-
-                    // Build 4 corner vertices using exact integer axis stepping
+                    // Build 4 corner vertices using exact integer axis stepping.
+                    // With texture arrays, UVs are [0,1] normalized. Greedy-merged quads
+                    // have UVs outside [0,1] (e.g. a 3x2 merge → corners at (0,0)-(3,2)).
+                    // The shader uses fract() to tile — no per-vertex sprite bounds needed.
                     auto makeVertex = [&](int du, int dv, const glm::vec4& color) {
                         vk::VertexFormat::PBRTriangle vert = av0; // template
                         vert.pos = snappedMin
@@ -412,16 +414,15 @@ GreedyMesher::Result GreedyMesher::merge(
                         vert.norm = faceNormal;
                         vert.flags |= vk::VertexFormat::PBR_FLAG_GREEDY_MERGED;
                         vert.flags &= ~(vk::VertexFormat::PBR_FLAG_USE_GLINT | vk::VertexFormat::PBR_FLAG_USE_OVERLAY);
-                        vert.postBase = vert.pos; // static chunk — zero motion vector
+                        vert.postBase = vert.pos;
                         vert.textureUV = minUV
                                        + uvDeltaU * static_cast<float>(du)
                                        + uvDeltaV * static_cast<float>(dv);
                         vert.colorLayer = color;
-                        // Repurpose unused fields to carry sprite bounds per-vertex:
-                        // glintUV → spriteMin, overlayPacked → spriteSizeU, lightPacked → spriteSizeV
-                        vert.glintUV = spriteMin;
-                        std::memcpy(&vert.overlayPacked, &spriteSize.x, sizeof(float));
-                        std::memcpy(&vert.lightPacked, &spriteSize.y, sizeof(float));
+                        // glintUV, overlayPacked, lightPacked are freed — no sprite bounds needed
+                        vert.glintUV = glm::vec2(0.0f);
+                        vert.overlayPacked = 0;
+                        vert.lightPacked = 0;
                         return vert;
                     };
 
