@@ -74,10 +74,23 @@ class TextureArrayManager {
     /// Compute mip level count for a given sprite size.
     static uint32_t computeMipLevels(uint32_t spriteSize);
 
-  private:
     /// Generate mipmaps for a single layer of an array.
     void generateMipmapsForLayer(uint32_t arrayId, uint32_t layer,
                                   std::shared_ptr<vk::CommandBuffer> cmdBuffer);
+
+    /// Collect which layers of an array have pending uploads (without flushing).
+    std::vector<uint32_t> collectDirtyLayers(uint32_t arrayId) const;
+
+    /// Take ownership of this frame's staging buffers (for GC collection).
+    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> takeStagingBuffers();
+
+    /// Batch-collect dirty layers for up to 3 arrays in a single mutex lock.
+    struct DirtyLayers {
+        std::vector<uint32_t> albedo, specular, normal;
+    };
+    DirtyLayers collectAllDirtyLayers(uint32_t albedoId, uint32_t specId, uint32_t normId) const;
+
+  private:
 
     struct StagedUpload {
         uint32_t arrayId;
@@ -88,7 +101,9 @@ class TextureArrayManager {
 
     std::map<uint32_t, ArrayInfo> arrays_;
     std::vector<StagedUpload> stagedUploads_;
-    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> inflightStagingBuffers_; // kept alive until GPU done
+    // Per-frame staging buffers: kept alive until GC reclaims them (imageCount*3 frames).
+    // This matches the existing GarbageCollector pattern used for all GPU resources.
+    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> currentFrameStagingBuffers_;
     uint32_t nextArrayId_ = 0;
     mutable std::mutex mutex_;
 };

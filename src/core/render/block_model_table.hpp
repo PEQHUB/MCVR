@@ -55,15 +55,6 @@ struct BiomeTintEntry {
 };
 static_assert(sizeof(BiomeTintEntry) == 8, "BiomeTintEntry must be 8 bytes");
 
-/// Sprite atlas UV bounds (20 bytes).
-struct SpriteUVBounds {
-    uint16_t spriteId;     // 2B: texture ID
-    uint16_t padding;      // 2B
-    float minU, maxU;      // 8B: atlas U range
-    float minV, maxV;      // 8B: atlas V range
-};
-static_assert(sizeof(SpriteUVBounds) == 20, "SpriteUVBounds must be 20 bytes");
-
 #pragma pack(pop)
 
 /// Immutable block model lookup table.
@@ -77,8 +68,9 @@ class BlockModelTable {
     /// Load biome tint colors.
     void loadBiomeTints(const BiomeTintEntry* tints, uint32_t count);
 
-    /// Load sprite UV bounds.
-    void loadSpriteBounds(const SpriteUVBounds* bounds, uint32_t count);
+    /// Pre-normalize quad UVs from atlas space to [0,1] within sprite bounds.
+    /// Must be called after load() and after TextureSystem is finalized.
+    void normalizeQuadUVs();
 
     /// Query model data for a global block state ID. Returns nullptr if invisible/air.
     const BlockModelEntry* getEntry(uint32_t globalStateId) const;
@@ -90,9 +82,6 @@ class BlockModelTable {
 
     /// Get biome tint color. Returns white (255,255,255) if not found.
     glm::u8vec3 getBiomeTint(uint16_t biomeId, uint8_t tintType) const;
-
-    /// Get sprite UV bounds. Returns {0,1,0,1} if not found.
-    const SpriteUVBounds* getSpriteBounds(uint16_t spriteId) const;
 
     /// Is the table loaded and ready?
     bool isLoaded() const { return !entries_.empty(); }
@@ -112,7 +101,6 @@ class BlockModelTable {
     std::vector<glm::u8vec3> biomeTints_;       // Indexed by (biomeId * 3 + tintType)
     uint32_t maxBiomeId_ = 0;
 
-    // Sprite bounds: indexed by spriteId
-    std::vector<SpriteUVBounds> spriteBounds_;
-    uint32_t maxSpriteId_ = 0;
+    // Guard: UVs are only normalized once per load
+    bool uvsNormalized_ = false;
 };

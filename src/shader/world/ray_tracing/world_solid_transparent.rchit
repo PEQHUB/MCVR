@@ -167,9 +167,17 @@ layout(location = 1) rayPayloadEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
 
 // Sample height value from texture based on height source mode
-float sampleHeightRaw(uint texID, vec2 uv, vec2 uvMin, vec2 uvMax, int heightSourceMode, vec3 channelWeights) {
+float sampleHeightRaw(uint texID, vec2 uv, vec2 uvMin, vec2 uvMax, int heightSourceMode, vec3 channelWeights, bool isBlock) {
     vec2 clampedUV = clamp(uv, uvMin, uvMax);
-    vec4 s = textureLod(textures[nonuniformEXT(texID)], clampedUV, 0);
+    vec4 s;
+    if (isBlock) {
+        // Block geometry: sample from sprite texture array using spriteId
+        SpriteEntry se = spriteEntries[texID];
+        uint layer = spriteAnimLayer(se, worldUbo.animTick);
+        s = textureLod(blockAlbedo, vec3(clampedUV, float(layer)), 0);
+    } else {
+        s = textureLod(textures[nonuniformEXT(texID)], clampedUV, 0);
+    }
     if (heightSourceMode == 1) return s.r;       // Red
     if (heightSourceMode == 2) return s.g;       // Green
     if (heightSourceMode == 3) return s.b;       // Blue
@@ -199,7 +207,8 @@ void applyAutoPBR(
     vec2 texUV,
     vec2 uvMin,
     vec2 uvMax,
-    float hitDistance
+    float hitDistance,
+    bool isBlock
 ) {
     float lumMin = mc.lumMin;
     float lumMax = mc.lumMax;
@@ -248,7 +257,7 @@ void applyAutoPBR(
     vec3 channelWeights = vec3(0.2627, 0.6780, 0.0593); // BT.2020 luminance
 
     // --- Roughness from luminance percentile mapping ---
-    float rawLum = sampleHeightRaw(texID, texUV, uvMin, uvMax, heightSourceMode, channelWeights);
+    float rawLum = sampleHeightRaw(texID, texUV, uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
     if (rawLum < 0.001) return; // Skip transparent/masked pixels
 
     float normLum = clamp((rawLum - lumMin) / lumSpan, 0.0, 1.0);
@@ -273,7 +282,12 @@ void applyAutoPBR(
         return;
     }
 
-    vec2 texSize = vec2(textureSize(textures[nonuniformEXT(texID)], 0));
+    vec2 texSize;
+    if (isBlock) {
+        texSize = vec2(textureSize(blockAlbedo, 0).xy);
+    } else {
+        texSize = vec2(textureSize(textures[nonuniformEXT(texID)], 0));
+    }
     vec2 texelStep = filterRadiusVal / texSize;
 
     // Process center height
@@ -284,10 +298,10 @@ void applyAutoPBR(
 
     if (filterMode == 1) {
         // Central differences: 4 samples, symmetric
-        float rawL = sampleHeightRaw(texID, texUV - vec2(texelStep.x, 0), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawR = sampleHeightRaw(texID, texUV + vec2(texelStep.x, 0), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawD = sampleHeightRaw(texID, texUV - vec2(0, texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawU = sampleHeightRaw(texID, texUV + vec2(0, texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights);
+        float rawL = sampleHeightRaw(texID, texUV - vec2(texelStep.x, 0), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawR = sampleHeightRaw(texID, texUV + vec2(texelStep.x, 0), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawD = sampleHeightRaw(texID, texUV - vec2(0, texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawU = sampleHeightRaw(texID, texUV + vec2(0, texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
         float hL = processHeight(rawL, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
         float hR = processHeight(rawR, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
         float hD = processHeight(rawD, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
@@ -296,14 +310,14 @@ void applyAutoPBR(
         gy = (hU - hD) * 0.5;
     } else if (filterMode == 2) {
         // Sobel 3x3: 8 neighbor samples, best edge detection
-        float rawTL = sampleHeightRaw(texID, texUV + vec2(-texelStep.x,  texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawT  = sampleHeightRaw(texID, texUV + vec2(0,             texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawTR = sampleHeightRaw(texID, texUV + vec2( texelStep.x,  texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawL  = sampleHeightRaw(texID, texUV + vec2(-texelStep.x,  0),           uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawR  = sampleHeightRaw(texID, texUV + vec2( texelStep.x,  0),           uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawBL = sampleHeightRaw(texID, texUV + vec2(-texelStep.x, -texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawB  = sampleHeightRaw(texID, texUV + vec2(0,            -texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawBR = sampleHeightRaw(texID, texUV + vec2( texelStep.x, -texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights);
+        float rawTL = sampleHeightRaw(texID, texUV + vec2(-texelStep.x,  texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawT  = sampleHeightRaw(texID, texUV + vec2(0,             texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawTR = sampleHeightRaw(texID, texUV + vec2( texelStep.x,  texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawL  = sampleHeightRaw(texID, texUV + vec2(-texelStep.x,  0),           uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawR  = sampleHeightRaw(texID, texUV + vec2( texelStep.x,  0),           uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawBL = sampleHeightRaw(texID, texUV + vec2(-texelStep.x, -texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawB  = sampleHeightRaw(texID, texUV + vec2(0,            -texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawBR = sampleHeightRaw(texID, texUV + vec2( texelStep.x, -texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
         float hTL = processHeight(rawTL, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
         float hT  = processHeight(rawT,  lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
         float hTR = processHeight(rawTR, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
@@ -319,10 +333,10 @@ void applyAutoPBR(
     } else if (filterMode == 3) {
         // Bilinear: sample at half-texel offsets for smooth gradients
         vec2 halfStep = texelStep * 0.5;
-        float rawL = sampleHeightRaw(texID, texUV - vec2(halfStep.x, 0), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawR = sampleHeightRaw(texID, texUV + vec2(halfStep.x, 0), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawD = sampleHeightRaw(texID, texUV - vec2(0, halfStep.y), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawU = sampleHeightRaw(texID, texUV + vec2(0, halfStep.y), uvMin, uvMax, heightSourceMode, channelWeights);
+        float rawL = sampleHeightRaw(texID, texUV - vec2(halfStep.x, 0), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawR = sampleHeightRaw(texID, texUV + vec2(halfStep.x, 0), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawD = sampleHeightRaw(texID, texUV - vec2(0, halfStep.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawU = sampleHeightRaw(texID, texUV + vec2(0, halfStep.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
         float hL = processHeight(rawL, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
         float hR = processHeight(rawR, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
         float hD = processHeight(rawD, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
@@ -333,10 +347,10 @@ void applyAutoPBR(
         // Bicubic: 4th-order finite difference on each axis
         vec2 s1 = texelStep;
         vec2 s2 = texelStep * 2.0;
-        float rawXn2 = sampleHeightRaw(texID, texUV - vec2(s2.x, 0), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawXn1 = sampleHeightRaw(texID, texUV - vec2(s1.x, 0), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawXp1 = sampleHeightRaw(texID, texUV + vec2(s1.x, 0), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawXp2 = sampleHeightRaw(texID, texUV + vec2(s2.x, 0), uvMin, uvMax, heightSourceMode, channelWeights);
+        float rawXn2 = sampleHeightRaw(texID, texUV - vec2(s2.x, 0), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawXn1 = sampleHeightRaw(texID, texUV - vec2(s1.x, 0), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawXp1 = sampleHeightRaw(texID, texUV + vec2(s1.x, 0), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawXp2 = sampleHeightRaw(texID, texUV + vec2(s2.x, 0), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
         float hXn2 = processHeight(rawXn2, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
         float hXn1 = processHeight(rawXn1, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
         float hXp1 = processHeight(rawXp1, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
@@ -344,10 +358,10 @@ void applyAutoPBR(
         // 4th-order central difference: (-f[-2] + 8*f[-1] - 8*f[+1] + f[+2]) / 12
         gx = (-hXn2 + 8.0*hXn1 - 8.0*hXp1 + hXp2) / 12.0;
 
-        float rawYn2 = sampleHeightRaw(texID, texUV - vec2(0, s2.y), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawYn1 = sampleHeightRaw(texID, texUV - vec2(0, s1.y), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawYp1 = sampleHeightRaw(texID, texUV + vec2(0, s1.y), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawYp2 = sampleHeightRaw(texID, texUV + vec2(0, s2.y), uvMin, uvMax, heightSourceMode, channelWeights);
+        float rawYn2 = sampleHeightRaw(texID, texUV - vec2(0, s2.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawYn1 = sampleHeightRaw(texID, texUV - vec2(0, s1.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawYp1 = sampleHeightRaw(texID, texUV + vec2(0, s1.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawYp2 = sampleHeightRaw(texID, texUV + vec2(0, s2.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
         float hYn2 = processHeight(rawYn2, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
         float hYn1 = processHeight(rawYn1, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
         float hYp1 = processHeight(rawYp1, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
@@ -355,8 +369,8 @@ void applyAutoPBR(
         gy = (-hYn2 + 8.0*hYn1 - 8.0*hYp1 + hYp2) / 12.0;
     } else {
         // filterMode == 0: Forward differences (original behavior)
-        float rawR = sampleHeightRaw(texID, texUV + vec2(texelStep.x, 0), uvMin, uvMax, heightSourceMode, channelWeights);
-        float rawU = sampleHeightRaw(texID, texUV + vec2(0, texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights);
+        float rawR = sampleHeightRaw(texID, texUV + vec2(texelStep.x, 0), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
+        float rawU = sampleHeightRaw(texID, texUV + vec2(0, texelStep.y), uvMin, uvMax, heightSourceMode, channelWeights, isBlock);
         float hR = processHeight(rawR, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
         float hU = processHeight(rawU, lumMin, lumSpan, invertHeight, heightRemapMinVal, heightRemapMaxVal, heightContrastVal, heightOffsetVal);
         gx = hR - hCenter;
@@ -584,7 +598,8 @@ void main() {
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
 
     // No normal texture → AO channel is uninitialized (0), not "full occlusion"
-    if (normalTextureID < 0) mat.ao = 1.0;
+    // For blocks, AO comes from the normal array (defaults to 1.0 for missing normals)
+    if (!isBlockGeometry && normalTextureID < 0) mat.ao = 1.0;
 
     // Save original texture properties before material overrides (for masks + Tex Roughness blend)
     float texSourceRoughness = mat.roughness;
@@ -617,8 +632,9 @@ void main() {
     if (materialType > 0u) {
         materialClassIdx = materialType - 1u;
         hasMaterialClass = true;
-    } else {
+    } else if (!isBlockGeometry) {
         // Fallback: per-texel mask texture (R8_UNORM, value = MaterialBlock ordinal)
+        // Only for entities — block textureID is spriteId, not a GLID for mapping.entries[]
         int maskTexID = mapping.entries[textureID].maskTexture;
         if (maskTexID >= 0) {
             materialClassIdx = uint(texture(textures[nonuniformEXT(maskTexID)], textureUV).r * 255.0 + 0.5);
@@ -655,11 +671,20 @@ void main() {
                 float f0 = ((ior - 1.0) * (ior - 1.0)) / ((ior + 1.0) * (ior + 1.0));
                 mat.f0 = vec3(f0);
             }
-            // GPU-side AutoPBR: derive roughness + normal from albedo when enabled
+            // AutoPBR roughness + normal derivation
             if ((mc.flags & 0x8u) != 0u) {
-                applyAutoPBR(mat, mc, rawAlbedoLinear, textureID, textureUV, uvMin, uvMax, gl_HitTEXT);
+                if (!isBlockGeometry) {
+                    // Entity path: GPU-side AutoPBR
+                    applyAutoPBR(mat, mc, rawAlbedoLinear, textureID, textureUV, uvMin, uvMax, gl_HitTEXT, false);
+                } else if (pack1.y > 0.001) {
+                    // Transmissive AutoPBR blocks (slime, glass, ice):
+                    // CPU bake was skipped — use material class roughness slider
+                    mat.roughness = max(pack0.a * pack0.a, 0.01);
+                }
+                // Non-transmissive AutoPBR blocks (iron, stone, wood):
+                // Roughness from CPU-baked specular (via convertLabPBRMaterial). No override.
             } else {
-                // Material class slider roughness (perceptual → GGX alpha)
+                // Non-AutoPBR blocks: material class roughness slider
                 mat.roughness = max(pack0.a * pack0.a, 0.01);
             }
 
@@ -694,8 +719,10 @@ void main() {
             matNoiseMaskInvert = ((maskPacked >> 3) & 0x1) != 0; // bit 3
             matNoiseWrap = (maskPacked >> 4) & 0x7;    // bits 4-6
 
-            // Normal strength: amplify/attenuate LabPBR normal map (skip for AutoPBR — already applied)
-            if ((mc.flags & 0x8u) == 0u) {
+            // Normal strength: amplify/attenuate normal map.
+            // Skip for AutoPBR entities (GPU applyAutoPBR handles it).
+            // Apply for blocks (CPU-baked normals use neutral strength, shader applies runtime value).
+            if ((mc.flags & 0x8u) == 0u || isBlockGeometry) {
                 float matNormalStrength = pack5.w;
                 if (matNormalStrength < 0.01) {
                     mat.normal = vec3(0.0, 0.0, 1.0); // flat — disable normal map

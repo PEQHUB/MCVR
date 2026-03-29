@@ -74,9 +74,11 @@ void TextureArrayManager::flushUploads(std::shared_ptr<vk::VMA> vma,
 
     if (stagedUploads_.empty()) return;
 
-    // Clear previous in-flight staging buffers (safe: previous frame's GPU work has completed
-    // by the time the render thread re-enters this code path via acquireContext)
-    inflightStagingBuffers_.clear();
+    // Move previous frame's staging buffers to the return vector for GC collection.
+    // The caller (TextureSystem::flushPendingUploads) routes them through the
+    // Framework's GarbageCollector, which keeps resources alive for imageCount*3
+    // frames — matching the existing pattern for all GPU resource lifetime management.
+    currentFrameStagingBuffers_.clear();
 
     for (auto& upload : stagedUploads_) {
         auto it = arrays_.find(upload.arrayId);
@@ -87,6 +89,14 @@ void TextureArrayManager::flushUploads(std::shared_ptr<vk::VMA> vma,
 
         auto& info = it->second;
         auto& image = info.image;
+
+        // Bounds check: skip uploads to non-existent layers
+        if (upload.layer >= info.layerCount) {
+            std::cerr << "[TextureArrayManager] Layer " << upload.layer
+                      << " out of range (max " << info.layerCount << ") for array "
+                      << upload.arrayId << ", skipping" << std::endl;
+            continue;
+        }
 
         uint32_t mipSize = info.spriteSize >> upload.mipLevel;
         if (mipSize == 0) mipSize = 1;
@@ -106,7 +116,7 @@ void TextureArrayManager::flushUploads(std::shared_ptr<vk::VMA> vma,
             vma, device, upload.pixels.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
         staging->uploadToBuffer(upload.pixels.data());
         staging->flush();
-        inflightStagingBuffers_.push_back(staging);
+        currentFrameStagingBuffers_.push_back(staging);
 
         // Transition image to TRANSFER_DST
         VkImageSubresourceRange range{};
@@ -162,8 +172,7 @@ void TextureArrayManager::flushUploads(std::shared_ptr<vk::VMA> vma,
         }});
     }
 
-    std::cout << "[TextureArrayManager] Flushed " << stagedUploads_.size()
-              << " layer uploads" << std::endl;
+    // Per-frame log removed (was spamming every animation tick)
     stagedUploads_.clear();
 }
 
@@ -438,9 +447,35 @@ const TextureArrayManager::ArrayInfo* TextureArrayManager::getArray(uint32_t arr
     return &it->second;
 }
 
+std::vector<uint32_t> TextureArrayManager::collectDirtyLayers(uint32_t arrayId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint32_t> layers;
+    for (const auto& upload : stagedUploads_) {
+        if (upload.arrayId == arrayId) layers.push_back(upload.layer);
+    }
+    return layers;
+}
+
+std::vector<std::shared_ptr<vk::HostVisibleBuffer>> TextureArrayManager::takeStagingBuffers() {
+    return std::move(currentFrameStagingBuffers_);
+}
+
+TextureArrayManager::DirtyLayers TextureArrayManager::collectAllDirtyLayers(
+        uint32_t albedoId, uint32_t specId, uint32_t normId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    DirtyLayers result;
+    for (const auto& upload : stagedUploads_) {
+        if (upload.arrayId == albedoId) result.albedo.push_back(upload.layer);
+        else if (upload.arrayId == specId) result.specular.push_back(upload.layer);
+        else if (upload.arrayId == normId) result.normal.push_back(upload.layer);
+    }
+    return result;
+}
+
 void TextureArrayManager::reset() {
     std::lock_guard<std::mutex> lock(mutex_);
     arrays_.clear();
     stagedUploads_.clear();
+    currentFrameStagingBuffers_.clear();
     nextArrayId_ = 0;
 }

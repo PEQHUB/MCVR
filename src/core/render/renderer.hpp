@@ -8,8 +8,7 @@
 
 #include "core/render/block_model_table.hpp"
 #include "core/render/gpu_profiler.hpp"
-#include "core/render/sprite_registry.hpp"
-#include "core/render/texture_arrays.hpp"
+#include "core/render/texture_system.hpp"
 #include "core/render/thread_pool.hpp"
 
 class Textures;
@@ -270,8 +269,7 @@ class Renderer : public Singleton<Renderer> {
     static GpuProfiler gpuProfiler;
     static ThreadPool threadPool;
     static BlockModelTable blockModelTable;
-    static SpriteRegistry spriteRegistry;
-    static TextureArrayManager textureArrayManager;
+    static TextureSystem textureSystem;
 
     // Frame Generation: images set by pipeline modules, read by render_framework for SL tagging
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> frameGenDepthImages;        // Linear depth (render res)

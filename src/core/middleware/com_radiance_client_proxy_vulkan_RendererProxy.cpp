@@ -175,21 +175,15 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
     if (!rendererUsable()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
-    fprintf(stderr, "[JNI] submitCommand enter\n"); fflush(stderr);
     framework->submitCommand();
-    fprintf(stderr, "[JNI] submitCommand exit\n"); fflush(stderr);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_present(JNIEnv *, jclass) {
-    fprintf(stderr, "[JNI] present enter\n"); fflush(stderr);
     std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
-    fprintf(stderr, "[JNI] present mutex acquired\n"); fflush(stderr);
-    if (!rendererUsable()) { fprintf(stderr, "[JNI] present: not usable\n"); return; }
+    if (!rendererUsable()) return;
     auto framework = Renderer::instance().framework();
-    if (framework == nullptr) { fprintf(stderr, "[JNI] present: framework null\n"); return; }
-    fprintf(stderr, "[JNI] present calling framework->present()\n"); fflush(stderr);
+    if (framework == nullptr) return;
     framework->present();
-    fprintf(stderr, "[JNI] present exit\n"); fflush(stderr);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_drawOverlay(

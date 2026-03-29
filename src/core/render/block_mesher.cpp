@@ -89,16 +89,8 @@ void BlockMesher::emitQuad(std::vector<PBRTriangle>& vertices,
                                | (entry.isVivid ? 0x10000u : 0u)
                                | ((entry.blockTypeId & 0x7FFF) << 17);
 
-    // Look up sprite UV bounds for atlas→[0,1] conversion.
-    // spriteId from Java is now a sequential layer index (assigned during atlas stitching).
-    const SpriteUVBounds* bounds = table.getSpriteBounds(quad.spriteId);
-    float spriteMinU = bounds ? bounds->minU : 0.0f;
-    float spriteMinV = bounds ? bounds->minV : 0.0f;
-    float spriteSizeU = bounds ? (bounds->maxU - bounds->minU) : 1.0f;
-    float spriteSizeV = bounds ? (bounds->maxV - bounds->minV) : 1.0f;
-    // Avoid division by zero for degenerate sprites
-    if (spriteSizeU < 1e-6f) spriteSizeU = 1.0f;
-    if (spriteSizeV < 1e-6f) spriteSizeV = 1.0f;
+    // UVs are pre-normalized to [0,1] within sprite bounds during model table load.
+    // No per-vertex UV conversion needed here.
 
     uint32_t baseIdx = static_cast<uint32_t>(vertices.size());
 
@@ -119,16 +111,10 @@ void BlockMesher::emitQuad(std::vector<PBRTriangle>& vertices,
         vert.postBase = vert.pos;
         vert.emissiveBlockType = emissiveBlockType;
 
-        // Convert atlas UVs to [0,1] normalized within sprite
-        float atlasU = quad.uvs[v][0];
-        float atlasV = quad.uvs[v][1];
-        vert.textureUV = glm::vec2(
-            (atlasU - spriteMinU) / spriteSizeU,
-            (atlasV - spriteMinV) / spriteSizeV
-        );
+        vert.textureUV = glm::vec2(quad.uvs[v][0], quad.uvs[v][1]);
 
         vert.glintUV = glm::vec2(0.0f);
-        vert.textureID = quad.spriteId; // sequential layer index (not atlas GLID)
+        vert.textureID = quad.spriteId; // deterministic sorted index
         vert.glintTexture = 0;
         vert.overlayPacked = 0;
         vert.lightPacked = 0;

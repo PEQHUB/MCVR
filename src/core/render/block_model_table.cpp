@@ -1,4 +1,5 @@
 #include "block_model_table.hpp"
+#include "core/render/renderer.hpp"
 #include <cstring>
 #include <iostream>
 
@@ -24,8 +25,9 @@ void BlockModelTable::load(const BlockModelEntry* entries, uint32_t entryCount,
         if (entries[i].renderType != 0) modelCount++;
     }
 
-    // Copy quad array
+    // Copy quad array (UVs are in atlas space, need normalizeQuadUVs() later)
     quads_.assign(quads, quads + quadCount);
+    uvsNormalized_ = false;
 
     std::cout << "[BlockModelTable] Loaded " << entryCount << " block states ("
               << modelCount << " with models), " << quadCount << " quads, "
@@ -53,27 +55,35 @@ void BlockModelTable::loadBiomeTints(const BiomeTintEntry* tints, uint32_t count
               << "max biomeId=" << maxBiomeId_ << std::endl;
 }
 
-void BlockModelTable::loadSpriteBounds(const SpriteUVBounds* bounds, uint32_t count) {
-    maxSpriteId_ = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        if (bounds[i].spriteId > maxSpriteId_)
-            maxSpriteId_ = bounds[i].spriteId;
+void BlockModelTable::normalizeQuadUVs() {
+    if (uvsNormalized_) {
+        std::cout << "[BlockModelTable] UVs already normalized, skipping" << std::endl;
+        return;
     }
 
-    // Default bounds: full [0,1] range
-    SpriteUVBounds defaultBounds{};
-    defaultBounds.minU = 0; defaultBounds.maxU = 1;
-    defaultBounds.minV = 0; defaultBounds.maxV = 1;
-
-    spriteBounds_.clear();
-    spriteBounds_.resize(maxSpriteId_ + 1, defaultBounds);
-
-    for (uint32_t i = 0; i < count; i++) {
-        spriteBounds_[bounds[i].spriteId] = bounds[i];
+    auto& texSys = Renderer::textureSystem;
+    if (texSys.spriteCount() == 0) {
+        std::cout << "[BlockModelTable] No texture system data, skipping UV normalization" << std::endl;
+        return;
     }
 
-    std::cout << "[BlockModelTable] Loaded " << count << " sprite bounds, "
-              << "max spriteId=" << maxSpriteId_ << std::endl;
+    uint32_t normalized = 0;
+    for (auto& quad : quads_) {
+        auto& bounds = texSys.getSpriteBounds(quad.spriteId);
+        float sizeU = bounds.maxU - bounds.minU;
+        float sizeV = bounds.maxV - bounds.minV;
+        if (sizeU < 1e-6f) sizeU = 1.0f;
+        if (sizeV < 1e-6f) sizeV = 1.0f;
+
+        for (int v = 0; v < 4; v++) {
+            quad.uvs[v][0] = (quad.uvs[v][0] - bounds.minU) / sizeU;
+            quad.uvs[v][1] = (quad.uvs[v][1] - bounds.minV) / sizeV;
+        }
+        normalized++;
+    }
+
+    uvsNormalized_ = true;
+    std::cout << "[BlockModelTable] Pre-normalized UVs for " << normalized << " quads" << std::endl;
 }
 
 const BlockModelEntry* BlockModelTable::getEntry(uint32_t globalStateId) const {
@@ -108,7 +118,3 @@ glm::u8vec3 BlockModelTable::getBiomeTint(uint16_t biomeId, uint8_t tintType) co
     return biomeTints_[idx];
 }
 
-const SpriteUVBounds* BlockModelTable::getSpriteBounds(uint16_t spriteId) const {
-    if (spriteId > maxSpriteId_) return nullptr;
-    return &spriteBounds_[spriteId];
-}

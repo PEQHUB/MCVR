@@ -1592,7 +1592,7 @@ void RayTracingModuleContext::render() {
         bufferBindings.push_back({mcBuffer, 1, 11});
     }
     // SpriteRegistry SSBO for texture array metadata
-    auto spriteRegBuffer = Renderer::spriteRegistry.getBuffer();
+    auto spriteRegBuffer = Renderer::textureSystem.registry().getBuffer();
     if (spriteRegBuffer) {
         bufferBindings.push_back({spriteRegBuffer, 1, 13});
     }
@@ -1637,29 +1637,28 @@ void RayTracingModuleContext::render() {
     rayTracingDescriptorTable->bindImages(frameImageBindings);
 
     // Bind block sprite texture arrays (set 0, bindings 3-5)
-    auto& texArrayMgr = Renderer::textureArrayManager;
-    // Flush any pending texture array uploads (staged from Java thread, executed here on render thread)
-    // Uses selective mipgen: only regenerates mipmaps for layers that were updated
-    // (initial load = all layers, per-tick animation = only changed animated sprites)
-    if (texArrayMgr.hasPendingUploads()) {
+    auto& texSystem = Renderer::textureSystem;
+    // Flush any pending texture array uploads (staged by animation tick, executed here on render thread)
+    if (texSystem.isFinalized()) {
         auto vma = framework->vma();
         auto device = framework->device();
-        texArrayMgr.flushAndMipgenDirtyLayers(0, vma, device, worldCommandBuffer);
+        texSystem.flushPendingUploads(vma, device, worldCommandBuffer, framework->gc());
     }
-    // Array ID 0 = block albedo (created in finalizeTextureArrays)
-    auto* albedoArray = texArrayMgr.getArray(0);
+    // Block albedo array
+    auto& texArrayMgr = texSystem.arrayManager();
+    auto* albedoArray = texArrayMgr.getArray(texSystem.blockAlbedoArrayId());
     if (albedoArray && albedoArray->image) {
         rayTracingDescriptorTable->bindSamplerImage(
             albedoArray->sampler, albedoArray->image,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 3, 0);
     }
-    auto* specArray = texArrayMgr.getArray(1);
+    auto* specArray = texArrayMgr.getArray(texSystem.blockSpecularArrayId());
     if (specArray && specArray->image) {
         rayTracingDescriptorTable->bindSamplerImage(
             specArray->sampler, specArray->image,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 4, 0);
     }
-    auto* normArray = texArrayMgr.getArray(2);
+    auto* normArray = texArrayMgr.getArray(texSystem.blockNormalArrayId());
     if (normArray && normArray->image) {
         rayTracingDescriptorTable->bindSamplerImage(
             normArray->sampler, normArray->image,

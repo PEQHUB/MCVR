@@ -74,7 +74,7 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
         bool hasMicromap = false;
     };
     std::vector<OMMGeometryData> ommGeometryData;
-    uint8_t vertexFormat = 2; // 0=full entity, 1=compact far, 2=lossless near
+    uint8_t vertexFormat = 0; // 0=full (96-byte PBRTriangle), 1=compact far, 2=lossless near
 
     // CPU-side OMM results computed in prepareCPU(), consumed by uploadGPU()
     struct OMMCpuResult {
@@ -259,7 +259,7 @@ struct Chunk1 : public SharedObject<Chunk1> {
     std::shared_ptr<vk::BLAS> blas;
     int64_t blasVersion = -1;
     uint64_t blasGeneration = 0;  // incremented on each BLAS swap, for TLAS UPDATE change detection
-    uint8_t vertexFormat = 2;     // 0=full entity, 1=compact far, 2=lossless near
+    uint8_t vertexFormat = 0;     // 0=full (96-byte PBRTriangle), 1=compact far, 2=lossless near
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
 
