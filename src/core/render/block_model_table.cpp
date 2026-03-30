@@ -25,6 +25,19 @@ void BlockModelTable::load(const BlockModelEntry* entries, uint32_t entryCount,
         if (entries[i].renderType != 0) modelCount++;
     }
 
+    // Extract water data from pure water entry (renderType==2, fluidType==1)
+    waterSpriteStill_ = 0;
+    waterSpriteFlow_  = 0;
+    waterMaterialOrdinal_ = 255;
+    for (uint32_t i = 0; i < entryCount; i++) {
+        if (entries[i].renderType == 2 && entries[i].fluidType == 1) {
+            waterSpriteStill_ = entries[i].fluidSpriteStill();
+            waterSpriteFlow_  = entries[i].fluidSpriteFlow();
+            waterMaterialOrdinal_ = entries[i].materialOrdinal;
+            break;
+        }
+    }
+
     // Copy quad array (UVs are in atlas space, need normalizeQuadUVs() later)
     quads_.assign(quads, quads + quadCount);
     uvsNormalized_ = false;

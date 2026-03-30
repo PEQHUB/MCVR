@@ -168,6 +168,10 @@ float BlockMesher::getFluidHeightAt(const SectionInput& input, const BlockModelT
         }
     }
 
+    // Waterlogged blocks (renderType!=2) are always source-level water;
+    // their totalQuadCount field holds model quad count, not fluid level.
+    if (entry->renderType != 2) return 8.0f / 9.0f;
+
     uint8_t level = entry->fluidLevel();
     if (level >= 8) return 8.0f / 9.0f; // source block
     if (level == 0) return 1.0f;         // falling
@@ -186,21 +190,22 @@ static float averageCornerHeight(float h0, float h1, float h2, float h3) {
 
 static void emitFluidFace(std::vector<PBRTriangle>& vertices, std::vector<uint32_t>& indices,
                            const glm::vec3 pos[4], glm::vec3 normal,
-                           uint16_t spriteId, const BlockModelEntry& entry) {
+                           uint16_t spriteId, uint8_t fluidMaterialOrdinal,
+                           uint8_t tintType) {
     uint32_t flags = vk::VertexFormat::PBR_FLAG_USE_NORM
                    | vk::VertexFormat::PBR_FLAG_USE_TEXTURE
                    | vk::VertexFormat::PBR_FLAG_BLOCK_GEOMETRY;
 
-    // Biome tint for water (tintColorType stored as 2=water)
-    if (entry.tintColorType <= 2) {
-        flags |= (static_cast<uint32_t>(entry.tintColorType + 1) << vk::VertexFormat::PBR_FLAG_BIOME_TINT_SHIFT);
+    // Biome tint (use override tintType — allows waterlogged blocks to force TINT_WATER)
+    if (tintType <= 2) {
+        flags |= (static_cast<uint32_t>(tintType + 1) << vk::VertexFormat::PBR_FLAG_BIOME_TINT_SHIFT);
     }
 
-    uint32_t materialVal = (entry.materialOrdinal != 255) ? (entry.materialOrdinal + 1) : 0;
-    uint32_t emissiveBlockType = (entry.emissiveOrdinal & 0xFF)
-                               | ((materialVal & 0xFF) << 8)
-                               | (entry.isVivid ? 0x10000u : 0u)
-                               | ((entry.blockTypeId & 0x7FFF) << 17);
+    // Always use the fluid's own material (e.g. WATER_MAT ordinal 103), never the host block's.
+    // This ensures waterlogged block water surfaces get proper water rendering (IOR, roughness).
+    uint32_t materialVal = (fluidMaterialOrdinal != 255) ? (fluidMaterialOrdinal + 1) : 0;
+    uint32_t emissiveBlockType = 0xFF  // emissiveOrdinal=255 (no emission)
+                               | ((materialVal & 0xFF) << 8);
 
     // Simple UV mapping: 4 corners of the sprite [0,1]
     static const glm::vec2 uvs[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
@@ -212,7 +217,7 @@ static void emitFluidFace(std::vector<PBRTriangle>& vertices, std::vector<uint32
         vert.pos = pos[v];
         vert.flags = flags;
         vert.norm = normal;
-        vert.albedoEmission = entry.emissionNits;
+        vert.albedoEmission = 0.0f;
         vert.colorLayer = glm::vec4(1.0f);
         vert.postBase = vert.pos;
         vert.emissiveBlockType = emissiveBlockType;
@@ -220,6 +225,15 @@ static void emitFluidFace(std::vector<PBRTriangle>& vertices, std::vector<uint32
         vert.textureID = spriteId;
         vertices.push_back(vert);
     }
+    // Double-sided: emit both windings so fluid faces are visible from both directions
+    // Front face (outward-facing, e.g. top face visible from above)
+    indices.push_back(baseIdx + 2);
+    indices.push_back(baseIdx + 1);
+    indices.push_back(baseIdx + 0);
+    indices.push_back(baseIdx + 0);
+    indices.push_back(baseIdx + 3);
+    indices.push_back(baseIdx + 2);
+    // Back face (inward-facing, e.g. top face visible from underwater)
     indices.push_back(baseIdx + 0);
     indices.push_back(baseIdx + 1);
     indices.push_back(baseIdx + 2);
@@ -240,8 +254,15 @@ void BlockMesher::emitFluidQuads(const SectionInput& input, const BlockModelTabl
     auto& verts = isWater ? output.translucentVertices : output.solidVertices;
     auto& idxs  = isWater ? output.translucentIndices  : output.solidIndices;
 
-    uint16_t stillSprite = entry.fluidSpriteStill();
-    uint16_t flowSprite  = entry.fluidSpriteFlow();
+    // Waterlogged blocks (renderType==1) store model data in quadOffset, not sprite IDs.
+    // Use table-stored water data instead. Pure fluids (renderType==2) use entry data.
+    bool waterlogged = (entry.renderType != 2);
+    uint16_t stillSprite = waterlogged ? table.waterSpriteStill() : entry.fluidSpriteStill();
+    uint16_t flowSprite  = waterlogged ? table.waterSpriteFlow()  : entry.fluidSpriteFlow();
+    uint8_t fluidTint = waterlogged ? 2 : entry.tintColorType;
+    // Material ordinal: always use water's material (WATER_MAT = ordinal 103) for correct IOR/roughness.
+    // Waterlogged blocks get it from the table; pure water entries already have it.
+    uint8_t fluidMaterial = waterlogged ? table.waterMaterialOrdinal() : entry.materialOrdinal;
 
     // Compute corner heights for top face
     float hCenter = getFluidHeightAt(input, table, x, y, z, fluidType);
@@ -288,7 +309,7 @@ void BlockMesher::emitFluidQuads(const SectionInput& input, const BlockModelTabl
         };
         // Normal from height gradient
         glm::vec3 normal = glm::normalize(glm::vec3(cNW - cNE + cSW - cSE, 2.0f, cNW + cNE - cSW - cSE));
-        emitFluidFace(verts, idxs, pos, normal, stillSprite, entry);
+        emitFluidFace(verts, idxs, pos, normal, stillSprite, fluidMaterial, fluidTint);
     }
 
     // BOTTOM FACE: render if block below is not same fluid and not opaque
@@ -299,7 +320,7 @@ void BlockMesher::emitFluidQuads(const SectionInput& input, const BlockModelTabl
             {bx + 1, by + 0.001f, bz},
             {bx,     by + 0.001f, bz},
         };
-        emitFluidFace(verts, idxs, pos, {0, -1, 0}, stillSprite, entry);
+        emitFluidFace(verts, idxs, pos, {0, -1, 0}, stillSprite, fluidMaterial, fluidTint);
     }
 
     // SIDE FACES: render if neighbor is not same fluid and not full opaque
@@ -312,7 +333,7 @@ void BlockMesher::emitFluidQuads(const SectionInput& input, const BlockModelTabl
             {bx,     by,      bz},
             {bx + 1, by,      bz},
         };
-        emitFluidFace(verts, idxs, pos, {0, 0, -1}, flowSprite, entry);
+        emitFluidFace(verts, idxs, pos, {0, 0, -1}, flowSprite, fluidMaterial, fluidTint);
     }
 
     // SOUTH (z+1)
@@ -324,7 +345,7 @@ void BlockMesher::emitFluidQuads(const SectionInput& input, const BlockModelTabl
             {bx + 1, by,      bz + 1},
             {bx,     by,      bz + 1},
         };
-        emitFluidFace(verts, idxs, pos, {0, 0, 1}, flowSprite, entry);
+        emitFluidFace(verts, idxs, pos, {0, 0, 1}, flowSprite, fluidMaterial, fluidTint);
     }
 
     // WEST (x-1)
@@ -336,7 +357,7 @@ void BlockMesher::emitFluidQuads(const SectionInput& input, const BlockModelTabl
             {bx, by,      bz + 1},
             {bx, by,      bz},
         };
-        emitFluidFace(verts, idxs, pos, {-1, 0, 0}, flowSprite, entry);
+        emitFluidFace(verts, idxs, pos, {-1, 0, 0}, flowSprite, fluidMaterial, fluidTint);
     }
 
     // EAST (x+1)
@@ -348,7 +369,7 @@ void BlockMesher::emitFluidQuads(const SectionInput& input, const BlockModelTabl
             {bx + 1, by,      bz},
             {bx + 1, by,      bz + 1},
         };
-        emitFluidFace(verts, idxs, pos, {1, 0, 0}, flowSprite, entry);
+        emitFluidFace(verts, idxs, pos, {1, 0, 0}, flowSprite, fluidMaterial, fluidTint);
     }
 }
 
@@ -370,19 +391,12 @@ BlockMesher::SectionOutput BlockMesher::mesh(const SectionInput& input,
                 const BlockModelEntry* entry = table.getEntry(stateId);
                 if (!entry) continue; // invisible or unknown
 
-                // Fluid blocks: generate dynamic quads instead of model quads
+                // Fluid blocks: generate dynamic fluid quads
                 if (entry->fluidType != 0) {
-                    // Collect light source if emissive (lava)
-                    if (entry->emissiveOrdinal != 255 && entry->emissionNits > 0) {
-                        ChunkLightEntry light;
-                        light.worldX = static_cast<float>(input.originX + x) + 0.5f;
-                        light.worldY = static_cast<float>(input.originY + y) + 0.5f;
-                        light.worldZ = static_cast<float>(input.originZ + z) + 0.5f;
-                        light.lightTypeId = entry->emissiveOrdinal;
-                        output.lights.push_back(light);
-                    }
                     emitFluidQuads(input, table, *entry, x, y, z, output);
-                    continue;
+                    // Pure fluids (renderType==2): done, no model quads.
+                    // Waterlogged (renderType==1): fall through to also emit model quads.
+                    if (entry->renderType == 2) continue;
                 }
 
                 // Collect light source if emissive

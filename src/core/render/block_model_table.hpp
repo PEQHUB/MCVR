@@ -28,7 +28,7 @@ static_assert(sizeof(BlockModelQuad) == 88, "BlockModelQuad must be 88 bytes");
 /// Per-block-state entry (32 bytes).
 struct BlockModelEntry {
     uint32_t globalStateId;          // 4B: Minecraft registry raw ID
-    uint8_t  renderType;             // 1B: 0=invisible, 1=model
+    uint8_t  renderType;             // 1B: 0=invisible, 1=model, 2=fluid
     uint8_t  isFullOpaqueCube;       // 1B: 1 if all 6 faces are solid (for neighbor face culling)
     uint8_t  emissiveOrdinal;        // 1B: EmissiveBlock.ordinal() or 255
     uint8_t  materialOrdinal;        // 1B: MaterialBlock ordinal or 255
@@ -98,6 +98,12 @@ class BlockModelTable {
     /// Max global state ID (for bounds checking).
     uint32_t maxStateId() const { return maxStateId_; }
 
+    /// Water data (extracted from pure water block entry during load).
+    /// Used by mesher for waterlogged blocks whose fields store model data, not fluid data.
+    uint16_t waterSpriteStill() const { return waterSpriteStill_; }
+    uint16_t waterSpriteFlow()  const { return waterSpriteFlow_; }
+    uint8_t  waterMaterialOrdinal() const { return waterMaterialOrdinal_; }
+
   private:
     std::vector<BlockModelEntry> entries_;     // Indexed by globalStateId (sparse — gaps are zeroed)
     std::vector<BlockModelQuad> quads_;         // Flat quad array, entries index into this
@@ -109,4 +115,9 @@ class BlockModelTable {
 
     // Guard: UVs are only normalized once per load
     bool uvsNormalized_ = false;
+
+    // Water data (from pure water FluidBlock, for waterlogged block meshing)
+    uint16_t waterSpriteStill_ = 0;
+    uint16_t waterSpriteFlow_  = 0;
+    uint8_t  waterMaterialOrdinal_ = 255;
 };
