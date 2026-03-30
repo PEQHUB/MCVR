@@ -67,4 +67,17 @@ class BlockMesher {
                          int blockX, int blockY, int blockZ,
                          uint32_t textureId,
                          const glm::vec4* overlayBounds = nullptr);
+
+    /// Get block state at arbitrary position within or adjacent to the section.
+    /// Handles section boundaries using neighborStates. Returns 0 (air) for diagonal out-of-bounds.
+    static uint32_t getBlockAt(const SectionInput& input, int x, int y, int z);
+
+    /// Get fluid height at a position (0.0 if not fluid, up to 1.0 for submerged).
+    static float getFluidHeightAt(const SectionInput& input, const BlockModelTable& table,
+                                   int x, int y, int z, uint8_t fluidType);
+
+    /// Generate fluid quads (top, bottom, sides) for a single fluid block.
+    static void emitFluidQuads(const SectionInput& input, const BlockModelTable& table,
+                                const BlockModelEntry& entry,
+                                int x, int y, int z, SectionOutput& output);
 };

@@ -18,8 +18,11 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <set>
 
 #include <glm/gtc/packing.hpp>
@@ -1198,7 +1201,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
         cmdPool_.push(vk::CommandBuffer::create(device, asyncPool));
     }
 
-    // Timeline semaphore for BLAS thread — secondary queue only (Streamline-safe).
+    // Timeline semaphore for BLAS thread — secondary queue only.
     auto blasSem = device->blasSemaphore();
     // Initialize counter from current semaphore value — handles scheduler restart
     // (render distance change recreates scheduler but Device-level semaphore persists).
@@ -1207,12 +1210,56 @@ void ChunkBuildScheduler::blasThreadLoop() {
     static uint64_t totalOrig = 0, totalComp = 0;
     static uint32_t totalN = 0;
 
+    // --- BLAS diagnostic log: persistent, survives TDR ---
+    // Deferred open: Renderer::folderPath may not be set yet at BLAS thread start
+    std::ofstream diagLog;
+    auto diagTs = []() {
+        auto now = std::chrono::steady_clock::now();
+        return std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+    };
+    uint64_t diagIter = 0;
+    auto ensureDiagOpen = [&]() {
+        if (!diagLog.is_open() && !Renderer::folderPath.empty()) {
+            auto diagPath = Renderer::folderPath / "logs" / "blas_diag.log";
+            std::filesystem::create_directories(diagPath.parent_path());
+            diagLog.open(diagPath, std::ios::trunc);
+            if (diagLog.is_open()) {
+                diagLog << "BLAS_DIAG_START timelineInit=" << blasTimelineCounter_
+                        << " maxInFlight=" << MAX_IN_FLIGHT
+                        << " path=" << diagPath.string() << std::endl;
+                diagLog.flush();
+            }
+        }
+    };
+    ensureDiagOpen();
+
     while (!stop_.load()) {
+        // Pause gate: render thread requests pause during swapchain recreate
+        if (paused_.load(std::memory_order_acquire)) {
+            pausedAck_.store(true, std::memory_order_release);
+            while (paused_.load(std::memory_order_acquire) && !stop_.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            pausedAck_.store(false, std::memory_order_release);
+            if (stop_.load()) break;
+        }
+
+        diagIter++;
+        ensureDiagOpen();
         // ---- POLL: check completed batches via timeline counter (non-blocking) ----
         uint64_t currentTimelineVal = blasSem->getValue();
         while (!inFlight_.empty()) {
             auto &front = inFlight_.front();
             if (currentTimelineVal < front.timelineValue) break;  // oldest not done yet
+
+            if (diagLog.is_open()) {
+                diagLog << diagTs() << " COMPLETE iter=" << diagIter
+                        << " tv=" << front.timelineValue
+                        << " type=" << (front.isCompaction ? "compact" : "build")
+                        << " chunks=" << front.chunks.size()
+                        << " inFlight=" << inFlight_.size()
+                        << " gpuVal=" << currentTimelineVal << std::endl;
+            }
 
             if (front.isCompaction) {
                 // Compaction phase complete — destroy query pool and hand off
@@ -1280,7 +1327,17 @@ void ChunkBuildScheduler::blasThreadLoop() {
                     csi.pNext = &tsi;
                     csi.commandBufferCount = 1; csi.pCommandBuffers = &compCmd->vkCommandBuffer();
                     csi.signalSemaphoreCount = 1; csi.pSignalSemaphores = &blasSemHandle;
-                    VkResult cr = vkQueueSubmit(device->secondaryQueue(), 1, &csi, VK_NULL_HANDLE);
+                    VkResult cr;
+                    {
+                        std::lock_guard<std::mutex> qLock(device->queueMutex());
+                        cr = vkQueueSubmit(device->secondaryQueue(), 1, &csi, VK_NULL_HANDLE);
+                    }
+                    if (diagLog.is_open()) {
+                        diagLog << diagTs() << " COMPACT_SUBMIT iter=" << diagIter
+                                << " tv=" << compactValue << " vk=" << cr
+                                << " inFlight=" << inFlight_.size() << std::endl;
+                        diagLog.flush();
+                    }
                     if (cr == VK_SUCCESS) {
                         auto chunks = std::move(front.chunks);
                         auto qp = front.compactionQP;
@@ -1289,9 +1346,13 @@ void ChunkBuildScheduler::blasThreadLoop() {
                         inFlight_.push_back({compactValue, std::move(compCmd),
                             std::move(chunks), qp, qpCount, true});
                     } else {
-                        // Submit failed — hand off uncompacted chunks
+                        // Submit failed — propagate device lost
                         --blasTimelineCounter_;
                         g_crashRing.record("compactionSubmitFail", cr);
+                        if (cr == VK_ERROR_DEVICE_LOST) {
+                            if (diagLog.is_open()) { diagLog << diagTs() << " DEVICE_LOST_COMPACT" << std::endl; diagLog.flush(); }
+                            crashExitWithQueue(cr, "BLAS compaction submit DEVICE_LOST", device->secondaryQueue());
+                        }
                         if (front.compactionQP) vkDestroyQueryPool(device->vkDevice(), front.compactionQP, nullptr);
                         {
                             std::lock_guard<std::mutex> lock(completedMtx_);
@@ -1472,10 +1533,25 @@ void ChunkBuildScheduler::blasThreadLoop() {
                 si.pNext = &btsi;
                 si.commandBufferCount = 1; si.pCommandBuffers = &cmd->vkCommandBuffer();
                 si.signalSemaphoreCount = 1; si.pSignalSemaphores = &blasSemHandle;
-                VkResult r = vkQueueSubmit(device->secondaryQueue(), 1, &si, VK_NULL_HANDLE);
+                VkResult r;
+                {
+                    std::lock_guard<std::mutex> qLock(device->queueMutex());
+                    r = vkQueueSubmit(device->secondaryQueue(), 1, &si, VK_NULL_HANDLE);
+                }
+                if (diagLog.is_open()) {
+                    diagLog << diagTs() << " BUILD_SUBMIT iter=" << diagIter
+                            << " tv=" << batchValue << " vk=" << r
+                            << " chunks=" << batch.size()
+                            << " inFlight=" << inFlight_.size() << std::endl;
+                    diagLog.flush();
+                }
                 if (r != VK_SUCCESS) {
                     --blasTimelineCounter_;  // rollback — signal never issued
                     g_crashRing.record("blasThreadSubmitFail", r);
+                    if (r == VK_ERROR_DEVICE_LOST) {
+                        if (diagLog.is_open()) { diagLog << diagTs() << " DEVICE_LOST_BUILD" << std::endl; diagLog.flush(); }
+                        crashExitWithQueue(r, "BLAS build submit DEVICE_LOST", device->secondaryQueue());
+                    }
                     cmdPool_.push(std::move(cmd));
                     if (qp) vkDestroyQueryPool(device->vkDevice(), qp, nullptr);
                     continue;
@@ -1494,6 +1570,19 @@ void ChunkBuildScheduler::blasThreadLoop() {
             // In-flight batches but no new work or no capacity — brief yield
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
+
+        // Periodic crash ring flush (every 500 iterations ≈ 50ms) so TDR doesn't lose data
+        if (diagIter % 500 == 0) {
+            auto logsDir = Renderer::folderPath / "logs";
+            g_crashRing.dumpToFile(logsDir);
+        }
+    }
+
+    if (diagLog.is_open()) {
+        diagLog << diagTs() << " SHUTDOWN iter=" << diagIter
+                << " tv=" << blasTimelineCounter_
+                << " inFlight=" << inFlight_.size() << std::endl;
+        diagLog.flush();
     }
 
     // Drain remaining in-flight batches on shutdown — single timeline wait covers all
@@ -1509,6 +1598,19 @@ void ChunkBuildScheduler::blasThreadLoop() {
 
 uint32_t ChunkBuildScheduler::chunkBuildingBatchSize() {
     return chunkBuildingBatchSize_;
+}
+
+void ChunkBuildScheduler::pause() {
+    paused_.store(true, std::memory_order_release);
+    // Spin until BLAS thread acknowledges — guarantees no submit is in progress
+    while (!pausedAck_.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+}
+
+void ChunkBuildScheduler::resume() {
+    pausedAck_.store(false, std::memory_order_release);
+    paused_.store(false, std::memory_order_release);
 }
 
 float Chunk1::buildFactor(std::chrono::steady_clock::time_point currentTime, glm::vec3 cameraPos) {

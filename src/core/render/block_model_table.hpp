@@ -43,6 +43,12 @@ struct BlockModelEntry {
     uint8_t  fixedTintR;             // 1B: fixed tint red   (when tintColorType=3)
     uint8_t  fixedTintG;             // 1B: fixed tint green (when tintColorType=3)
     uint8_t  fixedTintB;             // 1B: fixed tint blue  (when tintColorType=3)
+
+    // Fluid-specific accessors (valid only when fluidType != 0).
+    // These read repurposed fields: quadOffset stores packed sprite IDs, totalQuadCount stores level.
+    uint8_t  fluidLevel()       const { return totalQuadCount; }
+    uint16_t fluidSpriteStill() const { return static_cast<uint16_t>(quadOffset & 0xFFFF); }
+    uint16_t fluidSpriteFlow()  const { return static_cast<uint16_t>((quadOffset >> 16) & 0xFFFF); }
 };
 static_assert(sizeof(BlockModelEntry) == 32, "BlockModelEntry must be 32 bytes");
 

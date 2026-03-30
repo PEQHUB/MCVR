@@ -130,6 +130,228 @@ void BlockMesher::emitQuad(std::vector<PBRTriangle>& vertices,
     indices.push_back(baseIdx + 0);
 }
 
+// ---- Fluid meshing ----
+
+uint32_t BlockMesher::getBlockAt(const SectionInput& input, int x, int y, int z) {
+    if (x >= 0 && x < 16 && y >= 0 && y < 16 && z >= 0 && z < 16)
+        return input.blockStates[y * 256 + z * 16 + x];
+    // Single-axis out of bounds: use neighbor face data
+    if (y < 0)  return input.neighborStates[0][z * 16 + x];    // DOWN
+    if (y > 15) return input.neighborStates[1][z * 16 + x];    // UP
+    if (z < 0)  return input.neighborStates[2][y * 16 + x];    // NORTH
+    if (z > 15) return input.neighborStates[3][y * 16 + x];    // SOUTH
+    if (x < 0)  return input.neighborStates[4][y * 16 + z];    // WEST
+    if (x > 15) return input.neighborStates[5][y * 16 + z];    // EAST
+    return 0; // diagonal out-of-bounds: treat as air
+}
+
+float BlockMesher::getFluidHeightAt(const SectionInput& input, const BlockModelTable& table,
+                                     int x, int y, int z, uint8_t fluidType) {
+    uint32_t stateId = getBlockAt(input, x, y, z);
+    if (stateId == 0) return 0.0f;
+    const BlockModelEntry* entry = table.getEntry(stateId);
+    if (!entry || entry->fluidType == 0) return 0.0f;
+    // Must be same fluid type (water=1, lava=2)
+    uint8_t ft = entry->fluidType;
+    uint8_t baseType = (ft <= 2) ? ft : ((ft == 3) ? 1 : 2); // normalize flowing→base
+    uint8_t queryBase = (fluidType <= 2) ? fluidType : ((fluidType == 3) ? 1 : 2);
+    if (baseType != queryBase) return 0.0f;
+
+    // Check if fluid above → submerged = full height
+    uint32_t aboveState = getBlockAt(input, x, y + 1, z);
+    if (aboveState != 0) {
+        const BlockModelEntry* aboveEntry = table.getEntry(aboveState);
+        if (aboveEntry && aboveEntry->fluidType != 0) {
+            uint8_t aboveBase = (aboveEntry->fluidType <= 2) ? aboveEntry->fluidType
+                              : ((aboveEntry->fluidType == 3) ? 1 : 2);
+            if (aboveBase == queryBase) return 1.0f;
+        }
+    }
+
+    uint8_t level = entry->fluidLevel();
+    if (level >= 8) return 8.0f / 9.0f; // source block
+    if (level == 0) return 1.0f;         // falling
+    return (8.0f - static_cast<float>(level)) / 9.0f; // flowing 1-7
+}
+
+static float averageCornerHeight(float h0, float h1, float h2, float h3) {
+    // Average non-zero heights (Minecraft's corner averaging algorithm)
+    float sum = 0; int count = 0;
+    if (h0 > 0) { sum += h0; count++; }
+    if (h1 > 0) { sum += h1; count++; }
+    if (h2 > 0) { sum += h2; count++; }
+    if (h3 > 0) { sum += h3; count++; }
+    return count > 0 ? sum / count : 0.0f;
+}
+
+static void emitFluidFace(std::vector<PBRTriangle>& vertices, std::vector<uint32_t>& indices,
+                           const glm::vec3 pos[4], glm::vec3 normal,
+                           uint16_t spriteId, const BlockModelEntry& entry) {
+    uint32_t flags = vk::VertexFormat::PBR_FLAG_USE_NORM
+                   | vk::VertexFormat::PBR_FLAG_USE_TEXTURE
+                   | vk::VertexFormat::PBR_FLAG_BLOCK_GEOMETRY;
+
+    // Biome tint for water (tintColorType stored as 2=water)
+    if (entry.tintColorType <= 2) {
+        flags |= (static_cast<uint32_t>(entry.tintColorType + 1) << vk::VertexFormat::PBR_FLAG_BIOME_TINT_SHIFT);
+    }
+
+    uint32_t materialVal = (entry.materialOrdinal != 255) ? (entry.materialOrdinal + 1) : 0;
+    uint32_t emissiveBlockType = (entry.emissiveOrdinal & 0xFF)
+                               | ((materialVal & 0xFF) << 8)
+                               | (entry.isVivid ? 0x10000u : 0u)
+                               | ((entry.blockTypeId & 0x7FFF) << 17);
+
+    // Simple UV mapping: 4 corners of the sprite [0,1]
+    static const glm::vec2 uvs[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+
+    uint32_t baseIdx = static_cast<uint32_t>(vertices.size());
+    for (int v = 0; v < 4; v++) {
+        PBRTriangle vert;
+        std::memset(&vert, 0, sizeof(PBRTriangle));
+        vert.pos = pos[v];
+        vert.flags = flags;
+        vert.norm = normal;
+        vert.albedoEmission = entry.emissionNits;
+        vert.colorLayer = glm::vec4(1.0f);
+        vert.postBase = vert.pos;
+        vert.emissiveBlockType = emissiveBlockType;
+        vert.textureUV = uvs[v];
+        vert.textureID = spriteId;
+        vertices.push_back(vert);
+    }
+    indices.push_back(baseIdx + 0);
+    indices.push_back(baseIdx + 1);
+    indices.push_back(baseIdx + 2);
+    indices.push_back(baseIdx + 2);
+    indices.push_back(baseIdx + 3);
+    indices.push_back(baseIdx + 0);
+}
+
+void BlockMesher::emitFluidQuads(const SectionInput& input, const BlockModelTable& table,
+                                  const BlockModelEntry& entry,
+                                  int x, int y, int z, SectionOutput& output) {
+    float bx = static_cast<float>(x);
+    float by = static_cast<float>(y);
+    float bz = static_cast<float>(z);
+
+    uint8_t fluidType = entry.fluidType;
+    bool isWater = (fluidType == 1 || fluidType == 3);
+    auto& verts = isWater ? output.translucentVertices : output.solidVertices;
+    auto& idxs  = isWater ? output.translucentIndices  : output.solidIndices;
+
+    uint16_t stillSprite = entry.fluidSpriteStill();
+    uint16_t flowSprite  = entry.fluidSpriteFlow();
+
+    // Compute corner heights for top face
+    float hCenter = getFluidHeightAt(input, table, x, y, z, fluidType);
+    float hN  = getFluidHeightAt(input, table, x, y, z - 1, fluidType);
+    float hS  = getFluidHeightAt(input, table, x, y, z + 1, fluidType);
+    float hE  = getFluidHeightAt(input, table, x + 1, y, z, fluidType);
+    float hW  = getFluidHeightAt(input, table, x - 1, y, z, fluidType);
+    float hNE = getFluidHeightAt(input, table, x + 1, y, z - 1, fluidType);
+    float hNW = getFluidHeightAt(input, table, x - 1, y, z - 1, fluidType);
+    float hSE = getFluidHeightAt(input, table, x + 1, y, z + 1, fluidType);
+    float hSW = getFluidHeightAt(input, table, x - 1, y, z + 1, fluidType);
+
+    // Corner heights: average of 4 blocks touching each corner
+    float cNW = averageCornerHeight(hCenter, hN, hW, hNW);
+    float cNE = averageCornerHeight(hCenter, hN, hE, hNE);
+    float cSW = averageCornerHeight(hCenter, hS, hW, hSW);
+    float cSE = averageCornerHeight(hCenter, hS, hE, hSE);
+
+    // Helper: check if neighbor is same fluid
+    auto isSameFluid = [&](int nx, int ny, int nz) -> bool {
+        uint32_t ns = getBlockAt(input, nx, ny, nz);
+        if (ns == 0) return false;
+        const BlockModelEntry* ne = table.getEntry(ns);
+        if (!ne || ne->fluidType == 0) return false;
+        uint8_t nBase = (ne->fluidType <= 2) ? ne->fluidType : ((ne->fluidType == 3) ? 1 : 2);
+        uint8_t myBase = isWater ? 1 : 2;
+        return nBase == myBase;
+    };
+
+    auto isOpaqueAt = [&](int nx, int ny, int nz) -> bool {
+        uint32_t ns = getBlockAt(input, nx, ny, nz);
+        if (ns == 0) return false;
+        const BlockModelEntry* ne = table.getEntry(ns);
+        return ne && ne->isFullOpaqueCube;
+    };
+
+    // TOP FACE: render if block above is not same fluid
+    if (!isSameFluid(x, y + 1, z)) {
+        glm::vec3 pos[4] = {
+            {bx,     by + cNW, bz},       // NW
+            {bx + 1, by + cNE, bz},       // NE
+            {bx + 1, by + cSE, bz + 1},   // SE
+            {bx,     by + cSW, bz + 1},   // SW
+        };
+        // Normal from height gradient
+        glm::vec3 normal = glm::normalize(glm::vec3(cNW - cNE + cSW - cSE, 2.0f, cNW + cNE - cSW - cSE));
+        emitFluidFace(verts, idxs, pos, normal, stillSprite, entry);
+    }
+
+    // BOTTOM FACE: render if block below is not same fluid and not opaque
+    if (!isSameFluid(x, y - 1, z) && !isOpaqueAt(x, y - 1, z)) {
+        glm::vec3 pos[4] = {
+            {bx,     by + 0.001f, bz + 1},
+            {bx + 1, by + 0.001f, bz + 1},
+            {bx + 1, by + 0.001f, bz},
+            {bx,     by + 0.001f, bz},
+        };
+        emitFluidFace(verts, idxs, pos, {0, -1, 0}, stillSprite, entry);
+    }
+
+    // SIDE FACES: render if neighbor is not same fluid and not full opaque
+    // NORTH (z-1)
+    if (!isSameFluid(x, y, z - 1) && !isOpaqueAt(x, y, z - 1)) {
+        float hL = cNW, hR = cNE;
+        glm::vec3 pos[4] = {
+            {bx + 1, by + hR, bz},
+            {bx,     by + hL, bz},
+            {bx,     by,      bz},
+            {bx + 1, by,      bz},
+        };
+        emitFluidFace(verts, idxs, pos, {0, 0, -1}, flowSprite, entry);
+    }
+
+    // SOUTH (z+1)
+    if (!isSameFluid(x, y, z + 1) && !isOpaqueAt(x, y, z + 1)) {
+        float hL = cSE, hR = cSW;
+        glm::vec3 pos[4] = {
+            {bx,     by + hR, bz + 1},
+            {bx + 1, by + hL, bz + 1},
+            {bx + 1, by,      bz + 1},
+            {bx,     by,      bz + 1},
+        };
+        emitFluidFace(verts, idxs, pos, {0, 0, 1}, flowSprite, entry);
+    }
+
+    // WEST (x-1)
+    if (!isSameFluid(x - 1, y, z) && !isOpaqueAt(x - 1, y, z)) {
+        float hL = cSW, hR = cNW;
+        glm::vec3 pos[4] = {
+            {bx, by + hR, bz},
+            {bx, by + hL, bz + 1},
+            {bx, by,      bz + 1},
+            {bx, by,      bz},
+        };
+        emitFluidFace(verts, idxs, pos, {-1, 0, 0}, flowSprite, entry);
+    }
+
+    // EAST (x+1)
+    if (!isSameFluid(x + 1, y, z) && !isOpaqueAt(x + 1, y, z)) {
+        float hL = cNE, hR = cSE;
+        glm::vec3 pos[4] = {
+            {bx + 1, by + hR, bz + 1},
+            {bx + 1, by + hL, bz},
+            {bx + 1, by,      bz},
+            {bx + 1, by,      bz + 1},
+        };
+        emitFluidFace(verts, idxs, pos, {1, 0, 0}, flowSprite, entry);
+    }
+}
+
 BlockMesher::SectionOutput BlockMesher::mesh(const SectionInput& input,
                                               const BlockModelTable& table) {
     SectionOutput output;
@@ -147,6 +369,21 @@ BlockMesher::SectionOutput BlockMesher::mesh(const SectionInput& input,
 
                 const BlockModelEntry* entry = table.getEntry(stateId);
                 if (!entry) continue; // invisible or unknown
+
+                // Fluid blocks: generate dynamic quads instead of model quads
+                if (entry->fluidType != 0) {
+                    // Collect light source if emissive (lava)
+                    if (entry->emissiveOrdinal != 255 && entry->emissionNits > 0) {
+                        ChunkLightEntry light;
+                        light.worldX = static_cast<float>(input.originX + x) + 0.5f;
+                        light.worldY = static_cast<float>(input.originY + y) + 0.5f;
+                        light.worldZ = static_cast<float>(input.originZ + z) + 0.5f;
+                        light.lightTypeId = entry->emissiveOrdinal;
+                        output.lights.push_back(light);
+                    }
+                    emitFluidQuads(input, table, *entry, x, y, z, output);
+                    continue;
+                }
 
                 // Collect light source if emissive
                 if (entry->emissiveOrdinal != 255 && entry->emissionNits > 0) {

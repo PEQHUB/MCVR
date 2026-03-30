@@ -797,11 +797,18 @@ void Framework::recreate() {
     vk::Window::framebufferResized = false;
     pipeline_->needRecreate = false;
 
-    renderDiag("  waitRenderQueueIdle...");
-    waitRenderQueueIdle();
-    renderDiag("  waitBackendQueueIdle...");
-    waitBackendQueueIdle();
-    renderDiag("  queues idle");
+    // Pause BLAS thread FIRST to prevent new secondary queue submits during recreate.
+    // This closes the race window between queue idle and context destruction.
+    renderDiag("  pausing BLAS thread...");
+    {
+        auto world = Renderer::instance().world();
+        if (world && world->chunks() && world->chunks()->chunkBuildScheduler()) {
+            world->chunks()->chunkBuildScheduler()->pause();
+        }
+    }
+    renderDiag("  BLAS thread paused, waiting device idle...");
+    waitDeviceIdle();
+    renderDiag("  device idle");
 
     // Notify frame gen manager before swapchain teardown
     renderDiag("  FrameGenManager::beforeSwapchainRecreate...");
@@ -912,6 +919,15 @@ void Framework::recreate() {
     }
 
     Renderer::instance().textures()->bindAllTextures();
+
+    // Resume BLAS thread after recreate is complete
+    {
+        auto world = Renderer::instance().world();
+        if (world && world->chunks() && world->chunks()->chunkBuildScheduler()) {
+            world->chunks()->chunkBuildScheduler()->resume();
+        }
+    }
+    renderDiag("  BLAS thread resumed");
 }
 
 void Framework::waitDeviceIdle() {

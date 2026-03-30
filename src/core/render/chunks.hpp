@@ -177,6 +177,11 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
 
     uint32_t chunkBuildingBatchSize();
 
+    // Pause BLAS thread during swapchain recreate to prevent submits in the critical window.
+    // Blocks until BLAS thread acknowledges pause (no pending submits).
+    void pause();
+    void resume();
+
     // Queue depth for Java-side adaptive throttling
     uint32_t getInputQueueSize() {
         std::lock_guard<std::mutex> lock(inputMtx_);
@@ -195,6 +200,8 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
     // Hands off fully-built, compacted BLASes to render thread via completedQueue_.
     std::thread blasThread_;
     std::atomic<bool> stop_{false};
+    std::atomic<bool> paused_{false};
+    std::atomic<bool> pausedAck_{false};
     std::atomic<float> cameraPosX_{0}, cameraPosY_{0}, cameraPosZ_{0};
 
     // Input queue: JNI pushes chunks, BLAS thread consumes them.

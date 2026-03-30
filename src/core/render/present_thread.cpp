@@ -8,6 +8,7 @@
 #include <fstream>
 #include <filesystem>
 #include <cstdarg>
+#include <mutex>
 
 // ── Diagnostic file logger (writes to same dir as overlay_diag.log) ──
 static std::ofstream sPtDiag;
@@ -276,8 +277,12 @@ void PresentThread::threadFunc() {
         // Submit to secondary (present) queue
         // NOTE: assumes secondary queue supports presentation (same family as main on NVIDIA).
         // TODO: add queue family presentation capability check for multi-family GPUs.
-        VkResult submitResult = vkQueueSubmit(
-            device_->secondaryQueue(), 1, &submitInfo, compositeFence_);
+        VkResult submitResult;
+        {
+            std::lock_guard<std::mutex> qLock(device_->queueMutex());
+            submitResult = vkQueueSubmit(
+                device_->secondaryQueue(), 1, &submitInfo, compositeFence_);
+        }
         if (submitResult != VK_SUCCESS) {
             ptCerr() << "composite submit failed: " << submitResult << std::endl;
             continue;
