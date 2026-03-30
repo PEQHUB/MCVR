@@ -735,6 +735,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.noHandAmbient = enabled;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetEntityNormalsEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    Renderer::options.entityNormalsEnabled = (enabled == JNI_TRUE);
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOfflineState(
     JNIEnv *, jclass, jint state, jboolean) {
     Renderer::options.offlineState = static_cast<uint32_t>(std::clamp(state, 0, 2));

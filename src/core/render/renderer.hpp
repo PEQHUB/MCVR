@@ -188,6 +188,7 @@ struct Options {
     bool noEmissionClamp = false;
     bool physicalSunDisk = true;
     bool noHandAmbient = false;
+    bool entityNormalsEnabled = true;
     uint32_t offlineBounces = 16;    // ray bounces during accumulation (1-128)
     bool offlineDisableRR = false;
     bool offlineDisableClamp = false;

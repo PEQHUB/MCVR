@@ -1685,7 +1685,8 @@ void RayTracingModuleContext::render() {
                        | (Renderer::options.physicalSunDisk ? 2048 : 0)
                        | (Renderer::options.noHandAmbient ? 4096 : 0)
                        | ((framework->device()->hasSER() && Renderer::options.serEnabled) ? 8192 : 0)
-                       | ((framework->device()->hasSER() && Renderer::options.serEnabled && Renderer::options.serHintsEnabled) ? 16384 : 0);
+                       | ((framework->device()->hasSER() && Renderer::options.serEnabled && Renderer::options.serHintsEnabled) ? 16384 : 0)
+                       | (Renderer::options.entityNormalsEnabled ? 32768 : 0);
     pushConstant.areaLightCount = worldPrepareContext->areaLightCount;
     pushConstant.shadowSoftness = Renderer::options.shadowSoftness;
     pushConstant.risCandidates = Renderer::options.restirCandidates;

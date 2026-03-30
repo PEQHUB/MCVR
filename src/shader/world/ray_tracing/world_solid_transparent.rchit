@@ -140,6 +140,7 @@ layout(push_constant) uniform PushConstant {
 #define NO_EMISSION_CLAMP  ((pc.flags & 1024) != 0)
 #define PHYSICAL_SUN_DISK  ((pc.flags & 2048) != 0)
 #define NO_HAND_AMBIENT    ((pc.flags & 4096) != 0)
+#define ENTITY_NORMALS_ON  ((pc.flags & 32768) != 0)
 
 layout(set = 3, binding = 3, rgba32f) uniform readonly image2D normalRoughnessImage;
 layout(set = 3, binding = 4, rg32f) uniform readonly image2D motionVectorImage;
@@ -723,12 +724,17 @@ void main() {
             // Skip for AutoPBR entities (GPU applyAutoPBR handles it).
             // Apply for blocks (CPU-baked normals use neutral strength, shader applies runtime value).
             if ((mc.flags & 0x8u) == 0u || isBlockGeometry) {
-                float matNormalStrength = pack5.w;
-                if (matNormalStrength < 0.01) {
-                    mat.normal = vec3(0.0, 0.0, 1.0); // flat — disable normal map
-                } else if (matNormalStrength != 1.0 && length(mat.normal) > 0.01) {
-                    mat.normal.xy *= matNormalStrength;
-                    mat.normal = normalize(mat.normal);
+                // Entity normals master toggle: flatten all entity normals when disabled
+                if (!isBlockGeometry && !ENTITY_NORMALS_ON) {
+                    mat.normal = vec3(0.0, 0.0, 1.0);
+                } else {
+                    float matNormalStrength = pack5.w;
+                    if (matNormalStrength < 0.01) {
+                        mat.normal = vec3(0.0, 0.0, 1.0); // flat — disable normal map
+                    } else if (matNormalStrength != 1.0 && length(mat.normal) > 0.01) {
+                        mat.normal.xy *= matNormalStrength;
+                        mat.normal = normalize(mat.normal);
+                    }
                 }
             }
 
