@@ -19,7 +19,7 @@ layout(set = 0, binding = 2) readonly buffer ExposureBuffer {
     float paperWhiteNits;   // ITU-R BT.2408 reference white (e.g. 203.0)
     float saturation;       // Saturation boost (1.0 = neutral)
     float sdrTransferFunction; // 0.0 = Gamma 2.2, 1.0 = sRGB
-    float capExposureSmoothed; // internal: kept for layout parity
+    float _pad0;               // padding (was capExposureSmoothed)
     float manualExposureEnabled; // 0.0 = auto exposure, 1.0 = manual exposure
     float manualExposure; // direct exposure multiplier when manual is enabled
     // PsychoV tonemapper parameters
@@ -43,7 +43,7 @@ layout(set = 0, binding = 2) readonly buffer ExposureBuffer {
     float tonemapParam5;
     float tonemapParam6;
     float tonemapParam7;
-    float bootTimer;             // shader-internal (not used by frag, layout parity with exposure.comp)
+    float _pad1;                 // padding (was bootTimer)
 }
 gExposure;
 

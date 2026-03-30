@@ -224,44 +224,24 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.Lwhite = lw;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetLegacyExposure(
-    JNIEnv *, jclass, jboolean legacyExposure, jboolean write) {
-    Renderer::options.legacyExposure = legacyExposure;
-}
-
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureUpSpeed(
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetBrightAdaptSpeed(
     JNIEnv *, jclass, jfloat speed, jboolean write) {
-    Renderer::options.exposureUpSpeed = speed;
+    Renderer::options.brightAdaptSpeed = speed;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureDownSpeed(
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDarkAdaptSpeed(
     JNIEnv *, jclass, jfloat speed, jboolean write) {
-    Renderer::options.exposureDownSpeed = speed;
+    Renderer::options.darkAdaptSpeed = speed;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureBrightAdaptBoost(
-    JNIEnv *, jclass, jfloat boost, jboolean write) {
-    Renderer::options.exposureBrightAdaptBoost = boost;
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSceneChangeThreshold(
+    JNIEnv *, jclass, jfloat threshold, jboolean write) {
+    Renderer::options.sceneChangeThreshold = threshold;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureHighlightProtection(
-    JNIEnv *, jclass, jfloat protection, jboolean write) {
-    Renderer::options.exposureHighlightProtection = protection;
-}
-
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureHighlightPercentile(
-    JNIEnv *, jclass, jfloat percentile, jboolean write) {
-    Renderer::options.exposureHighlightPercentile = percentile;
-}
-
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureHighlightSmoothingSpeed(
-    JNIEnv *, jclass, jfloat speed, jboolean write) {
-    Renderer::options.exposureHighlightSmoothingSpeed = speed;
-}
-
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExposureLog2MaxImproved(
-    JNIEnv *, jclass, jfloat log2Max, jboolean write) {
-    Renderer::options.exposureLog2MaxImproved = log2Max;
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetCenterWeightStrength(
+    JNIEnv *, jclass, jfloat strength, jboolean write) {
+    Renderer::options.centerWeightStrength = strength;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssPreset(

@@ -19,18 +19,15 @@ layout(push_constant) uniform PushB {
     float highPercent;
     float middleGrey;
     float dt;
-    float speedUp;
-    float speedDown;
-    float brightAdaptBoost;
+    float brightAdaptSpeed;
+    float darkAdaptSpeed;
     float minExposure;
     float maxExposure;
+    float sceneChangeThreshold;
+    float centerWeightStrength;
     float tonemapMode;
     float Lwhite;
     float exposureCompensation;
-    float legacyExposure;
-    float highlightPercent;
-    float highlightProtection;
-    float highlightSmoothingSpeed;
     // HDR fields (unused by hist shader, but must match push constant layout)
     float hdrPipelineEnabled;
     float hdr10OutputEnabled;
@@ -78,10 +75,6 @@ void main() {
     barrier();
 
     // Read from render-res HDR (binding 4) — the pre-DLSS composed scene.
-    // This gives the histogram accurate scene brightness that DLSS-RR hasn't
-    // modified through neural upscaling. The trimmed percentile (10-90%) handles
-    // extreme outliers, and the iris cap in exposure.comp detects bright emitters
-    // via the 99.95th percentile with asymmetric temporal smoothing.
     ivec2 size = textureSize(uHdrRenderRes, 0);
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 
@@ -90,10 +83,9 @@ void main() {
     if (inside) {
         vec3 hdr = texelFetch(uHdrRenderRes, p, 0).rgb;
 
-        // Do NOT undo pre-exposure here. Both the histogram (render-res HDR) and
-        // the tone mapper (DLSS output) see the same pre-exposed scale, so the
-        // auto-exposure computation naturally compensates:
-        // exposure = middleGrey / avgLum cancels preExposure in the final image.
+        // Histogram meters raw pre-exposed HDR values. The auto-exposure formula
+        // (middleGrey / avgLum) naturally cancels the pre-exposure when tone_mapping.frag
+        // applies exposure to the same pre-exposed image. No undo needed.
         float lum = dot(hdr, LUMA);
         float logLum = log2(max(lum, pc.epsilon));
 
@@ -102,7 +94,14 @@ void main() {
         t = clamp(t, 0.0, 1.0);
 
         uint bin = uint(t * float(NUM_BINS - 1));
-        atomicAdd(sHist[bin], 1u);
+
+        // Center-weighted metering: pixels near center contribute more weight.
+        // Gaussian-like falloff from center; strength controls blend with uniform.
+        vec2 uv = (vec2(p) + 0.5) / vec2(size);
+        float r2 = dot(uv - 0.5, uv - 0.5);
+        float w = mix(1.0, 1.0 + 3.0 * exp(-8.0 * r2), pc.centerWeightStrength);
+        uint weight = uint(clamp(w, 1.0, 4.0));
+        atomicAdd(sHist[bin], weight);
     }
 
     barrier();

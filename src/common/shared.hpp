@@ -330,7 +330,7 @@ namespace Data {
         T_UINT fogType;
         T_UINT skyType;
         T_UINT rayBounces;
-        T_FLOAT pad3;
+        T_FLOAT cameraTmin;  // Min ray distance for primary rays (skips enclosing block geometry)
 
         T_DVEC4 cameraPos; // w for padding
 

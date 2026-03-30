@@ -349,12 +349,17 @@ void main() {
             vec3 radianceBeforeTrace = mainRay.radiance;
             vec3 throughputBeforeTrace = mainRay.throughput;
 
+            // Camera-inside-block: use cameraTmin for primary camera rays to skip enclosing
+            // block geometry (grass, vines, water). Bounces and hand rays keep tmin=0
+            // (bounces use offset_ray() for self-intersection avoidance).
+            float tmin = (psrDepth == 0 && isHand == 0) ? worldUBO.cameraTmin : 0.0;
+
             // SER: reorder PSR traces by hit geometry for material coherence
             if (SER_ENABLED) {
                 hitObjectNV hitObject;
                 hitObjectTraceRayNV(hitObject, topLevelAS, rayFlags, mask,
                                     1, 1, missId,
-                                    mainRay.origin, 0.0, mainRay.direction, len, 0);
+                                    mainRay.origin, tmin, mainRay.direction, len, 0);
                 if (SER_HINTS && hitObjectIsHitNV(hitObject)) {
                     // Coherence hint: geometry index within BLAS correlates with block material.
                     // Chunks pack different block types into separate geometries, so grouping
@@ -370,7 +375,7 @@ void main() {
             } else {
                 traceRayEXT(topLevelAS, rayFlags, mask,
                             1, 1, missId,
-                            mainRay.origin, 0.0, mainRay.direction, len, 0);
+                            mainRay.origin, tmin, mainRay.direction, len, 0);
             }
 
             // Fancy clouds (volumetric): integrate only on the primary camera ray.
