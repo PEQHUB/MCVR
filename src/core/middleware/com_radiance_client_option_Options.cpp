@@ -280,6 +280,13 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     if (write) Renderer::options.needRecreate = true;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrScrgbMode(
+    JNIEnv *, jclass, jboolean scrgb, jboolean write) {
+    Renderer::options.hdrScrgbMode = scrgb;
+    // Changing HDR format requires swapchain recreation
+    if (write) Renderer::options.needRecreate = true;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHdrPeakNits(
     JNIEnv *, jclass, jint nits, jboolean write) {
     Renderer::options.hdrPeakNits = static_cast<float>(nits);

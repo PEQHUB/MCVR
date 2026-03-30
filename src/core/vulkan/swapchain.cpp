@@ -62,15 +62,30 @@ VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &av
     return availableFormats[0];
 }
 
-// HDR10 surface format selection — returns {format, found} pair
+// HDR surface format selection — returns {format, hdrMode} pair
+// HDR10 is default (compatible with DLSS-FG). scRGB is optional (breaks DLSS-FG).
 // Only called when Renderer::options.hdrEnabled is true
-std::pair<VkSurfaceFormatKHR, bool> chooseHDRSurfaceFormat(const std::vector<VkSurfaceFormatKHR> &availableFormats) {
-    // Look for A2B10G10R10_UNORM_PACK32 + HDR10_ST2084
+std::tuple<VkSurfaceFormatKHR, vk::Swapchain::HdrMode> chooseHDRSurfaceFormat(
+    const std::vector<VkSurfaceFormatKHR> &availableFormats, bool preferScRGB) {
+
+    // If user explicitly requested scRGB and it's available, use it
+    if (preferScRGB) {
+        for (const auto &fmt : availableFormats) {
+            if (fmt.format == VK_FORMAT_R16G16B16A16_SFLOAT &&
+                fmt.colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT) {
+                swapchainCout() << "scRGB format found: R16G16B16A16_SFLOAT + EXTENDED_SRGB_LINEAR" << std::endl;
+                return {fmt, vk::Swapchain::HdrMode::ScRGB};
+            }
+        }
+        swapchainCerr() << "scRGB not available, trying HDR10" << std::endl;
+    }
+
+    // Default: HDR10 (A2B10G10R10_UNORM_PACK32 + HDR10_ST2084) — DLSS-FG compatible
     for (const auto &fmt : availableFormats) {
         if (fmt.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
             fmt.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
             swapchainCout() << "HDR10 format found: A2B10G10R10_UNORM + HDR10_ST2084" << std::endl;
-            return {fmt, true};
+            return {fmt, vk::Swapchain::HdrMode::HDR10};
         }
     }
 
@@ -79,12 +94,12 @@ std::pair<VkSurfaceFormatKHR, bool> chooseHDRSurfaceFormat(const std::vector<VkS
         if (fmt.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32 &&
             fmt.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
             swapchainCout() << "HDR10 format found: A2R10G10B10_UNORM + HDR10_ST2084" << std::endl;
-            return {fmt, true};
+            return {fmt, vk::Swapchain::HdrMode::HDR10};
         }
     }
 
-    swapchainCerr() << "HDR10 format not available, falling back to SDR" << std::endl;
-    return {{}, false};
+    swapchainCerr() << "No HDR format available, falling back to SDR" << std::endl;
+    return {{}, vk::Swapchain::HdrMode::None};
 }
 
 VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR &surfaceCapabilities, uint32_t width, uint32_t height) {
@@ -176,12 +191,15 @@ void vk::Swapchain::reconstruct() {
                         << " ColorSpace: " << surfaceFormats[i].colorSpace << std::endl;
     }
 #endif
-    // HDR10 format selection (when enabled and supported), else SDR (existing path)
+    // HDR format selection (when enabled), else SDR (existing path)
+    hdrMode_ = HdrMode::None;
     hdrActive_ = false;
     if (Renderer::options.hdrEnabled) {
-        auto [hdrFormat, found] = chooseHDRSurfaceFormat(surfaceFormats);
-        if (found) {
+        bool preferScRGB = Renderer::options.hdrScrgbMode;
+        auto [hdrFormat, mode] = chooseHDRSurfaceFormat(surfaceFormats, preferScRGB);
+        if (mode != HdrMode::None) {
             surfaceFormat_ = hdrFormat;
+            hdrMode_ = mode;
             hdrActive_ = true;
         } else {
             surfaceFormat_ = chooseSurfaceFormat(surfaceFormats);
@@ -388,19 +406,41 @@ bool vk::Swapchain::isHDRSupported() const {
     }
 
     for (const auto &fmt : surfaceFormats) {
-        if (fmt.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32
+        // HDR10
+        if ((fmt.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || fmt.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32)
             && fmt.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
             return true;
         }
+        // scRGB
+        if (fmt.format == VK_FORMAT_R16G16B16A16_SFLOAT
+            && fmt.colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool vk::Swapchain::isScRGBSupported() const {
+    uint32_t formatCount = 0;
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_->vkPhysicalDevice(), window_->vkSurface(),
+                                             &formatCount, nullptr) != VK_SUCCESS
+        || formatCount == 0) {
+        return false;
+    }
+
+    std::vector<VkSurfaceFormatKHR> surfaceFormats(formatCount);
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_->vkPhysicalDevice(), window_->vkSurface(),
+                                             &formatCount, surfaceFormats.data()) != VK_SUCCESS) {
+        return false;
     }
 
     for (const auto &fmt : surfaceFormats) {
-        if (fmt.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32
-            && fmt.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+        if (fmt.format == VK_FORMAT_R16G16B16A16_SFLOAT
+            && fmt.colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT) {
             return true;
         }
     }
-
     return false;
 }
 

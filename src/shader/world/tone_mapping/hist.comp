@@ -90,10 +90,12 @@ void main() {
     if (inside) {
         vec3 hdr = texelFetch(uHdrRenderRes, p, 0).rgb;
 
-        // Do NOT undo pre-exposure here. Both the histogram (render-res HDR) and
-        // the tone mapper (DLSS output) see the same pre-exposed scale, so the
-        // auto-exposure computation naturally compensates:
-        // exposure = middleGrey / avgLum cancels preExposure in the final image.
+        // Undo pre-exposure so the histogram reflects actual scene luminance.
+        // This decouples auto-exposure from the static pre-exposure factor,
+        // ensuring the trimmed percentile mean tracks real scene brightness.
+        float invPreExposure = (pc.preExposure > 1e-7) ? 1.0 / pc.preExposure : 1.0;
+        hdr *= invPreExposure;
+
         float lum = dot(hdr, LUMA);
         float logLum = log2(max(lum, pc.epsilon));
 

@@ -17,6 +17,8 @@
 #ifndef MATERIAL_OVERRIDE_GLSL
 #define MATERIAL_OVERRIDE_GLSL
 
+#include "color_pipeline.glsl"
+
 struct NoiseParams {
     float scale;
     float strength;
@@ -36,42 +38,14 @@ struct EmissionResult {
 
 #define EMISSION_REFERENCE_NITS 200.0
 
-// Oklab chroma scaling for BT.2020 colors (gamut boost/reduction).
-// boostFactor > 1.0 = more saturated, < 1.0 = less, 1.0 = no change.
-// Includes gamut clamp: desaturates toward grey if result falls outside BT.2020.
-vec3 applyGamutBoost(vec3 colorBT2020, float boostFactor) {
-    const mat3 bt2020_to_lms = mat3(
-        0.6167557871, 0.2651330639, 0.1001026342,
-        0.3601983994, 0.6358393640, 0.2039065193,
-        0.0230458134, 0.0990275718, 0.6959908464);
-    const mat3 lms_to_lab = mat3(
-        0.2104542553,  1.9779984951,  0.0259040371,
-        0.7936177850, -2.4285922050,  0.7827717662,
-       -0.0040720468,  0.4505937099, -0.8086757660);
-    const mat3 lab_to_lms = mat3(
-        1.0,           1.0,           1.0,
-        0.3963377774, -0.1055613458, -0.0894841775,
-        0.2158037573, -0.0638541728, -1.2914855480);
-    const mat3 lms_to_bt2020 = mat3(
-         2.1399067359, -0.8847358624, -0.0485737581,
-        -1.2463895090,  2.1632309822, -0.4545031427,
-         0.1064827729, -0.2784951194,  1.5030769008);
+// Gamut boost — delegated to color_pipeline.glsl (centralized, matched matrix pairs)
+vec3 applyGamutBoost(vec3 colorRec709, float boostFactor, int mode) {
+    return cpApplyGamutBoost(colorRec709, boostFactor, mode);
+}
 
-    vec3 lms = bt2020_to_lms * max(colorBT2020, vec3(0.0));
-    vec3 lms_g = sign(lms) * pow(abs(lms), vec3(1.0 / 3.0));
-    vec3 lab = lms_to_lab * lms_g;
-    lab.yz *= boostFactor;
-    vec3 lms_g2 = lab_to_lms * lab;
-    vec3 lms2 = lms_g2 * lms_g2 * lms_g2;
-    vec3 result = lms_to_bt2020 * lms2;
-    // Gamut clamp: desaturate toward grey if outside BT.2020
-    float minC = min(result.r, min(result.g, result.b));
-    if (minC < 0.0) {
-        float luma = dot(result, vec3(0.2627, 0.6780, 0.0593));
-        float t = luma / (luma - minC);
-        result = mix(vec3(luma), result, t);
-    }
-    return result;
+// Overload without mode (defaults to saturation-based)
+vec3 applyGamutBoost(vec3 colorRec709, float boostFactor) {
+    return cpApplyGamutBoost(colorRec709, boostFactor, 1);
 }
 
 // Tier 3: SSBO material overrides (contiguous MaterialClassEntry from unified SSBO)

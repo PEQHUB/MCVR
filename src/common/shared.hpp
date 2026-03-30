@@ -532,7 +532,7 @@ namespace Data {
         T_FLOAT lumMin;         // Precomputed per-block min luminance [0,1] (linear)
         T_FLOAT lumMax;         // Precomputed per-block max luminance [0,1] (linear)
         T_UINT  autoPBRPacked0; // rMin_u8 | rMax_u8<<8 | center_u8<<16 | spread_u8<<24
-        T_UINT  autoPBRPacked1; // normalStrength_u16 | heightGamma_u16<<16
+        T_UINT  autoPBRPacked1; // heightGamma_u16 | reserved_u16<<16
     }; // 144 bytes (9 x vec4), std430 aligned
 
 #ifdef __cplusplus
