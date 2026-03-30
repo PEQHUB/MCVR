@@ -522,7 +522,14 @@ void StreamlineContext::advanceFrame() {
                     : sl::ReflexMode::eLowLatency;
             }
             uint32_t maxFps = Renderer::options.maxFps;
-            opts.frameLimitUs = (maxFps > 0 && maxFps < 1000000) ? (1000000 / maxFps) : 0;
+            // When FG is active, disable the render-side frame limit — DLSS-G's interposer
+            // handles frame pacing internally. An app-side limit causes Reflex to over-sleep,
+            // starving the GPU (manifests as ~80% util with high multipliers like 6x).
+            if (Renderer::options.frameGenEnabled) {
+                opts.frameLimitUs = 0;
+            } else {
+                opts.frameLimitUs = (maxFps > 0 && maxFps < 1000000) ? (1000000 / maxFps) : 0;
+            }
             pfnReflexSetOptions(opts);
         }
     }

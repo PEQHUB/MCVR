@@ -191,7 +191,7 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
     uint32_t chunkBuildingBatchSize_;
 
     // Background BLAS builder thread — sole owner of secondary queue.
-    // Does everything: CPU geometry → VMA alloc → cmd recording → submit → fence wait → compaction.
+    // Does everything: CPU geometry → VMA alloc → cmd recording → submit → compaction.
     // Hands off fully-built, compacted BLASes to render thread via completedQueue_.
     std::thread blasThread_;
     std::atomic<bool> stop_{false};
@@ -212,7 +212,7 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
 
     // In-flight batches on GPU — BLAS thread owns these exclusively (no mutex needed)
     struct InFlightBatch {
-        std::shared_ptr<vk::Fence> fence;
+        uint64_t timelineValue;
         std::shared_ptr<vk::CommandBuffer> cmd;
         std::vector<std::shared_ptr<ChunkBuildData>> chunks;
         VkQueryPool compactionQP = VK_NULL_HANDLE;
@@ -221,8 +221,10 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
     };
     std::deque<InFlightBatch> inFlight_;
 
-    // BLAS thread fence/cmd pool — owned exclusively, no mutex
-    std::queue<std::shared_ptr<vk::Fence>> fencePool_;
+    // BLAS timeline counter — only incremented by BLAS thread (sole owner, no atomic needed)
+    uint64_t blasTimelineCounter_{0};
+
+    // BLAS thread cmd pool — owned exclusively, no mutex
     std::queue<std::shared_ptr<vk::CommandBuffer>> cmdPool_;
 
     void blasThreadLoop();

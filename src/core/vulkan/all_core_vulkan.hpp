@@ -19,3 +19,4 @@
 #include "core/vulkan/shader.hpp"
 #include "core/vulkan/as.hpp"
 #include "core/vulkan/sbt.hpp"
+#include "core/vulkan/sync.hpp"

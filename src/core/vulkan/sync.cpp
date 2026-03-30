@@ -34,3 +34,49 @@ vk::Fence::~Fence() {
 VkFence &vk::Fence::vkFence() {
     return fence_;
 }
+
+// --- TimelineSemaphore ---
+
+vk::TimelineSemaphore::TimelineSemaphore(std::shared_ptr<Device> device, uint64_t initialValue) : device_(device) {
+    VkSemaphoreTypeCreateInfo typeInfo{};
+    typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    typeInfo.initialValue = initialValue;
+
+    VkSemaphoreCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    createInfo.pNext = &typeInfo;
+
+    vkCreateSemaphore(device_->vkDevice(), &createInfo, nullptr, &semaphore_);
+}
+
+vk::TimelineSemaphore::~TimelineSemaphore() {
+    vkDestroySemaphore(device_->vkDevice(), semaphore_, nullptr);
+}
+
+VkSemaphore &vk::TimelineSemaphore::vkSemaphore() {
+    return semaphore_;
+}
+
+uint64_t vk::TimelineSemaphore::getValue() const {
+    uint64_t value = 0;
+    vkGetSemaphoreCounterValue(device_->vkDevice(), semaphore_, &value);
+    return value;
+}
+
+VkResult vk::TimelineSemaphore::waitValue(uint64_t value, uint64_t timeout) const {
+    VkSemaphoreWaitInfo waitInfo{};
+    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    waitInfo.semaphoreCount = 1;
+    waitInfo.pSemaphores = &semaphore_;
+    waitInfo.pValues = &value;
+    return vkWaitSemaphores(device_->vkDevice(), &waitInfo, timeout);
+}
+
+void vk::TimelineSemaphore::signal(uint64_t value) {
+    VkSemaphoreSignalInfo signalInfo{};
+    signalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO;
+    signalInfo.semaphore = semaphore_;
+    signalInfo.value = value;
+    vkSignalSemaphore(device_->vkDevice(), &signalInfo);
+}

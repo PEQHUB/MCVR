@@ -1192,24 +1192,27 @@ void ChunkBuildScheduler::blasThreadLoop() {
     auto asyncPool = framework->asyncCommandPool();
     auto secondaryQueueIndex = physicalDevice->secondaryQueueIndex();
 
-    // Pre-allocate fence/cmd pool — sole owner, no mutex needed.
-    // 12 slots: up to 8 build batches + 4 concurrent compaction batches.
+    // Pre-allocate cmd pool — sole owner, no mutex needed.
     constexpr uint32_t MAX_IN_FLIGHT = 12;
     for (uint32_t i = 0; i < MAX_IN_FLIGHT; i++) {
-        fencePool_.push(vk::Fence::create(device));
         cmdPool_.push(vk::CommandBuffer::create(device, asyncPool));
     }
+
+    // Timeline semaphore for BLAS thread — secondary queue only (Streamline-safe).
+    auto blasSem = device->blasSemaphore();
+    // Initialize counter from current semaphore value — handles scheduler restart
+    // (render distance change recreates scheduler but Device-level semaphore persists).
+    blasTimelineCounter_ = blasSem->getValue();
+
     static uint64_t totalOrig = 0, totalComp = 0;
     static uint32_t totalN = 0;
 
     while (!stop_.load()) {
-        // ---- POLL: check completed batches (non-blocking) ----
+        // ---- POLL: check completed batches via timeline counter (non-blocking) ----
+        uint64_t currentTimelineVal = blasSem->getValue();
         while (!inFlight_.empty()) {
             auto &front = inFlight_.front();
-            VkResult fr = vkWaitForFences(device->vkDevice(), 1, &front.fence->vkFence(), true, 0);
-            if (fr != VK_SUCCESS) break;  // oldest not done yet — stop checking
-
-            vkResetFences(device->vkDevice(), 1, &front.fence->vkFence());
+            if (currentTimelineVal < front.timelineValue) break;  // oldest not done yet
 
             if (front.isCompaction) {
                 // Compaction phase complete — destroy query pool and hand off
@@ -1226,22 +1229,19 @@ void ChunkBuildScheduler::blasThreadLoop() {
                     std::lock_guard<std::mutex> lock(completedMtx_);
                     for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
                 }
-                fencePool_.push(std::move(front.fence));
                 cmdPool_.push(std::move(front.cmd));
                 inFlight_.pop_front();
 
-            } else if (front.compactionQP && front.compactionCount > 0 && !fencePool_.empty()) {
-                // Build phase complete with compaction queries — submit compaction async
+            } else if (front.compactionQP && front.compactionCount > 0 && !cmdPool_.empty()) {
+                // Build phase complete with compaction queries — submit compaction async (non-blocking)
                 std::vector<VkDeviceSize> sizes(front.compactionCount);
                 bool queriesOk = vkGetQueryPoolResults(device->vkDevice(), front.compactionQP, 0,
                     front.compactionCount, sizes.size() * sizeof(VkDeviceSize), sizes.data(),
                     sizeof(VkDeviceSize), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS;
 
                 if (queriesOk) {
-                    // Recycle build fence+cmd, take fresh ones for compaction
-                    fencePool_.push(std::move(front.fence));
+                    // Recycle build cmd, take fresh one for compaction
                     cmdPool_.push(std::move(front.cmd));
-                    auto compFence = std::move(fencePool_.front()); fencePool_.pop();
                     auto compCmd = std::move(cmdPool_.front()); cmdPool_.pop();
 
                     compCmd->begin();
@@ -1269,26 +1269,34 @@ void ChunkBuildScheduler::blasThreadLoop() {
                     }
                     compCmd->end();
 
+                    // Submit compaction with timeline signal (non-blocking — polled next iteration)
+                    uint64_t compactValue = ++blasTimelineCounter_;
+                    VkSemaphore blasSemHandle = blasSem->vkSemaphore();
+                    VkTimelineSemaphoreSubmitInfo tsi{};
+                    tsi.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+                    tsi.signalSemaphoreValueCount = 1;
+                    tsi.pSignalSemaphoreValues = &compactValue;
                     VkSubmitInfo csi{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                    csi.pNext = &tsi;
                     csi.commandBufferCount = 1; csi.pCommandBuffers = &compCmd->vkCommandBuffer();
-                    VkResult cr = vkQueueSubmit(device->secondaryQueue(), 1, &csi, compFence->vkFence());
+                    csi.signalSemaphoreCount = 1; csi.pSignalSemaphores = &blasSemHandle;
+                    VkResult cr = vkQueueSubmit(device->secondaryQueue(), 1, &csi, VK_NULL_HANDLE);
                     if (cr == VK_SUCCESS) {
-                        // Re-enqueue as compaction phase — will be polled on next iteration
                         auto chunks = std::move(front.chunks);
                         auto qp = front.compactionQP;
                         auto qpCount = front.compactionCount;
                         inFlight_.pop_front();
-                        inFlight_.push_back({std::move(compFence), std::move(compCmd),
+                        inFlight_.push_back({compactValue, std::move(compCmd),
                             std::move(chunks), qp, qpCount, true});
                     } else {
                         // Submit failed — hand off uncompacted chunks
+                        --blasTimelineCounter_;
                         g_crashRing.record("compactionSubmitFail", cr);
                         if (front.compactionQP) vkDestroyQueryPool(device->vkDevice(), front.compactionQP, nullptr);
                         {
                             std::lock_guard<std::mutex> lock(completedMtx_);
                             for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
                         }
-                        fencePool_.push(std::move(compFence));
                         cmdPool_.push(std::move(compCmd));
                         inFlight_.pop_front();
                     }
@@ -1299,7 +1307,6 @@ void ChunkBuildScheduler::blasThreadLoop() {
                         std::lock_guard<std::mutex> lock(completedMtx_);
                         for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
                     }
-                    fencePool_.push(std::move(front.fence));
                     cmdPool_.push(std::move(front.cmd));
                     inFlight_.pop_front();
                 }
@@ -1311,21 +1318,20 @@ void ChunkBuildScheduler::blasThreadLoop() {
                     std::lock_guard<std::mutex> lock(completedMtx_);
                     for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
                 }
-                fencePool_.push(std::move(front.fence));
                 cmdPool_.push(std::move(front.cmd));
                 inFlight_.pop_front();
             }
         }
 
-        // ---- SUBMIT: prepare + submit new batch if we have work AND a free fence ----
+        // ---- SUBMIT: prepare + submit new batch if we have work AND capacity ----
         bool hasWork = false;
         {
             std::lock_guard<std::mutex> lock(inputMtx_);
             hasWork = !inputQueue_.empty();
         }
 
-        if (hasWork && !fencePool_.empty()) {
-            // Dequeue batch
+        if (hasWork && inFlight_.size() < MAX_IN_FLIGHT && !cmdPool_.empty()) {
+            // Dequeue batch — dynamic size based on GPU headroom
             std::vector<std::shared_ptr<ChunkBuildData>> batch;
             {
                 std::lock_guard<std::mutex> lock(inputMtx_);
@@ -1347,10 +1353,10 @@ void ChunkBuildScheduler::blasThreadLoop() {
                 Renderer::threadPool.parallelFor(static_cast<uint32_t>(batch.size()), [&](uint32_t i) {
                     batch[i]->prepareCPU(true, false, cameraPos);
                 });
+                // GPU upload (sequential — VMA alloc + staging)
                 for (auto &cbd : batch) cbd->uploadGPU();
 
-                // Take fence + cmd from pool
-                auto fence = std::move(fencePool_.front()); fencePool_.pop();
+                // Take cmd from pool
                 auto cmd = std::move(cmdPool_.front()); cmdPool_.pop();
 
                 // Record
@@ -1455,19 +1461,28 @@ void ChunkBuildScheduler::blasThreadLoop() {
 
                 cmd->end();
 
-                // Submit (sole owner of secondary queue — no mutex)
+                // Submit with timeline signal (sole owner of secondary queue — no mutex)
+                uint64_t batchValue = ++blasTimelineCounter_;
+                VkSemaphore blasSemHandle = blasSem->vkSemaphore();
+                VkTimelineSemaphoreSubmitInfo btsi{};
+                btsi.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+                btsi.signalSemaphoreValueCount = 1;
+                btsi.pSignalSemaphoreValues = &batchValue;
                 VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                si.pNext = &btsi;
                 si.commandBufferCount = 1; si.pCommandBuffers = &cmd->vkCommandBuffer();
-                VkResult r = vkQueueSubmit(device->secondaryQueue(), 1, &si, fence->vkFence());
+                si.signalSemaphoreCount = 1; si.pSignalSemaphores = &blasSemHandle;
+                VkResult r = vkQueueSubmit(device->secondaryQueue(), 1, &si, VK_NULL_HANDLE);
                 if (r != VK_SUCCESS) {
+                    --blasTimelineCounter_;  // rollback — signal never issued
                     g_crashRing.record("blasThreadSubmitFail", r);
-                    fencePool_.push(std::move(fence)); cmdPool_.push(std::move(cmd));
+                    cmdPool_.push(std::move(cmd));
                     if (qp) vkDestroyQueryPool(device->vkDevice(), qp, nullptr);
                     continue;
                 }
 
                 // Track in-flight
-                inFlight_.push_back({std::move(fence), std::move(cmd), std::move(batch), qp, qpCount});
+                inFlight_.push_back({batchValue, std::move(cmd), std::move(batch), qp, qpCount});
             }
         } else if (!hasWork && inFlight_.empty()) {
             // Nothing to do — wait for input
@@ -1476,14 +1491,16 @@ void ChunkBuildScheduler::blasThreadLoop() {
                 return stop_.load() || !inputQueue_.empty();
             });
         } else {
-            // In-flight batches but no new work or no free fences — brief yield
+            // In-flight batches but no new work or no capacity — brief yield
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
     }
 
-    // Drain remaining in-flight batches on shutdown
+    // Drain remaining in-flight batches on shutdown — single timeline wait covers all
+    if (!inFlight_.empty()) {
+        blasSem->waitValue(inFlight_.back().timelineValue);
+    }
     for (auto &f : inFlight_) {
-        vkWaitForFences(device->vkDevice(), 1, &f.fence->vkFence(), true, UINT64_MAX);
         if (f.compactionQP) vkDestroyQueryPool(device->vkDevice(), f.compactionQP, nullptr);
         std::lock_guard<std::mutex> lock(completedMtx_);
         for (auto &cbd : f.chunks) completedQueue_.push_back(std::move(cbd));

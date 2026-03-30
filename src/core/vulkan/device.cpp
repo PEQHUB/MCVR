@@ -6,6 +6,7 @@
 #include "core/render/streamline_context.hpp"
 #include "core/vulkan/instance.hpp"
 #include "core/vulkan/physical_device.hpp"
+#include "core/vulkan/sync.hpp"
 
 #include <cstring>
 #include <filesystem>
@@ -307,6 +308,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     vulkan12Features.shaderFloat16 = supportedVulkan12.shaderFloat16;
     vulkan12Features.shaderBufferInt64Atomics = supportedVulkan12.shaderBufferInt64Atomics;
     vulkan12Features.scalarBlockLayout = supportedVulkan12.scalarBlockLayout;
+    vulkan12Features.timelineSemaphore = VK_TRUE;
 
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures = {};
     accelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
@@ -450,11 +452,16 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     GpuDiag::init(device_, physicalDevice_->vkPhysicalDevice(), checkpointsSupported_, deviceFaultSupported_);
 }
 
+void vk::Device::createTimelineSemaphores() {
+    blasSemaphore_ = TimelineSemaphore::create(shared_from_this(), 0);
+}
+
 vk::Device::~Device() {
     savePipelineCache();
     if (pipelineCache_ != VK_NULL_HANDLE) {
         vkDestroyPipelineCache(device_, pipelineCache_, nullptr);
     }
+    blasSemaphore_.reset();
     vkDestroyDevice(device_, nullptr);
 
 #ifdef DEBUG

@@ -832,7 +832,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetFrameGenMode(
     JNIEnv *, jclass, jint mode, jboolean) {
-    Renderer::options.frameGenMode = static_cast<uint32_t>(std::clamp(mode, 0, 1));
+    Renderer::options.frameGenMode = static_cast<uint32_t>(std::clamp(mode, 0, 2));
     Renderer::options.frameGenEnabled = (mode != 0);
     // Trigger swapchain recreation — FrameGenManager::setMode() will be called
     // on the render thread during recreate (via beforeSwapchainRecreate/afterSwapchainRecreate).
@@ -844,7 +844,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetFrameGenMultiplier(
     JNIEnv *, jclass, jint multiplier, jboolean) {
-    Renderer::options.frameGenMultiplier = static_cast<uint32_t>(std::clamp(multiplier, 1, 3));
+    Renderer::options.frameGenMultiplier = static_cast<uint32_t>(std::clamp(multiplier, 1, 5));
     // Changing multiplier while active requires re-calling slDLSSGSetOptions.
     // Trigger recreation to apply on render thread.
     if (Renderer::options.frameGenEnabled) {

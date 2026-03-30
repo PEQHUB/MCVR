@@ -8,6 +8,7 @@ namespace vk {
 class Instance;
 class Window;
 class PhysicalDevice;
+class TimelineSemaphore;
 
 class Device : public SharedObject<Device> {
   public:
@@ -23,6 +24,11 @@ class Device : public SharedObject<Device> {
     VkPipelineCache pipelineCache() const { return pipelineCache_; }
 
     void savePipelineCache();
+
+    /// Create Device-level timeline semaphores. Must be called after Device::create() returns
+    /// (shared_from_this() is not valid inside the constructor).
+    void createTimelineSemaphores();
+    std::shared_ptr<TimelineSemaphore> blasSemaphore() { return blasSemaphore_; }
 
     bool hasExtendedDynamicState2LogicOp() const { return extendedDynamicState2LogicOp_; }
     bool hasOMM() const { return ommSupported_; }
@@ -48,6 +54,8 @@ class Device : public SharedObject<Device> {
     bool shaderClockSupported_ = false;
     bool checkpointsSupported_ = false;
     bool deviceFaultSupported_ = false;
+
+    std::shared_ptr<TimelineSemaphore> blasSemaphore_;
 
     void loadPipelineCache();
     static std::string pipelineCachePath();

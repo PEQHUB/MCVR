@@ -17,6 +17,17 @@
 static std::ostream &fgCout() { return std::cout << "[FrameGen] "; }
 static std::ostream &fgCerr() { return std::cerr << "[FrameGen ERROR] "; }
 
+#ifdef _WIN32
+/// Map Options::frameGenMode (0=Off, 1=On, 2=Auto) to Streamline enum.
+static sl::DLSSGMode toSlMode(uint32_t mode) {
+    switch (mode) {
+    case 1:  return sl::DLSSGMode::eOn;
+    case 2:  return sl::DLSSGMode::eAuto;
+    default: return sl::DLSSGMode::eOff;
+    }
+}
+#endif
+
 bool FrameGenManager::initialized_ = false;
 bool FrameGenManager::active_ = false;
 uint32_t FrameGenManager::maxFrames_ = 0;
@@ -73,10 +84,13 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
 
     // Deferred activation: feature is loaded, waiting for shouldRender to go true
     if (deferredActivation_ && shouldRender) {
+        sl::DLSSGMode slMode = toSlMode(Renderer::options.frameGenMode);
         uint32_t multiplier = Renderer::options.frameGenMultiplier;
+        // In Auto mode, give the plugin the full hardware range to dynamically vary
+        if (slMode == sl::DLSSGMode::eAuto) multiplier = maxFrames_;
         if (multiplier > maxFrames_) multiplier = maxFrames_;
         if (multiplier < 1) multiplier = 1;
-        StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOn, multiplier);
+        StreamlineContext::setDlssGOptions(slMode, multiplier);
         active_ = true;
         deferredActivation_ = false;
         currentMode_ = Renderer::options.frameGenMode;
@@ -350,10 +364,12 @@ void FrameGenManager::afterSwapchainRecreate() {
     if (wantActive && featureLoaded_) {
         // Second recreate (or normal recreate with feature loaded): hooks active.
         if (Renderer::instance().world()->shouldRender()) {
+            sl::DLSSGMode slMode = toSlMode(Renderer::options.frameGenMode);
             uint32_t multiplier = Renderer::options.frameGenMultiplier;
+            if (slMode == sl::DLSSGMode::eAuto) multiplier = maxFrames_;
             if (multiplier > maxFrames_) multiplier = maxFrames_;
             if (multiplier < 1) multiplier = 1;
-            StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOn, multiplier);
+            StreamlineContext::setDlssGOptions(slMode, multiplier);
             active_ = true;
             currentMode_ = Renderer::options.frameGenMode;
             fgCout() << "activated after swapchain recreate" << std::endl;

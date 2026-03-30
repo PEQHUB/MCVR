@@ -319,6 +319,7 @@ void Framework::init(GLFWwindow *window) {
     window_ = vk::Window::create(instance_, window);
     physicalDevice_ = vk::PhysicalDevice::create(instance_, window_);
     device_ = vk::Device::create(instance_, window_, physicalDevice_);
+    device_->createTimelineSemaphores();
     vma_ = vk::VMA::create(instance_, physicalDevice_, device_);
     swapchain_ = vk::Swapchain::create(physicalDevice_, device_, window_);
     mainCommandPool_ = vk::CommandPool::create(physicalDevice_, device_);
