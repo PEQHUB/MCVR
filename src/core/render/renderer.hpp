@@ -45,7 +45,7 @@ struct Options {
     static constexpr uint32_t ommBatchCap = 2; // Max chunks per GPU batch when OMM active (prevents TDR)
     uint32_t tonemappingMode = 1; // 0 = PBR Neutral, 1 = Reinhard Extended
     float minExposure = 1e-7f;         // Minimum exposure clamp (lowered for physical sun ~100k lux)
-    float maxExposure = 2.0f;           // Moderate dark adaptation — caves dark but shadow detail visible
+    float maxExposure = 2.0f;           // Max dark adaptation — caves stay dark, shadow detail visible
     float exposureCompensation = 0.0f; // EV offset (-3 to +3)
     bool manualExposureEnabled = false;  // Auto-exposure on by default (required for physical luminance range)
     float manualExposure = 2.54e-5f;  // EV100=15 (sunny day): 1/(1.2 * 2^15)
@@ -53,14 +53,10 @@ struct Options {
     float casSharpness = 0.5f;   // Sharpness for both CAS and RCAS (0.0-1.0)
     float middleGrey = 0.18f;          // Middle grey point (0.01 to 0.50)
     float Lwhite = 4.0f;               // White point for Reinhard Extended
-    bool legacyExposure = false;       // Use legacy exposure algorithm (keeps legacy failure modes)
-    float exposureUpSpeed = 0.8f;      // Max EV increase rate (EV/s) — dark adaptation: gradual
-    float exposureDownSpeed = 1.0f;    // Max EV decrease rate (EV/s) — moderate: less pulsing than 1.5, better low-light than 0.7
-    float exposureBrightAdaptBoost = 1.0f; // Multiplier on downSpeed entering bright (1.0 = no boost, eliminates 4:1 asymmetry)
-    float exposureHighlightProtection = 0.3f; // 0..1, soft nudge only; tonemapper handles clipping
-    float exposureHighlightPercentile = 0.98f; // 0..1, less sensitive to emissive surface outliers
-    float exposureHighlightSmoothingSpeed = 2.0f; // 0..30, ~0.35s half-life filters percentile noise
-    float exposureLog2MaxImproved = 18.0f; // Histogram max log2(luminance) for improved mode (physical sun ~100k lux needs ~17)
+    float brightAdaptSpeed = 0.5f;    // Exponential decay tau for bright adaptation (seconds)
+    float darkAdaptSpeed = 2.0f;       // Exponential decay tau for dark adaptation (seconds)
+    float sceneChangeThreshold = 5.0f; // EV difference triggering instant snap (2.0-10.0)
+    float centerWeightStrength = 0.0f; // Center-weighted metering strength (0.0-1.0, 0=uniform)
     float saturation = 1.3f;           // Saturation/Vibrance boost (0.0 to 2.0)
     bool saturationAdaptive = false;   // Adaptive saturation: brightness+chroma-dependent (Special K style)
     bool noiseLOD = true;              // Noise quality LOD: reduce octaves with distance, skip gradient far away
@@ -242,7 +238,7 @@ class Renderer : public Singleton<Renderer> {
   public:
     static std::filesystem::path folderPath;
     static Options options;
-    static float preExposure;  // Set by tone mapping, read by RT + DLSS (1-frame delay)
+    static float preExposure;  // Constant per-frame pre-exposure (0.1 for DLSS-RR, 1.0 otherwise)
     static bool resetExposureAdaptation;  // Set by JNI on world load, consumed by tone mapping
     static uint32_t accumFrameCount;
     static uint32_t dlssEpochFrame;   // current frame within Denoised epoch (0..epochLength-1)

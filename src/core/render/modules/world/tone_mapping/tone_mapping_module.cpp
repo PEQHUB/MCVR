@@ -54,10 +54,6 @@ void ToneMappingModule::setAttributes(int attributeCount, std::vector<std::strin
     for (int i = 0; i < attributeCount; i++) {
         if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.middle_grey") {
             middleGrey_ = std::stof(attributeKVs[2 * i + 1]);
-        } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.exposure_up_speed") {
-            speedUp_ = std::stof(attributeKVs[2 * i + 1]);
-        } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.exposure_down_speed") {
-            speedDown_ = std::stof(attributeKVs[2 * i + 1]);
         } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.tonemap_mode") {
             if (attributeKVs[2 * i + 1] == "pbr_neutral") {
                 tonemapMode_ = 0.0f;
@@ -78,8 +74,6 @@ void ToneMappingModule::setAttributes(int attributeCount, std::vector<std::strin
             }
         } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.lwhite") {
             Lwhite_ = std::stof(attributeKVs[2 * i + 1]);
-        } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.max_exposure") {
-            maxExposure_ = std::stof(attributeKVs[2 * i + 1]);
         } else if (attributeKVs[2 * i] == "render_pipeline.module.tone_mapping.attribute.exposure_compensation") {
             Renderer::options.exposureCompensation = std::stof(attributeKVs[2 * i + 1]);
         }
@@ -360,8 +354,6 @@ void ToneMappingModuleContext::render() {
             }
         }
     }
-    Renderer::preExposure = module->computedExposure_;
-
     // Reset exposure adaptation on world load (deferred GPU buffer zero)
     if (Renderer::resetExposureAdaptation) {
         module->pendingExposureReset_ = true;  // zero GPU buffer in command recording
@@ -506,7 +498,7 @@ void ToneMappingModuleContext::render() {
     vkCmdFillBuffer(worldCommandBuffer->vkCommandBuffer(), histBuffer->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
 
     // Zero ExposureBuffer on world load so shader snaps to target (not stale previous world)
-    // This zeros exposure, capExposureSmoothed, bootTimer — shader checks <= 0.0 for each
+    // This zeros exposure — shader scene-cut detection handles first-frame snap
     if (module->pendingExposureReset_) {
         vkCmdFillBuffer(worldCommandBuffer->vkCommandBuffer(),
                         module->exposureData_->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
@@ -539,29 +531,21 @@ void ToneMappingModuleContext::render() {
 
     ToneMappingModulePushConstant pc{};
     pc.log2Min = -12.0f;
-    pc.log2Max = (Renderer::options.legacyExposure) ? +8.0f : Renderer::options.exposureLog2MaxImproved;
+    pc.log2Max = 18.0f;
     pc.epsilon = 1e-6f;
-    // Industry-standard percentile trim (Unreal 4.25+: 10%/90%).
-    // Excluding the darkest 10% ignores unlit caves/shadows; excluding the brightest 10%
-    // ignores sky, sun disc, and specular highlights so they don't pull the mean up and
-    // cause the meter to underexpose midtones. Legacy mode keeps original (near-no-trim) values.
-    pc.lowPercent = (Renderer::options.legacyExposure) ? 0.005f : 0.10f;
-    pc.highPercent = (Renderer::options.legacyExposure) ? 0.99f : 0.90f;
+    pc.lowPercent = 0.10f;
+    pc.highPercent = 0.90f;
     pc.middleGrey = Renderer::options.middleGrey;
     pc.dt = elapsedTime.count();
-    pc.speedUp = Renderer::options.exposureUpSpeed;
-    pc.speedDown = Renderer::options.exposureDownSpeed;
-    pc.brightAdaptBoost = Renderer::options.exposureBrightAdaptBoost;
+    pc.brightAdaptSpeed = Renderer::options.brightAdaptSpeed;
+    pc.darkAdaptSpeed = Renderer::options.darkAdaptSpeed;
     pc.minExposure = Renderer::options.minExposure;
     pc.maxExposure = Renderer::options.maxExposure;
+    pc.sceneChangeThreshold = Renderer::options.sceneChangeThreshold;
+    pc.centerWeightStrength = Renderer::options.centerWeightStrength;
     pc.tonemapMode = static_cast<float>(Renderer::options.tonemappingMode);
     pc.Lwhite = Renderer::options.Lwhite;
     pc.exposureCompensation = Renderer::options.exposureCompensation;
-    pc.legacyExposure = Renderer::options.legacyExposure ? 1.0f : 0.0f;
-    // Improved auto-exposure highlight protection (legacy mode ignores these).
-    pc.highlightPercent = Renderer::options.exposureHighlightPercentile;
-    pc.highlightProtection = Renderer::options.exposureHighlightProtection;
-    pc.highlightSmoothingSpeed = Renderer::options.exposureHighlightSmoothingSpeed;
     // HDR fields
     pc.hdrPipelineEnabled = hdrPipelineEnabled ? 1.0f : 0.0f;
     // hdr10OutputEnabled: 0.0 = SDR, 1.0 = HDR10 (PQ), 2.0 = scRGB (linear)

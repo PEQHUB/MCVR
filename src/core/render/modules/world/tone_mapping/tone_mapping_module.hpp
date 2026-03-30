@@ -28,7 +28,7 @@ struct ToneMappingModuleExposureData {
     float paperWhiteNits;        // ITU-R BT.2408 reference white (e.g. 203.0)
     float saturation;            // Saturation boost (1.0 = neutral)
     float sdrTransferFunction;   // 0.0 = Gamma 2.2, 1.0 = sRGB
-    float capExposureSmoothed;   // internal: smoothed highlight cap exposure (improved mode)
+    float _pad0;                 // padding (was capExposureSmoothed)
     float manualExposureEnabled; // 0.0 = auto exposure, 1.0 = manual exposure
     float manualExposure;        // direct exposure multiplier when manual is enabled
     // PsychoV tonemapper parameters
@@ -52,29 +52,26 @@ struct ToneMappingModuleExposureData {
     float tonemapParam5;
     float tonemapParam6;
     float tonemapParam7;
-    float bootTimer;             // shader-internal: adaptation boot timer (not set from CPU)
+    float _pad1;                 // padding (was bootTimer)
 };
 
 struct ToneMappingModulePushConstant {
-    float log2Min;     // 例如 -12
-    float log2Max;     // 例如 +4
-    float epsilon;     // 例如 1e-6
-    float lowPercent;  // 例如 0.005 (0.5%)
-    float highPercent; // 例如 0.99  (99%)
-    float middleGrey;  // 例如 0.18
-    float dt;          // 本帧 delta time（秒）
-    float speedUp;     // 变亮适应速度（1/秒），例如 3.0
-    float speedDown;   // 变暗适应速度（1/秒），例如 1.0
-    float brightAdaptBoost;    // stopping-down boost multiplier (improved mode)
-    float minExposure;          // clamp, e.g. 0.0001
-    float maxExposure;          // clamp, e.g. 10000.0
+    float log2Min;              // e.g. -12
+    float log2Max;              // e.g. +18
+    float epsilon;              // e.g. 1e-6
+    float lowPercent;           // trimmed percentile low (0.05)
+    float highPercent;          // trimmed percentile high (0.95)
+    float middleGrey;           // e.g. 0.18
+    float dt;                   // frame delta time (seconds)
+    float brightAdaptSpeed;     // exponential decay tau for bright adaptation (seconds)
+    float darkAdaptSpeed;       // exponential decay tau for dark adaptation (seconds)
+    float minExposure;          // safety clamp lower bound
+    float maxExposure;          // safety clamp upper bound
+    float sceneChangeThreshold; // EV diff triggering instant snap
+    float centerWeightStrength; // center-weighted metering strength (0-1)
     float tonemapMode;          // 0.0 = PBR Neutral, 1.0 = Reinhard Extended, etc.
     float Lwhite;               // White point for Reinhard Extended (default 4.0)
     float exposureCompensation; // EV offset applied after auto-exposure
-    float legacyExposure;       // 0.0 = improved, 1.0 = legacy (keeps legacy failure modes)
-    float highlightPercent;     // high percentile (e.g. 0.999) for highlight protection
-    float highlightProtection;  // 0.0 = off, 1.0 = full
-    float highlightSmoothingSpeed; // smoothing speed for highlight cap (0 disables)
     // HDR fields (appended at end)
     float hdrPipelineEnabled;   // 0.0 = SDR pipeline, 1.0 = HDR pipeline behavior
     float hdr10OutputEnabled;   // 0.0 = SDR output, 1.0 = HDR10 output encoding
@@ -178,9 +175,6 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
     std::vector<std::shared_ptr<vk::Sampler>> samplers_;
 
     float middleGrey_ = 0.18f;
-    float speedUp_ = 5.0f;
-    float speedDown_ = 1.5f;
-    float maxExposure_ = 2.0f;
     float tonemapMode_ = 1.0f;  // default: Reinhard Extended
     float Lwhite_ = 4.0f;
 

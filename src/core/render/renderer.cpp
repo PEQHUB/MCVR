@@ -7,7 +7,7 @@
 
 std::filesystem::path Renderer::folderPath{};
 Options Renderer::options{};
-float Renderer::preExposure = 0.00002f;  // Init for physical sun ~100k lux (avoids first-frame FP16 overflow)
+float Renderer::preExposure = 0.1f;  // Constant pre-exposure for DLSS-RR (never varies per-frame)
 bool Renderer::resetExposureAdaptation = false;
 uint32_t Renderer::accumFrameCount = 0;
 uint32_t Renderer::dlssEpochFrame = 0;
