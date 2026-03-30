@@ -524,9 +524,10 @@ void ToneMappingModuleContext::render() {
     module->lastTimePoint_ = currentTimePoint;
 
     // HDR pipeline is always enabled for visual parity.
-    // HDR10 output encoding depends on swapchain HDR + user HDR output toggle.
+    // HDR output encoding depends on swapchain HDR mode + user toggle.
     bool hdrPipelineEnabled = true;
-    bool hdr10OutputEnabled = Renderer::options.hdrEnabled && framework->swapchain()->isHDR();
+    bool hdr10OutputEnabled = Renderer::options.hdrEnabled && framework->swapchain()->isHDR10();
+    bool scrgbOutputEnabled = Renderer::options.hdrEnabled && framework->swapchain()->isScRGB();
 
     ToneMappingModulePushConstant pc{};
     pc.log2Min = -12.0f;
@@ -547,7 +548,8 @@ void ToneMappingModuleContext::render() {
     pc.exposureCompensation = Renderer::options.exposureCompensation;
     // HDR fields
     pc.hdrPipelineEnabled = hdrPipelineEnabled ? 1.0f : 0.0f;
-    pc.hdr10OutputEnabled = hdr10OutputEnabled ? 1.0f : 0.0f;
+    // hdr10OutputEnabled: 0.0 = SDR, 1.0 = HDR10 (PQ), 2.0 = scRGB (linear)
+    pc.hdr10OutputEnabled = scrgbOutputEnabled ? 2.0f : (hdr10OutputEnabled ? 1.0f : 0.0f);
     pc.peakNits = Renderer::options.hdrPeakNits;
     pc.paperWhiteNits = Renderer::options.hdrPaperWhiteNits;
     pc.saturation = Renderer::options.saturation;

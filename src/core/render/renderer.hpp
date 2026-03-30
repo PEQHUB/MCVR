@@ -85,8 +85,9 @@ struct Options {
     uint32_t psychoWhiteCurve = 1;       // 0 = Neutwo, 1 = Naka-Rushton
     float psychoConeExponent = 1.0f;     // 0.1-3.0, default 1.0 (Naka-Rushton exponent)
 
-    // HDR10 output settings (default: disabled, pure SDR)
+    // HDR output settings (default: disabled, pure SDR)
     bool hdrEnabled = false;
+    bool hdrScrgbMode = false;            // false = HDR10 (default, DLSS-FG compatible), true = scRGB
     float hdrPeakNits = 1000.0f;          // Display peak brightness (400–10000 nits)
     float hdrPaperWhiteNits = 203.0f;     // ITU-R BT.2408 reference white
     float hdrUiBrightnessNits = 100.0f;   // UI brightness in HDR mode (50–300 nits)

@@ -603,12 +603,33 @@ void Framework::submitCommand() {
     // Decoupled mode: no semaphores — fence handles sync with PresentThread.
     std::vector<VkSemaphore> waitSemaphores;
     std::vector<VkPipelineStageFlags> waitStageMasks;
+    std::vector<uint64_t> waitValues;
     std::vector<VkSemaphore> signalSemaphores;
+    std::vector<uint64_t> signalValues;
     if (!decoupledPresent_) {
         waitSemaphores.push_back(currentContext_->imageAcquiredSemaphore->vkSemaphore());
         waitStageMasks.push_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        waitValues.push_back(0);  // binary semaphore — value ignored
         signalSemaphores.push_back(currentContext_->commandProcessedSemaphore->vkSemaphore());
+        signalValues.push_back(0);  // binary semaphore — value ignored
     }
+
+    // Cross-queue sync: make the main queue wait on the BLAS timeline semaphore.
+    // The BLAS thread builds chunk BLASes on the secondary (async compute) queue.
+    // CPU-side timeline polling confirms completion, but the Vulkan spec requires a
+    // semaphore wait to establish GPU memory visibility between queue families.
+    // The value is already reached, so the GPU wait is a no-op — but it ensures
+    // the main queue engine sees all secondary queue writes (BLAS BVH data).
+    auto blasSem = device_->blasSemaphore();
+    if (blasSem) {
+        uint64_t blasTimelineVal = blasSem->getValue();
+        if (blasTimelineVal > 0) {
+            waitSemaphores.push_back(blasSem->vkSemaphore());
+            waitStageMasks.push_back(VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR);
+            waitValues.push_back(blasTimelineVal);
+        }
+    }
+
     std::vector<VkCommandBuffer> commandbuffers = {
         currentContext_->uploadCommandBuffer->vkCommandBuffer(),
         currentContext_->worldCommandBuffer->vkCommandBuffer(),
@@ -616,14 +637,22 @@ void Framework::submitCommand() {
         currentContext_->fuseCommandBuffer->vkCommandBuffer(),
     };
 
+    VkTimelineSemaphoreSubmitInfo timelineInfo{};
+    timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timelineInfo.waitSemaphoreValueCount = static_cast<uint32_t>(waitValues.size());
+    timelineInfo.pWaitSemaphoreValues = waitValues.data();
+    timelineInfo.signalSemaphoreValueCount = static_cast<uint32_t>(signalValues.size());
+    timelineInfo.pSignalSemaphoreValues = signalValues.data();
+
     VkSubmitInfo vkSubmitInfo = {};
     vkSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    vkSubmitInfo.waitSemaphoreCount = waitSemaphores.size();
+    vkSubmitInfo.pNext = &timelineInfo;
+    vkSubmitInfo.waitSemaphoreCount = static_cast<uint32_t>(waitSemaphores.size());
     vkSubmitInfo.pWaitSemaphores = waitSemaphores.data();
     vkSubmitInfo.pWaitDstStageMask = waitStageMasks.data();
-    vkSubmitInfo.commandBufferCount = commandbuffers.size();
+    vkSubmitInfo.commandBufferCount = static_cast<uint32_t>(commandbuffers.size());
     vkSubmitInfo.pCommandBuffers = commandbuffers.data();
-    vkSubmitInfo.signalSemaphoreCount = signalSemaphores.size();
+    vkSubmitInfo.signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size());
     vkSubmitInfo.pSignalSemaphores = signalSemaphores.data();
 
     std::shared_ptr<vk::Fence> fence = currentContext_->commandFinishedFence;

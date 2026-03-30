@@ -29,14 +29,25 @@ class Swapchain : public SharedObject<Swapchain> {
     std::vector<std::shared_ptr<SwapchainImage>> &swapchainImages();
     uint32_t imageCount();
 
-    /// Returns true if the swapchain is currently using HDR10 (A2B10G10R10 + ST.2084)
-    bool isHDR() const { return hdrActive_; }
+    enum class HdrMode { None, HDR10, ScRGB };
+
+    /// Returns true if any HDR format is active (HDR10 or scRGB)
+    bool isHDR() const { return hdrMode_ != HdrMode::None; }
+
+    /// Returns true if HDR10 (A2B10G10R10 + ST.2084) is active
+    bool isHDR10() const { return hdrMode_ == HdrMode::HDR10; }
+
+    /// Returns true if scRGB (R16G16B16A16_SFLOAT + EXTENDED_SRGB_LINEAR) is active
+    bool isScRGB() const { return hdrMode_ == HdrMode::ScRGB; }
 
     /// Returns true if the swapchain images were created with TRANSFER_SRC usage.
     bool supportsTransferSrc() const { return transferSrcEnabled_; }
 
-    /// Returns true if the current surface supports HDR10 swapchain formats.
+    /// Returns true if the current surface supports any HDR swapchain format.
     bool isHDRSupported() const;
+
+    /// Returns true if scRGB format is available on this surface.
+    bool isScRGBSupported() const;
 
   private:
     std::shared_ptr<PhysicalDevice> physicalDevice_;
@@ -50,7 +61,8 @@ class Swapchain : public SharedObject<Swapchain> {
     VkExtent2D maxExtent_;
     VkExtent2D minExtent_;
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
-    bool hdrActive_ = false;  // true when HDR10 format was successfully selected
+    HdrMode hdrMode_ = HdrMode::None;
+    bool hdrActive_ = false;  // legacy compat — mirrors hdrMode_ != None
     bool transferSrcEnabled_ = false;
 
     std::vector<std::shared_ptr<SwapchainImage>> swapchainImages_;
