@@ -1667,6 +1667,15 @@ void RayTracingModuleContext::render() {
 
     bool accumulating = Renderer::options.offlineState == 2;
 
+    // Lazy SHARC init: create buffers + pipelines if enabled at runtime but not yet allocated.
+    // Must happen BEFORE push constant population so SHARC BDAs are available on the same frame.
+    if (Renderer::options.sharcEnabled && !module->sharcHashEntries_) {
+        module->sharcCapacity_ = 1u << static_cast<uint32_t>(Renderer::options.sharcCapacityExponent);
+        module->initSharcBuffers();
+        module->initSharcUpdatePipeline();
+        module->initSharcResolvePipeline();
+    }
+
     RayTracingPushConstant pushConstant{};
     pushConstant.numRayBounces = accumulating
         ? static_cast<int>(Renderer::options.offlineBounces)
@@ -1676,7 +1685,7 @@ void RayTracingModuleContext::render() {
                        | (Renderer::options.restirEnabled ? 4 : 0)
                        | (Renderer::options.restirSimplifiedBRDF ? 8 : 0)
                        | (Renderer::options.restirBounceEnabled ? 16 : 0)
-                       | ((Renderer::options.sharcEnabled && !accumulating) ? 32 : 0)
+                       | ((Renderer::options.sharcEnabled && !accumulating && module->sharcHashEntries_) ? 32 : 0)
                        | (Renderer::options.noiseLOD ? 64 : 0)
                        | (Renderer::options.multiScatterGGX ? 128 : 0)
                        | (Renderer::options.eonDiffuse ? 256 : 0)
@@ -1903,14 +1912,6 @@ void RayTracingModuleContext::render() {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
             0, 1, &clusterBarrier, 0, nullptr, 0, nullptr);
-    }
-
-    // Lazy SHARC init: create buffers + pipelines if enabled at runtime but not yet allocated
-    if (Renderer::options.sharcEnabled && !module->sharcHashEntries_) {
-        module->sharcCapacity_ = 1u << static_cast<uint32_t>(Renderer::options.sharcCapacityExponent);
-        module->initSharcBuffers();
-        module->initSharcUpdatePipeline();
-        module->initSharcResolvePipeline();
     }
 
     // Reset SHARC buffers when disabled so re-enable starts fresh (prevents stale cache artifacts)
