@@ -235,6 +235,12 @@ void WorldPrepareContext::render() {
     auto &instanceBuilder = tlasBuilder->beginInstanceBuilder();
     int blasIndex = 0;
 
+    // BLAS lifetime snapshot: keep shared_ptrs alive while GPU references the TLAS.
+    // prevBlasSnapshot_ from the last use of this swapchain context is safe to release
+    // (GPU finished with it before we re-acquired this context).
+    // Declared BEFORE entity section so entity BLASes are tracked for UPDATE validity.
+    TlasBlasSnapshot currBlasSnapshot;
+
     // Entity
     {
         auto entityBatch = entities->entityBatch();
@@ -286,6 +292,11 @@ void WorldPrepareContext::render() {
 
                     instanceBuilder.defineInstance(transform, blasIndex, entities1[i]->rtFlag, blasGroupAccu, flags,
                                                    entities1[i]->blas);
+                    // Track entity BLAS in snapshot for TLAS UPDATE validity check + GPU lifetime.
+                    // Entity BLASes are rebuilt every frame (new VkAccelerationStructureKHR handles),
+                    // so using blasDeviceAddress as generation ensures canUpdate detects the change.
+                    currBlasSnapshot.blases.push_back(entities1[i]->blas);
+                    currBlasSnapshot.generations.push_back(entities1[i]->blas->blasDeviceAddress());
                 } else {
                     // auto &prebuiltBLAS =
                     //     Renderer::instance().framework()->prebuiltBLASs()[entityRenderData->prebuiltBLAS];
@@ -364,11 +375,6 @@ void WorldPrepareContext::render() {
             }
         }
     }
-
-    // BLAS lifetime snapshot: keep shared_ptrs alive while GPU references the TLAS.
-    // prevBlasSnapshot_ from the last use of this swapchain context is safe to release
-    // (GPU finished with it before we re-acquired this context).
-    TlasBlasSnapshot currBlasSnapshot;
 
     // Chunk — cached + parallel instance population
     {
@@ -673,7 +679,10 @@ void WorldPrepareContext::render() {
                     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
                     si.commandBufferCount = 1;
                     si.pCommandBuffers = &megaCmdBuffer_->vkCommandBuffer();
-                    vkQueueSubmit(device->secondaryQueue(), 1, &si, megaFence_->vkFence());
+                    {
+                        std::lock_guard<std::mutex> qLock(device->queueMutex());
+                        vkQueueSubmit(device->secondaryQueue(), 1, &si, megaFence_->vkFence());
+                    }
                     vkWaitForFences(device->vkDevice(), 1, &megaFence_->vkFence(), true, UINT64_MAX);
                     vkResetFences(device->vkDevice(), 1, &megaFence_->vkFence());
 
@@ -906,8 +915,9 @@ void WorldPrepareContext::render() {
 
     auto cpuT7 = Clock::now();
     // Determine if TLAS UPDATE is possible by comparing per-instance BLAS generations.
-    // UPDATE requires identical BLAS handles at each instance index. If any chunk BLAS
-    // was rebuilt (generation changed) or instance count changed, we must full BUILD.
+    // UPDATE requires identical BLAS handles at each instance index (Vulkan spec).
+    // Tracks both entity BLASes (via device address as generation — changes every frame)
+    // and chunk BLASes (via Chunk1::blasGeneration). Any change forces full BUILD.
     currBlasSnapshot.instanceCount = static_cast<uint32_t>(instanceBuilder.instances.size());
     uint32_t currentInstanceCount = currBlasSnapshot.instanceCount;
 
