@@ -7,6 +7,7 @@
 #include <filesystem>
 
 #include "core/render/block_model_table.hpp"
+#include "core/render/block_state_registry.hpp"
 #include "core/render/gpu_profiler.hpp"
 #include "core/render/texture_system.hpp"
 #include "core/render/thread_pool.hpp"
@@ -41,6 +42,7 @@ struct Options {
     uint32_t chunkBuildingTotalBatches = 6;
     float chunkCullDistance = 384.0f;  // Max chunk distance in blocks (64-1024), chunks beyond are excluded from TLAS
     float chunkLodDistance = 160.0f;  // LOD boundary in blocks (64-512): ≤ = lossless 64B vertex, > = compact 32B
+    uint32_t extendedRenderDistance = 0; // Extra chunks beyond Java's RD, loaded from disk (0=disabled, max 64)
     float megaMergeDistance = 0.0f;  // Beyond this distance (blocks), chunks are merged into mega-BLASes (0=disabled)
     static constexpr uint32_t ommBatchCap = 2; // Max chunks per GPU batch when OMM active (prevents TDR)
     uint32_t tonemappingMode = 1; // 0 = PBR Neutral, 1 = Reinhard Extended
@@ -267,6 +269,8 @@ class Renderer : public Singleton<Renderer> {
     static GpuProfiler gpuProfiler;
     static ThreadPool threadPool;
     static BlockModelTable blockModelTable;
+    static BlockStateRegistry blockStateRegistry;
+    static std::string worldRegionPath; // Path to saves/<world>/region/ for Anvil reader
     static TextureSystem textureSystem;
 
     // Frame Generation: images set by pipeline modules, read by render_framework for SL tagging

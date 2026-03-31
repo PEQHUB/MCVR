@@ -129,6 +129,10 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     void prepareCPU(bool allowMicromapBake, bool skipOMM, glm::vec3 cameraPos);
     void uploadGPU();
 
+    // Release staging buffers after GPU copy completes (timeline semaphore confirmed).
+    // Frees ~50% of per-chunk buffer memory — staging halves are only needed during upload.
+    void releaseStagingBuffers();
+
     // Release CPU-side vertex/index data after GPU upload + BLAS build.
     // Frees ~4GB of RAM across all loaded chunks.
     void releaseHostGeometry();
@@ -311,6 +315,13 @@ class Chunks : public SharedObject<Chunks> {
     void invalidateChunk(int id);
     void queueChunkBuild(ChunkBuildTask task);
     void queueBlockStateBuild(ChunkBuildTaskV2 task);
+
+    /// Submit a pre-built ChunkBuildData for an extended chunk (C++-only, from disk).
+    /// Called from ExtendedChunkManager's worker thread.
+    void submitExtendedBuild(uint32_t extId, std::shared_ptr<ChunkBuildData> cbd);
+
+    /// Grow chunks_ array to accommodate extended chunks. Thread-safe.
+    void ensureCapacity(uint32_t totalSlots);
 
     bool isChunkReady(int64_t id);
     uint32_t getInputQueueSize();

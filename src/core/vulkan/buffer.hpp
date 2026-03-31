@@ -79,6 +79,7 @@ class DeviceLocalBuffer : public Buffer, public SharedObject<DeviceLocalBuffer> 
     void uploadToStagingBuffer(void *src);
     void uploadToStagingBuffer(void *src, size_t size, size_t offset);
     void flushStagingBuffer();
+    void releaseStagingBuffer();
 
     void downloadFromBuffer(VkCommandBuffer cmdBuffer);
     void downloadFromBuffer(VkCommandBuffer cmdBuffer, size_t size, size_t srcOffset, size_t dstOffset);
