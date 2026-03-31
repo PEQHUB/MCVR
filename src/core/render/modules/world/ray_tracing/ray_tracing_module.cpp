@@ -1674,6 +1674,13 @@ void RayTracingModuleContext::render() {
         module->initSharcBuffers();
         module->initSharcUpdatePipeline();
         module->initSharcResolvePipeline();
+        // Refresh ALL contexts' stale SBT pointers — were nullptr at construction time
+        for (size_t ci = 0; ci < module->contexts_.size(); ci++) {
+            auto rtCtx = std::static_pointer_cast<RayTracingModuleContext>(module->contexts_[ci]);
+            if (ci < module->sharcUpdateSbts_.size()) {
+                rtCtx->sharcUpdateSbt = module->sharcUpdateSbts_[ci];
+            }
+        }
     }
 
     RayTracingPushConstant pushConstant{};
@@ -1965,7 +1972,7 @@ void RayTracingModuleContext::render() {
     // Skip entirely during offline accumulation — SHARC temporal cache conflicts with independent samples
     if (Renderer::options.sharcEnabled && !accumulating
         && module->sharcUpdatePipeline_ && module->sharcResolvePipeline_ != VK_NULL_HANDLE
-        && module->sharcHashEntries_) {
+        && module->sharcHashEntries_ && sharcUpdateSbt) {
         worldCommandBuffer->beginLabel("RT:SHARC Update", 0.9f, 0.6f, 0.1f);
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
         GpuDiag::checkpoint(cmd, GpuDiag::SHARC_UPDATE_RT);
