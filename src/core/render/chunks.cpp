@@ -1074,6 +1074,18 @@ void ChunkBuildData::releaseHostGeometry() {
     displacedFaceData.shrink_to_fit();
 }
 
+void ChunkBuildData::releaseStagingBuffers() {
+    for (auto &vb : vertexBuffers) { if (vb) vb->releaseStagingBuffer(); }
+    for (auto &ib : indexBuffers) { if (ib) ib->releaseStagingBuffer(); }
+    for (auto &ob : ommIndexBuffers) { if (ob) ob->releaseStagingBuffer(); }
+    for (auto &gd : ommGeometryData) {
+        if (gd.arrayBuffer) gd.arrayBuffer->releaseStagingBuffer();
+        if (gd.descBuffer) gd.descBuffer->releaseStagingBuffer();
+    }
+    if (displacedAABBBuffer) displacedAABBBuffer->releaseStagingBuffer();
+    if (displacedFaceDataBuffer) displacedFaceDataBuffer->releaseStagingBuffer();
+}
+
 ChunkBuildDataBatch::ChunkBuildDataBatch(uint32_t maxBatchSize,
                                          std::set<int64_t> &queuedIndexSet,
                                          std::vector<std::shared_ptr<Chunk1>> &chunks,
@@ -1173,6 +1185,14 @@ void ChunkBuildScheduler::integrateCompleted() {
         ChunkPackedData data = { .geometryCount = cbd->geometryCount };
         chunkPackedData_->uploadToBuffer(&data, sizeof(ChunkPackedData),
                                          cbd->id * sizeof(ChunkPackedData));
+
+        // Release ChunkBuildData slot to free scratch/OMM/displacement buffers
+        // that were NOT transferred to Chunk1 (blasBuilder, ommGeometryData, etc.).
+        // Only clear if slot still points to this build (a newer build may have replaced it).
+        if (cbd->id < static_cast<int64_t>(chunkBuildDatas_.size()) &&
+            chunkBuildDatas_[cbd->id] == cbd) {
+            chunkBuildDatas_[cbd->id] = nullptr;
+        }
     }
 }
 
@@ -1271,7 +1291,8 @@ void ChunkBuildScheduler::blasThreadLoop() {
                               << " KB -> " << (totalComp/1024) << " KB (" << pct << "% savings)" << std::endl;
                 }
 
-                // Hand off to render thread
+                // Hand off to render thread — release staging buffers first (GPU copy done)
+                for (auto &cbd : front.chunks) cbd->releaseStagingBuffers();
                 {
                     std::lock_guard<std::mutex> lock(completedMtx_);
                     for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
@@ -1354,6 +1375,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
                             crashExitWithQueue(cr, "BLAS compaction submit DEVICE_LOST", device->secondaryQueue());
                         }
                         if (front.compactionQP) vkDestroyQueryPool(device->vkDevice(), front.compactionQP, nullptr);
+                        for (auto &cbd : front.chunks) cbd->releaseStagingBuffers();
                         {
                             std::lock_guard<std::mutex> lock(completedMtx_);
                             for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
@@ -1364,6 +1386,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
                 } else {
                     // Query failed — hand off without compaction
                     if (front.compactionQP) vkDestroyQueryPool(device->vkDevice(), front.compactionQP, nullptr);
+                    for (auto &cbd : front.chunks) cbd->releaseStagingBuffers();
                     {
                         std::lock_guard<std::mutex> lock(completedMtx_);
                         for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
@@ -1375,6 +1398,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
             } else {
                 // Build phase complete, no compaction needed — hand off directly
                 if (front.compactionQP) vkDestroyQueryPool(device->vkDevice(), front.compactionQP, nullptr);
+                for (auto &cbd : front.chunks) cbd->releaseStagingBuffers();
                 {
                     std::lock_guard<std::mutex> lock(completedMtx_);
                     for (auto &cbd : front.chunks) completedQueue_.push_back(std::move(cbd));
@@ -1416,6 +1440,10 @@ void ChunkBuildScheduler::blasThreadLoop() {
                 });
                 // GPU upload (sequential — VMA alloc + staging)
                 for (auto &cbd : batch) cbd->uploadGPU();
+
+                // Release CPU-side geometry data — staging buffers hold the copy for GPU transfer.
+                // This frees ~200KB/chunk of system RAM (PBRTriangle arrays + index arrays).
+                for (auto &cbd : batch) cbd->releaseHostGeometry();
 
                 // Take cmd from pool
                 auto cmd = std::move(cmdPool_.front()); cmdPool_.pop();
@@ -1591,6 +1619,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
     }
     for (auto &f : inFlight_) {
         if (f.compactionQP) vkDestroyQueryPool(device->vkDevice(), f.compactionQP, nullptr);
+        for (auto &cbd : f.chunks) cbd->releaseStagingBuffers();
         std::lock_guard<std::mutex> lock(completedMtx_);
         for (auto &cbd : f.chunks) completedQueue_.push_back(std::move(cbd));
     }
@@ -1795,6 +1824,11 @@ void Chunks::invalidateChunk(int id) {
     if (id < 0 || id >= static_cast<int>(chunks_.size())) return;
     chunks_[id]->invalidate();
 
+    // Release ChunkBuildData to free scratch/OMM buffers for out-of-range chunks
+    if (id < static_cast<int>(chunkBuildDatas_.size())) {
+        chunkBuildDatas_[id] = nullptr;
+    }
+
     ChunkPackedData data = {
         .geometryCount = 0,
     };
@@ -1955,6 +1989,56 @@ void Chunks::setChunkLights(int64_t id, const std::vector<ChunkLightEntry> &ligh
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     if (id >= 0 && id < static_cast<int64_t>(chunks_.size()) && chunks_[id]) {
         chunks_[id]->lightSources = lights;
+    }
+}
+
+void Chunks::ensureCapacity(uint32_t totalSlots) {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    if (totalSlots <= chunks_.size()) return;
+
+    auto framework = Renderer::instance().framework();
+    auto vma = framework->vma();
+    auto device = framework->device();
+
+    uint32_t oldSize = static_cast<uint32_t>(chunks_.size());
+    chunks_.resize(totalSlots);
+    chunkBuildDatas_.resize(totalSlots);
+
+    for (uint32_t i = oldSize; i < totalSlots; i++) {
+        chunks_[i] = Chunk1::create();
+        chunkBuildDatas_[i] = nullptr;
+    }
+
+    // Reallocate chunkPackedData SSBO to fit new size
+    auto newPackedData = vk::HostVisibleBuffer::create(
+        vma, device, totalSlots * sizeof(ChunkPackedData),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    // Copy existing data
+    if (chunkPackedData_ && oldSize > 0) {
+        std::memcpy(newPackedData->mappedPtr(), chunkPackedData_->mappedPtr(),
+                    oldSize * sizeof(ChunkPackedData));
+    }
+    // Zero new entries
+    std::memset(static_cast<uint8_t*>(newPackedData->mappedPtr()) + oldSize * sizeof(ChunkPackedData),
+                0, (totalSlots - oldSize) * sizeof(ChunkPackedData));
+    chunkPackedData_ = newPackedData;
+
+    std::cout << "[ExtendedRD] Chunk array grown: " << oldSize << " -> " << totalSlots << std::endl;
+}
+
+void Chunks::submitExtendedBuild(uint32_t extId, std::shared_ptr<ChunkBuildData> cbd) {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+
+    // Grow array if needed
+    if (extId >= chunks_.size()) {
+        ensureCapacity(extId + 256); // Grow in batches of 256
+    }
+
+    chunkBuildDatas_[extId] = cbd;
+    glm::vec3 camPos = Renderer::instance().world()
+        ? glm::vec3(Renderer::instance().world()->getCameraPos()) : glm::vec3(0);
+    if (chunkBuildScheduler_) {
+        chunkBuildScheduler_->enqueue(cbd, camPos, false);
     }
 }
 

@@ -3,11 +3,28 @@
 #include "core/render/chunks.hpp"
 #include "core/render/renderer.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <iostream>
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_initNative(JNIEnv *, jclass, jint chunkNum) {
     Renderer::instance().world()->chunks()->reset(chunkNum);
+
+    // Compute Java's render distance from chunk count:
+    // numChunks = (2*RD+1)^2 * 24 → RD = (sqrt(numChunks/24) - 1) / 2
+    uint32_t javaRD = static_cast<uint32_t>((std::sqrt(chunkNum / 24.0) - 1) / 2);
+    Renderer::instance().world()->startExtendedChunkLoading(javaRD, chunkNum);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_nativeSetWorldRegionPath(
+    JNIEnv *env, jclass, jstring jpath) {
+    if (!jpath) return;
+    const char* utf = env->GetStringUTFChars(jpath, nullptr);
+    if (utf) {
+        Renderer::worldRegionPath = utf;
+        std::cout << "[ExtendedRD] World region path: " << Renderer::worldRegionPath << std::endl;
+        env->ReleaseStringUTFChars(jpath, utf);
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_rebuildSingle(JNIEnv *,

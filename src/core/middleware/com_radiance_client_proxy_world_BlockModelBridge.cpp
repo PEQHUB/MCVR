@@ -2,6 +2,7 @@
 #include "core/render/renderer.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/block_model_table.hpp"
+#include "core/render/block_state_registry.hpp"
 
 #include <iostream>
 
@@ -110,6 +111,16 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
     if (Renderer::blockModelTable.isLoaded()) {
         Renderer::blockModelTable.normalizeQuadUVs();
     }
+}
+
+// ---- Block state registry (for C++-only chunk loading from region files) ----
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeUploadBlockStateRegistry(
+    JNIEnv *, jclass,
+    jlong dataPtr, jint dataSize) {
+
+    auto* data = reinterpret_cast<const uint8_t*>(dataPtr);
+    Renderer::blockStateRegistry.load(data, static_cast<uint32_t>(dataSize));
 }
 
 // ---- Animation tick (called per game tick from Java) ----

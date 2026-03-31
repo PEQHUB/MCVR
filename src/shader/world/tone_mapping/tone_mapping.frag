@@ -826,13 +826,16 @@ void main() {
 
     } else {
         // ====================================================================
-        // SDR PIPELINE — process in BT.2020, convert to BT.709 after tonemapping
+        // SDR PIPELINE — convert to BT.709 first, tone-map in display gamut
         // ====================================================================
-        vec3 workingColor = expColor;
+        // BT.2020 → BT.709 before tone mapping. Tone mapping in BT.709 keeps
+        // highlight rolloff in the display gamut — no post-tonemap gamut mapping
+        // needed, which was crushing highlight chroma via Oklab soft-clip.
+        vec3 workingColor = max(CP_BT2020_TO_BT709 * expColor, vec3(0.0));
 
-        // Pre-tonemap saturation in Oklab (BT.2020)
+        // Pre-tonemap saturation in Oklab (BT.709)
         if (gExposure.saturation != 1.0) {
-            vec3 lab = cpBt2020ToOklab(max(workingColor, vec3(0.0)));
+            vec3 lab = cpBt709ToOklab(max(workingColor, vec3(0.0)));
 
             if (gExposure.saturationAdaptive > 0.5) {
                 float chroma = length(lab.yz);
@@ -845,7 +848,7 @@ void main() {
                 lab.yz *= 1.0 + boostAmount * (gExposure.saturation - 1.0);
             }
 
-            workingColor = max(cpOklabToBt2020(lab), vec3(0.0));
+            workingColor = max(cpOklabToBt709(lab), vec3(0.0));
         }
 
         // SDR tonemapping — 9 modes (original numbering preserved)
@@ -872,12 +875,11 @@ void main() {
             gExposure.psychoWhiteCurve,
             gExposure.psychoConeExponent);
 
-        // Post-tonemap gamut mapping: BT.2020 -> BT.709 with Oklab perceptual soft-clip
-        // Replaces hard clamp — preserves hue and adapts lightness for out-of-gamut colors
-        mapped = cpGamutMapToSrgb(mapped);
+        // Already in BT.709 — just clamp (no gamut mapping needed)
+        mapped = clamp(mapped, vec3(0.0), vec3(1.0));
 
         bool useSrgb = gExposure.sdrTransferFunction > 0.5;
-        vec3 encoded = useSrgb ? cpLinearToSRGB(mapped) : pow(max(mapped, vec3(0.0)), vec3(1.0 / 2.2));
+        vec3 encoded = useSrgb ? cpLinearToSRGB(mapped) : pow(mapped, vec3(1.0 / 2.2));
 
         // Triangular dithering: breaks 8-bit quantization banding
         float n1 = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));

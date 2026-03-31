@@ -357,6 +357,14 @@ void vk::DeviceLocalBuffer::flushStagingBuffer() {
     vmaFlushAllocation(vma_->allocator(), stagingAllocation_, 0, size_);
 }
 
+void vk::DeviceLocalBuffer::releaseStagingBuffer() {
+    if (stagingBuffer_ == VK_NULL_HANDLE) return;
+    vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
+    stagingBuffer_ = VK_NULL_HANDLE;
+    stagingAllocation_ = VK_NULL_HANDLE;
+    mappedPtr_ = nullptr;
+}
+
 void vk::DeviceLocalBuffer::downloadFromBuffer(VkCommandBuffer cmdBuffer) {
     downloadFromBuffer(cmdBuffer, size_, 0, 0);
 }
