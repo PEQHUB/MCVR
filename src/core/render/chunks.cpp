@@ -149,9 +149,16 @@ void ChunkBuildData::prepareCPU(bool allowMicromapBake, bool skipOMM, glm::vec3 
         }
     }
 
-    // Full 96-byte PBRTriangle — lossless format has struct layout issues.
-    // Block vs entity is identified via PBR_FLAG_BLOCK_GEOMETRY in vertex flags.
-    vertexFormat = 0;
+    // Select vertex format based on distance from camera:
+    //   0 = full 96-byte PBRTriangle (near chunks — full quality)
+    //   1 = compact 32-byte PBRTriangleCompact (far chunks — saves ~67% VRAM)
+    // x/y/z are section origins in block coordinates. Section center = origin + 8.
+    float lodDist = Renderer::options.chunkLodDistance;
+    float dx = static_cast<float>(x + 8) - cameraPos.x;
+    float dy = static_cast<float>(y + 8) - cameraPos.y;
+    float dz = static_cast<float>(z + 8) - cameraPos.z;
+    float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+    vertexFormat = (lodDist > 0 && dist > lodDist) ? 1 : 0;
 
     // CPU-only OMM classification: compute per-triangle opacity indices without VMA/Vulkan calls.
     // Results stored in ommCpuResults[], consumed by uploadGPU().
@@ -2031,8 +2038,12 @@ void Chunks::submitExtendedBuild(uint32_t extId, std::shared_ptr<ChunkBuildData>
 
     // Grow array if needed
     if (extId >= chunks_.size()) {
-        ensureCapacity(extId + 256); // Grow in batches of 256
+        ensureCapacity(extId + 256);
     }
+
+    // Use proper version from the target Chunk1 slot (same as queueBlockStateBuild)
+    cbd->version = chunks_[extId]->latestVersion++;
+    cbd->id = extId;
 
     chunkBuildDatas_[extId] = cbd;
     glm::vec3 camPos = Renderer::instance().world()
@@ -2040,6 +2051,15 @@ void Chunks::submitExtendedBuild(uint32_t extId, std::shared_ptr<ChunkBuildData>
     if (chunkBuildScheduler_) {
         chunkBuildScheduler_->enqueue(cbd, camPos, false);
     }
+
+    static uint32_t logCount = 0;
+    if (logCount < 20 || logCount % 500 == 0) {
+        std::cout << "[ExtendedRD] Submitted chunk id=" << extId
+                  << " pos=(" << cbd->x << "," << cbd->y << "," << cbd->z << ")"
+                  << " verts=" << cbd->allVertexCount
+                  << " geom=" << cbd->geometryCount << std::endl;
+    }
+    logCount++;
 }
 
 void Chunks::close() {

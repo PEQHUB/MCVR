@@ -1,6 +1,7 @@
 #include "core/render/greedy_mesher.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -487,11 +488,15 @@ GreedyMesher::Result GreedyMesher::merge(
 
     result.mergedTriCount = static_cast<uint32_t>(result.indices.size()) / 3;
 
-    // Log significant merges
+    // Log significant merges (throttled to avoid spam during extended chunk loading)
     if (result.origTriCount > 100 && result.mergedTriCount < result.origTriCount) {
-        int pct = 100 - static_cast<int>(result.mergedTriCount * 100u / result.origTriCount);
-        std::cout << "[GreedyMesher] " << result.origTriCount << " -> " << result.mergedTriCount
-                  << " tris (" << pct << "% reduction)" << std::endl;
+        static std::atomic<uint32_t> logCount{0};
+        uint32_t n = logCount.fetch_add(1);
+        if (n < 20 || n % 500 == 0) {
+            int pct = 100 - static_cast<int>(result.mergedTriCount * 100u / result.origTriCount);
+            std::cout << "[GreedyMesher] " << result.origTriCount << " -> " << result.mergedTriCount
+                      << " tris (" << pct << "% reduction)" << std::endl;
+        }
     }
 
     return result;

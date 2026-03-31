@@ -3,6 +3,7 @@
 #include "core/render/renderer.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 
 static auto& extCout() {
@@ -27,6 +28,13 @@ void ExtendedChunkManager::start(const std::filesystem::path& regionDir,
     nextExtendedId_.store(javaChunkCount);
     loadedCount_.store(0);
     loadedColumns_.clear();
+    freeIds_.clear();
+    {
+        std::lock_guard<std::mutex> lock(evictionMtx_);
+        pendingEvictions_.clear();
+    }
+    lastCamChunkX_ = INT32_MAX;
+    lastCamChunkZ_ = INT32_MAX;
     stopRequested_.store(false);
     running_.store(true);
 
@@ -50,6 +58,71 @@ void ExtendedChunkManager::updateCamera(glm::dvec3 cameraPos) {
     cameraPos_ = cameraPos;
 }
 
+void ExtendedChunkManager::processPendingEvictions() {
+    // Called from render thread — safe to call invalidateChunk here
+    std::vector<uint32_t> toEvict;
+    {
+        std::lock_guard<std::mutex> lock(evictionMtx_);
+        if (pendingEvictions_.empty()) return;
+        toEvict.swap(pendingEvictions_);
+    }
+
+    for (uint32_t id : toEvict) {
+        chunks_->invalidateChunk(static_cast<int>(id));
+    }
+
+    if (!toEvict.empty()) {
+        extCout() << "[ExtendedRD] Evicted " << toEvict.size() << " chunk sections (render thread)" << std::endl;
+    }
+}
+
+void ExtendedChunkManager::markOutOfRangeForEviction(int32_t camChunkX, int32_t camChunkZ, uint32_t totalRD) {
+    // Evict columns whose center is beyond totalRD + 2 chunks (hysteresis to avoid thrashing)
+    int32_t evictRD = static_cast<int32_t>(totalRD) + 2;
+    int64_t evictDist2 = static_cast<int64_t>(evictRD) * evictRD;
+
+    std::vector<ChunkColumnKey> toEvict;
+    for (auto& [key, ids] : loadedColumns_) {
+        int64_t dx = static_cast<int64_t>(key.x) - camChunkX;
+        int64_t dz = static_cast<int64_t>(key.z) - camChunkZ;
+        if (dx * dx + dz * dz > evictDist2) {
+            toEvict.push_back(key);
+        }
+    }
+
+    if (toEvict.empty()) return;
+
+    int evictedSections = 0;
+    {
+        std::lock_guard<std::mutex> lock(evictionMtx_);
+        for (auto& key : toEvict) {
+            auto it = loadedColumns_.find(key);
+            if (it == loadedColumns_.end()) continue;
+
+            // Queue IDs for render-thread invalidation and recycle
+            for (uint32_t id : it->second) {
+                pendingEvictions_.push_back(id);
+                freeIds_.push_back(id);
+                evictedSections++;
+            }
+            loadedColumns_.erase(it);
+        }
+    }
+
+    extCout() << "[ExtendedRD] Marked " << toEvict.size() << " columns ("
+              << evictedSections << " sections) for eviction, "
+              << freeIds_.size() << " IDs recyclable" << std::endl;
+}
+
+static uint32_t allocExtendedId(std::vector<uint32_t>& freeIds, std::atomic<uint32_t>& nextId) {
+    if (!freeIds.empty()) {
+        uint32_t id = freeIds.back();
+        freeIds.pop_back();
+        return id;
+    }
+    return nextId.fetch_add(1);
+}
+
 void ExtendedChunkManager::workerLoop() {
     auto& registry = Renderer::blockStateRegistry;
     if (!registry.isLoaded()) {
@@ -67,8 +140,13 @@ void ExtendedChunkManager::workerLoop() {
     uint32_t extRD = Renderer::options.extendedRenderDistance;
     uint32_t totalRD = javaRenderDistance_ + extRD;
 
+    // Maximum chunk array slots we're allowed to use
+    uint32_t maxExtendedSlots = static_cast<uint32_t>(
+        (2 * totalRD + 1) * (2 * totalRD + 1) * 24);
+
     extCout() << "[ExtendedRD] Worker started: loading chunks from RD "
-              << javaRenderDistance_ << " to " << totalRD << std::endl;
+              << javaRenderDistance_ << " to " << totalRD
+              << " (max " << maxExtendedSlots << " section slots)" << std::endl;
 
     while (!stopRequested_.load()) {
         glm::dvec3 camPos;
@@ -81,46 +159,73 @@ void ExtendedChunkManager::workerLoop() {
         int32_t camChunkX = static_cast<int32_t>(std::floor(camPos.x / 16.0));
         int32_t camChunkZ = static_cast<int32_t>(std::floor(camPos.z / 16.0));
 
+        // Detect camera movement (full chunk boundary crossing)
+        bool cameraMoved = (camChunkX != lastCamChunkX_ || camChunkZ != lastCamChunkZ_);
+        if (cameraMoved && lastCamChunkX_ != INT32_MAX) {
+            // Mark columns outside the ring for eviction (render thread will actually invalidate)
+            markOutOfRangeForEviction(camChunkX, camChunkZ, totalRD);
+        }
+        lastCamChunkX_ = camChunkX;
+        lastCamChunkZ_ = camChunkZ;
+
+        // Throttle: don't submit faster than the BLAS thread can process.
+        // Check input queue depth — if it's backed up, wait.
+        if (chunks_->getInputQueueSize() > 64) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+
         // Generate positions for the extended ring
         auto positions = generateSpiralPositions(camChunkX, camChunkZ,
                                                   javaRenderDistance_, totalRD);
 
         int loadedThisPass = 0;
+        int skippedNoRegion = 0, skippedEmpty = 0;
         for (auto& [cx, cz] : positions) {
             if (stopRequested_.load()) break;
 
             ChunkColumnKey key{cx, cz};
             if (loadedColumns_.count(key)) continue;
 
+            // Throttle within the pass too
+            if (chunks_->getInputQueueSize() > 64) break;
+
             // Check if region file exists for this chunk
-            if (!anvil::RegionReader::regionExists(regionDir_, cx, cz)) continue;
+            if (!anvil::RegionReader::regionExists(regionDir_, cx, cz)) {
+                skippedNoRegion++;
+                continue;
+            }
 
             // Read chunk from disk
             auto nbtData = anvil::RegionReader::readChunk(regionDir_, cx, cz);
-            if (nbtData.empty()) continue;
+            if (nbtData.empty()) {
+                skippedEmpty++;
+                continue;
+            }
 
             // Decode
             auto decoded = anvil::ChunkDecoder::decode(
                 nbtData.data(), nbtData.size(), cx, cz, registry);
             if (decoded.sections.empty()) continue;
 
-            // For each non-empty section, create a ChunkBuildTaskV2 and submit
+            // Track section IDs for this column (for eviction later)
+            std::vector<uint32_t> columnIds;
+
+            // For each non-empty section, mesh and submit
             for (auto& section : decoded.sections) {
                 if (section.empty) continue;
                 if (stopRequested_.load()) break;
 
-                uint32_t extId = nextExtendedId_.fetch_add(1);
+                uint32_t extId = allocExtendedId(freeIds_, nextExtendedId_);
 
                 // Bounds check — don't exceed allocated chunk array
-                if (extId >= javaChunkCount_ +
-                    static_cast<uint32_t>((2 * (javaRenderDistance_ + extRD) + 1) *
-                     (2 * (javaRenderDistance_ + extRD) + 1) * 24)) {
+                if (extId >= javaChunkCount_ + maxExtendedSlots) {
                     extCout() << "[ExtendedRD] Chunk array full at id " << extId << std::endl;
+                    freeIds_.push_back(extId);
                     break;
                 }
 
                 // Build neighbor states from adjacent sections within this column
-                // (inter-column neighbors left as air for simplicity)
                 uint32_t neighborStates[6][256];
                 std::memset(neighborStates, 0, sizeof(neighborStates));
 
@@ -148,7 +253,7 @@ void ExtendedChunkManager::workerLoop() {
                 input.originX = cx * 16;
                 input.originY = section.sectionY * 16;
                 input.originZ = cz * 16;
-                input.blockAtlasTextureId = 0; // Texture array system doesn't use this
+                input.blockAtlasTextureId = 0;
 
                 // Mesh
                 auto meshOutput = BlockMesher::mesh(input, Renderer::blockModelTable);
@@ -176,25 +281,24 @@ void ExtendedChunkManager::workerLoop() {
 
                 if (geometryTypes.empty()) continue;
 
-                // Submit to the chunk build pipeline with the extended ID
                 int geomCount = static_cast<int>(geometryTypes.size());
                 auto chunkBuildData = ChunkBuildData::create(
                     extId, cx * 16, section.sectionY * 16, cz * 16,
-                    1, // version
-                    allVertexCount, allIndexCount, geomCount,
+                    1, allVertexCount, allIndexCount, geomCount,
                     std::move(geometryTypes), std::move(vertices), std::move(indices));
 
-                // Use default biome colors for extended chunks
                 chunkBuildData->biomeGrassColor = 0x91BD59;
                 chunkBuildData->biomeFoliageColor = 0x77AB2F;
                 chunkBuildData->biomeWaterColor = 0x3F76E4;
 
-                // Submit to existing build pipeline
                 chunks_->submitExtendedBuild(extId, chunkBuildData);
+                columnIds.push_back(extId);
             }
 
-            loadedColumns_.insert(key);
-            loadedThisPass++;
+            if (!columnIds.empty()) {
+                loadedColumns_[key] = std::move(columnIds);
+                loadedThisPass++;
+            }
 
             // Yield periodically to not starve other threads
             if (loadedThisPass % 4 == 0) {
@@ -203,6 +307,13 @@ void ExtendedChunkManager::workerLoop() {
         }
 
         loadedCount_.store(static_cast<uint32_t>(loadedColumns_.size()));
+
+        if (loadedThisPass > 0) {
+            extCout() << "[ExtendedRD] Pass done: loaded " << loadedThisPass
+                      << " columns (total " << loadedColumns_.size() << "), skipped "
+                      << skippedNoRegion << " no-region, " << skippedEmpty << " empty"
+                      << ", free IDs: " << freeIds_.size() << std::endl;
+        }
 
         if (loadedThisPass == 0) {
             // All visible chunks loaded — sleep and check for camera movement
@@ -223,12 +334,10 @@ std::vector<std::pair<int32_t, int32_t>> ExtendedChunkManager::generateSpiralPos
 
     // Generate positions ring by ring, closest first
     for (int32_t ring = inner + 1; ring <= outer; ring++) {
-        // Top and bottom edges
         for (int32_t dx = -ring; dx <= ring; dx++) {
             positions.push_back({centerX + dx, centerZ - ring});
             positions.push_back({centerX + dx, centerZ + ring});
         }
-        // Left and right edges (excluding corners already added)
         for (int32_t dz = -ring + 1; dz < ring; dz++) {
             positions.push_back({centerX - ring, centerZ + dz});
             positions.push_back({centerX + ring, centerZ + dz});

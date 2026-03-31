@@ -149,7 +149,7 @@ void main() {
         mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
     }
     traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, 0,
-                mainRay.origin, 0.0, mainRay.direction, 1000.0, 0);
+                mainRay.origin, 0.0, mainRay.direction, max(worldUBO.rayMaxDistance, 1000.0), 0);
 
     // Bounce loop with SHARC update
     int maxBounces = min(pc.numRayBounces, pc.sharcUpdateBounces);

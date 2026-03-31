@@ -40,9 +40,9 @@ struct Options {
 
     uint32_t chunkBuildingBatchSize = 6;
     uint32_t chunkBuildingTotalBatches = 6;
-    float chunkCullDistance = 384.0f;  // Max chunk distance in blocks (64-1024), chunks beyond are excluded from TLAS
-    float chunkLodDistance = 160.0f;  // LOD boundary in blocks (64-512): ≤ = lossless 64B vertex, > = compact 32B
-    uint32_t extendedRenderDistance = 0; // Extra chunks beyond Java's RD, loaded from disk (0=disabled, max 64)
+    float chunkCullDistance = 384.0f;  // Max distance in blocks, chunks beyond excluded from TLAS (UI: 0-128 chunks × 16)
+    float chunkLodDistance = 160.0f;  // LOD boundary in blocks: ≤ = full 96B vertex, > = compact 32B (UI: 0-128 chunks × 16)
+    uint32_t extendedRenderDistance = 0; // Extra chunks beyond Java's RD, loaded from disk (0=disabled, max 512)
     float megaMergeDistance = 0.0f;  // Beyond this distance (blocks), chunks are merged into mega-BLASes (0=disabled)
     static constexpr uint32_t ommBatchCap = 2; // Max chunks per GPU batch when OMM active (prevents TDR)
     uint32_t tonemappingMode = 1; // 0 = PBR Neutral, 1 = Reinhard Extended
@@ -271,6 +271,8 @@ class Renderer : public Singleton<Renderer> {
     static BlockModelTable blockModelTable;
     static BlockStateRegistry blockStateRegistry;
     static std::string worldRegionPath; // Path to saves/<world>/region/ for Anvil reader
+    static uint32_t javaChunkCount;     // Stored at initNative(), used by extended chunk loading
+    static uint32_t javaRenderDistance;  // Java's render distance in chunks, set from ChunkProxy
     static TextureSystem textureSystem;
 
     // Frame Generation: images set by pipeline modules, read by render_framework for SL tagging

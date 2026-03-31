@@ -337,7 +337,7 @@ namespace Data {
         T_UINT endSkyTextureID;
         T_UINT endPortalTextureID;
         T_UINT animTick;    // Global animation tick counter (incremented per game tick)
-        T_UINT pad5;
+        T_FLOAT rayMaxDistance; // Max ray distance in blocks (= effective render distance * 16)
 
         T_VEC4 emissionData[50]; // Per-block: .rgb = BT.2020 color override (0,0,0 = use texture), .a = scalar multiplier
 

@@ -305,10 +305,11 @@ void main() {
             float len;
             uint mask;
             uint missId;
+            float primaryLen = max(worldUBO.rayMaxDistance, 1000.0);
             if (isHand == 0) {
                 missId = 0;
                 if (psrDepth == 0) {
-                    len = 1000;
+                    len = primaryLen;
                     if (worldUBO.isFirstPerson == 1) {
                         // Regular first person: hide player entirely
                         mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
@@ -321,7 +322,7 @@ void main() {
                             WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                     }
                 } else if (psrDepth <= 1) {
-                    len = 1000;
+                    len = primaryLen;
                     mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                 } else {
                     len = 384;
@@ -746,9 +747,10 @@ void main() {
             mainRay.index = b;
 
             uint mask;
-            uint len;
+            float len;
+            float bouncePrimaryLen = max(worldUBO.rayMaxDistance, 1000.0);
             if (b == 0) {
-                len = 1000;
+                len = bouncePrimaryLen;
                 if (worldUBO.isFirstPerson == 1) {
                     mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                 } else if (worldUBO.isFirstPerson == 2) {
@@ -757,7 +759,7 @@ void main() {
                     mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
                 }
             } else if (b <= 1) {
-                len = 1000;
+                len = bouncePrimaryLen;
                 mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
             } else {
                 len = 384;

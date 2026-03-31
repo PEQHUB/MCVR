@@ -379,7 +379,13 @@ void WorldPrepareContext::render() {
     // Chunk — cached + parallel instance population
     {
         auto &chunk1s = chunks->chunks();
+        // Effective cull distance: max of user setting and extended render distance requirement
         float cullDist = Renderer::options.chunkCullDistance;
+        if (Renderer::options.extendedRenderDistance > 0) {
+            float extMinCull = static_cast<float>(
+                (Renderer::javaRenderDistance + Renderer::options.extendedRenderDistance + 2) * 16);
+            if (extMinCull > cullDist) cullDist = extMinCull;
+        }
         float cullDist2 = cullDist * cullDist;
         float mergeDist = Renderer::options.megaMergeDistance;
         float mergeDist2 = mergeDist * mergeDist;

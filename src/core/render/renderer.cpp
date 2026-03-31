@@ -33,6 +33,8 @@ ThreadPool Renderer::threadPool;
 BlockModelTable Renderer::blockModelTable;
 BlockStateRegistry Renderer::blockStateRegistry;
 std::string Renderer::worldRegionPath;
+uint32_t Renderer::javaChunkCount = 0;
+uint32_t Renderer::javaRenderDistance = 0;
 TextureSystem Renderer::textureSystem;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::frameGenDepthImages;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::frameGenMotionVectorImages;

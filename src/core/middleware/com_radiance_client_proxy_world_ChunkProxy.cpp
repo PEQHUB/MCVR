@@ -9,11 +9,8 @@
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_initNative(JNIEnv *, jclass, jint chunkNum) {
     Renderer::instance().world()->chunks()->reset(chunkNum);
-
-    // Compute Java's render distance from chunk count:
-    // numChunks = (2*RD+1)^2 * 24 → RD = (sqrt(numChunks/24) - 1) / 2
-    uint32_t javaRD = static_cast<uint32_t>((std::sqrt(chunkNum / 24.0) - 1) / 2);
-    Renderer::instance().world()->startExtendedChunkLoading(javaRD, chunkNum);
+    // Store Java chunk count for later use by extended chunk loading
+    Renderer::javaChunkCount = static_cast<uint32_t>(chunkNum);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_nativeSetWorldRegionPath(
@@ -24,6 +21,13 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
         Renderer::worldRegionPath = utf;
         std::cout << "[ExtendedRD] World region path: " << Renderer::worldRegionPath << std::endl;
         env->ReleaseStringUTFChars(jpath, utf);
+
+        // Now that save path + block state registry + block model table are all ready,
+        // start extended chunk loading if configured.
+        uint32_t chunkNum = Renderer::javaChunkCount;
+        uint32_t javaRD = static_cast<uint32_t>((std::sqrt(chunkNum / 24.0) - 1) / 2);
+        Renderer::javaRenderDistance = javaRD;
+        Renderer::instance().world()->startExtendedChunkLoading(javaRD, chunkNum);
     }
 }
 

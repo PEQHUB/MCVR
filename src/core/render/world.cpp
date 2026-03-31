@@ -12,7 +12,12 @@
 World::World(std::shared_ptr<Framework> framework)
     : chunks_(Chunks::create(framework)), entities_(Entities::create(framework)) {}
 
-void World::resetFrame() {}
+void World::resetFrame() {
+    // Process deferred chunk evictions from ExtendedChunkManager (render thread only)
+    if (extendedChunkMgr_) {
+        extendedChunkMgr_->processPendingEvictions();
+    }
+}
 
 bool &World::shouldRender() {
     return shouldRenderWorld_;
@@ -40,9 +45,16 @@ glm::dvec3 World::getCameraPos() {
 
 void World::startExtendedChunkLoading(uint32_t javaRenderDistance, uint32_t javaChunkCount) {
     uint32_t extRD = Renderer::options.extendedRenderDistance;
-    if (extRD == 0) return;
-    if (Renderer::worldRegionPath.empty()) return;
-    if (!Renderer::blockStateRegistry.isLoaded()) return;
+    std::cout << "[ExtendedRD] startExtendedChunkLoading: extRD=" << extRD
+              << " javaRD=" << javaRenderDistance
+              << " javaChunks=" << javaChunkCount
+              << " regionPath=" << (Renderer::worldRegionPath.empty() ? "(empty)" : Renderer::worldRegionPath)
+              << " registry=" << (Renderer::blockStateRegistry.isLoaded() ? "loaded" : "NOT LOADED")
+              << " modelTable=" << (Renderer::blockModelTable.isLoaded() ? "loaded" : "NOT LOADED")
+              << std::endl;
+    if (extRD == 0) { std::cout << "[ExtendedRD] SKIPPED: extendedRenderDistance=0" << std::endl; return; }
+    if (Renderer::worldRegionPath.empty()) { std::cout << "[ExtendedRD] SKIPPED: region path empty" << std::endl; return; }
+    if (!Renderer::blockStateRegistry.isLoaded()) { std::cout << "[ExtendedRD] SKIPPED: registry not loaded" << std::endl; return; }
 
     extendedChunkMgr_ = std::make_unique<ExtendedChunkManager>();
     extendedChunkMgr_->start(

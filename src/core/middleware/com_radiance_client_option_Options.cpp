@@ -497,34 +497,18 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkCullDistance(
     JNIEnv *, jclass, jint distance, jboolean write) {
-    Renderer::options.chunkCullDistance = static_cast<float>(std::clamp(distance, 64, 1024));
+    // UI is in chunks (0-512), C++ pipeline works in blocks (×16). 0 = unlimited (100000).
+    int chunks = std::clamp(distance, 0, 512);
+    Renderer::options.chunkCullDistance = chunks == 0 ? 100000.0f : static_cast<float>(chunks * 16);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkLodDistance(
     JNIEnv *, jclass, jint distance, jboolean write) {
-    float oldDist = Renderer::options.chunkLodDistance;
-    float newDist = static_cast<float>(std::clamp(distance, 64, 512));
-    Renderer::options.chunkLodDistance = newDist;
-    // Live update: invalidate chunks that crossed the LOD boundary
-    if (write && oldDist != newDist && Renderer::instance().world() && Renderer::instance().world()->chunks()) {
-        auto chunks = Renderer::instance().world()->chunks();
-        auto cameraPos = Renderer::instance().world()->getCameraPos();
-        std::unique_lock<std::recursive_mutex> lock(chunks->mutex());
-        auto &chunk1s = chunks->chunks();
-        for (size_t i = 0; i < chunk1s.size(); i++) {
-            auto &c = chunk1s[i];
-            if (!c || !c->blas) continue;
-            float cx = static_cast<float>(c->x + 8.0 - cameraPos.x);
-            float cy = static_cast<float>(c->y + 8.0 - cameraPos.y);
-            float cz = static_cast<float>(c->z + 8.0 - cameraPos.z);
-            float dist = std::sqrt(cx * cx + cy * cy + cz * cz);
-            bool wasLossless = (dist <= oldDist);
-            bool nowLossless = (dist <= newDist);
-            if (wasLossless != nowLossless) {
-                c->invalidate();
-            }
-        }
-    }
+    // UI is in chunks (0-512), C++ pipeline works in blocks (×16). 0 = all full quality (100000).
+    int chunks = std::clamp(distance, 0, 512);
+    Renderer::options.chunkLodDistance = chunks == 0 ? 100000.0f : static_cast<float>(chunks * 16);
+    // LOD format is selected at BLAS build time based on chunk distance from camera.
+    // No invalidation needed — chunks retain their current format until naturally rebuilt.
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMegaMergeDistance(
@@ -532,6 +516,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     // MegaBLAS abandoned (sync builds kill perf, TLAS build not bottleneck) — force off
     Renderer::options.megaMergeDistance = 0.0f;
     std::cout << "[MegaBLAS] DISABLED (abandoned)" << std::endl;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExtendedRenderDistance(
+    JNIEnv *, jclass, jint distance, jboolean write) {
+    Renderer::options.extendedRenderDistance = static_cast<uint32_t>(std::clamp(distance, 0, 512));
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetShadowSoftness(

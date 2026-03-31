@@ -366,6 +366,17 @@ void Buffers::setAndUploadWorldUniformBuffer(vk::Data::WorldUBO &ubo) {
                                           VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     }
 
+    // Compute effective ray max distance from render settings
+    {
+        float cullDist = Renderer::options.chunkCullDistance;
+        if (Renderer::options.extendedRenderDistance > 0) {
+            float extMinCull = static_cast<float>(
+                (Renderer::javaRenderDistance + Renderer::options.extendedRenderDistance + 2) * 16);
+            if (extMinCull > cullDist) cullDist = extMinCull;
+        }
+        ubo.rayMaxDistance = cullDist;
+    }
+
     worldUniformBuffer_[context->frameIndex]->uploadToBuffer(&ubo);
     lastWorldUniformBuffer_[context->frameIndex]->uploadToBuffer(&lastUBO);
 
