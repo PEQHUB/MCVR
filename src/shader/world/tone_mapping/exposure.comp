@@ -19,7 +19,7 @@ layout(set = 0, binding = 2) buffer ExposureBuffer {
     float paperWhiteNits;
     float saturation;
     float sdrTransferFunction;
-    float _pad0;                // (was capExposureSmoothed)
+    float psychoPeakSDR;        // SDR PsychoV peak value (default 2.0)
     float manualExposureEnabled;
     float manualExposure;
     // PsychoV tonemapper parameters
@@ -71,6 +71,7 @@ layout(push_constant) uniform PushConstant {
     float paperWhiteNits;
     float saturation;
     float sdrTransferFunction;
+    float psychoPeakSDR;
     float manualExposureEnabled;
     float manualExposure;
     // PsychoV tonemapper parameters
@@ -95,6 +96,7 @@ layout(push_constant) uniform PushConstant {
     float tonemapParam6;
     float tonemapParam7;
     float preExposure;  // RT pre-exposure (layout parity with hist.comp)
+    float highlightWeight; // (layout parity with hist.comp)
 }
 pc;
 
@@ -111,6 +113,7 @@ void passThrough() {
     expData.paperWhiteNits = pc.paperWhiteNits;
     expData.saturation = pc.saturation;
     expData.sdrTransferFunction = pc.sdrTransferFunction;
+    expData.psychoPeakSDR = pc.psychoPeakSDR;
     expData.manualExposureEnabled = pc.manualExposureEnabled;
     expData.manualExposure = pc.manualExposure;
     expData.psychoEnabled = pc.psychoEnabled;
