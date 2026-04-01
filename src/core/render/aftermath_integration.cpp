@@ -15,6 +15,7 @@
 // Aftermath SDK types — loaded dynamically to avoid hard DLL dependency
 #include <GFSDK_Aftermath_Defines.h>
 #include <GFSDK_Aftermath_GpuCrashDump.h>
+#include <GFSDK_Aftermath_GpuCrashDumpDecoding.h>
 
 static std::filesystem::path s_logsDir;
 static std::mutex s_dumpMutex;
@@ -27,6 +28,103 @@ static PFN_GFSDK_Aftermath_EnableGpuCrashDumps s_pfnEnable = nullptr;
 static PFN_GFSDK_Aftermath_DisableGpuCrashDumps s_pfnDisable = nullptr;
 static PFN_GFSDK_Aftermath_GetCrashDumpStatus s_pfnGetStatus = nullptr;
 
+// Decoder function pointers
+static PFN_GFSDK_Aftermath_GpuCrashDump_CreateDecoder s_pfnCreateDecoder = nullptr;
+static PFN_GFSDK_Aftermath_GpuCrashDump_DestroyDecoder s_pfnDestroyDecoder = nullptr;
+static PFN_GFSDK_Aftermath_GpuCrashDump_GenerateJSON s_pfnGenerateJSON = nullptr;
+static PFN_GFSDK_Aftermath_GpuCrashDump_GetJSON s_pfnGetJSON = nullptr;
+static PFN_GFSDK_Aftermath_GpuCrashDump_GetPageFaultInfo s_pfnGetPageFault = nullptr;
+static PFN_GFSDK_Aftermath_GpuCrashDump_GetPageFaultResourceInfo s_pfnGetPageFaultResources = nullptr;
+static PFN_GFSDK_Aftermath_GpuCrashDump_GetActiveShadersInfoCount s_pfnGetShaderCount = nullptr;
+static PFN_GFSDK_Aftermath_GpuCrashDump_GetActiveShadersInfo s_pfnGetShaderInfo = nullptr;
+static PFN_GFSDK_Aftermath_GetShaderHashForShaderInfo s_pfnGetShaderHash = nullptr;
+
+// Decode a crash dump in-place and write a JSON report alongside the binary dump.
+static void decodeCrashDump(const void* pGpuCrashDump, uint32_t gpuCrashDumpSize,
+                             const std::filesystem::path& jsonPath) {
+    if (!s_pfnCreateDecoder || !s_pfnGenerateJSON || !s_pfnGetJSON || !s_pfnDestroyDecoder) {
+        std::cerr << "[Aftermath] Decoder functions not available — skipping decode" << std::endl;
+        return;
+    }
+
+    GFSDK_Aftermath_GpuCrashDump_Decoder decoder = nullptr;
+    auto result = s_pfnCreateDecoder(GFSDK_Aftermath_Version_API,
+                                      pGpuCrashDump, gpuCrashDumpSize, &decoder);
+    if (result != GFSDK_Aftermath_Result_Success || !decoder) {
+        std::cerr << "[Aftermath] CreateDecoder failed: " << result << std::endl;
+        return;
+    }
+
+    // Query page fault info directly and log to stderr for immediate visibility
+    if (s_pfnGetPageFault) {
+        GFSDK_Aftermath_GpuCrashDump_PageFaultInfo pf{};
+        if (s_pfnGetPageFault(decoder, &pf) == GFSDK_Aftermath_Result_Success) {
+            std::cerr << "[Aftermath] PAGE FAULT: VA=0x" << std::hex << pf.faultingGpuVA
+                      << " faultType=" << std::dec << pf.faultType
+                      << " accessType=" << pf.accessType
+                      << " engine=" << pf.engine
+                      << " client=" << pf.client
+                      << " resourceCount=" << pf.resourceInfoCount << std::endl;
+
+            // Query resource info for the faulting address
+            if (pf.resourceInfoCount > 0 && s_pfnGetPageFaultResources) {
+                std::vector<GFSDK_Aftermath_GpuCrashDump_ResourceInfo> resources(pf.resourceInfoCount);
+                if (s_pfnGetPageFaultResources(decoder, pf.resourceInfoCount, resources.data())
+                    == GFSDK_Aftermath_Result_Success) {
+                    for (uint32_t i = 0; i < pf.resourceInfoCount; i++) {
+                        auto &r = resources[i];
+                        std::cerr << "[Aftermath]   Resource[" << i << "]: VA=0x" << std::hex << r.gpuVa
+                                  << " size=" << std::dec << r.size
+                                  << " " << r.width << "x" << r.height << "x" << r.depth
+                                  << " format=" << r.format
+                                  << " handle=0x" << std::hex << r.apiResource << std::dec << std::endl;
+                    }
+                }
+            }
+        }
+    }
+
+    // Query active shaders and log
+    if (s_pfnGetShaderCount && s_pfnGetShaderInfo) {
+        uint32_t shaderCount = 0;
+        if (s_pfnGetShaderCount(decoder, &shaderCount) == GFSDK_Aftermath_Result_Success && shaderCount > 0) {
+            std::vector<GFSDK_Aftermath_GpuCrashDump_ShaderInfo> shaders(shaderCount);
+            if (s_pfnGetShaderInfo(decoder, shaderCount, shaders.data()) == GFSDK_Aftermath_Result_Success) {
+                std::cerr << "[Aftermath] ACTIVE SHADERS (" << shaderCount << "):" << std::endl;
+                for (uint32_t i = 0; i < shaderCount; i++) {
+                    auto &s = shaders[i];
+                    std::cerr << "[Aftermath]   [" << i << "] hash=0x" << std::hex << s.shaderHash
+                              << " instance=0x" << s.shaderInstance
+                              << std::dec << " type=" << s.shaderType
+                              << " internal=" << s.isInternal << std::endl;
+                }
+            }
+        }
+    }
+
+    // Generate full JSON report (no shader source callbacks — we don't have SPIR-V at crash time)
+    uint32_t jsonSize = 0;
+    const uint32_t flags = 0x3FFF; // GFSDK_Aftermath_GpuCrashDumpDecoderFlags_ALL_INFO
+    result = s_pfnGenerateJSON(decoder, flags, 0, nullptr, nullptr, nullptr, nullptr, &jsonSize);
+    if (result == GFSDK_Aftermath_Result_Success && jsonSize > 0) {
+        std::vector<char> json(jsonSize);
+        result = s_pfnGetJSON(decoder, jsonSize, json.data());
+        if (result == GFSDK_Aftermath_Result_Success) {
+            std::ofstream jsonFile(jsonPath);
+            if (jsonFile.is_open()) {
+                jsonFile.write(json.data(), jsonSize - 1); // exclude null terminator
+                jsonFile.close();
+                std::cerr << "[Aftermath] Decoded report: " << jsonPath.string()
+                          << " (" << jsonSize << " bytes)" << std::endl;
+            }
+        }
+    } else {
+        std::cerr << "[Aftermath] GenerateJSON failed: " << result << std::endl;
+    }
+
+    s_pfnDestroyDecoder(decoder);
+}
+
 static void GFSDK_AFTERMATH_CALL gpuCrashDumpCb(
     const void* pGpuCrashDump, const uint32_t gpuCrashDumpSize, void*) {
     std::lock_guard<std::mutex> lock(s_dumpMutex);
@@ -37,17 +135,22 @@ static void GFSDK_AFTERMATH_CALL gpuCrashDumpCb(
     std::strftime(timeBuf, sizeof(timeBuf), "%Y%m%d_%H%M%S", std::localtime(&time));
 
     std::filesystem::create_directories(s_logsDir);
-    auto path = s_logsDir / (std::string("crash_") + timeBuf + ".nv-gpudmp");
+    auto baseName = std::string("crash_") + timeBuf;
+    auto dumpPath = s_logsDir / (baseName + ".nv-gpudmp");
+    auto jsonPath = s_logsDir / (baseName + ".json");
 
-    std::ofstream file(path, std::ios::binary);
+    std::ofstream file(dumpPath, std::ios::binary);
     if (file.is_open()) {
         file.write(static_cast<const char*>(pGpuCrashDump), gpuCrashDumpSize);
         file.close();
-        std::cerr << "[Aftermath] Crash dump saved: " << path.string()
+        std::cerr << "[Aftermath] Crash dump saved: " << dumpPath.string()
                   << " (" << gpuCrashDumpSize << " bytes)" << std::endl;
-        s_lastDumpPath = path.string();
+        s_lastDumpPath = dumpPath.string();
+
+        // Decode the dump inline — extract page fault, active shaders, full JSON report
+        decodeCrashDump(pGpuCrashDump, gpuCrashDumpSize, jsonPath);
     } else {
-        std::cerr << "[Aftermath] Failed to write: " << path.string() << std::endl;
+        std::cerr << "[Aftermath] Failed to write: " << dumpPath.string() << std::endl;
     }
 }
 
@@ -96,6 +199,30 @@ bool AftermathIntegration::init(const std::filesystem::path& logsDir) {
         FreeLibrary(s_aftermathModule);
         s_aftermathModule = nullptr;
         return false;
+    }
+
+    // Load decoder functions (optional — decode fails gracefully if unavailable)
+    s_pfnCreateDecoder = (PFN_GFSDK_Aftermath_GpuCrashDump_CreateDecoder)
+        GetProcAddress(s_aftermathModule, "GFSDK_Aftermath_GpuCrashDump_CreateDecoder");
+    s_pfnDestroyDecoder = (PFN_GFSDK_Aftermath_GpuCrashDump_DestroyDecoder)
+        GetProcAddress(s_aftermathModule, "GFSDK_Aftermath_GpuCrashDump_DestroyDecoder");
+    s_pfnGenerateJSON = (PFN_GFSDK_Aftermath_GpuCrashDump_GenerateJSON)
+        GetProcAddress(s_aftermathModule, "GFSDK_Aftermath_GpuCrashDump_GenerateJSON");
+    s_pfnGetJSON = (PFN_GFSDK_Aftermath_GpuCrashDump_GetJSON)
+        GetProcAddress(s_aftermathModule, "GFSDK_Aftermath_GpuCrashDump_GetJSON");
+    s_pfnGetPageFault = (PFN_GFSDK_Aftermath_GpuCrashDump_GetPageFaultInfo)
+        GetProcAddress(s_aftermathModule, "GFSDK_Aftermath_GpuCrashDump_GetPageFaultInfo");
+    s_pfnGetPageFaultResources = (PFN_GFSDK_Aftermath_GpuCrashDump_GetPageFaultResourceInfo)
+        GetProcAddress(s_aftermathModule, "GFSDK_Aftermath_GpuCrashDump_GetPageFaultResourceInfo");
+    s_pfnGetShaderCount = (PFN_GFSDK_Aftermath_GpuCrashDump_GetActiveShadersInfoCount)
+        GetProcAddress(s_aftermathModule, "GFSDK_Aftermath_GpuCrashDump_GetActiveShadersInfoCount");
+    s_pfnGetShaderInfo = (PFN_GFSDK_Aftermath_GpuCrashDump_GetActiveShadersInfo)
+        GetProcAddress(s_aftermathModule, "GFSDK_Aftermath_GpuCrashDump_GetActiveShadersInfo");
+    s_pfnGetShaderHash = (PFN_GFSDK_Aftermath_GetShaderHashForShaderInfo)
+        GetProcAddress(s_aftermathModule, "GFSDK_Aftermath_GetShaderHashForShaderInfo");
+
+    if (s_pfnCreateDecoder) {
+        std::cout << "[Aftermath] Crash dump decoder available" << std::endl;
     }
 
     GFSDK_Aftermath_Result result = s_pfnEnable(
