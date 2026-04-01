@@ -90,32 +90,59 @@ void vk::PartitionedTLAS::buildAllInstances(
     auto *mapped = static_cast<uint8_t *>(indirectBuffer_->mappedPtr());
     VkDeviceAddress baseAddr = indirectBuffer_->bufferAddress();
 
+    VkDeviceSize instanceStride = sizeof(VkPartitionedAccelerationStructureWriteInstanceDataNV);
+
+    // On first build: initialize ALL maxInstances slots. The PTLAS data buffer was sized
+    // for maxInstances, and the driver's internal build shader may process all slots
+    // regardless of instanceCount. Uninitialized slots with garbage BLAS addresses cause
+    // AddressTranslation faults. After initialization, in-place updates only write real instances.
+    uint32_t totalWriteCount;
+    if (!initialBuildDone_) {
+        // First build: real instances + zeroed padding to fill entire capacity
+        totalWriteCount = config_.maxInstances;
+    } else {
+        // Subsequent builds: write real instances + clear any slots that were active
+        // in previous frame but aren't in this frame
+        totalWriteCount = std::max(numInstances, prevInstanceCount_);
+    }
+
+    // Write real instance data
+    std::memcpy(mapped + instanceDataOffset_, instances.data(), numInstances * instanceStride);
+
+    // Zero all slots beyond real instances (up to totalWriteCount)
+    if (totalWriteCount > numInstances) {
+        uint32_t padCount = totalWriteCount - numInstances;
+        auto *padStart = mapped + instanceDataOffset_ + numInstances * instanceStride;
+        std::memset(padStart, 0, padCount * instanceStride);
+        // Set instanceIndex for each zeroed slot
+        for (uint32_t i = 0; i < padCount; i++) {
+            auto *slot = reinterpret_cast<VkPartitionedAccelerationStructureWriteInstanceDataNV *>(
+                padStart + i * instanceStride);
+            slot->instanceIndex = numInstances + i;
+        }
+    }
+    prevInstanceCount_ = numInstances;
+
     // Write srcInfosCount = 1 (one indirect command)
     uint32_t cmdCount = 1;
     std::memcpy(mapped + countOffset_, &cmdCount, sizeof(uint32_t));
 
-    // Write instance data array
-    VkDeviceSize instanceDataSize = numInstances *
-        sizeof(VkPartitionedAccelerationStructureWriteInstanceDataNV);
-    std::memcpy(mapped + instanceDataOffset_, instances.data(), instanceDataSize);
-
     // Write the indirect command header
     VkBuildPartitionedAccelerationStructureIndirectCommandNV cmd{};
     cmd.opType = VK_PARTITIONED_ACCELERATION_STRUCTURE_OP_TYPE_WRITE_INSTANCE_NV;
-    cmd.argCount = numInstances;
+    cmd.argCount = totalWriteCount;
     cmd.argData.startAddress = baseAddr + instanceDataOffset_;
-    cmd.argData.strideInBytes = sizeof(VkPartitionedAccelerationStructureWriteInstanceDataNV);
+    cmd.argData.strideInBytes = instanceStride;
     std::memcpy(mapped + commandOffset_, &cmd, sizeof(cmd));
 
     // Flush to make writes visible to GPU
     indirectBuffer_->flush();
 
-    // Fill the build info
+    // Build info: fresh build on first frame, in-place update thereafter
     VkBuildPartitionedAccelerationStructureInfoNV buildInfo{};
     buildInfo.sType = VK_STRUCTURE_TYPE_BUILD_PARTITIONED_ACCELERATION_STRUCTURE_INFO_NV;
     buildInfo.input = inputSpec_;
-    // Override instanceCount with actual count for this build
-    buildInfo.input.instanceCount = numInstances;
+    buildInfo.input.instanceCount = totalWriteCount;
     buildInfo.srcAccelerationStructureData = initialBuildDone_ ? dataBufferAddress_ : 0;
     buildInfo.dstAccelerationStructureData = dataBufferAddress_;
     buildInfo.scratchData = scratchBuffer_->bufferAddress();

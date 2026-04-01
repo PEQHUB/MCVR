@@ -63,6 +63,7 @@ class PartitionedTLAS : public SharedObject<PartitionedTLAS> {
 
     VkPartitionedAccelerationStructureInstancesInputNV inputSpec_{};
     bool initialBuildDone_ = false;
+    uint32_t prevInstanceCount_ = 0; // tracks max instances written for stale slot clearing
 };
 
 } // namespace vk

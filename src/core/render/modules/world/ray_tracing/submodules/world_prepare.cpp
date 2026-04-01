@@ -727,12 +727,11 @@ void WorldPrepareContext::render() {
         return;
     }
 
-    // PTLAS: disabled by default pending driver investigation (595.97 AS Build fault).
-    // Standard TLAS UPDATE path is stable. PTLAS can be enabled via Options when ready.
-    // if (!usePTLAS_ && device->hasPTLAS()) {
-    //     usePTLAS_ = true;
-    //     std::cout << "[PTLAS] Enabled — using partitioned TLAS for incremental updates" << std::endl;
-    // }
+    // Decide PTLAS vs standard TLAS on first render (device capability is immutable)
+    if (!usePTLAS_ && device->hasPTLAS()) {
+        usePTLAS_ = true;
+        std::cout << "[PTLAS] Enabled — using partitioned TLAS for incremental updates" << std::endl;
+    }
 
     // Log TLAS instance count and build mode for profiling (every 120 frames ~ 1/sec at 120fps)
     static uint32_t tlasLogCounter = 0;
