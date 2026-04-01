@@ -50,6 +50,8 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                                                    VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME,
                                                    // Shader clock: per-pixel profiling instrumentation
                                                    VK_KHR_SHADER_CLOCK_EXTENSION_NAME,
+                                                   // PTLAS: Partitioned TLAS for incremental BVH updates (Blackwell+)
+                                                   VK_NV_PARTITIONED_ACCELERATION_STRUCTURE_EXTENSION_NAME,
                                                    // GPU diagnostics: breadcrumbs for DEVICE_LOST debugging
                                                    VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME,
                                                    VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME,
@@ -114,8 +116,12 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
 #endif
 
     // query supported features
+    VkPhysicalDevicePartitionedAccelerationStructureFeaturesNV supportedPTLASFeatures{};
+    supportedPTLASFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PARTITIONED_ACCELERATION_STRUCTURE_FEATURES_NV;
+
     VkPhysicalDeviceShaderClockFeaturesKHR supportedShaderClockFeatures{};
     supportedShaderClockFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR;
+    supportedShaderClockFeatures.pNext = &supportedPTLASFeatures;
 
     VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV supportedSERFeatures{};
     supportedSERFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
@@ -183,9 +189,18 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                      hasExtension(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME)) &&
                     supportedSERFeatures.rayTracingInvocationReorder == VK_TRUE;
 
+    // PTLAS: Partitioned acceleration structure for incremental TLAS updates (Blackwell+)
+    ptlasSupported_ = hasExtension(VK_NV_PARTITIONED_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
+                      supportedPTLASFeatures.partitionedAccelerationStructure == VK_TRUE;
+
+    VkPhysicalDevicePartitionedAccelerationStructureFeaturesNV ptlasFeatures{};
+    ptlasFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PARTITIONED_ACCELERATION_STRUCTURE_FEATURES_NV;
+    ptlasFeatures.pNext = &ommFeatures;
+    ptlasFeatures.partitionedAccelerationStructure = ptlasSupported_ ? VK_TRUE : VK_FALSE;
+
     VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV serFeatures{};
     serFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
-    serFeatures.pNext = &ommFeatures;
+    serFeatures.pNext = &ptlasFeatures;
     serFeatures.rayTracingInvocationReorder = serSupported_ ? VK_TRUE : VK_FALSE;
 
     // Shader clock: per-pixel profiling instrumentation
@@ -227,6 +242,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     deviceCout() << "Shader Clock: " << (shaderClockSupported_ ? "YES" : "NO") << std::endl;
     deviceCout() << "GPU Diagnostics Checkpoints: " << (checkpointsSupported_ ? "YES" : "NO") << std::endl;
     deviceCout() << "GPU Device Fault: " << (deviceFaultSupported_ ? "YES" : "NO") << std::endl;
+    deviceCout() << "Partitioned TLAS (PTLAS): " << (ptlasSupported_ ? "YES" : "NO") << std::endl;
 
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vertexInputDynamicState{};
     vertexInputDynamicState.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT;

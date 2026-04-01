@@ -36,6 +36,7 @@ class Device : public SharedObject<Device> {
     bool hasShaderClock() const { return shaderClockSupported_; }
     bool hasCheckpoints() const { return checkpointsSupported_; }
     bool hasDeviceFault() const { return deviceFaultSupported_; }
+    bool hasPTLAS() const { return ptlasSupported_; }
 
   private:
     std::shared_ptr<Instance> instance_;
@@ -54,6 +55,7 @@ class Device : public SharedObject<Device> {
     bool shaderClockSupported_ = false;
     bool checkpointsSupported_ = false;
     bool deviceFaultSupported_ = false;
+    bool ptlasSupported_ = false;
 
     std::shared_ptr<TimelineSemaphore> blasSemaphore_;
 

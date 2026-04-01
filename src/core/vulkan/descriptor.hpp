@@ -55,6 +55,7 @@ class DescriptorTable : public SharedObject<DescriptorTable> {
     bindBuffers(std::vector<std::shared_ptr<Buffer>> buffers, uint32_t set, uint32_t binding);
 
     std::shared_ptr<DescriptorTable> bindAS(std::shared_ptr<TLAS> buffer, uint32_t set, uint32_t binding);
+    std::shared_ptr<DescriptorTable> bindPartitionedAS(VkDeviceAddress ptlasAddress, uint32_t set, uint32_t binding);
 
     // Batch binding helpers: issue a single vkUpdateDescriptorSets call for multiple bindings.
     struct ImageBinding {

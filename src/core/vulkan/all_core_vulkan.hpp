@@ -19,5 +19,6 @@
 #include "core/vulkan/framebuffer.hpp"
 #include "core/vulkan/shader.hpp"
 #include "core/vulkan/as.hpp"
+#include "core/vulkan/partitioned_tlas.hpp"
 #include "core/vulkan/sbt.hpp"
 #include "core/vulkan/sync.hpp"

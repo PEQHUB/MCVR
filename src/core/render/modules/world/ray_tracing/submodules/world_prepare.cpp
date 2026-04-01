@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -490,6 +491,7 @@ void WorldPrepareContext::render() {
 
         // Pre-allocate all arrays to exact sizes (entity prefix already accumulated)
         uint32_t chunkInstBase = blasIndex;
+        chunkInstBase_ = chunkInstBase; // store for PTLAS partition assignment
         uint32_t chunkGeoBase = static_cast<uint32_t>(vertexBufferAddrs.size());
         uint32_t chunkSbtBase = blasGroupAccu;
         uint32_t chunkBlasBase = blasAccu;
@@ -720,8 +722,15 @@ void WorldPrepareContext::render() {
 
     if (instanceBuilder.instances.empty()) {
         tlas = nullptr;
+        ptlas = nullptr;
         prevTlasInstanceCount_ = 0;
         return;
+    }
+
+    // Decide PTLAS vs standard TLAS on first render (device capability is immutable)
+    if (!usePTLAS_ && device->hasPTLAS()) {
+        usePTLAS_ = true;
+        std::cout << "[PTLAS] Enabled — using partitioned TLAS for incremental updates" << std::endl;
     }
 
     // Log TLAS instance count and build mode for profiling (every 120 frames ~ 1/sec at 120fps)
@@ -730,75 +739,114 @@ void WorldPrepareContext::render() {
     static uint32_t tlasBuildCount = 0;
 
     auto cpuT7 = Clock::now();
-    // Determine if TLAS UPDATE is possible by comparing per-instance BLAS generations.
-    // UPDATE requires identical BLAS handles at each instance index (Vulkan spec).
-    // Tracks both entity BLASes (via device address as generation — changes every frame)
-    // and chunk BLASes (via Chunk1::blasGeneration). Any change forces full BUILD.
     currBlasSnapshot.instanceCount = static_cast<uint32_t>(instanceBuilder.instances.size());
     uint32_t currentInstanceCount = currBlasSnapshot.instanceCount;
 
-    // TLAS UPDATE only requires same instance count. Per Vulkan spec, instances can have
-    // different BLAS references / transforms — the driver refits the BVH. Removing the
-    // generations check allows UPDATE even when entity BLASes change (animation).
-    // This saves ~1.5ms per frame (full BUILD → refit UPDATE for 26K instances).
-    bool canUpdate = tlas != nullptr
-        && currBlasSnapshot.instanceCount == prevBlasSnapshot_.instanceCount;
-
-    constexpr VkBuildAccelerationStructureFlagsKHR tlasFlags =
-        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
-        VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-
-    if (canUpdate) {
-        // UPDATE path: reuse existing TLAS, only transforms changed
-        // Upload new instance data (endInstanceBuilder writes to a new host-visible buffer)
-        instanceBuilder.endInstanceBuilder(device, vma);
-        tlasBuilder->defineBuildProperty(tlasFlags);  // sets flags_ for the geometry info
-
-        GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::TLAS_UPDATE);
-        tlasBuilder->updateAndSubmit(tlas, tlasScratchBuffer_, worldCommandBuffer);
-        tlasUpdateCount++;
-    } else {
-        // Full BUILD path: instance count or BLAS composition changed
-        instanceBuilder.endInstanceBuilder(device, vma);
-        tlasBuilder->defineBuildProperty(tlasFlags);
-        tlasBuilder->querySizeInfo(device);
-        tlasBuilder->allocateBuffers(physicalDevice, device, vma);
-        GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::TLAS_BUILD);
-        tlas = tlasBuilder->buildAndSubmit(device, worldCommandBuffer);
-
-        // Persist scratch buffer sized for max(build, update) for future UPDATE calls.
-        // Query both BUILD and UPDATE scratch sizes to ensure the buffer is large enough.
-        VkAccelerationStructureBuildGeometryInfoKHR sizeQueryInfo{};
-        sizeQueryInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
-        sizeQueryInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-        sizeQueryInfo.flags = tlasFlags;
-
-        VkAccelerationStructureBuildSizesInfoKHR buildSizeInfo{};
-        buildSizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-        sizeQueryInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-        vkGetAccelerationStructureBuildSizesKHR(device->vkDevice(),
-            VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-            &sizeQueryInfo, &currentInstanceCount, &buildSizeInfo);
-
-        VkAccelerationStructureBuildSizesInfoKHR updateSizeInfo{};
-        updateSizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-        sizeQueryInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
-        vkGetAccelerationStructureBuildSizesKHR(device->vkDevice(),
-            VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-            &sizeQueryInfo, &currentInstanceCount, &updateSizeInfo);
-
-        VkDeviceSize requiredScratchSize = std::max(buildSizeInfo.buildScratchSize,
-                                                     updateSizeInfo.updateScratchSize);
-
-        if (!tlasScratchBuffer_ || tlasScratchSize_ < requiredScratchSize) {
-            tlasScratchSize_ = requiredScratchSize;
-            tlasScratchBuffer_ = vk::DeviceLocalBuffer::create(
-                vma, device, false, tlasScratchSize_,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                0, VMA_MEMORY_USAGE_GPU_ONLY,
-                physicalDevice->accelerationStructProperties().minAccelerationStructureScratchOffsetAlignment);
+    if (usePTLAS_) {
+        // PTLAS path: convert instances and build partitioned TLAS
+        // Recreate if capacity exceeded or first frame
+        if (!ptlas || ptlas->needsRecreate(currentInstanceCount)) {
+            vk::PartitionedTLAS::Config ptlasConfig{};
+            ptlasConfig.maxInstances = std::max(currentInstanceCount + 4096, 40000u);
+            ptlasConfig.maxPartitions = 300;
+            ptlasConfig.maxInstancePerPartition = 512;
+            ptlasConfig.maxGlobalInstances = 2048;
+            ptlas = vk::PartitionedTLAS::create(device, physicalDevice, vma, ptlasConfig);
         }
-        tlasBuildCount++;
+
+        // Convert TLASBuilder instances to PTLAS write data
+        std::vector<VkPartitionedAccelerationStructureWriteInstanceDataNV> ptlasInstances(currentInstanceCount);
+        uint32_t entityInstCount = static_cast<uint32_t>(chunkInstBase_);
+
+        for (uint32_t i = 0; i < currentInstanceCount; i++) {
+            auto &[transform, customIndex, mask, sbtOffset, flags, blas] = instanceBuilder.instances[i];
+            auto &wd = ptlasInstances[i];
+            wd.transform = transform;
+            std::memset(wd.explicitAABB, 0, sizeof(wd.explicitAABB));
+            wd.instanceID = customIndex;
+            wd.instanceMask = mask;
+            wd.instanceContributionToHitGroupIndex = sbtOffset;
+            wd.instanceFlags = static_cast<VkPartitionedAccelerationStructureInstanceFlagsNV>(flags);
+            wd.instanceIndex = i;
+            wd.accelerationStructure = blas->blasDeviceAddress();
+
+            // Partition assignment: entities → global, chunks → spatial hash
+            if (i < entityInstCount) {
+                wd.partitionIndex = VK_PARTITIONED_ACCELERATION_STRUCTURE_PARTITION_INDEX_GLOBAL_NV;
+            } else {
+                // Look up chunk coordinates from cachedChunks_ via the visible chunk index
+                // Use a spatial hash to distribute chunks across partitions
+                uint32_t chunkLocalIdx = i - entityInstCount;
+                // Compute partition from the instance transform translation (camera-relative chunk position)
+                // Use the transform directly — it encodes the spatial position
+                int gx = static_cast<int>(std::floor(transform.matrix[0][3])) >> 6;
+                int gz = static_cast<int>(std::floor(transform.matrix[2][3])) >> 6;
+                uint32_t h = static_cast<uint32_t>(gx * 73856093) ^ static_cast<uint32_t>(gz * 19349663);
+                wd.partitionIndex = 1 + (h % (ptlas->config().maxPartitions - 1));
+            }
+        }
+
+        GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::TLAS_BUILD);
+        ptlas->buildAllInstances(ptlasInstances, worldCommandBuffer);
+        tlasUpdateCount++; // PTLAS builds are always incremental
+
+    } else {
+        // Standard TLAS path (non-Blackwell GPUs)
+        // TLAS UPDATE only requires same instance count. Per Vulkan spec, instances can have
+        // different BLAS references / transforms — the driver refits the BVH.
+        bool canUpdate = tlas != nullptr
+            && currBlasSnapshot.instanceCount == prevBlasSnapshot_.instanceCount;
+
+        constexpr VkBuildAccelerationStructureFlagsKHR tlasFlags =
+            VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+            VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+
+        if (canUpdate) {
+            instanceBuilder.endInstanceBuilder(device, vma);
+            tlasBuilder->defineBuildProperty(tlasFlags);
+            GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::TLAS_UPDATE);
+            tlasBuilder->updateAndSubmit(tlas, tlasScratchBuffer_, worldCommandBuffer);
+            tlasUpdateCount++;
+        } else {
+            instanceBuilder.endInstanceBuilder(device, vma);
+            tlasBuilder->defineBuildProperty(tlasFlags);
+            tlasBuilder->querySizeInfo(device);
+            tlasBuilder->allocateBuffers(physicalDevice, device, vma);
+            GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::TLAS_BUILD);
+            tlas = tlasBuilder->buildAndSubmit(device, worldCommandBuffer);
+
+            VkAccelerationStructureBuildGeometryInfoKHR sizeQueryInfo{};
+            sizeQueryInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+            sizeQueryInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+            sizeQueryInfo.flags = tlasFlags;
+
+            VkAccelerationStructureBuildSizesInfoKHR buildSizeInfo{};
+            buildSizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+            sizeQueryInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+            vkGetAccelerationStructureBuildSizesKHR(device->vkDevice(),
+                VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                &sizeQueryInfo, &currentInstanceCount, &buildSizeInfo);
+
+            VkAccelerationStructureBuildSizesInfoKHR updateSizeInfo{};
+            updateSizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+            sizeQueryInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+            vkGetAccelerationStructureBuildSizesKHR(device->vkDevice(),
+                VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                &sizeQueryInfo, &currentInstanceCount, &updateSizeInfo);
+
+            VkDeviceSize requiredScratchSize = std::max(buildSizeInfo.buildScratchSize,
+                                                         updateSizeInfo.updateScratchSize);
+
+            if (!tlasScratchBuffer_ || tlasScratchSize_ < requiredScratchSize) {
+                tlasScratchSize_ = requiredScratchSize;
+                tlasScratchBuffer_ = vk::DeviceLocalBuffer::create(
+                    vma, device, false, tlasScratchSize_,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                    0, VMA_MEMORY_USAGE_GPU_ONLY,
+                    physicalDevice->accelerationStructProperties().minAccelerationStructureScratchOffsetAlignment);
+            }
+            tlasBuildCount++;
+        }
     }
 
     cpuAccTlas += cpuMsSince(cpuT7);

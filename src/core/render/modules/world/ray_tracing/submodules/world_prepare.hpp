@@ -4,6 +4,7 @@
 #include "common/singleton.hpp"
 #include "core/all_extern.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
+#include "core/vulkan/partitioned_tlas.hpp"
 #include "core/render/world.hpp"
 
 #include <unordered_map>
@@ -41,6 +42,12 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
 
     std::shared_ptr<vk::TLAS> tlas;
     std::shared_ptr<vk::TLASBuilder> tlasBuilder;
+
+    // PTLAS (Blackwell+): replaces full TLAS BUILD with incremental partitioned updates.
+    // nullptr on non-Blackwell GPUs; fallback uses traditional TLAS path.
+    std::shared_ptr<vk::PartitionedTLAS> ptlas;
+    bool usePTLAS_ = false;
+    uint32_t chunkInstBase_ = 0; // instance index where chunk instances start (= entity count)
 
     // TLAS update tracking: reuse TLAS when only transforms changed (same BLAS set)
     uint32_t prevTlasInstanceCount_ = 0;
@@ -111,6 +118,7 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     void resetChunkState() {
         tlas = nullptr;
         tlasBuilder = nullptr;
+        ptlas = nullptr;
         prevBlasSnapshot_ = {};
         prevTlasInstanceCount_ = 0;
         tlasScratchBuffer_ = nullptr;

@@ -176,6 +176,26 @@ vk::DescriptorTable::bindAS(std::shared_ptr<TLAS> tlas, uint32_t set, uint32_t b
 }
 
 std::shared_ptr<vk::DescriptorTable>
+vk::DescriptorTable::bindPartitionedAS(VkDeviceAddress ptlasAddress, uint32_t set, uint32_t binding) {
+    VkWriteDescriptorSetPartitionedAccelerationStructureNV ptlasWriteInfo{};
+    ptlasWriteInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_PARTITIONED_ACCELERATION_STRUCTURE_NV;
+    ptlasWriteInfo.accelerationStructureCount = 1;
+    ptlasWriteInfo.pAccelerationStructures = &ptlasAddress;
+
+    VkWriteDescriptorSet writeDescriptorSet{};
+    writeDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writeDescriptorSet.pNext = &ptlasWriteInfo;
+    writeDescriptorSet.dstSet = table_[set];
+    writeDescriptorSet.descriptorCount = 1;
+    writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_PARTITIONED_ACCELERATION_STRUCTURE_NV;
+    writeDescriptorSet.dstBinding = binding;
+
+    vkUpdateDescriptorSets(device_->vkDevice(), 1, &writeDescriptorSet, 0, nullptr);
+
+    return shared_from_this();
+}
+
+std::shared_ptr<vk::DescriptorTable>
 vk::DescriptorTable::bindImages(const std::vector<ImageBinding> &bindings) {
     if (bindings.empty()) return shared_from_this();
 

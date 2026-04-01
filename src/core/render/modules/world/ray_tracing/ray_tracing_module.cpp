@@ -439,8 +439,10 @@ void RayTracingModule::initDescriptorTables() {
                 .beginDescriptorLayoutSet() // set 1
                 .beginDescriptorLayoutSetBinding()
                 .defineDescriptorLayoutSetBinding({
-                    .binding = 0, // binding 0: TLAS(s)
-                    .descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+                    .binding = 0, // binding 0: TLAS(s) — partitioned on Blackwell, standard otherwise
+                    .descriptorType = framework->device()->hasPTLAS()
+                        ? VK_DESCRIPTOR_TYPE_PARTITIONED_ACCELERATION_STRUCTURE_NV
+                        : VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
                     .descriptorCount = 1,
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
                 })
@@ -1547,9 +1549,16 @@ void RayTracingModuleContext::render() {
     worldPrepareContext->render();
     if (ctx0) ctx0->worldCommandBuffer->endLabel();
 
-    if (worldPrepareContext->tlas == nullptr) {
-        std::cout << "tlas is nullptr" << std::endl;
-        return;
+    if (worldPrepareContext->usePTLAS_) {
+        if (!worldPrepareContext->ptlas) {
+            std::cout << "ptlas is nullptr" << std::endl;
+            return;
+        }
+    } else {
+        if (worldPrepareContext->tlas == nullptr) {
+            std::cout << "tlas is nullptr" << std::endl;
+            return;
+        }
     }
 
     auto context = frameworkContext.lock();
@@ -1562,7 +1571,12 @@ void RayTracingModuleContext::render() {
     auto module = rayTracingModule.lock();
     if (!module) return;
 
-    rayTracingDescriptorTable->bindAS(worldPrepareContext->tlas, 1, 0);
+    if (worldPrepareContext->usePTLAS_) {
+        rayTracingDescriptorTable->bindPartitionedAS(
+            worldPrepareContext->ptlas->dataBufferAddress(), 1, 0);
+    } else {
+        rayTracingDescriptorTable->bindAS(worldPrepareContext->tlas, 1, 0);
+    }
 
     auto buffers = Renderer::instance().buffers();
     auto worldBuffer = buffers->worldUniformBuffer();
