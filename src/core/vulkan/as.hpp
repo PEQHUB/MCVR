@@ -104,7 +104,7 @@ class BLASBuilder : public SharedObject<BLASBuilder> {
             const VkMicromapUsageEXT *usageCounts,
             uint32_t usageCountsCount);
 
-        // Per-geometry transform: offsets vertices within the BLAS (for mega-chunks)
+        // Per-geometry transform: offsets vertices within the BLAS
         template <typename T>
         BLASGeometryBuilder &defineTriangleGeometryWithTransform(
             std::shared_ptr<DeviceLocalBuffer> vertexBuffer,
@@ -134,6 +134,11 @@ class BLASBuilder : public SharedObject<BLASBuilder> {
     std::shared_ptr<BLASBuilder> allocateBuffers(std::shared_ptr<PhysicalDevice> physicalDevice,
                                                  std::shared_ptr<Device> device,
                                                  std::shared_ptr<VMA> vma);
+    /// Pool-backed BLAS allocation: device buffer suballocated from shared pool.
+    std::shared_ptr<BLASBuilder> allocateBuffersPooled(std::shared_ptr<BufferPool> blasPool,
+                                                       std::shared_ptr<PhysicalDevice> physicalDevice,
+                                                       std::shared_ptr<Device> device,
+                                                       std::shared_ptr<VMA> vma);
     std::shared_ptr<BLAS> buildAndSubmit(std::shared_ptr<Device> device, std::shared_ptr<CommandBuffer> commandBuffer);
     std::shared_ptr<BLAS> build(std::shared_ptr<Device> device);
     std::shared_ptr<BLAS>

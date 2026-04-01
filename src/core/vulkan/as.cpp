@@ -163,11 +163,31 @@ std::shared_ptr<vk::BLASBuilder> vk::BLASBuilder::allocateBuffers(std::shared_pt
     return shared_from_this();
 }
 
+std::shared_ptr<vk::BLASBuilder> vk::BLASBuilder::allocateBuffersPooled(std::shared_ptr<BufferPool> blasPool,
+                                                                        std::shared_ptr<PhysicalDevice> physicalDevice,
+                                                                        std::shared_ptr<Device> device,
+                                                                        std::shared_ptr<VMA> vma) {
+    // BLAS storage from pool (256-byte aligned per VK spec)
+    auto alloc = blasPool->allocate(sizeInfo_.accelerationStructureSize, 256);
+    blasBuffer_ = DeviceLocalBuffer::create(blasPool, alloc, vma, device, false);
+
+    // Scratch buffer stays individual (temporary, freed after build)
+    scratchBuffer_ = DeviceLocalBuffer::create(
+        vma, device, false,
+        mode_ == VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR ? sizeInfo_.buildScratchSize :
+                                                                  sizeInfo_.updateScratchSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 0, VMA_MEMORY_USAGE_GPU_ONLY,
+        physicalDevice->accelerationStructProperties().minAccelerationStructureScratchOffsetAlignment);
+
+    return shared_from_this();
+}
+
 std::shared_ptr<vk::BLAS> vk::BLASBuilder::buildAndSubmit(std::shared_ptr<Device> device,
                                                           std::shared_ptr<CommandBuffer> commandBuffer) {
     VkAccelerationStructureCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
     createInfo.buffer = blasBuffer_->vkBuffer();
+    createInfo.offset = blasBuffer_->poolOffset(); // 0 for individual, sub-offset for pooled
     createInfo.size = sizeInfo_.accelerationStructureSize;
     createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 
@@ -206,6 +226,7 @@ std::shared_ptr<vk::BLAS> vk::BLASBuilder::build(std::shared_ptr<Device> device)
     VkAccelerationStructureCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
     createInfo.buffer = blasBuffer_->vkBuffer();
+    createInfo.offset = blasBuffer_->poolOffset(); // 0 for individual, sub-offset for pooled
     createInfo.size = sizeInfo_.accelerationStructureSize;
     createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 

@@ -12,9 +12,17 @@
 #extension GL_EXT_opacity_micromap : require
 #extension GL_NV_shader_invocation_reorder : enable
 
+// SHARC compile-time gate: controlled by CMake MCVR_ENABLE_SHARC option.
+// NVIDIA 595.97 crashes compiling SHARC SDK Int64-atomics+BDA in nvgpucomp64.dll.
+#ifndef SHARC_COMPILE_ENABLE
+#define SHARC_COMPILE_ENABLE 0
+#endif
+
+#if SHARC_COMPILE_ENABLE
 #define SHARC_ENABLE_GLSL 1
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
 #define SHARC_PROPAGATION_DEPTH 4
+#endif
 
 #include "../util/labpbr.glsl"
 #include "../util/random.glsl"
@@ -25,8 +33,10 @@
 #include "common/shared.hpp"
 #include "../util/colorspace.glsl"
 
+#if SHARC_COMPILE_ENABLE
 #include "SharcGlsl.h"
 #include "SharcCommon.h"
+#endif
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
@@ -822,6 +832,7 @@ void main() {
                 }
             }
 
+#if SHARC_COMPILE_ENABLE
             // SHARC cache query: early terminate indirect bounces using cached radiance.
             // Query at b >= 1 (skip primary PSR hit — always needs full CHS evaluation).
             // Gate on BOTH path roughness (no specular/transmissive bounces along path)
@@ -866,6 +877,7 @@ void main() {
                     }
                 }
             }
+#endif
 
             // Update path roughness tracking (before next bounce).
             // Once the path goes through a specular/transmissive surface, it stays specular.

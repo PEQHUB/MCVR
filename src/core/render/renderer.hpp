@@ -43,7 +43,6 @@ struct Options {
     float chunkCullDistance = 384.0f;  // Max distance in blocks, chunks beyond excluded from TLAS (UI: 0-128 chunks × 16)
     float chunkLodDistance = 160.0f;  // LOD boundary in blocks: ≤ = full 96B vertex, > = compact 32B (UI: 0-128 chunks × 16)
     uint32_t extendedRenderDistance = 0; // Extra chunks beyond Java's RD, loaded from disk (0=disabled, max 512)
-    float megaMergeDistance = 0.0f;  // Beyond this distance (blocks), chunks are merged into mega-BLASes (0=disabled)
     static constexpr uint32_t ommBatchCap = 2; // Max chunks per GPU batch when OMM active (prevents TDR)
     uint32_t tonemappingMode = 1; // 0 = PBR Neutral, 1 = Reinhard Extended
     float minExposure = 1e-7f;         // Minimum exposure clamp (lowered for physical sun ~100k lux)
@@ -268,6 +267,12 @@ class Renderer : public Singleton<Renderer> {
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> renderResHdrImages;  // DLSS input (render-res HDR), read by tone mapping histogram
     static GpuProfiler gpuProfiler;
     static ThreadPool threadPool;
+
+    // BufferPool suballocators — replace 260K per-chunk VMA allocations with ~200 pooled VkBuffers.
+    // Created after framework init, used by chunk uploadGPU() on BLAS thread.
+    static std::shared_ptr<vk::BufferPool> vertexPool;
+    static std::shared_ptr<vk::BufferPool> indexPool;
+    static std::shared_ptr<vk::BufferPool> blasPool;
     static BlockModelTable blockModelTable;
     static BlockStateRegistry blockStateRegistry;
     static std::string worldRegionPath; // Path to saves/<world>/region/ for Anvil reader

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/vulkan/buffer.hpp"
+#include "core/vulkan/buffer_pool.hpp"
 #include "core/vulkan/command.hpp"
 #include "core/vulkan/descriptor.hpp"
 #include "core/vulkan/device.hpp"

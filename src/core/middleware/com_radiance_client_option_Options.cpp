@@ -511,13 +511,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     // No invalidation needed — chunks retain their current format until naturally rebuilt.
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMegaMergeDistance(
-    JNIEnv *, jclass, jint distance, jboolean write) {
-    // MegaBLAS abandoned (sync builds kill perf, TLAS build not bottleneck) — force off
-    Renderer::options.megaMergeDistance = 0.0f;
-    std::cout << "[MegaBLAS] DISABLED (abandoned)" << std::endl;
-}
-
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExtendedRenderDistance(
     JNIEnv *, jclass, jint distance, jboolean write) {
     Renderer::options.extendedRenderDistance = static_cast<uint32_t>(std::clamp(distance, 0, 512));

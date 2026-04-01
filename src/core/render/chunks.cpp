@@ -867,19 +867,16 @@ void ChunkBuildData::uploadGPU() {
             bufData = vertices[i].data();
         }
 
-        auto vertexBuffer =
-            vk::DeviceLocalBuffer::create(vma, device, true, bufSize,
-                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        // Pool-backed allocation: device buffer suballocated from shared 8MB pool buffers.
+        // Reduces 260K individual VMA allocations to ~200 pooled VkBuffers.
+        auto vertAlloc = Renderer::vertexPool->allocate(bufSize, 16);
+        auto vertexBuffer = vk::DeviceLocalBuffer::create(Renderer::vertexPool, vertAlloc, vma, device, true);
         vertexBuffer->uploadToStagingBuffer(const_cast<void *>(bufData));
         vertexBuffers.push_back(vertexBuffer);
 
-        auto indexBuffer =
-            vk::DeviceLocalBuffer::create(vma, device, true, indices[i].size() * sizeof(uint32_t),
-                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        VkDeviceSize idxSize = indices[i].size() * sizeof(uint32_t);
+        auto idxAlloc = Renderer::indexPool->allocate(idxSize, 4);
+        auto indexBuffer = vk::DeviceLocalBuffer::create(Renderer::indexPool, idxAlloc, vma, device, true);
         indexBuffer->uploadToStagingBuffer(indices[i].data());
         indexBuffers.push_back(indexBuffer);
 
@@ -1026,8 +1023,7 @@ void ChunkBuildData::uploadGPU() {
         }
     }
     blasGeometryBuilder->endGeometries();
-    blas = blasBuilder->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR |
-                                           VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR)
+    blas = blasBuilder->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR) // DIAG: compaction disabled — testing 595.97 regression
                ->querySizeInfo(device)
                ->allocateBuffers(physicalDevice, device, vma)
                ->build(device);
@@ -1536,24 +1532,8 @@ void ChunkBuildScheduler::blasThreadLoop() {
                 }
                 vk::BLASBuilder::batchSubmit(builders, cmd);
 
-                // Compaction queries
+                // Compaction queries — DISABLED: driver 595.97 compaction regression
                 VkQueryPool qp = VK_NULL_HANDLE; uint32_t qpCount = 0;
-                {
-                    std::vector<VkAccelerationStructureKHR> handles;
-                    for (auto &cbd : batch) { if (cbd->blas) handles.push_back(cbd->blas->blas()); }
-                    if (!handles.empty()) {
-                        VkQueryPoolCreateInfo qpci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-                        qpci.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
-                        qpci.queryCount = static_cast<uint32_t>(handles.size());
-                        if (vkCreateQueryPool(device->vkDevice(), &qpci, nullptr, &qp) == VK_SUCCESS) {
-                            qpCount = qpci.queryCount;
-                            vkCmdResetQueryPool(cmd->vkCommandBuffer(), qp, 0, qpCount);
-                            vkCmdWriteAccelerationStructuresPropertiesKHR(cmd->vkCommandBuffer(),
-                                static_cast<uint32_t>(handles.size()), handles.data(),
-                                VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, qp, 0);
-                        }
-                    }
-                }
 
                 cmd->end();
 

@@ -387,29 +387,17 @@ void WorldPrepareContext::render() {
             if (extMinCull > cullDist) cullDist = extMinCull;
         }
         float cullDist2 = cullDist * cullDist;
-        float mergeDist = Renderer::options.megaMergeDistance;
-        float mergeDist2 = mergeDist * mergeDist;
-        bool megaEnabled = mergeDist > 0 && mergeDist < cullDist;
-
-        constexpr int MEGA_SIZE = 64;
-        auto megaKey = [](int x, int y, int z) -> int64_t {
-            int mx = (x >= 0) ? x / MEGA_SIZE : (x - MEGA_SIZE + 1) / MEGA_SIZE;
-            int my = (y >= 0) ? y / MEGA_SIZE : (y - MEGA_SIZE + 1) / MEGA_SIZE;
-            int mz = (z >= 0) ? z / MEGA_SIZE : (z - MEGA_SIZE + 1) / MEGA_SIZE;
-            return (int64_t(mx) & 0xFFFFF) | ((int64_t(my) & 0xFFFFF) << 20) | ((int64_t(mz) & 0xFFFFF) << 40);
-        };
-        std::unordered_map<int64_t, std::vector<int>> farChunksByMega;
 
         // Update cache: only recompute metadata when blasGeneration changes
         if (cachedChunks_.size() != chunk1s.size()) cachedChunks_.resize(chunk1s.size());
 
         // Parallel pass 1: update cache + distance cull → collect visible chunk indices
-        // Each thread fills a local list of visible chunk indices
+        // Each thread fills a local list of visible chunk indices + GC items (thread-safe)
         uint32_t numChunks = static_cast<uint32_t>(chunk1s.size());
         uint32_t numThreads = std::max(1u, Renderer::threadPool.threadCount());
         struct LocalResult {
-            std::vector<int> visibleNear;
-            std::vector<std::pair<int64_t, int>> visibleFar; // megaKey, chunkIndex
+            std::vector<int> visible;
+            std::vector<std::shared_ptr<void>> gcItems; // thread-local GC collection
         };
         std::vector<LocalResult> locals(numThreads);
 
@@ -425,6 +413,14 @@ void WorldPrepareContext::render() {
                 // Update cache if generation changed
                 auto &cc = cachedChunks_[i];
                 if (cc.blasGeneration != chunk1->blasGeneration) {
+                    // Defer GC to thread-local vector — gc().collect() is not thread-safe.
+                    // Keeps old BLAS + vertex/index buffers alive so pool sub-allocations
+                    // aren't reused while the GPU still reads them.
+                    if (cc.blas) local.gcItems.push_back(cc.blas);
+                    if (cc.displacedBlas) local.gcItems.push_back(cc.displacedBlas);
+                    if (cc.vertexBuffers) local.gcItems.push_back(cc.vertexBuffers);
+                    if (cc.indexBuffers) local.gcItems.push_back(cc.indexBuffers);
+                    if (cc.displacedFaceDataBuffer) local.gcItems.push_back(cc.displacedFaceDataBuffer);
                     cc.blasGeneration = chunk1->blasGeneration;
                     cc.blas = chunk1->blas;
                     cc.x = chunk1->x; cc.y = chunk1->y; cc.z = chunk1->z;
@@ -456,21 +452,22 @@ void WorldPrepareContext::render() {
                 float dist2 = cx * cx + cy * cy + cz * cz;
                 if (dist2 > cullDist2) continue;
 
-                if (megaEnabled && dist2 >= mergeDist2) {
-                    local.visibleFar.push_back({megaKey(cc.x, cc.y, cc.z), static_cast<int>(i)});
-                } else {
-                    local.visibleNear.push_back(static_cast<int>(i));
-                }
+                local.visible.push_back(static_cast<int>(i));
             }
         });
 
-        // Flatten visible chunks + collect far chunks for mega-BLAS
+        // Drain thread-local GC items (single-threaded — gc().collect() is not thread-safe)
+        for (auto &local : locals) {
+            for (auto &item : local.gcItems) {
+                framework->gc().collect(std::move(item));
+            }
+            local.gcItems.clear();
+        }
+
+        // Flatten visible chunks from all threads
         std::vector<int> allVisible;
         for (auto &local : locals) {
-            allVisible.insert(allVisible.end(), local.visibleNear.begin(), local.visibleNear.end());
-            for (auto &[mk, chunkIdx] : local.visibleFar) {
-                farChunksByMega[mk].push_back(chunkIdx);
-            }
+            allVisible.insert(allVisible.end(), local.visible.begin(), local.visible.end());
         }
 
         // Prefix sums: compute exact offsets for every visible chunk (sequential, ~50µs)
@@ -584,197 +581,10 @@ void WorldPrepareContext::render() {
             }
         });
 
-        // Update accumulators for mega-BLAS pass that follows
+        // Update accumulators after chunk instance population
         blasIndex += totalChunkInst;
         blasAccu += totalChunkGeo;
         blasGroupAccu += totalChunkSbt;
-
-        // Mega-BLAS: build merged BLASes for far chunk groups
-        // Each mega-chunk group gets a single TLAS instance with all sub-chunk geometries.
-        // Per-geometry transforms offset each sub-chunk within the mega-BLAS.
-        if (megaEnabled && !farChunksByMega.empty()) {
-            std::unordered_map<int64_t, std::shared_ptr<MegaChunk>> newMegaCache;
-            static uint32_t megaBuildCount = 0, megaCacheHit = 0;
-
-            for (auto &[mk, chunkIndices] : farChunksByMega) {
-                // Content hash: detect when any constituent chunk changed
-                uint64_t contentHash = 0;
-                for (int idx : chunkIndices) {
-                    contentHash ^= chunk1s[idx]->blasGeneration * 2654435761u + static_cast<uint64_t>(idx);
-                }
-
-                // Check cache
-                auto cacheIt = megaChunkCache_.find(mk);
-                if (cacheIt != megaChunkCache_.end() && cacheIt->second->contentHash == contentHash) {
-                    newMegaCache[mk] = cacheIt->second;
-                    megaCacheHit++;
-                } else {
-                    // Build new mega-BLAS
-                    auto mega = std::make_shared<MegaChunk>();
-                    mega->key = mk;
-                    mega->contentHash = contentHash;
-
-                    // Compute mega-chunk origin (aligned to MEGA_SIZE grid)
-                    int ox = chunk1s[chunkIndices[0]]->x;
-                    int oy = chunk1s[chunkIndices[0]]->y;
-                    int oz = chunk1s[chunkIndices[0]]->z;
-                    ox = (ox >= 0) ? (ox / MEGA_SIZE) * MEGA_SIZE : ((ox - MEGA_SIZE + 1) / MEGA_SIZE) * MEGA_SIZE;
-                    oy = (oy >= 0) ? (oy / MEGA_SIZE) * MEGA_SIZE : ((oy - MEGA_SIZE + 1) / MEGA_SIZE) * MEGA_SIZE;
-                    oz = (oz >= 0) ? (oz / MEGA_SIZE) * MEGA_SIZE : ((oz - MEGA_SIZE + 1) / MEGA_SIZE) * MEGA_SIZE;
-                    mega->origin = glm::dvec3(ox, oy, oz);
-
-                    auto megaBuilder = vk::BLASBuilder::create();
-                    auto megaGeom = megaBuilder->beginGeometries();
-                    uint32_t totalGeoms = 0;
-
-                    for (int idx : chunkIndices) {
-                        auto &chunk1 = chunk1s[idx];
-
-                        // Per-sub-chunk transform: chunk_origin - mega_origin
-                        VkTransformMatrixKHR subTransform = {
-                            1, 0, 0, static_cast<float>(chunk1->x - ox),
-                            0, 1, 0, static_cast<float>(chunk1->y - oy),
-                            0, 0, 1, static_cast<float>(chunk1->z - oz),
-                        };
-                        auto transformBuf = vk::HostVisibleBuffer::create(
-                            vma, device, sizeof(VkTransformMatrixKHR),
-                            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-                            16);
-                        transformBuf->uploadToBuffer(&subTransform);
-                        mega->transformBuffers.push_back(transformBuf);
-
-                        for (uint32_t g = 0; g < chunk1->geometryCount; g++) {
-                            bool isOpaque = (*chunk1->geometryTypes)[g] == World::WORLD_SOLID;
-                            auto &vb = (*chunk1->vertexBuffers)[g];
-                            auto &ib = (*chunk1->indexBuffers)[g];
-                            uint32_t vertCount = static_cast<uint32_t>(vb->size() / sizeof(vk::VertexFormat::PBRTriangle));
-                            uint32_t idxCount = static_cast<uint32_t>(ib->size() / sizeof(uint32_t));
-
-                            megaGeom->defineTriangleGeometryWithTransform<vk::VertexFormat::PBRTriangle>(
-                                vb, vertCount, ib, idxCount, isOpaque,
-                                transformBuf->bufferAddress());
-
-                            mega->geometryTypes.push_back((*chunk1->geometryTypes)[g]);
-                            mega->vertexBuffers.push_back(vb);
-                            mega->indexBuffers.push_back(ib);
-                            totalGeoms++;
-                        }
-                    }
-                    megaGeom->endGeometries();
-
-                    // Build mega-BLAS on SECONDARY queue (same queue that uploaded vertex data).
-                    // Building on the main queue crashes — cross-queue memory visibility issue.
-                    if (!megaCmdBuffer_) {
-                        megaCmdBuffer_ = vk::CommandBuffer::create(device, framework->asyncCommandPool());
-                        megaFence_ = vk::Fence::create(device);
-                    }
-
-                    auto megaBuilt = megaBuilder
-                        ->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR |
-                                              VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR)
-                        ->querySizeInfo(device)
-                        ->allocateBuffers(physicalDevice, device, vma)
-                        ->build(device);
-
-                    megaCmdBuffer_->begin();
-                    megaBuilder->submit(megaCmdBuffer_);
-                    megaCmdBuffer_->end();
-
-                    VkSubmitInfo si{};
-                    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-                    si.commandBufferCount = 1;
-                    si.pCommandBuffers = &megaCmdBuffer_->vkCommandBuffer();
-                    {
-                        std::lock_guard<std::mutex> qLock(device->queueMutex());
-                        vkQueueSubmit(device->secondaryQueue(), 1, &si, megaFence_->vkFence());
-                    }
-                    vkWaitForFences(device->vkDevice(), 1, &megaFence_->vkFence(), true, UINT64_MAX);
-                    vkResetFences(device->vkDevice(), 1, &megaFence_->vkFence());
-
-                    mega->blas = megaBuilt;
-
-                    newMegaCache[mk] = mega;
-                    megaBuildCount++;
-
-                    if (megaBuildCount % 10 == 0) {
-                        std::cout << "[MegaBLAS] Built " << megaBuildCount << " mega-chunks ("
-                                  << totalGeoms << " geoms in latest, "
-                                  << chunkIndices.size() << " sub-chunks), "
-                                  << megaCacheHit << " cache hits" << std::endl;
-                    }
-                }
-
-                // Add mega-chunk as TLAS instance
-                auto &mega = newMegaCache[mk];
-                VkTransformMatrixKHR megaTransform = {
-                    1, 0, 0, static_cast<float>(mega->origin.x - cameraPos.x),
-                    0, 1, 0, static_cast<float>(mega->origin.y - cameraPos.y),
-                    0, 0, 1, static_cast<float>(mega->origin.z - cameraPos.z),
-                };
-
-                instanceBuilder.defineInstance(megaTransform, blasIndex, 0x01, blasGroupAccu, 0, mega->blas);
-                currBlasSnapshot.blases.push_back(mega->blas);
-                currBlasSnapshot.generations.push_back(mega->contentHash);
-
-                // SBT: SHADOW prefix + all sub-chunk geometry types
-                geometryTypes.push_back(World::GeometryTypes::SHADOW);
-                geometryTypes.insert(geometryTypes.end(), mega->geometryTypes.begin(), mega->geometryTypes.end());
-
-                for (size_t g = 0; g < mega->vertexBuffers.size(); g++) {
-                    vertexBufferAddrs.push_back(mega->vertexBuffers[g]->bufferAddress());
-                    indexBufferAddrs.push_back(mega->indexBuffers[g]->bufferAddress());
-                    lastVertexBufferAddrs.push_back(0);
-                    lastIndexBufferAddrs.push_back(0);
-                }
-
-                {
-                    glm::mat4 lastObjToWorldMat = glm::transpose(glm::mat4(
-                        glm::vec4(1, 0, 0, static_cast<float>(mega->origin.x - cameraPos.x)),
-                        glm::vec4(0, 1, 0, static_cast<float>(mega->origin.y - cameraPos.y)),
-                        glm::vec4(0, 0, 1, static_cast<float>(mega->origin.z - cameraPos.z)),
-                        glm::vec4(0, 0, 0, 1)));
-                    lastObjToWorldMats.push_back(lastObjToWorldMat);
-                }
-
-                blasOffset.push_back(blasAccu);
-                blasAccu += static_cast<uint32_t>(mega->geometryTypes.size());
-                blasGroupAccu += static_cast<uint32_t>(mega->geometryTypes.size()) + 1;
-                blasIndex++;
-            }
-
-            // Evict stale mega-chunks — GC ALL resources, not just BLAS.
-            // In-flight frames may still reference vertex/index buffer addresses
-            // from the SSBO, so we must defer destruction via GC ring buffer.
-            auto &gc = framework->gc();
-            for (auto &[mk, oldMega] : megaChunkCache_) {
-                if (newMegaCache.find(mk) == newMegaCache.end()) {
-                    gc.collect(oldMega->blas);
-                    for (auto &vb : oldMega->vertexBuffers) gc.collect(vb);
-                    for (auto &ib : oldMega->indexBuffers) gc.collect(ib);
-                    for (auto &tb : oldMega->transformBuffers) gc.collect(tb);
-                }
-            }
-            megaChunkCache_ = std::move(newMegaCache);
-
-            // Barrier: make secondary-queue mega-BLAS builds visible to main-queue TLAS build.
-            // The fence wait ensures completion, but a memory barrier ensures visibility.
-            worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
-                .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-                .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
-            }});
-        } else if (!megaChunkCache_.empty()) {
-            auto &gc = framework->gc();
-            for (auto &[mk, oldMega] : megaChunkCache_) {
-                gc.collect(oldMega->blas);
-                for (auto &vb : oldMega->vertexBuffers) gc.collect(vb);
-                for (auto &ib : oldMega->indexBuffers) gc.collect(ib);
-                for (auto &tb : oldMega->transformBuffers) gc.collect(tb);
-            }
-            megaChunkCache_.clear();
-        }
     }
 
     // Area light gathering: collect from loaded chunks, cull by vertical range + distance
@@ -1026,6 +836,19 @@ void WorldPrepareContext::render() {
                        << "\n";
             }
         }
+        // Pool utilization stats
+        if (Renderer::vertexPool && Renderer::indexPool && Renderer::blasPool) {
+            auto vs = Renderer::vertexPool->getStats();
+            auto is = Renderer::indexPool->getStats();
+            auto bs = Renderer::blasPool->getStats();
+            uint32_t totalBlocks = vs.blockCount + is.blockCount + bs.blockCount;
+            VkDeviceSize totalUsedMB = (vs.totalUsed + is.totalUsed + bs.totalUsed) / (1024 * 1024);
+            VkDeviceSize totalCapMB = (vs.totalCapacity + is.totalCapacity + bs.totalCapacity) / (1024 * 1024);
+            std::cout << "[Pool] blocks: vtx=" << vs.blockCount << " idx=" << is.blockCount
+                      << " blas=" << bs.blockCount << "  total=" << totalBlocks
+                      << "  used=" << totalUsedMB << "/" << totalCapMB << " MB" << std::endl;
+        }
+
         tlasLogCounter = 0;
         tlasUpdateCount = 0;
         tlasBuildCount = 0;

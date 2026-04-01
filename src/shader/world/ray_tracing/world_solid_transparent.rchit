@@ -467,8 +467,6 @@ void main() {
 
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     // Compute world-space hit position from ray parameters instead of vertex buffer positions.
-    // This correctly handles per-geometry transforms (mega-BLAS) where vertex buffer positions
-    // are in chunk-local space but gl_ObjectToWorldEXT reflects the mega-chunk TLAS transform.
     vec3 worldPos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
 
     // Biome tint: shader-side resolution from per-section SSBO (bits 12-13 of flags)

@@ -59,28 +59,6 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     };
     TlasBlasSnapshot prevBlasSnapshot_;
 
-    // Mega-chunk system: groups distant chunks into single BLASes
-    struct MegaChunk {
-        int64_t key;                    // spatial hash of mega-chunk grid position
-        glm::dvec3 origin;             // world origin (min corner)
-        std::shared_ptr<vk::BLAS> blas;
-        uint64_t contentHash = 0;      // hash of constituent chunk generations (dirty detection)
-
-        // Flattened geometry metadata for SBT
-        std::vector<World::GeometryTypes> geometryTypes;
-        std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> vertexBuffers;
-        std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> indexBuffers;
-
-        // Per-sub-chunk transform buffers (3x4 VkTransformMatrixKHR each)
-        // HostVisibleBuffer avoids staging copy issues and guarantees alignment
-        std::vector<std::shared_ptr<vk::HostVisibleBuffer>> transformBuffers;
-    };
-    std::unordered_map<int64_t, std::shared_ptr<MegaChunk>> megaChunkCache_;
-
-    // Dedicated secondary-queue resources for mega-BLAS builds
-    std::shared_ptr<vk::CommandBuffer> megaCmdBuffer_;
-    std::shared_ptr<vk::Fence> megaFence_;
-
     // Cached per-chunk instance metadata — only regenerated when blasGeneration changes.
     // Eliminates shared_ptr dereferences and vector copies on stable frames.
     struct CachedChunkData {
@@ -137,7 +115,6 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         prevTlasInstanceCount_ = 0;
         tlasScratchBuffer_ = nullptr;
         tlasScratchSize_ = 0;
-        megaChunkCache_.clear();
         cachedChunks_.clear();
         blasOffsetsBuffer = nullptr; blasOffsetsCapacity_ = 0;
         vertexBufferAddr = nullptr; vertexBufferAddrCapacity_ = 0;

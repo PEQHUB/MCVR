@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/all_extern.hpp"
+#include "core/vulkan/buffer_pool.hpp"
 
 namespace vk {
 class VMA;
@@ -71,6 +72,15 @@ class DeviceLocalBuffer : public Buffer, public SharedObject<DeviceLocalBuffer> 
                       VmaAllocationCreateFlags allocationFlag,
                       VmaMemoryUsage vmaUsage,
                       VkDeviceSize minAlignment);
+
+    /// Pool-backed constructor: device-side buffer comes from BufferPool suballocation.
+    /// Staging buffer is still created normally (per-allocation, freed after GPU copy).
+    DeviceLocalBuffer(std::shared_ptr<BufferPool> pool,
+                      const SubAllocation &alloc,
+                      std::shared_ptr<VMA> vma,
+                      std::shared_ptr<Device> device,
+                      bool persistStaging);
+
     ~DeviceLocalBuffer();
 
     void downloadFromStagingBuffer(void *dest);
@@ -95,6 +105,8 @@ class DeviceLocalBuffer : public Buffer, public SharedObject<DeviceLocalBuffer> 
     VkBuffer &vkBuffer() override;
     void *mappedPtr();
     VkDeviceAddress &bufferAddress();
+    VkDeviceSize poolOffset() const { return poolOffset_; }
+    bool isPoolBacked() const { return pool_ != nullptr; }
 
   private:
     std::shared_ptr<VMA> vma_;
@@ -113,5 +125,12 @@ class DeviceLocalBuffer : public Buffer, public SharedObject<DeviceLocalBuffer> 
     VkBuffer buffer_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     VmaAllocationInfo allocationInfo_;
+
+    // Pool-backed mode: device buffer is a sub-region of a BufferPool backing buffer.
+    // When pool_ is non-null, buffer_/bufferAddress_ point into the pool (NOT owned by this object).
+    // Destructor returns sub-allocation to pool instead of calling vmaDestroyBuffer.
+    std::shared_ptr<BufferPool> pool_;
+    VkDeviceSize poolOffset_ = 0;
+    SubAllocation poolAlloc_{};
 };
 }; // namespace vk

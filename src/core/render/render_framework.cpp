@@ -1422,11 +1422,10 @@ OverlayCompositor *Framework::overlayCompositor() const {
 }
 
 GarbageCollector::GarbageCollector(std::shared_ptr<Framework> framework) : framework_(framework) {
-    // Use more slots than swapchain imageCount to give GPU work on the secondary
-    // queue (chunk BLAS builds) time to complete before resources are freed.
-    // With imageCount=2-3, resources can be destroyed while the GPU still references
-    // them from in-flight BLAS/TLAS builds, causing WRITE_AFTER_DESTROY at address 0x0.
-    uint32_t gcSlots = std::max(framework->swapchain_->imageCount() * 3, 32u);
+    // GC ring must outlive ALL in-flight GPU work: swapchain contexts + BLAS thread
+    // in-flight batches (12 batches * 6 chunks each). With 32 slots and burst chunk
+    // loading, old BLASes were freed while GPU TLAS still traversed them (READ_AFTER_DESTROY).
+    uint32_t gcSlots = std::max(framework->swapchain_->imageCount() * 3 + 12 * 6, 96u);
     collectors_.resize(gcSlots);
 }
 

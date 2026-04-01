@@ -1,4 +1,5 @@
 #include "core/vulkan/buffer.hpp"
+#include "core/vulkan/buffer_pool.hpp"
 
 #include "core/vulkan/command.hpp"
 #include "core/vulkan/device.hpp"
@@ -265,9 +266,61 @@ vk::DeviceLocalBuffer::DeviceLocalBuffer(std::shared_ptr<VMA> vma,
     }
 }
 
+vk::DeviceLocalBuffer::DeviceLocalBuffer(std::shared_ptr<BufferPool> pool,
+                                         const SubAllocation &alloc,
+                                         std::shared_ptr<VMA> vma,
+                                         std::shared_ptr<Device> device,
+                                         bool persistStaging)
+    : vma_(vma),
+      device_(device),
+      persistStaging_(persistStaging),
+      size_(static_cast<size_t>(alloc.size)),
+      vmaAllocationFlags_(0),
+      vmaUsage_(VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE),
+      pool_(pool),
+      poolOffset_(alloc.offset),
+      poolAlloc_(alloc) {
+
+    // Device-side buffer comes from pool — NOT owned by this object
+    buffer_ = alloc.buffer;
+    bufferAddress_ = alloc.address;
+    bufferUsage_ = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                   VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                   VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    // allocation_ stays null — we don't own a VMA allocation for device side
+
+    if (persistStaging_) {
+        VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bufferInfo.size = size_;
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+        VmaAllocationCreateInfo allocationInfo{};
+        allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocationInfo.flags =
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        if (vmaCreateBuffer(vma_->allocator(), &bufferInfo, &allocationInfo, &stagingBuffer_, &stagingAllocation_,
+                            &stagingAllocationInfo_) != VK_SUCCESS) {
+            bufferCerr() << "failed to create staging buffer (pooled)" << std::endl;
+        }
+        mappedPtr_ = stagingAllocationInfo_.pMappedData;
+    }
+}
+
 vk::DeviceLocalBuffer::~DeviceLocalBuffer() {
-    vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
-    vmaDestroyBuffer(vma_->allocator(), buffer_, allocation_);
+    // Always free staging buffer (owned by this object in all modes)
+    if (stagingBuffer_ != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
+    }
+
+    if (pool_) {
+        // Pool-backed: return sub-allocation, don't destroy VkBuffer
+        pool_->free(poolAlloc_);
+    } else {
+        // Individual allocation: destroy device buffer
+        vmaDestroyBuffer(vma_->allocator(), buffer_, allocation_);
+    }
 
 #ifdef DEBUG
 // bufferCout() << "device local buffer deconstructed" << std::endl;
@@ -366,7 +419,8 @@ void vk::DeviceLocalBuffer::releaseStagingBuffer() {
 }
 
 void vk::DeviceLocalBuffer::downloadFromBuffer(VkCommandBuffer cmdBuffer) {
-    downloadFromBuffer(cmdBuffer, size_, 0, 0);
+    // Pool-backed: src offset is the sub-allocation offset within the pool buffer.
+    downloadFromBuffer(cmdBuffer, size_, pool_ ? poolOffset_ : 0, 0);
 }
 
 void vk::DeviceLocalBuffer::downloadFromBuffer(VkCommandBuffer cmdBuffer,
@@ -378,7 +432,9 @@ void vk::DeviceLocalBuffer::downloadFromBuffer(VkCommandBuffer cmdBuffer,
 }
 
 void vk::DeviceLocalBuffer::uploadToBuffer(VkCommandBuffer cmdBuffer) {
-    uploadToBuffer(cmdBuffer, size_, 0, 0);
+    // Pool-backed: dst offset is the sub-allocation offset within the pool buffer.
+    // Individual: dst offset is 0 (full buffer).
+    uploadToBuffer(cmdBuffer, size_, 0, pool_ ? poolOffset_ : 0);
 }
 
 void vk::DeviceLocalBuffer::uploadToBuffer(VkCommandBuffer cmdBuffer, size_t size, size_t srcOffset, size_t dstOffset) {
