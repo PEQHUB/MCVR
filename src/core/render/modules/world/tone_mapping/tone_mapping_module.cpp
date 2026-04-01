@@ -554,6 +554,7 @@ void ToneMappingModuleContext::render() {
     pc.paperWhiteNits = Renderer::options.hdrPaperWhiteNits;
     pc.saturation = Renderer::options.saturation;
     pc.sdrTransferFunction = static_cast<float>(Renderer::options.sdrTransferFunction);
+    pc.psychoPeakSDR = Renderer::options.psychoPeakSDR;
     pc.manualExposureEnabled = Renderer::options.manualExposureEnabled ? 1.0f : 0.0f;
     pc.manualExposure = Renderer::options.manualExposure;
     // HDR tonemapper mode: 0.0 = PsychoVisual, 1.0 = BT.2390 EETF
@@ -584,6 +585,7 @@ void ToneMappingModuleContext::render() {
     float rtPreExposure = (Renderer::options.denoiserMode == 1) ? 0.1f : 1.0f;
     if (Renderer::options.offlineState == 2) rtPreExposure = 1.0f;
     pc.preExposure = rtPreExposure;
+    pc.highlightWeight = Renderer::options.highlightWeight;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ToneMappingModulePushConstant), &pc);

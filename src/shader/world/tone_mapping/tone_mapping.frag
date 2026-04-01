@@ -20,7 +20,7 @@ layout(set = 0, binding = 2) readonly buffer ExposureBuffer {
     float paperWhiteNits;   // ITU-R BT.2408 reference white (e.g. 203.0)
     float saturation;       // Saturation boost (1.0 = neutral)
     float sdrTransferFunction; // 0.0 = Gamma 2.2, 1.0 = sRGB
-    float _pad0;               // padding (was capExposureSmoothed)
+    float psychoPeakSDR;       // SDR PsychoV peak value (default 2.0)
     float manualExposureEnabled; // 0.0 = auto exposure, 1.0 = manual exposure
     float manualExposure; // direct exposure multiplier when manual is enabled
     // PsychoV tonemapper parameters
@@ -862,8 +862,8 @@ void main() {
         else if (mode < 5.5) mapped = FrostbiteToneMap(workingColor);        // 5: Frostbite
         else if (mode < 6.5) mapped = Uncharted2ToneMap(workingColor);       // 6: Uncharted 2
         else if (mode < 7.5) mapped = GTToneMap(workingColor);               // 7: GT
-        else                 mapped = psychoTonemap(workingColor, true,      // 8: PsychoVisual
-            1.0,
+        else                 mapped = psychoTonemap(workingColor, false,     // 8: PsychoVisual (SDR: BT.709 input)
+            gExposure.psychoPeakSDR,
             gExposure.psychoHighlights,
             gExposure.psychoShadows,
             gExposure.psychoContrast,

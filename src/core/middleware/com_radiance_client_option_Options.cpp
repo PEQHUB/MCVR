@@ -244,6 +244,16 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.centerWeightStrength = strength;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetHighlightWeight(
+    JNIEnv *, jclass, jfloat weight, jboolean write) {
+    Renderer::options.highlightWeight = weight;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoPeakSDR(
+    JNIEnv *, jclass, jfloat peak, jboolean write) {
+    Renderer::options.psychoPeakSDR = peak;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssPreset(
     JNIEnv *, jclass, jint preset, jboolean write) {
     // Clamp to valid DLSS RR preset range (A=0 through G=6)

@@ -58,6 +58,7 @@ struct Options {
     float darkAdaptSpeed = 2.0f;       // Exponential decay tau for dark adaptation (seconds)
     float sceneChangeThreshold = 5.0f; // EV difference triggering instant snap (2.0-10.0)
     float centerWeightStrength = 0.0f; // Center-weighted metering strength (0.0-1.0, 0=uniform)
+    float highlightWeight = 0.5f;      // Highlight-weighted metering (0.0-1.0, 0=uniform, 1=full highlight bias)
     float saturation = 1.3f;           // Saturation/Vibrance boost (0.0 to 2.0)
     bool saturationAdaptive = false;   // Adaptive saturation: brightness+chroma-dependent (Special K style)
     bool noiseLOD = true;              // Noise quality LOD: reduce octaves with distance, skip gradient far away
@@ -85,6 +86,7 @@ struct Options {
     float psychoAdaptContrast = 1.0f;    // 0.0-3.0, default 1.0 (Weber-Fechner adaptation)
     uint32_t psychoWhiteCurve = 1;       // 0 = Neutwo, 1 = Naka-Rushton
     float psychoConeExponent = 1.0f;     // 0.1-3.0, default 1.0 (Naka-Rushton exponent)
+    float psychoPeakSDR = 2.0f;          // 0.5-8.0, default 2.0 (SDR PsychoV peak value)
 
     // HDR output settings (default: disabled, pure SDR)
     bool hdrEnabled = false;

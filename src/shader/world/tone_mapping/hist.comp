@@ -35,6 +35,7 @@ layout(push_constant) uniform PushB {
     float paperWhiteNits;
     float saturation;
     float sdrTransferFunction;
+    float psychoPeakSDR;
     float manualExposureEnabled;
     float manualExposure;
     // PsychoV (layout parity with exposure.comp)
@@ -59,6 +60,7 @@ layout(push_constant) uniform PushB {
     float tonemapParam6;
     float tonemapParam7;
     float preExposure;  // RT pre-exposure — undo before binning for correct metering
+    float highlightWeight; // Highlight-weighted metering (0=uniform, 1=full highlight bias)
 }
 pc;
 
@@ -100,7 +102,14 @@ void main() {
         vec2 uv = (vec2(p) + 0.5) / vec2(size);
         float r2 = dot(uv - 0.5, uv - 0.5);
         float w = mix(1.0, 1.0 + 3.0 * exp(-8.0 * r2), pc.centerWeightStrength);
-        uint weight = uint(clamp(w, 1.0, 4.0));
+
+        // Highlight-weighted metering: brighter pixels get proportionally more weight.
+        // Prevents highlight blowout when player stands in shadow — the bright sky/sun
+        // pixels pull the exposure target up, reducing overexposure.
+        float highlightW = mix(1.0, 1.0 + 3.0 * t * t, pc.highlightWeight);
+        w *= highlightW;
+
+        uint weight = uint(clamp(w, 1.0, 16.0));
         atomicAdd(sHist[bin], weight);
     }
 
