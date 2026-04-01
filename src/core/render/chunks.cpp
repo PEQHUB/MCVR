@@ -1023,7 +1023,7 @@ void ChunkBuildData::uploadGPU() {
         }
     }
     blasGeometryBuilder->endGeometries();
-    blas = blasBuilder->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR) // DIAG: compaction disabled — testing 595.97 regression
+    blas = blasBuilder->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
                ->querySizeInfo(device)
                ->allocateBuffers(physicalDevice, device, vma)
                ->build(device);
@@ -1047,7 +1047,7 @@ void ChunkBuildData::uploadGPU() {
             displacedAABBBuffer, static_cast<uint32_t>(displacedAABBs.size()), true);
         displacedGeomBuilder->endGeometries();
         displacedBlas = displacedBlasBuilder
-                            ->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR)
+                            ->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR)
                             ->querySizeInfo(device)
                             ->allocateBuffers(physicalDevice, device, vma)
                             ->build(device);

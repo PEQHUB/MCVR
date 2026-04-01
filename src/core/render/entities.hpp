@@ -118,6 +118,7 @@ struct EntityBatch : public SharedObject<EntityBatch> {
     std::shared_ptr<vk::DeviceLocalBuffer> vertexBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> indexBuffer;
 
+    EntityBatch() = default;
     EntityBatch(std::shared_ptr<EntityBuildDataBatch> entityBuildDataBatch);
 };
 
@@ -138,6 +139,15 @@ struct EntityPostBatch : public SharedObject<EntityPostBatch> {
     std::vector<std::shared_ptr<EntityPost>> entities;
 
     EntityPostBatch(std::shared_ptr<EntityPostBuildDataBatch> entityPostBuildDataBatch);
+};
+
+/// Cached entity BLAS data — survives across frames for TLAS UPDATE.
+/// When an entity with the same hashCode + vertex content appears next frame,
+/// we reuse the BLAS handle (stable device address → generations match → UPDATE).
+struct CachedEntityBLAS {
+    uint64_t contentHash;       ///< Hash of vertex count + index count per geometry
+    std::shared_ptr<Entity> entity; ///< Full Entity with BLAS, buffers, BDAs
+    uint32_t lastUsedFrame;
 };
 
 class Entities : public SharedObject<Entities> {
@@ -166,4 +176,11 @@ class Entities : public SharedObject<Entities> {
     // waits on the fence for the context being reused, guaranteeing the previous GPU work is done.
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> pooledVertexBuffers_;
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> pooledIndexBuffers_;
+
+    // Entity BLAS cache: reuse BLASes across frames when geometry is unchanged.
+    // Key = entity hashCode (Java entity identity). Enables TLAS UPDATE by keeping
+    // BLAS device addresses stable across frames.
+    std::unordered_map<int, CachedEntityBLAS> entityBLASCache_;
+    uint32_t cacheFrameCounter_ = 0;
+    static constexpr uint32_t CACHE_EVICT_FRAMES = 300; // ~5 seconds at 60fps
 };

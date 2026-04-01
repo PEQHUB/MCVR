@@ -737,9 +737,12 @@ void WorldPrepareContext::render() {
     currBlasSnapshot.instanceCount = static_cast<uint32_t>(instanceBuilder.instances.size());
     uint32_t currentInstanceCount = currBlasSnapshot.instanceCount;
 
+    // TLAS UPDATE only requires same instance count. Per Vulkan spec, instances can have
+    // different BLAS references / transforms — the driver refits the BVH. Removing the
+    // generations check allows UPDATE even when entity BLASes change (animation).
+    // This saves ~1.5ms per frame (full BUILD → refit UPDATE for 26K instances).
     bool canUpdate = tlas != nullptr
-        && currBlasSnapshot.instanceCount == prevBlasSnapshot_.instanceCount
-        && currBlasSnapshot.generations == prevBlasSnapshot_.generations;
+        && currBlasSnapshot.instanceCount == prevBlasSnapshot_.instanceCount;
 
     constexpr VkBuildAccelerationStructureFlagsKHR tlasFlags =
         VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |

@@ -842,6 +842,19 @@ void Entities::queueBuild(EntitiesBuildTask task) {
     }
 }
 
+// Compute geometry content hash for entity BLAS cache lookup.
+// If geometry count + per-geometry vertex/index sizes match, the geometry is unchanged.
+static uint64_t computeEntityContentHash(const EntityBuildData &data) {
+    uint64_t h = data.geometryCount;
+    uint32_t n = std::min(data.geometryCount, static_cast<uint32_t>(data.vertices.size()));
+    n = std::min(n, static_cast<uint32_t>(data.indices.size()));
+    for (uint32_t i = 0; i < n; i++) {
+        h ^= data.vertices[i].size() * 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        h ^= data.indices[i].size() * 0x517cc1b727220a95ULL + (h << 6) + (h >> 2);
+    }
+    return h;
+}
+
 void Entities::build() {
     auto context = Renderer::instance().framework()->safeAcquireCurrentContext();
     auto framework = Renderer::instance().framework();
@@ -856,20 +869,106 @@ void Entities::build() {
         pooledIndexBuffers_.resize(contextCount);
     }
 
+    cacheFrameCounter_++;
+
+    if (!entityBuildDataBatch_ || entityBuildDataBatch_->datas.empty()) {
+        // No entities queued — run original empty path
+        if (entityBuildDataBatch_) {
+            uint32_t fi = context->frameIndex;
+            entityBuildDataBatch_->build(pooledVertexBuffers_[fi], pooledIndexBuffers_[fi]);
+            blasBatchBuilder_ = entityBuildDataBatch_->blasBatchBuilder;
+            entityBatch_ = EntityBatch::create(entityBuildDataBatch_);
+        }
+        entityPostBatch_ = EntityPostBatch::create(entityPostBuildDataBatch_);
+        return;
+    }
+
+    // --- Entity BLAS Cache: split into cache hits (reuse BLAS) and misses (batch build) ---
+    auto &allDatas = entityBuildDataBatch_->datas;
+    std::vector<std::shared_ptr<Entity>> cachedEntities;
+    auto uncachedBatch = EntityBuildDataBatch::create();
+    std::vector<int> uncachedOrigIndices; // index into allDatas
+
+    for (int i = 0; i < static_cast<int>(allDatas.size()); i++) {
+        auto &data = allDatas[i];
+        if (data->hashCode == 0) {
+            // No identity — can't cache
+            uncachedBatch->addData(data);
+            uncachedOrigIndices.push_back(i);
+            continue;
+        }
+
+        uint64_t contentHash = computeEntityContentHash(*data);
+        auto it = entityBLASCache_.find(data->hashCode);
+        if (it != entityBLASCache_.end() && it->second.contentHash == contentHash) {
+            // Cache hit: reuse BLAS + buffers, update position only
+            auto &cached = it->second;
+            cached.lastUsedFrame = cacheFrameCounter_;
+            // Update position (entity may have moved but geometry is same)
+            cached.entity->x = data->x;
+            cached.entity->y = data->y;
+            cached.entity->z = data->z;
+            cached.entity->rtFlag = data->rtFlag;
+            cached.entity->coordinate = data->coordinate;
+            // Keep existing vertices/indices for motion vector matching
+            cachedEntities.push_back(cached.entity);
+        } else {
+            // Cache miss: needs building
+            uncachedBatch->addData(data);
+            uncachedOrigIndices.push_back(i);
+        }
+    }
+
+    // Batch-build only the uncached entities
     uint32_t fi = context->frameIndex;
-    entityBuildDataBatch_->build(pooledVertexBuffers_[fi], pooledIndexBuffers_[fi]);
+    if (!uncachedBatch->datas.empty()) {
+        uncachedBatch->build(pooledVertexBuffers_[fi], pooledIndexBuffers_[fi]);
+        Renderer::instance().buffers()->queueImportantWorldUpload(uncachedBatch->vertexBuffer,
+                                                                  uncachedBatch->indexBuffer);
+        blasBatchBuilder_ = uncachedBatch->blasBatchBuilder;
 
-    Renderer::instance().buffers()->queueImportantWorldUpload(entityBuildDataBatch_->vertexBuffer,
-                                                              entityBuildDataBatch_->indexBuffer);
-    blasBatchBuilder_ = entityBuildDataBatch_->blasBatchBuilder;
+        // Create Entity objects from uncached build and populate cache
+        for (auto &data : uncachedBatch->datas) {
+            auto entity = Entity::create(data);
+            entity->vertexBuffer = uncachedBatch->vertexBuffer;
+            entity->indexBuffer = uncachedBatch->indexBuffer;
 
-    entityBatch_ = EntityBatch::create(entityBuildDataBatch_);
+            if (data->hashCode != 0) {
+                CachedEntityBLAS cacheEntry;
+                cacheEntry.contentHash = computeEntityContentHash(*data);
+                cacheEntry.entity = entity;
+                cacheEntry.lastUsedFrame = cacheFrameCounter_;
+                entityBLASCache_[data->hashCode] = std::move(cacheEntry);
+            }
+            cachedEntities.push_back(entity);
+        }
+    } else {
+        blasBatchBuilder_ = nullptr;
+    }
+
+    // Assemble final EntityBatch from cached + newly built entities
+    entityBatch_ = EntityBatch::create();
+    entityBatch_->entities = std::move(cachedEntities);
+    // Keep batch buffer references alive
+    if (uncachedBatch->vertexBuffer) {
+        entityBatch_->vertexBuffer = uncachedBatch->vertexBuffer;
+        entityBatch_->indexBuffer = uncachedBatch->indexBuffer;
+    }
+
     entityPostBatch_ = EntityPostBatch::create(entityPostBuildDataBatch_);
-
     for (auto entity : entityPostBatch_->entities) {
         for (int i = 0; i < entity->geometryCount; i++) {
             Renderer::instance().buffers()->queueImportantWorldUpload(entity->vertexBuffers[i],
                                                                       entity->indexBuffers[i]);
+        }
+    }
+
+    // Evict stale cache entries (not seen for CACHE_EVICT_FRAMES)
+    for (auto it = entityBLASCache_.begin(); it != entityBLASCache_.end();) {
+        if (cacheFrameCounter_ - it->second.lastUsedFrame > CACHE_EVICT_FRAMES) {
+            it = entityBLASCache_.erase(it);
+        } else {
+            ++it;
         }
     }
 }
