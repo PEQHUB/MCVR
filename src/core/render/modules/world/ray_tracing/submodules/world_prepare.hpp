@@ -14,6 +14,8 @@ class FrameworkContext;
 class RayTracingModule;
 struct RayTracingModuleContext;
 
+struct EntityBatch;
+struct EntityPostBatch;
 struct WorldPrepareContext;
 
 class WorldPrepare : public SharedObject<WorldPrepare> {
@@ -53,6 +55,12 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     uint32_t prevTlasInstanceCount_ = 0;
     std::shared_ptr<vk::DeviceLocalBuffer> tlasScratchBuffer_;  // persisted for UPDATE mode reuse
     VkDeviceSize tlasScratchSize_ = 0;  // max(buildScratchSize, updateScratchSize)
+
+    // Entity batch lifetime: keeps entity BLASes, vertex/index buffers alive while
+    // GPU references them via BDA. Without this, Entities::build() replaces entityBatch_
+    // every frame, freeing buffers while in-flight contexts still read their device addresses.
+    std::shared_ptr<EntityBatch> prevEntityBatch_;
+    std::shared_ptr<EntityPostBatch> prevEntityPostBatch_;
 
     // BLAS lifetime snapshot: keeps shared_ptrs alive while GPU references the TLAS.
     // Released when this swapchain context is reused (GPU guaranteed done by then).
@@ -119,6 +127,8 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         tlas = nullptr;
         tlasBuilder = nullptr;
         ptlas = nullptr;
+        prevEntityBatch_ = nullptr;
+        prevEntityPostBatch_ = nullptr;
         prevBlasSnapshot_ = {};
         prevTlasInstanceCount_ = 0;
         tlasScratchBuffer_ = nullptr;

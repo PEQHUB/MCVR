@@ -858,6 +858,12 @@ void WorldPrepareContext::render() {
     prevBlasSnapshot_ = std::move(currBlasSnapshot);
     prevTlasInstanceCount_ = currentInstanceCount;
 
+    // Save entity batch references: Entities::build() replaces the global entityBatch_
+    // every frame, freeing entity vertex/index buffers. Without this, in-flight GPU
+    // contexts read BDA addresses pointing to freed buffers → READ_AFTER_DESTROY.
+    prevEntityBatch_ = entities->entityBatch();
+    prevEntityPostBatch_ = entities->entityPostBatch();
+
     if (++tlasLogCounter >= 120) {
         float n = static_cast<float>(cpuFrameCount);
         std::cout << "[Profiler] TLAS instances: " << currentInstanceCount
