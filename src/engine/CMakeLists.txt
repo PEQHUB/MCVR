@@ -11,6 +11,7 @@ set(ENGINE_SOURCES
     frame/resource_gc.cpp
     platform/vulkan/vk2_buffer.cpp
     platform/vulkan/vk2_image.cpp
+    rendergraph/graph_builder.cpp
     ${CMAKE_SOURCE_DIR}/src/generated/bridge/config_bridge.cpp
 )
 
