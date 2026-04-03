@@ -269,10 +269,16 @@ def gen_jni_bridge(options: list[dict], out_dir: Path):
     lines.append('#include <algorithm>')
     lines.append('#include "engine_config.hpp"\n')
     lines.append("// Forward: provided by engine/app at link time")
-    lines.append("namespace engine { EngineConfig& activeConfig(); }\n")
+    lines.append("namespace engine {")
+    lines.append("    EngineConfig& activeConfig();")
+    lines.append("    // Called after a config write with side effects beyond flag-setting.")
+    lines.append("    // Implemented by engine/app. Default is a no-op weak symbol.")
+    lines.append("    void onConfigSideEffect(ConfigKey key);")
+    lines.append("}\n")
 
     jni_prefix = "Java_com_radiance_v2_bridge_ConfigBridge"
 
+    # Classify side effects: "flag" effects set cfg.X = Y, "action" effects need a callback
     for opt in options:
         name = opt["name"]
         jt = jni_type(opt)
@@ -297,14 +303,21 @@ def gen_jni_bridge(options: list[dict], out_dir: Path):
         else:
             lines.append(f"    cfg.{name} = {conv};")
 
+        has_action = False
         if side:
             for stmt in side.split(";"):
                 stmt = stmt.strip()
-                if stmt:
-                    if stmt.startswith("resetScheduler"):
-                        lines.append(f"    // TODO: {stmt} — needs explicit service call")
-                    else:
-                        lines.append(f"    if (write) cfg.{stmt};")
+                if not stmt:
+                    continue
+                # Flag assignments (cfg.X = Y) are inlined
+                if "=" in stmt and not stmt.startswith("reset") and not "(" in stmt:
+                    lines.append(f"    if (write) cfg.{stmt};")
+                else:
+                    # Action side effects go through the callback
+                    has_action = True
+
+        if has_action:
+            lines.append(f"    if (write) engine::onConfigSideEffect(engine::ConfigKey::{camel_to_upper(name)});")
 
         lines.append("}\n")
 

@@ -1,24 +1,30 @@
 # V2 Engine — gated behind MCVR_ENABLE_ENGINE_V2
-# Currently: diagnostics (spdlog logger) only
 
 set(ENGINE_SOURCES
     diagnostics/log.cpp
+    app/config_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/src/generated/bridge/config_bridge.cpp
 )
 
-add_library(engine_diagnostics STATIC ${ENGINE_SOURCES})
+add_library(engine STATIC ${ENGINE_SOURCES})
 
-target_include_directories(engine_diagnostics PUBLIC
+target_include_directories(engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/extern/spdlog/include
+    ${CMAKE_SOURCE_DIR}/src/generated/config
 )
 
-target_compile_definitions(engine_diagnostics PUBLIC
+target_compile_definitions(engine PUBLIC
     SPDLOG_COMPILED_LIB=0  # header-only mode
 )
 
 if (MSVC)
-    target_compile_options(engine_diagnostics PRIVATE /utf-8)
+    target_compile_options(engine PRIVATE /utf-8)
 endif()
 
-# Ensure codegen runs before engine builds (for config headers)
-add_dependencies(engine_diagnostics generate_config)
+# JNI headers needed for config_bridge.cpp
+find_package(JNI REQUIRED)
+target_include_directories(engine PRIVATE ${JNI_INCLUDE_DIRS})
+
+# Ensure codegen runs before engine builds
+add_dependencies(engine generate_config)

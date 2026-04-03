@@ -202,7 +202,7 @@ set(CONFIG_SCHEMA "${CMAKE_SOURCE_DIR}/schema/engine_config.schema.json")
 set(CONFIG_CODEGEN "${CMAKE_SOURCE_DIR}/tools/codegen/gen_config.py")
 set(GENERATED_CPP_DIR "${CMAKE_SOURCE_DIR}/src/generated/config")
 set(GENERATED_BRIDGE_DIR "${CMAKE_SOURCE_DIR}/src/generated/bridge")
-set(GENERATED_JAVA_DIR "${CMAKE_SOURCE_DIR}/../Radiance/src/generated/java/com/radiance/v2/config")
+set(GENERATED_JAVA_DIR "${JAVA_PROJECT_ROOT_DIR}/src/generated/java/com/radiance/v2/config")
 
 add_custom_command(
     OUTPUT

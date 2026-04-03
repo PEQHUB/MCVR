@@ -40,19 +40,40 @@ std::string formatMessage(std::string_view category, std::string_view msg) {
     return result;
 }
 
+void jsonEscape(std::string& out, std::string_view sv) {
+    for (char c : sv) {
+        switch (c) {
+            case '"':  out.append("\\\""); break;
+            case '\\': out.append("\\\\"); break;
+            case '\b': out.append("\\b");  break;
+            case '\f': out.append("\\f");  break;
+            case '\n': out.append("\\n");  break;
+            case '\r': out.append("\\r");  break;
+            case '\t': out.append("\\t");  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+                    out.append(buf);
+                } else {
+                    out.push_back(c);
+                }
+        }
+    }
+}
+
 std::string formatJsonl(std::string_view category, std::string_view eventId,
                         const std::unordered_map<std::string, std::string>& fields) {
-    // Simple JSON construction without external JSON library
     std::string json = "{\"cat\":\"";
-    json.append(category);
+    jsonEscape(json, category);
     json.append("\",\"event\":\"");
-    json.append(eventId);
+    jsonEscape(json, eventId);
     json.append("\"");
     for (const auto& [k, v] : fields) {
         json.append(",\"");
-        json.append(k);
+        jsonEscape(json, k);
         json.append("\":\"");
-        json.append(v);
+        jsonEscape(json, v);
         json.append("\"");
     }
     json.append("}");
