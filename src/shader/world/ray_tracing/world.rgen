@@ -12,9 +12,17 @@
 #extension GL_EXT_opacity_micromap : require
 #extension GL_NV_shader_invocation_reorder : enable
 
+// SHARC compile-time gate: controlled by CMake MCVR_ENABLE_SHARC option.
+// NVIDIA 595.97 crashes compiling SHARC SDK Int64-atomics+BDA in nvgpucomp64.dll.
+#ifndef SHARC_COMPILE_ENABLE
+#define SHARC_COMPILE_ENABLE 0
+#endif
+
+#if SHARC_COMPILE_ENABLE
 #define SHARC_ENABLE_GLSL 1
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
 #define SHARC_PROPAGATION_DEPTH 4
+#endif
 
 #include "../util/labpbr.glsl"
 #include "../util/random.glsl"
@@ -25,8 +33,10 @@
 #include "common/shared.hpp"
 #include "../util/colorspace.glsl"
 
+#if SHARC_COMPILE_ENABLE
 #include "SharcGlsl.h"
 #include "SharcCommon.h"
+#endif
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
@@ -123,6 +133,10 @@ layout(set = 3, binding = 27, r16f)    uniform image2D gbufferMetallicImage;
 layout(set = 3, binding = 28, r16f)    uniform image2D gbufferShadingModelIdImage;
 layout(set = 3, binding = 29, r16f)    uniform image2D gbufferMaterialIdImage;
 layout(set = 3, binding = 30, rgba32f) uniform image2D positionViewSpaceImage;
+// DLSS-RR transparency layer (stable planes for glass/water)
+layout(set = 3, binding = 31, rgba16f) uniform image2D transparencyLayerImage;
+layout(set = 3, binding = 32, rgba16f) uniform image2D transparencyLayerOpacityImage;
+layout(set = 3, binding = 33, rg32f)   uniform image2D transparencyLayerMvecsImage;
 
 // VertexBuffer and IndexBuffer declared in vertex_fetch.glsl
 
@@ -266,6 +280,18 @@ void main() {
     // Dense reflection probe: deterministic mirror-reflection hit distance for reflection MVs
     float reflectionProbeHitT = INF_DISTANCE;
     vec3 reflectionProbeVirtualDir = vec3(0.0);
+
+    // Transparency layer: glass/water surface data for DLSS-RR stable planes
+    bool hitGlass = false;
+    vec3 glassWorldPos = vec3(0.0);
+    vec3 glassNormal = vec3(0.0);
+    float glassHitT = 0.0;
+    vec3 glassTint = vec3(1.0);
+    float glassFresnelReflect = 0.0;
+    uint glassInstanceIndex = 0;
+    uint glassGeometryIndex = 0;
+    uint glassPrimitiveIndex = 0;
+    vec3 glassBaryCoords = vec3(0.0);
 
     mainRay.seed = worldUBO.seed;
     for (int isHand = 0; isHand <= 1; isHand++) {
@@ -437,6 +463,33 @@ void main() {
             if (hitSky) { break; }
 
             if (prGetCont(mainRay)) continue;
+
+            // Glass/water: capture surface for transparency layer, skip mirror matrix.
+            // Glass CHS sets lobeType=2 (transmission) and refracted origin/direction.
+            // Previously, glass fell through to buildMirrorMatrix4 which is geometrically wrong.
+            if (prGetLobeType(mainRay) == 2u && mainRay.roughness < 0.001 && !hitGlass) {
+                hitGlass = true;
+                glassWorldPos = mainRay.worldPos;
+                glassNormal = mainRay.normal;
+                glassHitT = T;
+                glassTint = mainRay.albedoValue.rgb;
+                glassInstanceIndex = mainRay.instanceIndex;
+                glassGeometryIndex = mainRay.geometryIndex;
+                glassPrimitiveIndex = mainRay.primitiveIndex;
+                glassBaryCoords = mainRay.baryCoords;
+                // Physical Fresnel reflectance (Schlick) for transparency layer opacity.
+                // Uses mainRay.f0 from CHS (IOR-derived for dielectrics, grayscale).
+                // Deliberately omits the CHS's (1-transmission) sampling weight — the
+                // transparency layer wants physical surface reflectance, not path probability.
+                vec3 viewDir = -normalize(traceDir);
+                bool entering = dot(mainRay.direction, glassNormal) < 0.0;
+                vec3 faceNormal = entering ? glassNormal : -glassNormal;
+                float cosTheta = max(dot(viewDir, faceNormal), 0.0);
+                float r0 = dot(mainRay.f0, vec3(0.333));
+                glassFresnelReflect = r0 + (1.0 - r0) * pow(1.0 - cosTheta, 5.0);
+                isPsr = true;
+                continue;  // CHS already set refracted origin/direction
+            }
 
             // Did we hit anything other than a mirror?
             // If so, stop PSR — the final non-mirror surface becomes the primary surface.
@@ -826,6 +879,7 @@ void main() {
             // AND current surface roughness (don't cache view-dependent specular outgoing).
             // On cache hit, REPLACE the CHS contribution with the cached total outgoing
             // radiance to avoid double-counting direct light at this surface.
+#if SHARC_COMPILE_ENABLE
             if (SHARC_ENABLED && b >= 1 && !prGetStop(mainRay) && mainRay.hitT != INF_DISTANCE
                 && minPathRoughness >= pc.sharcRoughnessThreshold
                 && mainRay.roughness >= pc.sharcRoughnessThreshold) {
@@ -864,6 +918,7 @@ void main() {
                     }
                 }
             }
+#endif
 
             // Update path roughness tracking (before next bounce).
             // Once the path goes through a specular/transmissive surface, it stays specular.
@@ -1024,6 +1079,43 @@ void main() {
     // World-space 3D velocity: object displacement from prev to current frame (camera motion removed).
     // Computed inside the Motion Vector block above; zero for sky and non-noisy pixels.
     imageStore(motionVectors3DImage, ivec2(pixel), vec4(velocity3D, 0.0));
+
+    // Transparency layer: glass/water surface data for DLSS-RR stable planes.
+    // Provides glass surface MVs, opacity, and tint so DLSS-RR can track the glass
+    // independently from the behind-glass scene for temporal stability.
+    if (hitGlass) {
+        // Glass tint * Fresnel as foreground color (pre-exposed to match pInColor range)
+        vec3 glassColor = glassTint * glassFresnelReflect;
+        imageStore(transparencyLayerImage, ivec2(pixel), vec4(glassColor * pc.preExposure, glassFresnelReflect));
+        imageStore(transparencyLayerOpacityImage, ivec2(pixel), vec4(vec3(glassFresnelReflect), glassFresnelReflect));
+
+        // Glass surface MVs (same pattern as primary MV computation)
+        vec3 glassCameraDelta = vec3(worldUBO.cameraPos.xyz - lastWorldUBO.cameraPos.xyz);
+        mat4 glassPrevMVP = lastWorldUBO.cameraProjMat * lastWorldUBO.cameraEffectedViewMat;
+
+        vec3 glassVirtualOrigin = eyePos + orgDirection * glassHitT;
+        vec3 glassRelToPrevCam = glassVirtualOrigin + glassCameraDelta;
+
+        uint rawOffset = blasOffsets.offsets[glassInstanceIndex];
+        uint vtxFormat = rawOffset >> 30u;
+        uint glassBOffset = decodeBlasOffset(rawOffset);
+        uint64_t lastIdxAddr = lastIndexBufferAddrs.addrs[glassBOffset + glassGeometryIndex];
+        uint64_t lastVtxAddr = lastVertexBufferAddrs.addrs[glassBOffset + glassGeometryIndex];
+        if (lastIdxAddr > 0 && lastVtxAddr > 0) {
+            vec3 prevLocalPos;
+            fetchTrianglePositions(vtxFormat, lastVtxAddr, lastIdxAddr,
+                                   glassPrimitiveIndex, glassBaryCoords, prevLocalPos);
+            mat4 lastModelMat = lastObjToWorldMats.mat[glassInstanceIndex];
+            glassRelToPrevCam = mat3(lastModelMat) * prevLocalPos + lastModelMat[3].xyz;
+        }
+        vec2 glassMV = computeCameraMotionVector(glassPrevMVP, pixelCenter, vec4(glassRelToPrevCam, 1.0));
+        imageStore(transparencyLayerMvecsImage, ivec2(pixel), vec4(glassMV, 0.0, 0.0));
+    } else {
+        imageStore(transparencyLayerImage, ivec2(pixel), vec4(0.0));
+        imageStore(transparencyLayerOpacityImage, ivec2(pixel), vec4(0.0));
+        imageStore(transparencyLayerMvecsImage, ivec2(pixel), vec4(0.0));
+    }
+
     // Prevent RGBA16F overflow: clamp radiance BEFORE pre-exposure so
     // radiance * preExposure <= 65000. Clamping before multiplication
     // preserves DLSS-RR contract: receives clampedRad*E, undoes /E → clampedRad (exact).

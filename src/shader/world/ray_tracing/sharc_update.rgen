@@ -11,10 +11,17 @@
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_opacity_micromap : require
 
+// SHARC compile-time gate: controlled by CMake MCVR_ENABLE_SHARC option.
+#ifndef SHARC_COMPILE_ENABLE
+#define SHARC_COMPILE_ENABLE 0
+#endif
+
+#if SHARC_COMPILE_ENABLE
 #define SHARC_ENABLE_GLSL 1
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
 #define SHARC_UPDATE 1
 #define SHARC_PROPAGATION_DEPTH 4
+#endif
 
 #include "../util/random.glsl"
 #include "../util/ray_cone.glsl"
@@ -22,8 +29,10 @@
 #include "../util/util.glsl"
 #include "common/shared.hpp"
 
+#if SHARC_COMPILE_ENABLE
 #include "SharcGlsl.h"
 #include "SharcCommon.h"
+#endif
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 layout(set = 0, binding = 2) uniform samplerCube skyFull;
@@ -73,6 +82,9 @@ layout(push_constant) uniform PushConstant {
 layout(location = 0) rayPayloadEXT PrimaryRay mainRay;
 
 void main() {
+#if !SHARC_COMPILE_ENABLE
+    return; // SHARC disabled at compile time
+#else
     uvec2 pixel = gl_LaunchIDEXT.xy;
     vec2 resolution = vec2(gl_LaunchSizeEXT.xy);
 
@@ -232,4 +244,5 @@ void main() {
         traceRayEXT(topLevelAS, bounceFlags, bounceMask, 1, 1, 0,
                     mainRay.origin, 0.0, mainRay.direction, len, 0);
     }
+#endif // SHARC_COMPILE_ENABLE
 }

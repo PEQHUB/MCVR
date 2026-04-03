@@ -74,7 +74,7 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
   public:
     constexpr static std::string_view NAME = "render_pipeline.module.ray_tracing.name";
     constexpr static uint32_t inputImageNum = 0;
-    constexpr static uint32_t outputImageNum = 26;
+    constexpr static uint32_t outputImageNum = 29;
 
     RayTracingModule();
 
@@ -192,6 +192,10 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> gbufferShadingModelIdImages_; // [23] GBuffer shading model ID
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> gbufferMaterialIdImages_;     // [24] GBuffer material ID
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> positionViewSpaceImages_;     // [25] view-space hit position
+    // DLSS-RR transparency layer (stable planes)
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerImages_;         // [26] glass/water foreground color
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerOpacityImages_;  // [27] glass/water per-channel opacity
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerMvecsImages_;    // [28] glass/water surface MVs
 
     // ReSTIR DI reservoir images (fixed roles)
     // [0] = temporal output (CHS writes), [1] = spatial output (compute writes)

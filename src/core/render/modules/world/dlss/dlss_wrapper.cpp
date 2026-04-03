@@ -426,6 +426,14 @@ NVSDK_NGX_Result DlssRR::denoise(std::shared_ptr<vk::CommandBuffer> cmdBuffer,
         evalParams.pInPositionViewSpace = getResource(RESOURCE_POSITION_VIEW_SPACE);
     evalParams.pInDepthHighRes = getResource(RESOURCE_LINEARDEPTH);
 
+    // Transparency layer (stable planes for glass/water)
+    if (getResource(RESOURCE_TRANSPARENCY_LAYER))
+        evalParams.pInTransparencyLayer = getResource(RESOURCE_TRANSPARENCY_LAYER);
+    if (getResource(RESOURCE_TRANSPARENCY_LAYER_OPACITY))
+        evalParams.pInTransparencyLayerOpacity = getResource(RESOURCE_TRANSPARENCY_LAYER_OPACITY);
+    if (getResource(RESOURCE_TRANSPARENCY_LAYER_MVECS))
+        evalParams.pInTransparencyLayerMvecs = getResource(RESOURCE_TRANSPARENCY_LAYER_MVECS);
+
     evalParams.InJitterOffsetX = -jitter.x;
     evalParams.InJitterOffsetY = -jitter.y;
     evalParams.InMVScaleX = 1.0f;

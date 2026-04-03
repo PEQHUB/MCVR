@@ -147,6 +147,8 @@ endif()
 # OMM SDK (Opacity Micro-Map) - CPU baker only
 # We bypass the OMM top-level CMake and add only the library + its deps,
 # providing glm/stb from our existing project to avoid target conflicts.
+option(MCVR_ENABLE_SHARC "Enable SHARC hash grid radiance cache (requires working nvgpucomp64 — broken on 595.97)" OFF)
+
 option(MCVR_ENABLE_OMM "Enable Opacity Micro-Map SDK for AHS elimination" ON)
 
 if (MCVR_ENABLE_OMM)

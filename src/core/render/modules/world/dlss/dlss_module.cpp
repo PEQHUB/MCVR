@@ -93,6 +93,9 @@ void DLSSModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<Worl
     gbufferShadingModelIdImages_.resize(size);
     gbufferMaterialIdImages_.resize(size);
     positionViewSpaceImages_.resize(size);
+    transparencyLayerImages_.resize(size);
+    transparencyLayerOpacityImages_.resize(size);
+    transparencyLayerMvecsImages_.resize(size);
     processedImages_.resize(size);
     upscaledFirstHitDepthImages_.resize(size);
     upscaled2xImages_.resize(size);
@@ -173,6 +176,9 @@ bool DLSSModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLo
     createOrResize(18); gbufferShadingModelIdImages_[frameIndex] = images[18];
     createOrResize(19); gbufferMaterialIdImages_[frameIndex] = images[19];
     createOrResize(20); positionViewSpaceImages_[frameIndex] = images[20];
+    createOrResize(21); transparencyLayerImages_[frameIndex] = images[21];
+    createOrResize(22); transparencyLayerOpacityImages_[frameIndex] = images[22];
+    createOrResize(23); transparencyLayerMvecsImages_[frameIndex] = images[23];
 
     return true;
 }
@@ -396,6 +402,9 @@ DLSSModuleContext::DLSSModuleContext(std::shared_ptr<FrameworkContext> framework
       gbufferShadingModelIdImage(dlssModule->gbufferShadingModelIdImages_[frameworkContext->frameIndex]),
       gbufferMaterialIdImage(dlssModule->gbufferMaterialIdImages_[frameworkContext->frameIndex]),
       positionViewSpaceImage(dlssModule->positionViewSpaceImages_[frameworkContext->frameIndex]),
+      transparencyLayerImage(dlssModule->transparencyLayerImages_[frameworkContext->frameIndex]),
+      transparencyLayerOpacityImage(dlssModule->transparencyLayerOpacityImages_[frameworkContext->frameIndex]),
+      transparencyLayerMvecsImage(dlssModule->transparencyLayerMvecsImages_[frameworkContext->frameIndex]),
       processedImage(dlssModule->processedImages_[frameworkContext->frameIndex]),
       upscaledFirstHitDepthImage(dlssModule->upscaledFirstHitDepthImages_[frameworkContext->frameIndex]) {}
 
@@ -802,6 +811,58 @@ void DLSSModuleContext::render() {
                      }});
             positionViewSpaceImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
             module->dlss_->setResource(DlssRR::RESOURCE_POSITION_VIEW_SPACE, positionViewSpaceImage);
+        }
+        // Transparency layer (stable planes for glass/water)
+        if (transparencyLayerImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = transparencyLayerImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = transparencyLayerImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            transparencyLayerImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            module->dlss_->setResource(DlssRR::RESOURCE_TRANSPARENCY_LAYER, transparencyLayerImage);
+        }
+        if (transparencyLayerOpacityImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = transparencyLayerOpacityImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = transparencyLayerOpacityImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            transparencyLayerOpacityImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            module->dlss_->setResource(DlssRR::RESOURCE_TRANSPARENCY_LAYER_OPACITY, transparencyLayerOpacityImage);
+        }
+        if (transparencyLayerMvecsImage) {
+            worldCommandBuffer->barriersBufferImage(
+                {}, {{
+                         .srcStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                         .oldLayout = transparencyLayerMvecsImage->imageLayout(),
+                         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                         .srcQueueFamilyIndex = mainQueueIndex,
+                         .dstQueueFamilyIndex = mainQueueIndex,
+                         .image = transparencyLayerMvecsImage,
+                         .subresourceRange = vk::wholeColorSubresourceRange,
+                     }});
+            transparencyLayerMvecsImage->imageLayout() = VK_IMAGE_LAYOUT_GENERAL;
+            module->dlss_->setResource(DlssRR::RESOURCE_TRANSPARENCY_LAYER_MVECS, transparencyLayerMvecsImage);
         }
 
         auto worldUBOBuffer = Renderer::instance().buffers()->worldUniformBuffer();

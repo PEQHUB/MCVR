@@ -7,12 +7,19 @@
 #extension GL_EXT_shader_16bit_storage : enable
 #extension GL_EXT_control_flow_attributes : require
 
+// SHARC compile-time gate: controlled by CMake MCVR_ENABLE_SHARC option.
+#ifndef SHARC_COMPILE_ENABLE
+#define SHARC_COMPILE_ENABLE 0
+#endif
+
+#if SHARC_COMPILE_ENABLE
 #define SHARC_ENABLE_GLSL 1
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
 #define SHARC_PROPAGATION_DEPTH 4
 
 #include "SharcGlsl.h"
 #include "SharcCommon.h"
+#endif
 
 layout(push_constant) uniform PushConstant {
     // SharcResolveParameters
@@ -40,6 +47,9 @@ layout(push_constant) uniform PushConstant {
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
+#if !SHARC_COMPILE_ENABLE
+    return;
+#else
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= pc.capacity) return;
 
@@ -62,4 +72,5 @@ void main() {
     resolveParams.frameIndex = pc.frameIndex;
 
     SharcResolveEntry(idx, sharcParams, resolveParams);
+#endif // SHARC_COMPILE_ENABLE
 }

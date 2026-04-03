@@ -179,6 +179,10 @@ class DlssRR : public SharedObject<DlssRR> {
         RESOURCE_GBUFFER_SHADING_MODEL_ID, // GBufferSurface[SHADINGMODELID=6] — material type classifier
         RESOURCE_GBUFFER_MATERIAL_ID,  // GBufferSurface[MATERIALID=7] — unique material ID per surface
         RESOURCE_POSITION_VIEW_SPACE,  // pInPositionViewSpace — view-space hit position
+        // DLSS-RR transparency layer (stable planes for glass/water)
+        RESOURCE_TRANSPARENCY_LAYER,         // pInTransparencyLayer — glass foreground color
+        RESOURCE_TRANSPARENCY_LAYER_OPACITY, // pInTransparencyLayerOpacity — per-channel glass opacity
+        RESOURCE_TRANSPARENCY_LAYER_MVECS,   // pInTransparencyLayerMvecs — glass surface motion vectors
 
         RESOURCE_NUM
     };

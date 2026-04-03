@@ -22,7 +22,7 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
 
   public:
     constexpr static std::string_view NAME = "render_pipeline.module.dlss.name";
-    constexpr static uint32_t inputImageNum = 21;
+    constexpr static uint32_t inputImageNum = 24;
     constexpr static uint32_t outputImageNum = 2;
 
     static bool initNGXContext();
@@ -77,6 +77,10 @@ class DLSSModule : public WorldModule, public SharedObject<DLSSModule> {
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> gbufferShadingModelIdImages_; // [18] GBuffer shading model ID
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> gbufferMaterialIdImages_;     // [19] GBuffer material ID
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> positionViewSpaceImages_;     // [20] view-space hit position
+    // DLSS-RR transparency layer (stable planes)
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerImages_;         // [21] glass foreground color
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerOpacityImages_;  // [22] glass per-channel opacity
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerMvecsImages_;    // [23] glass surface MVs
 
     // dlss
     std::shared_ptr<DlssRR> dlss_;
@@ -130,6 +134,10 @@ struct DLSSModuleContext : public WorldModuleContext, SharedObject<DLSSModuleCon
     std::shared_ptr<vk::DeviceLocalImage> gbufferShadingModelIdImage;
     std::shared_ptr<vk::DeviceLocalImage> gbufferMaterialIdImage;
     std::shared_ptr<vk::DeviceLocalImage> positionViewSpaceImage;
+    // Transparency layer
+    std::shared_ptr<vk::DeviceLocalImage> transparencyLayerImage;
+    std::shared_ptr<vk::DeviceLocalImage> transparencyLayerOpacityImage;
+    std::shared_ptr<vk::DeviceLocalImage> transparencyLayerMvecsImage;
 
     // output
     std::shared_ptr<vk::DeviceLocalImage> processedImage;          // DLSS writes here (2x when outputScale2x, else 1x)
