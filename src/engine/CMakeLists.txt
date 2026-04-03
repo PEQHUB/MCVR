@@ -15,6 +15,8 @@ set(ENGINE_SOURCES
     scene/chunk_registry.cpp
     scene/entity_registry.cpp
     scene/scene_service.cpp
+    diagnostics/replay/replay_recorder.cpp
+    features/tonemapping_adapter.cpp
     ${CMAKE_SOURCE_DIR}/src/generated/bridge/config_bridge.cpp
 )
 
