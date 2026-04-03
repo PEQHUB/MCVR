@@ -6,6 +6,8 @@ set(ENGINE_SOURCES
     app/engine_services.cpp
     config/config_service.cpp
     diagnostics/log.cpp
+    platform/vulkan/vk2_buffer.cpp
+    platform/vulkan/vk2_image.cpp
     ${CMAKE_SOURCE_DIR}/src/generated/bridge/config_bridge.cpp
 )
 
@@ -15,6 +17,9 @@ target_include_directories(engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/extern/spdlog/include
     ${CMAKE_SOURCE_DIR}/src/generated/config
+    ${CMAKE_SOURCE_DIR}/extern/vma/include
+    ${CMAKE_SOURCE_DIR}/extern/vulkan_headers/include
+    ${CMAKE_SOURCE_DIR}/extern/volk
 )
 
 target_compile_definitions(engine PUBLIC
