@@ -505,6 +505,20 @@ void Framework::acquireContext() {
 
     pipelineContext->uiModuleContext->begin(lastUIContext);
 
+    // Cross-queue GC sync: wait for ALL secondary queue (BLAS thread) work to complete
+    // before freeing resources. Without this, GC can free BLAS backing buffers while the
+    // secondary queue's AS build shader still references them (WRITE_AFTER_DESTROY crash).
+    {
+        auto blasSem = device_->blasSemaphore();
+        auto world = Renderer::instance().world();
+        if (blasSem && world && world->chunks() && world->chunks()->chunkBuildScheduler()) {
+            uint64_t lastSubmitted = world->chunks()->chunkBuildScheduler()->lastSubmittedTimelineValue();
+            if (lastSubmitted > 0) {
+                blasSem->waitValue(lastSubmitted);
+            }
+        }
+    }
+
     gc_->clear();
     Renderer::instance().buffers()->resetFrame();
     Renderer::instance().textures()->resetFrame();

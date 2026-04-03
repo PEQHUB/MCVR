@@ -436,6 +436,12 @@ vk::TLASBuilder::TLASInstanceBuilder::defineInstance(VkTransformMatrixKHR transf
 
 std::shared_ptr<vk::TLASBuilder>
 vk::TLASBuilder::TLASInstanceBuilder::endInstanceBuilder(std::shared_ptr<Device> device, std::shared_ptr<VMA> vma) {
+    // Filter out instances with null BLAS (entity/chunk not yet built)
+    instances.erase(
+        std::remove_if(instances.begin(), instances.end(),
+            [](const auto &inst) { return std::get<5>(inst) == nullptr; }),
+        instances.end());
+
     std::vector<VkAccelerationStructureInstanceKHR> asInstances(instances.size());
     for (int i = 0; i < instances.size(); i++) {
         asInstances[i].transform = std::get<0>(instances[i]);

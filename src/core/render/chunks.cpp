@@ -1019,8 +1019,7 @@ void ChunkBuildData::uploadGPU() {
         }
     }
     blasGeometryBuilder->endGeometries();
-    blas = blasBuilder->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR |
-                                           VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR)
+    blas = blasBuilder->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR)
                ->querySizeInfo(device)
                ->allocateBuffers(physicalDevice, device, vma)
                ->build(device);
@@ -1360,6 +1359,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
                         diagLog.flush();
                     }
                     if (cr == VK_SUCCESS) {
+                        lastSubmittedTimeline_.store(compactValue, std::memory_order_release);
                         auto chunks = std::move(front.chunks);
                         auto qp = front.compactionQP;
                         auto qpCount = front.compactionCount;
@@ -1529,24 +1529,8 @@ void ChunkBuildScheduler::blasThreadLoop() {
                 }
                 vk::BLASBuilder::batchSubmit(builders, cmd);
 
-                // Compaction queries
+                // Compaction queries — only valid when BLAS was built with ALLOW_COMPACTION
                 VkQueryPool qp = VK_NULL_HANDLE; uint32_t qpCount = 0;
-                {
-                    std::vector<VkAccelerationStructureKHR> handles;
-                    for (auto &cbd : batch) { if (cbd->blas) handles.push_back(cbd->blas->blas()); }
-                    if (!handles.empty()) {
-                        VkQueryPoolCreateInfo qpci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-                        qpci.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
-                        qpci.queryCount = static_cast<uint32_t>(handles.size());
-                        if (vkCreateQueryPool(device->vkDevice(), &qpci, nullptr, &qp) == VK_SUCCESS) {
-                            qpCount = qpci.queryCount;
-                            vkCmdResetQueryPool(cmd->vkCommandBuffer(), qp, 0, qpCount);
-                            vkCmdWriteAccelerationStructuresPropertiesKHR(cmd->vkCommandBuffer(),
-                                static_cast<uint32_t>(handles.size()), handles.data(),
-                                VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, qp, 0);
-                        }
-                    }
-                }
 
                 cmd->end();
 
@@ -1585,7 +1569,8 @@ void ChunkBuildScheduler::blasThreadLoop() {
                     continue;
                 }
 
-                // Track in-flight
+                // Track in-flight — store timeline AFTER confirmed success
+                lastSubmittedTimeline_.store(batchValue, std::memory_order_release);
                 inFlight_.push_back({batchValue, std::move(cmd), std::move(batch), qp, qpCount});
             }
         } else if (!hasWork && inFlight_.empty()) {
@@ -1767,11 +1752,9 @@ void Chunks::reset(uint32_t numChunks) {
     // GC flush intentionally omitted — shared_ptrs naturally prevent use-after-free,
     // and the frame-indexed ring will clean up when each slot is reused.
 
-    // Note: prevBlasSnapshot_ in WorldPrepareContexts still holds shared_ptrs to old
-    // BLASes — that's fine, it keeps them alive. The stale cachedChunks_ will be resized
-    // on the next render() call when chunk1s.size() changes. The TLAS UPDATE check will
-    // fail (instance count changed) and force a full BUILD. No explicit cleanup needed
-    // because vkDeviceWaitIdle above guarantees no GPU work references the old data.
+    // Note: WorldPrepareContext caches (cachedChunks_, prevBlasSnapshot_, TLAS) are
+    // cleared on the next render() call when chunk1s.size() changes.
+    // vkDeviceWaitIdle above guarantees no GPU work references old data.
 
     int size = Renderer::instance().framework()->swapchain()->imageCount();
 

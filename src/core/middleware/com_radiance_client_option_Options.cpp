@@ -46,6 +46,12 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     if (write) Renderer::options.needRecreate = true;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExtendedRenderDistance(
+    JNIEnv *, jclass, jint distance, jboolean write) {
+    // Stub: extended render distance not implemented at this commit.
+    // Prevents UnsatisfiedLinkError when Radiance Java code calls this method.
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkBuildingBatchSize(
     JNIEnv *, jclass, jint chunkBuildingBatchSize, jboolean write) {
     Renderer::options.chunkBuildingBatchSize = chunkBuildingBatchSize;

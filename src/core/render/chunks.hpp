@@ -186,6 +186,9 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
     void pause();
     void resume();
 
+    // Last BLAS timeline value submitted to secondary queue (for cross-queue GC sync)
+    uint64_t lastSubmittedTimelineValue() const { return lastSubmittedTimeline_.load(std::memory_order_acquire); }
+
     // Queue depth for Java-side adaptive throttling
     uint32_t getInputQueueSize() {
         std::lock_guard<std::mutex> lock(inputMtx_);
@@ -234,6 +237,9 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
 
     // BLAS timeline counter — only incremented by BLAS thread (sole owner, no atomic needed)
     uint64_t blasTimelineCounter_{0};
+
+    // Last submitted timeline value — atomic for cross-thread read by render thread GC sync
+    std::atomic<uint64_t> lastSubmittedTimeline_{0};
 
     // BLAS thread cmd pool — owned exclusively, no mutex
     std::queue<std::shared_ptr<vk::CommandBuffer>> cmdPool_;

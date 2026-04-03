@@ -284,6 +284,7 @@ void WorldPrepareContext::render() {
                         };
                     }
 
+                    if (!entities1[i]->blas) continue; // entity BLAS not yet built
                     instanceBuilder.defineInstance(transform, blasIndex, entities1[i]->rtFlag, blasGroupAccu, flags,
                                                    entities1[i]->blas);
                 } else {
@@ -388,8 +389,18 @@ void WorldPrepareContext::render() {
         };
         std::unordered_map<int64_t, std::vector<int>> farChunksByMega;
 
-        // Update cache: only recompute metadata when blasGeneration changes
-        if (cachedChunks_.size() != chunk1s.size()) cachedChunks_.resize(chunk1s.size());
+        // Update cache: only recompute metadata when blasGeneration changes.
+        // On render-distance change the chunk grid is rebuilt — clear the entire cache
+        // to prevent stale BLAS/buffer pointers from surviving across the reset.
+        if (cachedChunks_.size() != chunk1s.size()) {
+            cachedChunks_.clear();
+            cachedChunks_.resize(chunk1s.size());
+            // Force full TLAS BUILD (stale snapshot would falsely match new generations)
+            prevBlasSnapshot_ = {};
+            prevTlasInstanceCount_ = 0;
+            tlas = nullptr;
+            tlasBuilder = nullptr;
+        }
 
         // Parallel pass 1: update cache + distance cull → collect visible chunk indices
         // Each thread fills a local list of visible chunk indices
@@ -913,7 +924,8 @@ void WorldPrepareContext::render() {
 
     bool canUpdate = tlas != nullptr
         && currBlasSnapshot.instanceCount == prevBlasSnapshot_.instanceCount
-        && currBlasSnapshot.generations == prevBlasSnapshot_.generations;
+        && currBlasSnapshot.generations == prevBlasSnapshot_.generations
+        && currBlasSnapshot.blases == prevBlasSnapshot_.blases;
 
     constexpr VkBuildAccelerationStructureFlagsKHR tlasFlags =
         VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
