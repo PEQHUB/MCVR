@@ -1,8 +1,11 @@
 # V2 Engine — gated behind MCVR_ENABLE_ENGINE_V2
 
 set(ENGINE_SOURCES
+    app/engine_app.cpp
+    app/engine_session.cpp
+    app/engine_services.cpp
+    config/config_service.cpp
     diagnostics/log.cpp
-    app/config_stubs.cpp
     ${CMAKE_SOURCE_DIR}/src/generated/bridge/config_bridge.cpp
 )
 
