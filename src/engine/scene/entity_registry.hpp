@@ -63,6 +63,13 @@ public:
     void clearDirty();
 
     uint32_t size() const { return static_cast<uint32_t>(states_.size()); }
+
+    // Iterate all entity states (for TLAS instance building / scene extraction).
+    template<typename Fn>
+    void forEachState(Fn&& fn) const {
+        for (const auto& [id, state] : states_) fn(state);
+    }
+
     void clear();
 
 private:

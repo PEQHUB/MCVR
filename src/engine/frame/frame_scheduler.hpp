@@ -7,6 +7,7 @@
 
 #include "frame_context.hpp"
 #include "resource_gc.hpp"
+#include "rendergraph/graph_types.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -17,10 +18,10 @@ namespace engine {
 class EngineServices;
 
 // Orchestrates the per-frame lifecycle:
-//   beginFrame() → [render passes] → endFrame()
+//   beginFrame() → executeGraph() → endFrame()
 //
-// Currently a no-op loop (no Vulkan submission). The frame shell proves
-// the scheduling contract before real rendering is wired in.
+// When a CompiledGraph is set, executeGraph() runs all passes in
+// topological order, passing the FrameContext to each.
 class FrameScheduler {
 public:
     explicit FrameScheduler(EngineServices& services);
@@ -33,8 +34,18 @@ public:
     // Returns the FrameContext for this frame.
     FrameContext beginFrame();
 
+    // Execute the compiled render graph for this frame.
+    // Each pass's execute callback receives the FrameContext and PassResources.
+    // No-op if no graph is set.
+    void executeGraph(const FrameContext& ctx);
+
     // End the current frame. Updates timing, emits events.
     void endFrame(const FrameContext& ctx);
+
+    // Set the compiled render graph. Call after GraphBuilder::compile().
+    // The graph is NOT recompiled per-frame — only when the pipeline changes.
+    void setGraph(CompiledGraph graph);
+    bool hasGraph() const { return graph_.valid(); }
 
     // Access the GC (for deferring resource destruction).
     ResourceGC& gc() { return gc_; }
@@ -45,6 +56,7 @@ public:
 private:
     EngineServices& services_;
     ResourceGC gc_{32};
+    CompiledGraph graph_;
 
     uint64_t frameNumber_ = 0;
     uint32_t frameIndex_ = 0;       // Round-robin swapchain index (placeholder)

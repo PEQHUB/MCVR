@@ -43,6 +43,24 @@ FrameContext FrameScheduler::beginFrame() {
     return ctx;
 }
 
+void FrameScheduler::executeGraph(const FrameContext& ctx) {
+    if (!graph_.valid()) return;
+
+    for (const auto& pass : graph_.passes) {
+        if (pass.execute) {
+            pass.execute(ctx, pass.resources);
+        }
+    }
+}
+
+void FrameScheduler::setGraph(CompiledGraph graph) {
+    graph_ = std::move(graph);
+    if (graph_.valid()) {
+        log::info("frame", "Render graph set: " + std::to_string(graph_.passCount()) +
+                  " passes, " + std::to_string(graph_.resourceCount()) + " resources");
+    }
+}
+
 void FrameScheduler::endFrame(const FrameContext& ctx) {
     // Advance counters
     ++frameNumber_;

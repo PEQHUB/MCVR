@@ -117,7 +117,8 @@ bool ReplayPlayer::playFrame(const Callbacks& cb) {
                 std::vector<uint8_t> vData(vSize), iData(iSize);
                 if (vSize > 0) readBytes(vData.data(), vSize);
                 if (iSize > 0) readBytes(iData.data(), iSize);
-                if (cb.onChunkInsert) cb.onChunkInsert(id, vData.data(), vSize, iData.data(), iSize);
+                // Pass owned vectors — callback can move them into async upload.
+                if (cb.onChunkInsert) cb.onChunkInsert(id, std::move(vData), std::move(iData));
                 break;
             }
             case 0x02: { // ChunkRemove

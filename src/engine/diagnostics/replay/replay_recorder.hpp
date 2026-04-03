@@ -70,7 +70,9 @@ private:
 class ReplayPlayer {
 public:
     struct Callbacks {
-        std::function<void(ChunkId, const void*, uint32_t, const void*, uint32_t)> onChunkInsert;
+        // onChunkInsert receives owned vectors — safe to move into async upload.
+        // The vectors are valid for the lifetime of the callback and may be moved from.
+        std::function<void(ChunkId, std::vector<uint8_t> vertexData, std::vector<uint8_t> indexData)> onChunkInsert;
         std::function<void(ChunkId)> onChunkRemove;
         std::function<void(EntityId, float, float, float, float, float, float, float)> onEntityInsert;
         std::function<void(EntityId)> onEntityRemove;
