@@ -196,4 +196,33 @@ else()
     message(STATUS "OMM SDK Disabled")
 endif()
 
+# --- Config codegen (schema → C++ structs + JNI bridge) ---
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(CONFIG_SCHEMA "${CMAKE_SOURCE_DIR}/schema/engine_config.schema.json")
+set(CONFIG_CODEGEN "${CMAKE_SOURCE_DIR}/tools/codegen/gen_config.py")
+set(GENERATED_CPP_DIR "${CMAKE_SOURCE_DIR}/src/generated/config")
+set(GENERATED_BRIDGE_DIR "${CMAKE_SOURCE_DIR}/src/generated/bridge")
+set(GENERATED_JAVA_DIR "${CMAKE_SOURCE_DIR}/../Radiance/src/generated/java/com/radiance/v2/config")
+
+add_custom_command(
+    OUTPUT
+        "${GENERATED_CPP_DIR}/engine_config.hpp"
+        "${GENERATED_CPP_DIR}/config_defaults.hpp"
+        "${GENERATED_BRIDGE_DIR}/config_bridge.cpp"
+    COMMAND ${Python3_EXECUTABLE} "${CONFIG_CODEGEN}" "${CONFIG_SCHEMA}"
+        --cpp-out "${GENERATED_CPP_DIR}"
+        --java-out "${GENERATED_JAVA_DIR}"
+        --bridge-out "${GENERATED_BRIDGE_DIR}"
+    DEPENDS "${CONFIG_SCHEMA}" "${CONFIG_CODEGEN}"
+    COMMENT "Generating config from engine_config.schema.json"
+)
+add_custom_target(generate_config DEPENDS
+    "${GENERATED_CPP_DIR}/engine_config.hpp"
+    "${GENERATED_CPP_DIR}/config_defaults.hpp"
+    "${GENERATED_BRIDGE_DIR}/config_bridge.cpp"
+)
+
+# --- V2 engine (behind build flag, default OFF) ---
+option(MCVR_ENABLE_ENGINE_V2 "Enable v2 engine subsystems" OFF)
+
 add_subdirectory(src)

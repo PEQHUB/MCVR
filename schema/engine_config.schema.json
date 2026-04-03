@@ -1,0 +1,541 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://radser.dev/schema/engine_config.schema.json",
+  "title": "RadSER Engine Configuration",
+  "description": "Single source of truth for all engine options. Generates C++ structs, Java classes, and JNI bridge code.",
+  "type": "object",
+  "x-version": 22,
+  "x-properties-file": "options.properties",
+
+  "properties": {
+
+    "display": {
+      "type": "object",
+      "x-category": "options.video.category.window",
+      "x-order": 0,
+      "properties": {
+        "vsync": {
+          "type": "boolean",
+          "default": true,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "pipeline",
+          "x-runtime-scope": "frame",
+          "x-doc": "Vertical sync - caps framerate to display refresh rate",
+          "x-cpp-side-effect": "needRecreate = true"
+        },
+        "maxFps": {
+          "type": "integer",
+          "default": 260,
+          "minimum": 10,
+          "maximum": 1000,
+          "x-ui-control": "slider",
+          "x-step": 10,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Maximum framerate limit",
+          "x-cpp-side-effect": "reflexDirty = true"
+        },
+        "inactivityFpsLimit": {
+          "type": "integer",
+          "default": 260,
+          "minimum": 10,
+          "maximum": 1000,
+          "x-ui-control": "slider",
+          "x-step": 10,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Framerate limit when window is unfocused"
+        },
+        "outputScale2x": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "pipeline",
+          "x-runtime-scope": "session",
+          "x-doc": "Render at 2x display resolution (screenshot mode)",
+          "x-cpp-side-effect": "needRecreate = true"
+        }
+      }
+    },
+
+    "upscaler": {
+      "type": "object",
+      "x-category": "options.video.category.upscaler",
+      "x-order": 1,
+      "properties": {
+        "upscalerMode": {
+          "type": "integer",
+          "default": 0,
+          "x-enum": {
+            "0": "DLSS-RR",
+            "1": "FSR3",
+            "2": "Off"
+          },
+          "x-ui-control": "dropdown",
+          "x-restart-scope": "pipeline",
+          "x-runtime-scope": "session",
+          "x-doc": "Upscaler / denoiser backend",
+          "x-cpp-side-effect": "needRecreate = true"
+        },
+        "upscalerQuality": {
+          "type": "integer",
+          "default": 2,
+          "x-enum": {
+            "0": "Performance",
+            "1": "Balanced",
+            "2": "Quality",
+            "3": "Native / DLAA",
+            "4": "Custom"
+          },
+          "x-ui-control": "dropdown",
+          "x-restart-scope": "pipeline",
+          "x-runtime-scope": "session",
+          "x-doc": "Upscaler quality preset (affects internal resolution)",
+          "x-cpp-side-effect": "needRecreate = true"
+        },
+        "upscalerResOverride": {
+          "type": "integer",
+          "default": 99,
+          "minimum": 33,
+          "maximum": 100,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-unit": "%",
+          "x-restart-scope": "pipeline",
+          "x-runtime-scope": "session",
+          "x-doc": "Manual resolution scale override (only when quality = Custom)",
+          "x-cpp-side-effect": "needRecreate = true"
+        }
+      }
+    },
+
+    "rayTracing": {
+      "type": "object",
+      "x-category": "options.video.category.ray_tracing",
+      "x-order": 2,
+      "properties": {
+        "rayBounces": {
+          "type": "integer",
+          "default": 12,
+          "minimum": 1,
+          "maximum": 12,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Maximum ray bounce depth"
+        },
+        "simplifiedIndirect": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Use simplified BRDF for indirect bounces (faster, less accurate)"
+        },
+        "serEnabled": {
+          "type": "boolean",
+          "default": true,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Shader Execution Reordering (NV hardware feature)"
+        },
+        "serHintsEnabled": {
+          "type": "boolean",
+          "default": true,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "SER coherence hints for material sorting"
+        },
+        "noiseLOD": {
+          "type": "boolean",
+          "default": true,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Noise-based LOD for distant surfaces"
+        },
+        "multiScatterGGX": {
+          "type": "boolean",
+          "default": true,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Multi-scatter GGX energy compensation (Kulla-Conty)"
+        },
+        "eonDiffuse": {
+          "type": "boolean",
+          "default": true,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "EON diffuse BRDF (replaces Lambertian)"
+        },
+        "greedyMeshingEnabled": {
+          "type": "boolean",
+          "default": true,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "renderer",
+          "x-runtime-scope": "session",
+          "x-doc": "CPU-side coplanar face merging for chunk geometry"
+        },
+        "ommEnabled": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "renderer",
+          "x-runtime-scope": "session",
+          "x-doc": "Opacity Micro-Maps for alpha-tested geometry",
+          "x-experimental": true,
+          "x-cpp-side-effect": "needRecreate = true; resetScheduler()"
+        },
+        "ommBakerLevel": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 8,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-restart-scope": "renderer",
+          "x-runtime-scope": "session",
+          "x-doc": "OMM subdivision level (higher = more precise, more memory)"
+        }
+      }
+    },
+
+    "exposure": {
+      "type": "object",
+      "x-category": "options.video.category.exposure",
+      "x-order": 3,
+      "properties": {
+        "exposureCompensation": {
+          "type": "number",
+          "default": 0.0,
+          "x-java-type": "int",
+          "x-java-unit": "tenths",
+          "x-java-range": [-50, 50],
+          "x-cpp-type": "float",
+          "minimum": -5.0,
+          "maximum": 5.0,
+          "x-ui-control": "slider",
+          "x-step": 0.1,
+          "x-unit": "EV",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Exposure compensation in EV stops"
+        },
+        "manualExposureEnabled": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Override auto-exposure with manual value"
+        },
+        "manualExposure": {
+          "type": "number",
+          "default": 0.0000254,
+          "minimum": 0.0001,
+          "maximum": 10.0,
+          "x-ui-control": "slider",
+          "x-step": 0.0001,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Manual exposure value (luminance scale)"
+        },
+        "brightAdaptSpeed": {
+          "type": "number",
+          "default": 0.5,
+          "x-java-type": "int",
+          "x-java-unit": "tenths",
+          "x-java-range": [1, 50],
+          "x-cpp-type": "float",
+          "minimum": 0.1,
+          "maximum": 5.0,
+          "x-ui-control": "slider",
+          "x-step": 0.1,
+          "x-unit": "s",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Speed of adaptation from dark to bright"
+        },
+        "darkAdaptSpeed": {
+          "type": "number",
+          "default": 2.0,
+          "x-java-type": "int",
+          "x-java-unit": "tenths",
+          "x-java-range": [1, 50],
+          "x-cpp-type": "float",
+          "minimum": 0.1,
+          "maximum": 5.0,
+          "x-ui-control": "slider",
+          "x-step": 0.1,
+          "x-unit": "s",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Speed of adaptation from bright to dark"
+        },
+        "sceneChangeThreshold": {
+          "type": "number",
+          "default": 5.0,
+          "x-java-type": "int",
+          "x-java-unit": "tenths",
+          "x-java-range": [10, 200],
+          "x-cpp-type": "float",
+          "minimum": 1.0,
+          "maximum": 20.0,
+          "x-ui-control": "slider",
+          "x-step": 0.1,
+          "x-unit": "EV",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "EV delta threshold for instant exposure jump"
+        },
+        "centerWeightStrength": {
+          "type": "number",
+          "default": 0.0,
+          "x-java-type": "int",
+          "x-java-unit": "percent",
+          "x-java-range": [0, 100],
+          "x-cpp-type": "float",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "x-ui-control": "slider",
+          "x-step": 0.01,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Center-weighted metering strength"
+        },
+        "highlightWeight": {
+          "type": "number",
+          "default": 0.5,
+          "x-java-type": "int",
+          "x-java-unit": "percent",
+          "x-java-range": [0, 100],
+          "x-cpp-type": "float",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "x-ui-control": "slider",
+          "x-step": 0.01,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Highlight-weighted exposure metering strength"
+        }
+      }
+    },
+
+    "toneMapping": {
+      "type": "object",
+      "x-category": "options.video.category.tonemapping",
+      "x-order": 4,
+      "properties": {
+        "tonemappingMode": {
+          "type": "integer",
+          "default": 0,
+          "x-enum": {
+            "0": "PsychoV",
+            "1": "AgX",
+            "2": "Reinhard Extended",
+            "3": "Off"
+          },
+          "x-ui-control": "dropdown",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "SDR tone mapping operator"
+        },
+        "psychoEnabled": {
+          "type": "boolean",
+          "default": true,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Enable PsychoV psychophysical tone mapping"
+        },
+        "saturation": {
+          "type": "number",
+          "default": 1.3,
+          "x-java-type": "int",
+          "x-java-unit": "percent",
+          "x-java-range": [0, 200],
+          "x-cpp-type": "float",
+          "minimum": 0.0,
+          "maximum": 2.0,
+          "x-ui-control": "slider",
+          "x-step": 0.01,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Post-tonemap color saturation"
+        },
+        "saturationAdaptive": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Adaptive saturation based on scene luminance"
+        },
+        "Lwhite": {
+          "type": "number",
+          "default": 4.0,
+          "x-java-type": "int",
+          "x-java-unit": "tenths",
+          "x-java-range": [5, 200],
+          "x-cpp-type": "float",
+          "minimum": 0.5,
+          "maximum": 20.0,
+          "x-ui-control": "slider",
+          "x-step": 0.1,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "White point luminance for Reinhard-style operators"
+        },
+        "colorExpansion": {
+          "type": "number",
+          "default": 1.0,
+          "x-java-type": "int",
+          "x-java-unit": "percent",
+          "x-java-range": [0, 200],
+          "x-cpp-type": "float",
+          "minimum": 0.0,
+          "maximum": 2.0,
+          "x-ui-control": "slider",
+          "x-step": 0.01,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Gamut expansion strength"
+        },
+        "sharpenerMode": {
+          "type": "integer",
+          "default": 0,
+          "x-enum": {
+            "0": "Off",
+            "1": "CAS",
+            "2": "RCAS"
+          },
+          "x-ui-control": "dropdown",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Post-process sharpening filter"
+        },
+        "casSharpness": {
+          "type": "number",
+          "default": 0.5,
+          "x-java-type": "int",
+          "x-java-unit": "percent",
+          "x-java-range": [0, 100],
+          "x-cpp-type": "float",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "x-ui-control": "slider",
+          "x-step": 0.01,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "CAS/RCAS sharpening intensity"
+        },
+        "psychoPeakSDR": {
+          "type": "number",
+          "default": 1.0,
+          "x-java-type": "int",
+          "x-java-unit": "percent",
+          "x-java-range": [50, 300],
+          "x-cpp-type": "float",
+          "minimum": 0.5,
+          "maximum": 3.0,
+          "x-ui-control": "slider",
+          "x-step": 0.01,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "PsychoV SDR peak brightness multiplier"
+        }
+      }
+    },
+
+    "chunks": {
+      "type": "object",
+      "x-category": "options.video.category.chunks",
+      "x-order": 10,
+      "properties": {
+        "chunkBuildingBatchSize": {
+          "type": "integer",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 32,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Chunks per BLAS build batch"
+        },
+        "chunkBuildingTotalBatches": {
+          "type": "integer",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 32,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Maximum concurrent BLAS build batches"
+        },
+        "chunkCullDistance": {
+          "type": "number",
+          "default": 384.0,
+          "minimum": 64.0,
+          "maximum": 2048.0,
+          "x-ui-control": "slider",
+          "x-step": 16.0,
+          "x-unit": "blocks",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Distance beyond which chunks are culled from TLAS"
+        },
+        "chunkLodDistance": {
+          "type": "number",
+          "default": 160.0,
+          "minimum": 32.0,
+          "maximum": 512.0,
+          "x-ui-control": "slider",
+          "x-step": 16.0,
+          "x-unit": "blocks",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Distance at which chunks switch to lower LOD"
+        }
+      }
+    },
+
+    "debug": {
+      "type": "object",
+      "x-category": "options.video.category.debug",
+      "x-order": 99,
+      "properties": {
+        "loggingEnabled": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Enable engine debug logging"
+        },
+        "gpuDiagnostics": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Enable GPU diagnostics checkpoints"
+        },
+        "validationLayers": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "renderer",
+          "x-runtime-scope": "startup",
+          "x-doc": "Enable Vulkan validation layers (significant perf cost)"
+        }
+      }
+    }
+  }
+}

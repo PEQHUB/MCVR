@@ -85,3 +85,5 @@ cmake-build*
 
 ###### Project docs (session notes) ######
 docs/
+# Codegen output (regenerated from schema/engine_config.schema.json)
+src/generated/
