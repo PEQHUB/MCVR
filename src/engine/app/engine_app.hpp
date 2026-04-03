@@ -11,6 +11,11 @@ namespace engine {
 
 class EngineSession;
 class EngineServices;
+struct CmdPing;
+struct CmdWindowResize;
+struct CmdWorldLoad;
+struct CmdWorldUnload;
+struct CmdShutdown;
 
 enum class EngineMode {
     Legacy,  // Use existing Renderer path
@@ -49,6 +54,13 @@ private:
     std::unique_ptr<EngineSession> session_;
 
     static EngineApp* s_instance;
+
+    // Command dispatch (called from bridge handler via std::visit)
+    void handleCommand(const struct CmdPing& cmd);
+    void handleCommand(const struct CmdWindowResize& cmd);
+    void handleCommand(const struct CmdWorldLoad& cmd);
+    void handleCommand(const struct CmdWorldUnload& cmd);
+    void handleCommand(const struct CmdShutdown& cmd);
 };
 
 } // namespace engine

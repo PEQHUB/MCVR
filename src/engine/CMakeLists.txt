@@ -4,8 +4,11 @@ set(ENGINE_SOURCES
     app/engine_app.cpp
     app/engine_session.cpp
     app/engine_services.cpp
+    bridge/bridge_service.cpp
     config/config_service.cpp
     diagnostics/log.cpp
+    frame/frame_scheduler.cpp
+    frame/resource_gc.cpp
     platform/vulkan/vk2_buffer.cpp
     platform/vulkan/vk2_image.cpp
     ${CMAKE_SOURCE_DIR}/src/generated/bridge/config_bridge.cpp

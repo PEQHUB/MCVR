@@ -2,6 +2,7 @@
 #include "engine_session.hpp"
 #include "engine_services.hpp"
 #include "config/config_service.hpp"
+#include "bridge/bridge_service.hpp"
 #include "diagnostics/log.hpp"
 
 namespace engine {
@@ -33,6 +34,11 @@ void EngineApp::init(const std::string& configDir, EngineMode mode) {
     std::string configPath = configDir + "/options.properties";
     services_->config().load(configPath);
 
+    // Wire default command handler
+    services_->bridge().setHandler([this](const BridgeCommand& cmd) {
+        std::visit([this](const auto& c) { handleCommand(c); }, cmd);
+    });
+
     // Create session
     session_ = std::make_unique<EngineSession>(*services_);
     session_->setState(SessionState::Running);
@@ -61,6 +67,32 @@ void EngineApp::shutdown() {
 
 EngineApp* EngineApp::get() {
     return s_instance;
+}
+
+// --- Command handlers ---
+
+void EngineApp::handleCommand(const CmdPing& cmd) {
+    log::debug("bridge", "Ping received, ts=" + std::to_string(cmd.timestamp));
+}
+
+void EngineApp::handleCommand(const CmdWindowResize& cmd) {
+    log::info("bridge", "Window resize: " + std::to_string(cmd.width) + "x" + std::to_string(cmd.height));
+    // Will trigger SwapchainService::recreate() once that service exists.
+}
+
+void EngineApp::handleCommand(const CmdWorldLoad& cmd) {
+    log::info("bridge", "World load: " + cmd.regionPath);
+    // Will trigger SceneService reset + streaming start once those services exist.
+}
+
+void EngineApp::handleCommand(const CmdWorldUnload&) {
+    log::info("bridge", "World unload");
+    // Will trigger SceneService cleanup once that service exists.
+}
+
+void EngineApp::handleCommand(const CmdShutdown&) {
+    log::info("bridge", "Shutdown requested via bridge");
+    if (session_) session_->setState(SessionState::ShuttingDown);
 }
 
 // --- Bridge symbols (consumed by generated config_bridge.cpp) ---
