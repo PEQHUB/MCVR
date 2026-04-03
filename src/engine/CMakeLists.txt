@@ -12,6 +12,9 @@ set(ENGINE_SOURCES
     platform/vulkan/vk2_buffer.cpp
     platform/vulkan/vk2_image.cpp
     rendergraph/graph_builder.cpp
+    scene/chunk_registry.cpp
+    scene/entity_registry.cpp
+    scene/scene_service.cpp
     ${CMAKE_SOURCE_DIR}/src/generated/bridge/config_bridge.cpp
 )
 
@@ -24,6 +27,7 @@ target_include_directories(engine PUBLIC
     ${CMAKE_SOURCE_DIR}/extern/vma/include
     ${CMAKE_SOURCE_DIR}/extern/vulkan_headers/include
     ${CMAKE_SOURCE_DIR}/extern/volk
+    ${CMAKE_SOURCE_DIR}/extern/glm
 )
 
 target_compile_definitions(engine PUBLIC
