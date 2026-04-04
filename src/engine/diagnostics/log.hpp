@@ -48,3 +48,11 @@ void setCategoryEnabled(std::string_view category, bool enabled);
 bool isInitialized();
 
 } // namespace engine::log
+
+// Debug-only assertion — fires log::fatal (aborts) on invariant violation.
+#ifndef NDEBUG
+#define ENGINE_ASSERT(cond, msg) \
+    do { if (!(cond)) { engine::log::fatal("assert", msg); } } while(0)
+#else
+#define ENGINE_ASSERT(cond, msg) ((void)0)
+#endif

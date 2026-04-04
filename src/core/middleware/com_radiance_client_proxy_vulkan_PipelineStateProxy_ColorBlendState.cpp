@@ -9,6 +9,7 @@ extern "C" {
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024ColorBlendState_setBlendEnable(
     JNIEnv *, jclass, jboolean enable) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -19,6 +20,7 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_
 JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024ColorBlendState_setColorBlendConstants(
     JNIEnv *, jclass, jfloat const1, jfloat const2, jfloat const3, jfloat const4) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -30,6 +32,7 @@ JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024ColorBlendState_setColorLogicOpEnable(JNIEnv *,
                                                                                                     jclass,
                                                                                                     jboolean enable) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -45,6 +48,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024ColorBlendState_vk
     jint srcAlphaBlendFactor,
     jint dstColorBlendFactor,
     jint dstAlphaBlendFactor) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -58,6 +62,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024ColorBlendState_vk
                                                                                                    jclass,
                                                                                                    jint colorBlendOp,
                                                                                                    jint alphaBlendOp) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -69,6 +74,7 @@ JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024ColorBlendState_vkSetColorWriteMask(JNIEnv *,
                                                                                                   jclass,
                                                                                                   jint colorWriteMask) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -78,6 +84,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024ColorBlendState_vk
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024ColorBlendState_vkSetColorLogicOp(
     JNIEnv *, jclass, jint colorLogicOp) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();

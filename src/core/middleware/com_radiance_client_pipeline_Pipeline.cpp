@@ -7,22 +7,26 @@
 #include <iostream>
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_pipeline_Pipeline_buildNative(JNIEnv *, jclass, jlong paramsLongPtr) {
+    if (!Renderer::is_initialized()) return;
     WorldPipelineBuildParams *params = reinterpret_cast<WorldPipelineBuildParams *>(paramsLongPtr);
     auto pipeline = Renderer::instance().framework()->pipeline();
     if (pipeline != nullptr) Renderer::instance().framework()->pipeline()->buildWorldPipelineBlueprint(params);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_pipeline_Pipeline_collectNativeModules(JNIEnv *, jclass) {
+    if (!Renderer::is_initialized()) return;
     Pipeline::collectWorldModules();
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_pipeline_Pipeline_recollectNativeModules(JNIEnv *, jclass) {
+    if (!Renderer::is_initialized()) return;
     Pipeline::recollectWorldModules();
 }
 
 extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_pipeline_Pipeline_isNativeModuleAvailable(JNIEnv *env,
                                                                                               jclass,
                                                                                               jstring name) {
+    if (!Renderer::is_initialized()) return JNI_FALSE;
     if (name == nullptr) return JNI_FALSE;
     const char *nativeString = env->GetStringUTFChars(name, nullptr);
     if (nativeString == nullptr) return JNI_FALSE;

@@ -58,7 +58,8 @@ std::atomic<bool> g_rendererShuttingDown{false};
 std::atomic<bool> g_rendererClosed{false};
 
 inline bool rendererUsable() {
-    return !g_rendererShuttingDown.load(std::memory_order_acquire) &&
+    return Renderer::is_initialized() &&
+           !g_rendererShuttingDown.load(std::memory_order_acquire) &&
            !g_rendererClosed.load(std::memory_order_acquire);
 }
 } // namespace
@@ -157,7 +158,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
 
 extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_maxSupportedTextureSize(JNIEnv *, jclass) {
     std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
-    if (!rendererUsable()) return 0;
+    if (!rendererUsable()) return 16384; // V2 mode: return safe default for texture atlas sizing
     auto maxImageSize = Renderer::instance().framework()->physicalDevice()->properties().limits.maxImageDimension2D;
     return maxImageSize;
 }

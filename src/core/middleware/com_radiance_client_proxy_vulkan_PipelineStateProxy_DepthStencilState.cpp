@@ -10,6 +10,7 @@ JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_setDepthTestEnable(JNIEnv *,
                                                                                                    jclass,
                                                                                                    jboolean enable) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -21,6 +22,7 @@ JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_setDepthWriteEnable(JNIEnv *,
                                                                                                     jclass,
                                                                                                     jboolean enable) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -32,6 +34,7 @@ JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_setStencilTestEnable(JNIEnv *,
                                                                                                      jclass,
                                                                                                      jboolean enable) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -42,6 +45,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_
 JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_vkSetDepthCompareOp(
     JNIEnv *, jclass, jint depthCompareOp) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -52,6 +56,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_
 JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_vkSetStencilFrontFunc(
     JNIEnv *, jclass, jint compareOp, jint reference, jint compareMask) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -62,6 +67,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_
 JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_vkSetStencilBackFunc(
     JNIEnv *, jclass, jint compareOp, jint reference, jint compareMask) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -72,6 +78,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_
 JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_vkSetStencilFrontOp(
     JNIEnv *, jclass, jint failOp, jint depthFailOp, jint passOp) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -82,6 +89,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_
 JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_vkSetStencilBackOp(
     JNIEnv *, jclass, jint failOp, jint depthFailOp, jint passOp) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -92,6 +100,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_
 JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_vkSetStencilFrontWriteMask(
     JNIEnv *, jclass, jint writeMask) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -102,6 +111,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_
 JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024DepthStencilState_vkSetStencilBackWriteMask(
     JNIEnv *, jclass, jint writeMask) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();

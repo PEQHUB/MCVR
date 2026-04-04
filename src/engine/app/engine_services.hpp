@@ -11,6 +11,7 @@ namespace engine {
 class ConfigService;
 class BridgeService;
 class FrameScheduler;
+class MetricsService;
 class SceneService;
 
 namespace vk2 {
@@ -45,12 +46,16 @@ public:
     vk2::SwapchainService& swapchain() { return *swapchain_; }
     const vk2::SwapchainService& swapchain() const { return *swapchain_; }
 
+    MetricsService& metrics() { return *metrics_; }
+    const MetricsService& metrics() const { return *metrics_; }
+
 private:
     std::unique_ptr<ConfigService> config_;
     std::unique_ptr<BridgeService> bridge_;
     std::unique_ptr<vk2::DeviceService> device_;
     std::unique_ptr<vk2::SwapchainService> swapchain_;
     std::unique_ptr<FrameScheduler> frame_;
+    std::unique_ptr<MetricsService> metrics_;
     std::unique_ptr<SceneService> scene_;
 };
 

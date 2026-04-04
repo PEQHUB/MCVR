@@ -2,8 +2,12 @@
 
 // Ownership: EngineServices (1:1).
 // Thread: Main thread only. No method is thread-safe.
-// Dependencies: ConfigService (for snapshot), BridgeService (for flush),
-//               ResourceGC (for tick), DeviceService + SwapchainService (for V2 frames).
+// Dependencies: ConfigService (snapshot), BridgeService (flush),
+//               ResourceGC, DeviceService + SwapchainService (V2 frames).
+//
+// Sync objects are sized to framesInFlight (CPU frame slots), NOT imageCount.
+// frameIndex rotates through 0..framesInFlight-1 each frame.
+// swapchainImageIndex comes from vkAcquireNextImageKHR and indexes swapchain images.
 
 #include "frame_context.hpp"
 #include "resource_gc.hpp"
@@ -36,20 +40,19 @@ public:
 
     void setImageCount(uint32_t count) { imageCount_ = count; }
 
-    // Create per-frame sync objects (semaphores + fences + command pool).
-    vk2::Result<void> initSync(vk2::DeviceService& device);
+    // Create per-frame sync objects. framesInFlight <= imageCount.
+    vk2::Result<void> initSync(vk2::DeviceService& device, uint32_t framesInFlight);
     void shutdownSync();
 
     // --- Frame lifecycle ---
 
     FrameContext beginFrame();
 
-    // Record and submit a vkCmdClearColorImage + present. Proof of life.
-    void executeClearFrame(vk2::DeviceService& device, vk2::SwapchainService& swapchain,
-                           const FrameContext& ctx);
+    // Acquire, render clear, present. Returns true if frame was skipped (recreate).
+    bool executeClearFrame(vk2::DeviceService& device, vk2::SwapchainService& swapchain,
+                           FrameContext& ctx);
 
     void executeGraph(const FrameContext& ctx);
-
     void endFrame(const FrameContext& ctx);
 
     void setGraph(CompiledGraph graph);
@@ -58,6 +61,7 @@ public:
     ResourceGC& gc() { return gc_; }
     uint64_t frameNumber() const { return frameNumber_; }
     float lastFrameTimeMs() const { return lastFrameTimeMs_; }
+    bool isDeviceLost() const { return deviceLost_; }
 
 private:
     EngineServices& services_;
@@ -66,6 +70,7 @@ private:
 
     uint64_t frameNumber_ = 0;
     uint32_t frameIndex_ = 0;
+    uint32_t framesInFlight_ = 2;
     uint32_t imageCount_ = 3;
 
     using Clock = std::chrono::high_resolution_clock;
@@ -73,7 +78,6 @@ private:
     float lastFrameTimeMs_ = 0.0f;
     bool firstFrame_ = true;
 
-    // Per-frame sync objects (sized to imageCount_)
     struct FrameSync {
         VkSemaphore imageAcquired = VK_NULL_HANDLE;
         VkSemaphore renderComplete = VK_NULL_HANDLE;
@@ -82,8 +86,9 @@ private:
     };
     std::vector<FrameSync> frameSync_;
     VkCommandPool cmdPool_ = VK_NULL_HANDLE;
-    VkDevice syncDevice_ = VK_NULL_HANDLE;  // Non-owning, for cleanup
+    VkDevice syncDevice_ = VK_NULL_HANDLE;
     bool syncInitialized_ = false;
+    bool deviceLost_ = false;
 };
 
 } // namespace engine

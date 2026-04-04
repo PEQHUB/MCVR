@@ -8,6 +8,7 @@
 extern "C" {
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024RasterizationState_setLineWidth(
     JNIEnv *, jclass, jfloat lineWidth) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -19,6 +20,7 @@ JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024RasterizationState_vkSetPolygonMode(JNIEnv *,
                                                                                                   jclass,
                                                                                                   jint polygonMode) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -28,6 +30,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024RasterizationState
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024RasterizationState_vkSetCullMode(
     JNIEnv *, jclass, jint cullMode) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -37,6 +40,7 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024RasterizationState_vkSetFrontFace(
     JNIEnv *, jclass, jint frontFace) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -49,6 +53,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024RasterizationState
                                                                                                       jclass,
                                                                                                       jint polygonMode,
                                                                                                       jboolean enable) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -58,6 +63,7 @@ Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024RasterizationState
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024RasterizationState_vkSetDepthBias(
     JNIEnv *, jclass, jfloat depthBiasSlopeFactor, jfloat depthBiasConstantFactor) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();

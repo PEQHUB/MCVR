@@ -23,6 +23,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_EntityPro
                                                                                    jlong indexFormats,
                                                                                    jlong vertexCounts,
                                                                                    jlong vertices) {
+    if (!Renderer::is_initialized()) return;
     auto world = Renderer::instance().world();
     if (world == nullptr) return;
     world->entities()->queueBuild(EntitiesBuildTask{
@@ -48,6 +49,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_EntityPro
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_EntityProxy_build(JNIEnv *, jclass) {
+    if (!Renderer::is_initialized()) return;
     auto world = Renderer::instance().world();
     if (world == nullptr) return;
     world->entities()->build();

@@ -36,6 +36,11 @@ if (MSVC)
     target_link_libraries(core PRIVATE d3d11 dxgi dcomp dwmapi)
 endif ()
 
+if (MCVR_ENABLE_ENGINE_V2)
+    target_link_libraries(core PUBLIC engine)
+    target_compile_definitions(core PUBLIC MCVR_ENABLE_ENGINE_V2)
+endif ()
+
 set_target_properties(core PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF)
 
 install(TARGETS core DESTINATION ${MCVR_INSTALL_LIB_DIR})

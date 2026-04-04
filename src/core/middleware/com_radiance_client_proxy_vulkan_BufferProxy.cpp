@@ -5,6 +5,7 @@
 #include "core/render/renderer.hpp"
 
 extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_allocateBuffer(JNIEnv *, jclass) {
+    if (!Renderer::is_initialized()) return 0;
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr)
         return 0;
@@ -14,6 +15,7 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_BufferPr
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_initializeBuffer(
     JNIEnv *, jclass, jint id, jint size, jint usageFlags) {
+    if (!Renderer::is_initialized()) return;
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr) return;
     buffers->initializeBuffer(id, size, usageFlags);
@@ -21,6 +23,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferPr
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_buildIndexBuffer(
     JNIEnv *, jclass, jint dstId, jint type, jint drawMode, jint vertexCount, jint expectedIndexCount) {
+    if (!Renderer::is_initialized()) return;
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr) return;
     buffers->buildIndexBuffer(dstId, type, drawMode, vertexCount, expectedIndexCount);
@@ -30,12 +33,14 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferPr
                                                                                      jclass,
                                                                                      jlong ptr,
                                                                                      jint dstId) {
+    if (!Renderer::is_initialized()) return;
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr) return;
     buffers->queueOverlayUpload(reinterpret_cast<uint8_t *>(ptr), dstId);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_performQueuedUpload(JNIEnv *, jclass) {
+    if (!Renderer::is_initialized()) return;
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr) return;
     buffers->performQueuedUpload();
@@ -44,6 +49,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferPr
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateOverlayDrawUniform(JNIEnv *,
                                                                                                   jclass,
                                                                                                   jlong ptr) {
+    if (!Renderer::is_initialized()) return;
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr) return;
     vk::Data::OverlayUBO *ubo = reinterpret_cast<vk::Data::OverlayUBO *>(ptr);
@@ -53,6 +59,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferPr
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateOverlayPostUniform(JNIEnv *,
                                                                                                   jclass,
                                                                                                   jlong ptr) {
+    if (!Renderer::is_initialized()) return;
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr) return;
     vk::Data::OverlayPostUBO *ubo = reinterpret_cast<vk::Data::OverlayPostUBO *>(ptr);
@@ -87,6 +94,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferPr
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateWorldUniform(JNIEnv *,
                                                                                             jclass,
                                                                                             jlong ptr) {
+    if (!Renderer::is_initialized()) return;
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr) return;
     vk::Data::WorldUBO *ubo = reinterpret_cast<vk::Data::WorldUBO *>(ptr);
@@ -94,6 +102,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferPr
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateSkyUniform(JNIEnv *, jclass, jlong ptr) {
+    if (!Renderer::is_initialized()) return;
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr) return;
     vk::Data::SkyUBO *ubo = reinterpret_cast<vk::Data::SkyUBO *>(ptr);
@@ -101,6 +110,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferPr
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateMapping(JNIEnv *, jclass, jlong ptr) {
+    if (!Renderer::is_initialized()) return;
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr) return;
     vk::Data::TextureMapping *mapping = reinterpret_cast<vk::Data::TextureMapping *>(ptr);
@@ -108,6 +118,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferPr
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateMaterialClassMapping(JNIEnv *, jclass, jlong ptr) {
+    if (!Renderer::is_initialized()) return;
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr) return;
     vk::Data::MaterialClassMapping *mapping = reinterpret_cast<vk::Data::MaterialClassMapping *>(ptr);
@@ -117,6 +128,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferPr
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateLightMapUniform(JNIEnv *,
                                                                                                jclass,
                                                                                                jlong ptr) {
+    if (!Renderer::is_initialized()) return;
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr) return;
     vk::Data::LightMapUBO *lightMapUBO = reinterpret_cast<vk::Data::LightMapUBO *>(ptr);

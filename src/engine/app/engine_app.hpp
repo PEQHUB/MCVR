@@ -27,7 +27,8 @@ enum class EngineMode {
 
 struct EngineInitConfig {
     std::string configDir;             // Directory containing options.properties
-    GLFWwindow* window = nullptr;      // Existing GLFW window (required for V2 mode)
+    GLFWwindow* window = nullptr;      // Existing GLFW window (standalone V2 mode)
+    void* nativeWindowHandle = nullptr; // Platform window handle (HWND on Win32, for JNI mode)
     EngineMode mode = EngineMode::Legacy;
     bool enableValidation = false;
 };

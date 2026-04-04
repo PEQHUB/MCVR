@@ -2,12 +2,14 @@
 
 // Ownership: EngineServices (1:1 lifetime, outlives all GPU resources).
 // Thread: Created on main thread. Device handle is immutable after init.
-// Dependencies: GLFW (for surface/window), volk (for function loading).
+// Dependencies: volk (for function loading). GLFW optional (standalone mode only).
 
 #include "vk2_result.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include <vk_mem_alloc.h>
 
@@ -15,21 +17,51 @@ struct GLFWwindow;
 
 namespace engine::vk2 {
 
+// Device capability tier. Determined at init based on what the GPU actually supports.
+enum class DeviceProfile {
+    BootstrapPresent,   // Swapchain + present only (any GPU that can show a frame)
+    BaselineRenderer,   // + sync2, timeline semaphores, descriptor indexing, BDA
+    AdvancedRT          // + RT pipeline, acceleration structure
+};
+
 struct DeviceCaps {
+    DeviceProfile profile = DeviceProfile::BootstrapPresent;
+
+    // Feature flags — true only if actually enabled on the device
     bool rayTracingPipeline = false;
     bool accelerationStructure = false;
     bool timelineSemaphore = false;
     bool synchronization2 = false;
     bool bufferDeviceAddress = false;
     bool descriptorIndexing = false;
+    bool dynamicRendering = false;
     bool opacityMicromap = false;
     bool shaderExecutionReorder = false;
     bool shaderClock = false;
     bool maintenance5 = false;
     bool deviceFault = false;
+    bool debugUtils = false;
+    bool memoryBudget = false;
+
     uint32_t maxRayRecursionDepth = 0;
+
+    // Device identity
     std::string deviceName;
     uint32_t vendorId = 0;
+    uint32_t driverVersion = 0;
+    uint32_t vulkanVersion = 0;
+
+    // Memory heaps
+    struct HeapInfo {
+        uint64_t size = 0;
+        uint64_t budget = 0;     // 0 if VK_EXT_memory_budget not available
+        uint64_t usage = 0;
+        bool deviceLocal = false;
+    };
+    std::vector<HeapInfo> memoryHeaps;
+
+    // Present modes supported by current surface
+    std::vector<VkPresentModeKHR> presentModes;
 };
 
 struct QueueInfo {
@@ -39,6 +71,7 @@ struct QueueInfo {
 
 // Wraps VkInstance + VkPhysicalDevice + VkDevice + VMA.
 // Uses Result<T> for all fallible operations.
+// GPU selection is scoring-based (not filtering). Feature enabling is query-first.
 class DeviceService {
 public:
     DeviceService() = default;
@@ -47,18 +80,20 @@ public:
     DeviceService(const DeviceService&) = delete;
     DeviceService& operator=(const DeviceService&) = delete;
 
+    // Callback for creating a VkSurface without depending on GLFW.
+    using SurfaceFactory = std::function<VkResult(VkInstance, VkSurfaceKHR*)>;
+
     struct InitConfig {
-        GLFWwindow* window = nullptr;          // Required: existing GLFW window for surface
+        GLFWwindow* window = nullptr;          // GLFW window for surface (standalone mode)
+        SurfaceFactory surfaceFactory;         // Custom surface creation (JNI mode)
+        std::vector<const char*> instanceExtensions;  // Override GLFW instance extensions
         bool enableValidation = false;         // Vulkan validation layers
         bool enableDiagnostics = false;        // NV device diagnostics
         std::vector<const char*> extraInstanceExtensions;
         std::vector<const char*> extraDeviceExtensions;
     };
 
-    // Initialize the full Vulkan stack. Returns error on any failure.
     Result<void> init(const InitConfig& config);
-
-    // Clean shutdown (waits for device idle first).
     void shutdown();
 
     bool isInitialized() const { return device_ != VK_NULL_HANDLE; }
@@ -89,11 +124,18 @@ private:
     QueueInfo secondaryQueue_;
     DeviceCaps caps_;
 
+    // Supported extensions on the chosen physical device (populated during pickPhysicalDevice)
+    std::unordered_set<std::string> supportedExtensions_;
+
     Result<void> createInstance(const InitConfig& config);
     Result<void> pickPhysicalDevice();
     Result<void> createDevice(const InitConfig& config);
     Result<void> createVma();
     void findQueueFamilies();
+    void queryDeviceCaps();
+
+    int scoreDevice(VkPhysicalDevice pd) const;
+    bool hasExtension(const char* name) const { return supportedExtensions_.count(name) > 0; }
 
     uint32_t mainQueueFamilyIndex_ = UINT32_MAX;
     uint32_t secondaryQueueFamilyIndex_ = UINT32_MAX;

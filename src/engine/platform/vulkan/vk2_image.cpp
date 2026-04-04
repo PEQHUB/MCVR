@@ -1,6 +1,8 @@
 #include "vk2_image.hpp"
 #include "diagnostics/log.hpp"
 
+#include <volk.h>
+
 namespace engine::vk2 {
 
 Image::~Image() {

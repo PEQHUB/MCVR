@@ -5,6 +5,7 @@
 
 extern "C" {
 JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_generateTextureId(JNIEnv *, jclass) {
+    if (!Renderer::is_initialized()) return 0;
     auto textures = Renderer::instance().textures();
     if (textures == nullptr)
         return 0;
@@ -14,6 +15,7 @@ JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_genera
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_prepareImage(
     JNIEnv *, jclass, jint id, jint maxLevel, jint width, jint height, jint format) {
+    if (!Renderer::is_initialized()) return;
     auto textures = Renderer::instance().textures();
     if (textures == nullptr) return;
     auto vkFormat = static_cast<VkFormat>(format);
@@ -22,6 +24,7 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_prepar
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_setFilter(
     JNIEnv *, jclass, jint id, jint samplingMode, jint mipmapMode) {
+    if (!Renderer::is_initialized()) return;
     auto textures = Renderer::instance().textures();
     if (textures == nullptr) return;
     auto vkSamplingMode = static_cast<VkFilter>(samplingMode);
@@ -33,6 +36,7 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_setCla
                                                                                    jclass,
                                                                                    jint id,
                                                                                    jint addressMode) {
+    if (!Renderer::is_initialized()) return;
     auto textures = Renderer::instance().textures();
     if (textures == nullptr) return;
     auto vkSamplerAddressMode = static_cast<VkSamplerAddressMode>(addressMode);
@@ -52,6 +56,7 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_queueU
                                                                                       jint width,
                                                                                       jint height,
                                                                                       jint level) {
+    if (!Renderer::is_initialized()) return;
     auto textures = Renderer::instance().textures();
     if (textures == nullptr) return;
     textures->queueUpload(reinterpret_cast<uint8_t *>(srcPointer), srcSizeInBytes, srcRowPixels, dstId, srcOffsetX,
@@ -59,6 +64,7 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_queueU
 }
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_performQueuedUpload(JNIEnv *, jclass) {
+    if (!Renderer::is_initialized()) return;
     auto textures = Renderer::instance().textures();
     if (textures == nullptr) return;
     textures->performQueuedUpload();
@@ -68,6 +74,7 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_setTex
                                                                                                 jclass,
                                                                                                 jint id,
                                                                                                 jint alphaClass) {
+    if (!Renderer::is_initialized()) return;
     auto textures = Renderer::instance().textures();
     if (textures == nullptr) return;
     textures->setTextureAlphaClass(id, static_cast<Textures::AlphaClass>(alphaClass));
@@ -76,6 +83,7 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_setTex
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureProxy_destroyTexture(JNIEnv *,
                                                                                           jclass,
                                                                                           jint id) {
+    if (!Renderer::is_initialized()) return;
     auto textures = Renderer::instance().textures();
     if (textures == nullptr) return;
     textures->destroyTexture(static_cast<uint32_t>(id));

@@ -8,6 +8,7 @@
 #include <iostream>
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_initNative(JNIEnv *, jclass, jint chunkNum) {
+    if (!Renderer::is_initialized()) return;
     Renderer::instance().world()->chunks()->reset(chunkNum);
 
     // Compute Java's render distance from chunk count:
@@ -18,6 +19,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_nativeSetWorldRegionPath(
     JNIEnv *env, jclass, jstring jpath) {
+    if (!Renderer::is_initialized()) return;
     if (!jpath) return;
     const char* utf = env->GetStringUTFChars(jpath, nullptr);
     if (utf) {
@@ -40,6 +42,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
                                                                                      jlong vertexCounts,
                                                                                      jlong vertexAddrs,
                                                                                      jboolean important) {
+    if (!Renderer::is_initialized()) return;
     auto world = Renderer::instance().world();
     if (world == nullptr) return;
     world->chunks()->queueChunkBuild(ChunkBuildTask{
@@ -64,6 +67,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
     jlong biomeDataPtr, jlong neighborFacesPtr, jint blockAtlasTextureId,
     jboolean important,
     jint biomeGrassColor, jint biomeFoliageColor, jint biomeWaterColor) {
+    if (!Renderer::is_initialized()) return;
 
     auto world = Renderer::instance().world();
     if (world == nullptr) return;
@@ -107,6 +111,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
 }
 
 extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_isChunkReady(JNIEnv *, jclass, jlong id) {
+    if (!Renderer::is_initialized()) return JNI_FALSE;
     auto world = Renderer::instance().world();
     if (world == nullptr)
         return false;
@@ -115,18 +120,21 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_world_Chunk
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_invalidateSingle(JNIEnv *, jclass, jlong index) {
+    if (!Renderer::is_initialized()) return;
     auto world = Renderer::instance().world();
     if (world == nullptr) return;
     world->chunks()->invalidateChunk(index);
 }
 
 extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_nativeGetInputQueueSize(JNIEnv *, jclass) {
+    if (!Renderer::is_initialized()) return 0;
     auto world = Renderer::instance().world();
     if (!world) return 0;
     return static_cast<jint>(world->chunks()->getInputQueueSize());
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_setChunkLights(JNIEnv *, jclass, jlong chunkIndex, jint lightCount, jlong lightDataPtr) {
+    if (!Renderer::is_initialized()) return;
     auto world = Renderer::instance().world();
     if (world == nullptr) return;
 

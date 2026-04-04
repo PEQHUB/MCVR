@@ -12,6 +12,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
     JNIEnv *, jclass,
     jlong entryPtr, jint entryCount,
     jlong quadPtr, jint quadCount) {
+    if (!Renderer::is_initialized()) return;
 
     auto* entries = reinterpret_cast<const BlockModelEntry*>(entryPtr);
     auto* quads = reinterpret_cast<const BlockModelQuad*>(quadPtr);
@@ -29,6 +30,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_uploadBiomeTintTable(
     JNIEnv *, jclass,
     jlong tintPtr, jint tintCount) {
+    if (!Renderer::is_initialized()) return;
 
     auto* tints = reinterpret_cast<const BiomeTintEntry*>(tintPtr);
     Renderer::blockModelTable.loadBiomeTints(tints, static_cast<uint32_t>(tintCount));
@@ -39,6 +41,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeReceiveSpriteTable(
     JNIEnv *, jclass,
     jlong metaPtr, jint count, jint atlasWidth, jint atlasHeight) {
+    if (!Renderer::is_initialized()) return;
 
     auto* table = reinterpret_cast<const TextureSystem::SpriteMetadata*>(metaPtr);
     Renderer::textureSystem.receiveSpriteTable(
@@ -49,6 +52,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeReceiveSpritePixels(
     JNIEnv *, jclass,
     jlong dataPtr, jint totalBytes) {
+    if (!Renderer::is_initialized()) return;
 
     auto* data = reinterpret_cast<const uint8_t*>(dataPtr);
     Renderer::textureSystem.receiveSpritePixels(data, static_cast<uint32_t>(totalBytes));
@@ -57,6 +61,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeReceiveAnimationFrames(
     JNIEnv *, jclass,
     jlong dataPtr, jint totalBytes) {
+    if (!Renderer::is_initialized()) return;
 
     auto* data = reinterpret_cast<const uint8_t*>(dataPtr);
     Renderer::textureSystem.receiveAnimationFrames(data, static_cast<uint32_t>(totalBytes));
@@ -65,6 +70,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeReceiveSpriteAuxPixels(
     JNIEnv *, jclass,
     jlong specPtr, jlong normPtr, jint totalBytesPerType) {
+    if (!Renderer::is_initialized()) return;
 
     auto* specData = reinterpret_cast<const uint8_t*>(specPtr);
     auto* normData = reinterpret_cast<const uint8_t*>(normPtr);
@@ -74,6 +80,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeUpdateSpecularLayer(
     JNIEnv *, jclass, jint spriteId, jlong pixelPtr, jint sizeBytes) {
+    if (!Renderer::is_initialized()) return;
 
     auto& ts = Renderer::textureSystem;
     if (!ts.isFinalized() || ts.blockSpecularArrayId() == UINT32_MAX) return;
@@ -86,6 +93,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeUpdateNormalLayer(
     JNIEnv *, jclass, jint spriteId, jlong pixelPtr, jint sizeBytes) {
+    if (!Renderer::is_initialized()) return;
 
     auto& ts = Renderer::textureSystem;
     if (!ts.isFinalized() || ts.blockNormalArrayId() == UINT32_MAX) return;
@@ -98,6 +106,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeTextureFinalize(
     JNIEnv *, jclass) {
+    if (!Renderer::is_initialized()) return;
 
     auto framework = Renderer::instance().framework();
     auto vma = framework->vma();
@@ -118,6 +127,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeUploadBlockStateRegistry(
     JNIEnv *, jclass,
     jlong dataPtr, jint dataSize) {
+    if (!Renderer::is_initialized()) return;
 
     auto* data = reinterpret_cast<const uint8_t*>(dataPtr);
     Renderer::blockStateRegistry.load(data, static_cast<uint32_t>(dataSize));
@@ -128,6 +138,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeTickAnimation(
     JNIEnv *, jclass,
     jint gameTick) {
+    if (!Renderer::is_initialized()) return;
 
     Renderer::textureSystem.tickAnimation(static_cast<uint32_t>(gameTick));
 }

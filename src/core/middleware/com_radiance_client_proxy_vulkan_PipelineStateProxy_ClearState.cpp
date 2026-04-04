@@ -9,6 +9,7 @@
 extern "C" {
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024ClearState_setClearColor(
     JNIEnv *, jclass, jfloat red, jfloat green, jfloat blue, jfloat alpha) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -18,6 +19,7 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024ClearState_setClearDepth(
     JNIEnv *, jclass, jdouble depth) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -27,6 +29,7 @@ JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_
 
 JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_PipelineStateProxy_00024ClearState_setClearStencil(
     JNIEnv *, jclass, jint stencil) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();

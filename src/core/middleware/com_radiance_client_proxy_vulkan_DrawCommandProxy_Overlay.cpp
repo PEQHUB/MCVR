@@ -8,6 +8,7 @@
 extern "C" {
 JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_DrawCommandProxy_00024Overlay_vkCmdClearEntireColorAttachment(JNIEnv *, jclass) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();
@@ -18,6 +19,7 @@ Java_com_radiance_client_proxy_vulkan_DrawCommandProxy_00024Overlay_vkCmdClearEn
 JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_vulkan_DrawCommandProxy_00024Overlay_vkCmdClearEntireDepthStencilAttachment(
     JNIEnv *, jclass, jint aspectMask) {
+    if (!Renderer::is_initialized()) return;
     auto framework = Renderer::instance().framework();
     if (framework == nullptr) return;
     auto context = framework->safeAcquireCurrentContext();

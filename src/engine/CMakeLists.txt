@@ -7,8 +7,10 @@ set(ENGINE_SOURCES
     bridge/bridge_service.cpp
     config/config_service.cpp
     diagnostics/log.cpp
+    diagnostics/metrics_service.cpp
     frame/frame_scheduler.cpp
     frame/resource_gc.cpp
+    frame/screenshot_capture.cpp
     platform/vulkan/vk2_buffer.cpp
     platform/vulkan/vk2_device.cpp
     platform/vulkan/vk2_image.cpp
@@ -33,12 +35,14 @@ target_include_directories(engine PUBLIC
     ${CMAKE_SOURCE_DIR}/extern/volk
     ${CMAKE_SOURCE_DIR}/extern/glm
     ${CMAKE_SOURCE_DIR}/extern/glfw/include
+    ${CMAKE_SOURCE_DIR}/extern/stb
 )
 
 target_compile_definitions(engine PUBLIC
-    SPDLOG_COMPILED_LIB=0  # header-only mode
     VK_NO_PROTOTYPES       # Required for volk meta-loader
 )
+# spdlog: header-only mode — do NOT define SPDLOG_COMPILED_LIB
+# (any definition, even =0, triggers compiled-lib mode)
 
 if (MSVC)
     target_compile_options(engine PRIVATE /utf-8)

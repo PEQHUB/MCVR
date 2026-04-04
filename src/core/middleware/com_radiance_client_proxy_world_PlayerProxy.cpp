@@ -5,6 +5,7 @@
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_radiance_client_proxy_world_PlayerProxy_setCameraPos(JNIEnv *, jclass, jdouble x, jdouble y, jdouble z) {
+    if (!Renderer::is_initialized()) return;
     auto world = Renderer::instance().world();
     if (world == nullptr) return;
     Renderer::instance().world()->setCameraPos(glm::dvec3{x, y, z});
