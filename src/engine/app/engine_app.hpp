@@ -16,6 +16,7 @@ struct CmdWindowResize;
 struct CmdWorldLoad;
 struct CmdWorldUnload;
 struct CmdShutdown;
+struct CmdConfigPatch;
 
 enum class EngineMode {
     Legacy,  // Use existing Renderer path
@@ -61,6 +62,7 @@ private:
     void handleCommand(const struct CmdWorldLoad& cmd);
     void handleCommand(const struct CmdWorldUnload& cmd);
     void handleCommand(const struct CmdShutdown& cmd);
+    void handleCommand(const struct CmdConfigPatch& cmd);
 };
 
 } // namespace engine

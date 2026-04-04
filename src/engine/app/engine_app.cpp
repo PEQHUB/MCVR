@@ -95,10 +95,24 @@ void EngineApp::handleCommand(const CmdShutdown&) {
     if (session_) session_->setState(SessionState::ShuttingDown);
 }
 
+void EngineApp::handleCommand(const CmdConfigPatch& cmd) {
+    // Applied on main thread during bridge.flush() — safe to mutate live config.
+    cmd.apply();
+}
+
 // --- Bridge symbols (consumed by generated config_bridge.cpp) ---
 
 EngineConfig& activeConfig() {
     return EngineApp::get()->services().config().live();
+}
+
+BridgeService& activeBridge() {
+    return EngineApp::get()->services().bridge();
+}
+
+void notifyConfigChange(ConfigKey key) {
+    auto* app = EngineApp::get();
+    if (app) app->services().config().notifyChange(key);
 }
 
 void onConfigSideEffect(ConfigKey key) {

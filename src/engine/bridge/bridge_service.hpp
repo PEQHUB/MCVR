@@ -36,12 +36,19 @@ struct CmdWorldUnload {};
 
 struct CmdShutdown {};
 
+// Config patch: a type-erased mutation applied on the main thread.
+// The JNI bridge captures the field write + side effects into a lambda.
+struct CmdConfigPatch {
+    std::function<void()> apply;
+};
+
 using BridgeCommand = std::variant<
     CmdPing,
     CmdWindowResize,
     CmdWorldLoad,
     CmdWorldUnload,
-    CmdShutdown
+    CmdShutdown,
+    CmdConfigPatch
 >;
 
 // --- Event types (C++ → Java, fire-and-forget) ---

@@ -21,23 +21,21 @@ PassHandle GraphBuilder::addPass(PassDescriptor desc) {
 }
 
 void GraphBuilder::connect(ResourceHandle output, ResourceHandle input) {
-    // "connect" means: the resource produced as output is the same resource
-    // consumed as input. In our model, this is handled by passes referencing
-    // the same ResourceHandle. If they reference different handles with the
-    // same name, we alias them.
+    // "connect" means: pass A's output resource IS the same physical resource
+    // as pass B's input. We redirect input references to point at the output
+    // resource. Output arrays are never modified — each pass owns its outputs.
     if (output.index == input.index) return;  // Already the same resource
 
-    // Merge: redirect all references to input.index → output.index
+    // Redirect: all INPUT references to input.index → output.index
     for (auto& pass : passes_) {
         for (auto& r : pass.inputs) {
             if (r.index == input.index) r.index = output.index;
         }
-        for (auto& r : pass.outputs) {
-            if (r.index == input.index) r.index = output.index;
-        }
+        // Intentionally NOT touching pass.outputs — a pass's output identity
+        // must never change, or two passes could silently share an output.
     }
 
-    // Update name map
+    // Update name map so findResource() resolves to the canonical resource
     if (input.index < resources_.size()) {
         resourceNameMap_[resources_[input.index].name] = output.index;
     }

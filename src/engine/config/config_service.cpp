@@ -204,11 +204,19 @@ void ConfigService::unsubscribe(ConfigSubscriptionId id) {
 }
 
 void ConfigService::notifyChange(ConfigKey key) {
-    std::lock_guard lock(subMutex_);
-    for (const auto& sub : subscriptions_) {
-        if (sub.key == key) {
-            sub.callback(key);
+    // Copy matching callbacks under lock, invoke outside — prevents deadlock
+    // if a subscriber calls subscribe/unsubscribe during the callback.
+    std::vector<ConfigCallback> toCall;
+    {
+        std::lock_guard lock(subMutex_);
+        for (const auto& sub : subscriptions_) {
+            if (sub.key == key) {
+                toCall.push_back(sub.callback);
+            }
         }
+    }
+    for (const auto& cb : toCall) {
+        cb(key);
     }
 }
 

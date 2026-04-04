@@ -263,62 +263,73 @@ def gen_cpp_defaults(options: list[dict], out_dir: Path):
 # --- JNI bridge generation ---
 
 def gen_jni_bridge(options: list[dict], out_dir: Path):
-    """Generate config_bridge.cpp with JNI setters that write to EngineConfig."""
+    """Generate config_bridge.cpp with JNI setters that post CmdConfigPatch commands."""
     lines = [HEADER]
     lines.append('#include <jni.h>')
     lines.append('#include <algorithm>')
-    lines.append('#include "engine_config.hpp"\n')
+    lines.append('#include "engine_config.hpp"')
+    lines.append('#include "bridge/bridge_service.hpp"\n')
     lines.append("// Forward: provided by engine/app at link time")
     lines.append("namespace engine {")
     lines.append("    EngineConfig& activeConfig();")
-    lines.append("    // Called after a config write with side effects beyond flag-setting.")
-    lines.append("    // Implemented by engine/app. Default is a no-op weak symbol.")
+    lines.append("    BridgeService& activeBridge();")
+    lines.append("    void notifyConfigChange(ConfigKey key);")
     lines.append("    void onConfigSideEffect(ConfigKey key);")
     lines.append("}\n")
 
     jni_prefix = "Java_com_radiance_v2_bridge_ConfigBridge"
 
-    # Classify side effects: "flag" effects set cfg.X = Y, "action" effects need a callback
     for opt in options:
         name = opt["name"]
         jt = jni_type(opt)
         conv = conversion_java_to_cpp(opt)
         side = opt.get("x-cpp-side-effect", "")
-
-        lines.append(f'extern "C" JNIEXPORT void JNICALL {jni_prefix}_nativeSet{upper_first(name)}(')
-        lines.append(f"    JNIEnv*, jclass, {jt} value, jboolean write) {{")
-        lines.append(f"    auto& cfg = engine::activeConfig();")
-
-        # Apply range clamp on C++ side
+        ct = cpp_type(opt)
         mn = opt.get("minimum")
         mx = opt.get("maximum")
-        ct = cpp_type(opt)
+
+        lines.append(f'extern "C" JNIEXPORT void JNICALL {jni_prefix}_nativeSet{upper_first(name)}(')
+        lines.append(f"    JNIEnv*, jclass, {jt} value, jboolean /*write*/) {{")
+
+        # Capture the converted value for the lambda
         if mn is not None and mx is not None and ct in ("uint32_t", "float"):
             if ct == "float":
-                lines.append(f"    float converted = {conv};")
-                lines.append(f"    cfg.{name} = std::clamp(converted, {mn}f, {mx}f);")
+                lines.append(f"    float captured = std::clamp({conv}, {mn}f, {mx}f);")
             else:
-                lines.append(f"    auto converted = {conv};")
-                lines.append(f"    cfg.{name} = std::clamp(converted, static_cast<uint32_t>({int(mn)}), static_cast<uint32_t>({int(mx)}));")
+                lines.append(f"    uint32_t captured = std::clamp({conv}, static_cast<uint32_t>({int(mn)}), static_cast<uint32_t>({int(mx)}));")
+        elif ct == "bool":
+            lines.append(f"    bool captured = {conv};")
+        elif ct == "uint32_t":
+            lines.append(f"    uint32_t captured = {conv};")
+        elif ct == "float":
+            lines.append(f"    float captured = {conv};")
         else:
-            lines.append(f"    cfg.{name} = {conv};")
+            lines.append(f"    auto captured = {conv};")
 
+        # Post a CmdConfigPatch — applied on main thread during bridge.flush()
+        lines.append(f"    engine::activeBridge().post(engine::CmdConfigPatch{{[captured]() {{")
+        lines.append(f"        auto& cfg = engine::activeConfig();")
+        lines.append(f"        cfg.{name} = captured;")
+
+        # Side effects inside the lambda (main thread)
         has_action = False
         if side:
             for stmt in side.split(";"):
                 stmt = stmt.strip()
                 if not stmt:
                     continue
-                # Flag assignments (cfg.X = Y) are inlined
                 if "=" in stmt and not stmt.startswith("reset") and not "(" in stmt:
-                    lines.append(f"    if (write) cfg.{stmt};")
+                    lines.append(f"        cfg.{stmt};")
                 else:
-                    # Action side effects go through the callback
                     has_action = True
 
         if has_action:
-            lines.append(f"    if (write) engine::onConfigSideEffect(engine::ConfigKey::{camel_to_upper(name)});")
+            lines.append(f"        engine::onConfigSideEffect(engine::ConfigKey::{camel_to_upper(name)});")
 
+        # Always notify subscribers for every config change
+        lines.append(f"        engine::notifyConfigChange(engine::ConfigKey::{camel_to_upper(name)});")
+
+        lines.append(f"    }}}});")
         lines.append("}\n")
 
     out_path = out_dir / "config_bridge.cpp"

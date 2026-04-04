@@ -32,9 +32,18 @@ void BridgeService::setHandler(CommandHandler handler) {
 }
 
 void BridgeService::emit(BridgeEvent event) {
-    std::lock_guard lock(listenerMutex_);
-    for (const auto& entry : listeners_) {
-        entry.listener(event);
+    // Copy listeners under lock, invoke outside — prevents deadlock if
+    // a listener calls post() or addListener() during the callback.
+    std::vector<EventListener> snapshot;
+    {
+        std::lock_guard lock(listenerMutex_);
+        snapshot.reserve(listeners_.size());
+        for (const auto& entry : listeners_) {
+            snapshot.push_back(entry.listener);
+        }
+    }
+    for (const auto& listener : snapshot) {
+        listener(event);
     }
 }
 
