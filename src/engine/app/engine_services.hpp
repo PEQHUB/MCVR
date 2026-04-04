@@ -13,8 +13,12 @@ class BridgeService;
 class FrameScheduler;
 class SceneService;
 
+namespace vk2 {
+class DeviceService;
+class SwapchainService;
+}
+
 // Service locator — no globals. All subsystem access goes through here.
-// New services are added as the rewrite progresses (device, frame, scene, rt, etc.).
 class EngineServices {
 public:
     EngineServices();
@@ -35,15 +39,17 @@ public:
     SceneService& scene() { return *scene_; }
     const SceneService& scene() const { return *scene_; }
 
-    // Future services (uncommented as implemented):
-    // DeviceService& device();
-    // SwapchainService& swapchain();
-    // BlasService& blas();
-    // TlasService& tlas();
+    vk2::DeviceService& device() { return *device_; }
+    const vk2::DeviceService& device() const { return *device_; }
+
+    vk2::SwapchainService& swapchain() { return *swapchain_; }
+    const vk2::SwapchainService& swapchain() const { return *swapchain_; }
 
 private:
     std::unique_ptr<ConfigService> config_;
     std::unique_ptr<BridgeService> bridge_;
+    std::unique_ptr<vk2::DeviceService> device_;
+    std::unique_ptr<vk2::SwapchainService> swapchain_;
     std::unique_ptr<FrameScheduler> frame_;
     std::unique_ptr<SceneService> scene_;
 };

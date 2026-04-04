@@ -7,6 +7,8 @@
 #include <memory>
 #include <string>
 
+struct GLFWwindow;
+
 namespace engine {
 
 class EngineSession;
@@ -23,6 +25,13 @@ enum class EngineMode {
     V2       // Use v2 engine path
 };
 
+struct EngineInitConfig {
+    std::string configDir;             // Directory containing options.properties
+    GLFWwindow* window = nullptr;      // Existing GLFW window (required for V2 mode)
+    EngineMode mode = EngineMode::Legacy;
+    bool enableValidation = false;
+};
+
 class EngineApp {
 public:
     EngineApp() = default;
@@ -31,10 +40,12 @@ public:
     EngineApp(const EngineApp&) = delete;
     EngineApp& operator=(const EngineApp&) = delete;
 
-    // Initialize engine services. Does NOT start rendering.
-    // configDir: directory containing options.properties
-    // mode: determined from options or command line
-    void init(const std::string& configDir, EngineMode mode = EngineMode::Legacy);
+    // Initialize engine services. In V2 mode, creates Vulkan device + swapchain.
+    // Returns false on fatal init failure.
+    bool init(const EngineInitConfig& config);
+
+    // Run one frame (acquire, clear, present). Returns false if shutdown requested.
+    bool tick();
 
     // Shut down all services and release resources.
     void shutdown();
@@ -44,8 +55,6 @@ public:
     EngineSession& session() { return *session_; }
     EngineServices& services() { return *services_; }
 
-    // Global access (replaces Renderer::instance() for v2 code).
-    // Returns nullptr if not initialized.
     static EngineApp* get();
 
 private:
@@ -56,7 +65,6 @@ private:
 
     static EngineApp* s_instance;
 
-    // Command dispatch (called from bridge handler via std::visit)
     void handleCommand(const struct CmdPing& cmd);
     void handleCommand(const struct CmdWindowResize& cmd);
     void handleCommand(const struct CmdWorldLoad& cmd);
