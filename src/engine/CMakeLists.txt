@@ -10,7 +10,9 @@ set(ENGINE_SOURCES
     frame/frame_scheduler.cpp
     frame/resource_gc.cpp
     platform/vulkan/vk2_buffer.cpp
+    platform/vulkan/vk2_device.cpp
     platform/vulkan/vk2_image.cpp
+    platform/vulkan/vk2_swapchain.cpp
     rendergraph/graph_builder.cpp
     scene/chunk_registry.cpp
     scene/entity_registry.cpp
@@ -30,10 +32,12 @@ target_include_directories(engine PUBLIC
     ${CMAKE_SOURCE_DIR}/extern/vulkan_headers/include
     ${CMAKE_SOURCE_DIR}/extern/volk
     ${CMAKE_SOURCE_DIR}/extern/glm
+    ${CMAKE_SOURCE_DIR}/extern/glfw/include
 )
 
 target_compile_definitions(engine PUBLIC
     SPDLOG_COMPILED_LIB=0  # header-only mode
+    VK_NO_PROTOTYPES       # Required for volk meta-loader
 )
 
 if (MSVC)
