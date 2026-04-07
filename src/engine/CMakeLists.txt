@@ -9,17 +9,33 @@ set(ENGINE_SOURCES
     diagnostics/log.cpp
     diagnostics/metrics_service.cpp
     frame/frame_scheduler.cpp
+    frame/composite_pass.cpp
+    frame/offscreen_target.cpp
     frame/resource_gc.cpp
     frame/screenshot_capture.cpp
     platform/vulkan/vk2_buffer.cpp
+    platform/vulkan/vk2_descriptor.cpp
     platform/vulkan/vk2_device.cpp
     platform/vulkan/vk2_image.cpp
+    platform/vulkan/vk2_pipeline.cpp
+    platform/vulkan/vk2_rt_pipeline.cpp
+    platform/vulkan/vk2_shader.cpp
     platform/vulkan/vk2_swapchain.cpp
+    rendergraph/barrier_planner.cpp
     rendergraph/graph_builder.cpp
+    rendergraph/graph_resource_pool.cpp
+    scene/blas_service.cpp
     scene/chunk_registry.cpp
     scene/entity_registry.cpp
+    scene/gpu_upload_service.cpp
+    scene/scene_resource_service.cpp
     scene/scene_service.cpp
+    scene/tlas_service.cpp
     diagnostics/replay/replay_recorder.cpp
+    features/postprocess_adapter.cpp
+    features/raytracing_adapter.cpp
+    features/rt_descriptor_layout.cpp
+    features/test_compute_adapter.cpp
     features/tonemapping_adapter.cpp
     ${CMAKE_SOURCE_DIR}/src/generated/bridge/config_bridge.cpp
 )

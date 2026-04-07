@@ -15,12 +15,26 @@
 #include "config/config_service.hpp"
 #include "bridge/bridge_service.hpp"
 #include "frame/frame_scheduler.hpp"
+#include "frame/offscreen_target.hpp"
 #include "diagnostics/metrics_service.hpp"
 #include "platform/vulkan/vk2_device.hpp"
 #include "platform/vulkan/vk2_swapchain.hpp"
+#include "rendergraph/graph_builder.hpp"
+#include "features/feature_adapter.hpp"
+#include "features/test_compute_adapter.hpp"
+#include "features/tonemapping_adapter.hpp"
+#include "features/raytracing_adapter.hpp"
+#include "features/postprocess_adapter.hpp"
+#include "scene/scene_service.hpp"
+#include "scene/chunk_registry.hpp"
+#include "scene/gpu_upload_service.hpp"
+#include "scene/blas_service.hpp"
+#include "scene/tlas_service.hpp"
+#include "scene/scene_resource_service.hpp"
 #include "diagnostics/log.hpp"
 
 #include <volk.h>
+#include <cstring>
 
 namespace engine {
 
@@ -41,6 +55,9 @@ bool EngineApp::init(const EngineInitConfig& config) {
         if (services_) {
             if (mode_ == EngineMode::V2 && services_->device().isInitialized()) {
                 services_->device().waitIdle();
+                for (auto& a : adapters_) a->shutdown();
+                adapters_.clear();
+                services_->offscreen().shutdown();
                 services_->metrics().shutdown();
                 services_->frame().shutdownSync();
                 services_->swapchain().shutdown();
@@ -63,6 +80,7 @@ bool EngineApp::init(const EngineInitConfig& config) {
 
     // Create services
     services_ = std::make_unique<EngineServices>();
+    services_->setResourceDir(config.configDir);
 
     // Load config
     std::string configPath = config.configDir + "/options.properties";
@@ -146,6 +164,29 @@ bool EngineApp::init(const EngineInitConfig& config) {
             log::warn("app", "Metrics init failed (non-fatal): " + metricsResult.error().message);
         }
 
+        // Initialize scene services
+        {
+            auto gpuR = services_->gpuUpload().init(services_->device(), framesInFlight);
+            if (!gpuR) log::warn("app", "GpuUpload init failed (non-fatal): " + gpuR.error().message);
+            auto blasR = services_->blas().init(services_->device());
+            if (!blasR) log::warn("app", "BLAS init failed (non-fatal): " + blasR.error().message);
+            auto tlasR = services_->tlas().init(services_->device());
+            if (!tlasR) log::warn("app", "TLAS init failed (non-fatal): " + tlasR.error().message);
+            auto sceneResR = services_->sceneRes().init(services_->device(), framesInFlight);
+            if (!sceneResR) log::warn("app", "SceneRes init failed (non-fatal): " + sceneResR.error().message);
+        }
+
+        // Initialize offscreen render targets
+        auto offscreenResult = services_->offscreen().init(
+            services_->device(), framesInFlight,
+            services_->swapchain().extent().width,
+            services_->swapchain().extent().height);
+        if (!offscreenResult) {
+            log::error("app", "Offscreen init failed: " + offscreenResult.error().message);
+            rollback();
+            return false;
+        }
+
         log::info("app", "Vulkan initialized: " + services_->device().caps().deviceName +
                   ", swapchain " + std::to_string(services_->swapchain().extent().width) +
                   "x" + std::to_string(services_->swapchain().extent().height));
@@ -176,6 +217,38 @@ bool EngineApp::init(const EngineInitConfig& config) {
                   "  DynRender: " + std::string(caps.dynamicRendering ? "yes" : "no") +
                   "  RT: " + std::string(caps.rayTracingPipeline ? "yes" : "no"));
         log::info("app", "========================");
+
+        // Wire scene processing callback
+        services_->frame().setPreGraphCallback([this](VkCommandBuffer cmd) {
+            processScene(cmd);
+        });
+
+        // Build render graph: RT → ToneMapping → PostProcess (CAS) → Composite
+        auto rtAdapter = std::make_unique<RayTracingAdapter>();
+        rtAdapter->init(*services_);
+
+        auto tmAdapter = std::make_unique<ToneMappingAdapter>();
+        tmAdapter->init(*services_);
+
+        auto ppAdapter = std::make_unique<PostProcessAdapter>();
+        ppAdapter->init(*services_);
+
+        GraphBuilder builder;
+        auto rtOutput = rtAdapter->registerPass(builder);
+        tmAdapter->registerPass(builder, rtOutput);
+        // ToneMapping declares its output via outputHandle_; PostProcess takes over as final.
+        // We need to fish that handle out — easiest via a small accessor on the adapter.
+        ppAdapter->registerPass(builder, tmAdapter->outputHandle());
+        auto graph = builder.compile();
+
+        if (graph.valid()) {
+            services_->frame().setGraph(std::move(graph));
+            log::info("app", "Render graph active: RT → ToneMapping → PostProcess(CAS) → Composite");
+        }
+
+        adapters_.push_back(std::move(rtAdapter));
+        adapters_.push_back(std::move(tmAdapter));
+        adapters_.push_back(std::move(ppAdapter));
     }
 
     return true;
@@ -194,19 +267,27 @@ bool EngineApp::tick() {
     }
 
     if (mode_ == EngineMode::V2) {
-        if (services_->swapchain().isZeroExtent()) {
-            // Window minimized — idle, but try to recover on each tick
-            auto ctx = services_->frame().beginFrame();
-            // Attempt recreate to detect when window is restored
+        // Flush bridge and tick GC every frame regardless
+        auto ctx = services_->frame().beginFrame();
+        ctx.camera = latestCamera_;
+
+        if (!inWorld_ || services_->swapchain().isZeroExtent()) {
+            // Not in world or minimized — don't present, let Minecraft show its UI
             if (services_->swapchain().isRecreateNeeded()) {
                 services_->device().waitIdle();
                 services_->swapchain().recreate(0, 0);
             }
             services_->frame().endFrame(ctx);
         } else {
-            auto ctx = services_->frame().beginFrame();
-            bool skipped = services_->frame().executeClearFrame(
-                services_->device(), services_->swapchain(), ctx);
+            bool skipped;
+            if (services_->frame().hasGraph()) {
+                skipped = services_->frame().executeGraphFrame(
+                    services_->device(), services_->swapchain(), ctx);
+            } else {
+                skipped = services_->frame().executeOffscreenFrame(
+                    services_->device(), services_->swapchain(),
+                    services_->offscreen(), ctx);
+            }
             if (!skipped) {
                 services_->frame().endFrame(ctx);
             }
@@ -232,6 +313,13 @@ void EngineApp::shutdown() {
 
     if (mode_ == EngineMode::V2) {
         services_->device().waitIdle();
+        for (auto& adapter : adapters_) adapter->shutdown();
+        adapters_.clear();
+        services_->frame().resourcePool().releaseImmediate();
+        services_->tlas().shutdown();
+        services_->blas().shutdown();
+        services_->gpuUpload().shutdown();
+        services_->offscreen().shutdown();
         services_->metrics().shutdown();
         services_->frame().shutdownSync();
         services_->swapchain().shutdown();
@@ -273,11 +361,16 @@ void EngineApp::handleCommand(const CmdWindowResize& cmd) {
 
 void EngineApp::handleCommand(const CmdWorldLoad& cmd) {
     log::info("bridge", "World load: " + cmd.regionPath);
+    inWorld_ = true;
 }
 
 void EngineApp::handleCommand(const CmdWorldUnload&) {
     log::info("bridge", "World unload");
+    inWorld_ = false;
+    latestCamera_.valid = false;
 }
+
+
 
 void EngineApp::handleCommand(const CmdShutdown&) {
     log::info("bridge", "Shutdown requested via bridge");
@@ -286,6 +379,130 @@ void EngineApp::handleCommand(const CmdShutdown&) {
 
 void EngineApp::handleCommand(const CmdConfigPatch& cmd) {
     cmd.apply();
+}
+
+void EngineApp::handleCommand(const CmdChunkSubmit& cmd) {
+    ChunkGeometry geo;
+    geo.id = {cmd.chunkX, cmd.chunkZ};
+    geo.vertexData = cmd.vertexData;
+    geo.indexData = cmd.indexData;
+    geo.triangleCount = cmd.triangleCount;
+    geo.originX = static_cast<float>(cmd.originX);
+    geo.originY = static_cast<float>(cmd.originY);
+    geo.originZ = static_cast<float>(cmd.originZ);
+    services_->scene().chunks().insert(geo.id, std::move(geo));
+}
+
+void EngineApp::handleCommand(const CmdChunkRemove& cmd) {
+    ChunkId id{cmd.chunkX, cmd.chunkZ};
+    services_->scene().chunks().remove(id);
+    services_->gpuUpload().removeChunk(id);
+    services_->blas().removeChunk(id);
+}
+
+void EngineApp::processScene(VkCommandBuffer cmd) {
+    // Update scene resources (WorldUBO with current camera/config)
+    if (services_->sceneRes().isInitialized() && latestCamera_.valid) {
+        auto cfg = services_->config().snapshot();
+        if (cfg) {
+            services_->sceneRes().updateWorldUBO(
+                services_->frame().currentFrameIndex(),
+                latestCamera_, *cfg, services_->frame().frameNumber());
+        }
+    }
+
+    // Extract scene snapshot
+    auto scene = services_->scene().extractFrame(services_->frame().frameNumber());
+    if (!scene) return;
+
+    // Upload dirty chunks
+    uint32_t uploaded = 0;
+    if (!scene->dirtyChunkGeometries.empty() && services_->gpuUpload().isInitialized()) {
+        uploaded = services_->gpuUpload().uploadDirtyChunks(
+            cmd, scene->dirtyChunkGeometries, services_->frame().currentFrameIndex());
+        if (uploaded > 0) {
+            log::debug("scene", "Uploaded " + std::to_string(uploaded) + " chunks");
+        }
+    }
+
+    // Barrier: upload copies must complete before BLAS builds read vertex/index data
+    if (uploaded > 0) {
+        VkMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        barrier.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.memoryBarrierCount = 1;
+        dep.pMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
+
+    // Build BLAS for dirty chunks
+    if (services_->blas().isInitialized()) {
+        std::vector<ChunkId> dirtyIds;
+        for (const auto& geo : scene->dirtyChunkGeometries) {
+            if (!geo.empty()) dirtyIds.push_back(geo.id);
+        }
+        if (!dirtyIds.empty()) {
+            uint32_t built = services_->blas().buildDirtyChunks(
+                cmd, dirtyIds, services_->gpuUpload().allChunks());
+            if (built > 0) {
+                log::debug("scene", "Built " + std::to_string(built) + " BLAS");
+            }
+        }
+    }
+
+    // Rebuild TLAS
+    if (services_->tlas().isInitialized() && services_->blas().blasCount() > 0) {
+        services_->tlas().rebuild(cmd, services_->blas());
+    }
+}
+
+void EngineApp::handleCommand(const CmdCameraUpdate& cmd) {
+    inWorld_ = true;
+    std::memcpy(latestCamera_.view, cmd.view, sizeof(cmd.view));
+    std::memcpy(latestCamera_.projection, cmd.projection, sizeof(cmd.projection));
+    latestCamera_.posX = cmd.posX;
+    latestCamera_.posY = cmd.posY;
+    latestCamera_.posZ = cmd.posZ;
+    latestCamera_.dirX = cmd.dirX;
+    latestCamera_.dirY = cmd.dirY;
+    latestCamera_.dirZ = cmd.dirZ;
+    latestCamera_.nearPlane = cmd.nearPlane;
+    latestCamera_.farPlane = cmd.farPlane;
+    latestCamera_.valid = true;
+}
+
+void EngineApp::handleCommand(const CmdSkyUpdate& cmd) {
+    if (!services_->sceneRes().isInitialized()) return;
+
+    SkyUBOData sky{};
+    std::memcpy(sky.baseColor, cmd.baseColor, sizeof(sky.baseColor));
+    sky.skyType = cmd.skyType;
+    std::memcpy(sky.horizonColor, cmd.horizonColor, sizeof(sky.horizonColor));
+    std::memcpy(sky.sunDirection, cmd.sunDirection, sizeof(sky.sunDirection));
+    sky.isSunRisingOrSetting = cmd.sunRisingOrSetting;
+    std::memcpy(sky.moonDirection, cmd.moonDirection, sizeof(sky.moonDirection));
+    sky.isSkyDark = cmd.skyDark;
+    sky.hasBlindnessOrDarkness = cmd.hasBlindnessOrDarkness;
+    sky.cameraSubmersionType = cmd.cameraSubmersionType;
+    sky.moonPhase = cmd.moonPhase;
+    sky.rainGradient = cmd.rainGradient;
+    sky.thunderGradient = cmd.thunderGradient;
+    sky.sunTextureID = cmd.sunTextureID;
+    sky.moonTextureID = cmd.moonTextureID;
+
+    services_->sceneRes().updateSkyUBO(sky);
+}
+
+void EngineApp::handleCommand(const CmdTextureMappingUpdate& cmd) {
+    if (!services_->sceneRes().isInitialized()) return;
+    if (cmd.data.empty()) return;
+    services_->sceneRes().uploadTextureMapping(cmd.data.data(), cmd.data.size());
 }
 
 // --- Bridge symbols (consumed by generated config_bridge.cpp) ---
