@@ -4,8 +4,12 @@
 // Thread: Created and destroyed on the main thread.
 // Dependencies: None at construction. Services initialized via init().
 
+#include "features/feature_adapter.hpp"
+#include "frame/frame_context.hpp"
+
 #include <memory>
 #include <string>
+#include <vector>
 
 struct GLFWwindow;
 
@@ -52,6 +56,7 @@ public:
     void shutdown();
 
     bool isInitialized() const { return initialized_; }
+    bool isInWorld() const { return inWorld_; }
     EngineMode mode() const { return mode_; }
     EngineSession& session() { return *session_; }
     EngineServices& services() { return *services_; }
@@ -63,6 +68,9 @@ private:
     EngineMode mode_ = EngineMode::Legacy;
     std::unique_ptr<EngineServices> services_;
     std::unique_ptr<EngineSession> session_;
+    std::vector<std::unique_ptr<FeatureAdapter>> adapters_;
+    CameraData latestCamera_;
+    bool inWorld_ = false;
 
     static EngineApp* s_instance;
 
@@ -72,6 +80,13 @@ private:
     void handleCommand(const struct CmdWorldUnload& cmd);
     void handleCommand(const struct CmdShutdown& cmd);
     void handleCommand(const struct CmdConfigPatch& cmd);
+    void handleCommand(const struct CmdChunkSubmit& cmd);
+    void handleCommand(const struct CmdChunkRemove& cmd);
+    void handleCommand(const struct CmdCameraUpdate& cmd);
+    void handleCommand(const struct CmdSkyUpdate& cmd);
+    void handleCommand(const struct CmdTextureMappingUpdate& cmd);
+
+    void processScene(VkCommandBuffer cmd);
 };
 
 } // namespace engine

@@ -5,6 +5,7 @@
 // Dependencies: None — this is the service locator root.
 
 #include <memory>
+#include <string>
 
 namespace engine {
 
@@ -13,6 +14,11 @@ class BridgeService;
 class FrameScheduler;
 class MetricsService;
 class SceneService;
+class OffscreenTarget;
+class GpuUploadService;
+class BlasService;
+class TlasService;
+class SceneResourceService;
 
 namespace vk2 {
 class DeviceService;
@@ -49,6 +55,24 @@ public:
     MetricsService& metrics() { return *metrics_; }
     const MetricsService& metrics() const { return *metrics_; }
 
+    void setResourceDir(const std::string& dir) { resourceDir_ = dir; }
+    const std::string& resourceDir() const { return resourceDir_; }
+
+    OffscreenTarget& offscreen() { return *offscreen_; }
+    const OffscreenTarget& offscreen() const { return *offscreen_; }
+
+    GpuUploadService& gpuUpload() { return *gpuUpload_; }
+    const GpuUploadService& gpuUpload() const { return *gpuUpload_; }
+
+    BlasService& blas() { return *blas_; }
+    const BlasService& blas() const { return *blas_; }
+
+    TlasService& tlas() { return *tlas_; }
+    const TlasService& tlas() const { return *tlas_; }
+
+    SceneResourceService& sceneRes() { return *sceneRes_; }
+    const SceneResourceService& sceneRes() const { return *sceneRes_; }
+
 private:
     std::unique_ptr<ConfigService> config_;
     std::unique_ptr<BridgeService> bridge_;
@@ -57,6 +81,12 @@ private:
     std::unique_ptr<FrameScheduler> frame_;
     std::unique_ptr<MetricsService> metrics_;
     std::unique_ptr<SceneService> scene_;
+    std::unique_ptr<OffscreenTarget> offscreen_;
+    std::unique_ptr<GpuUploadService> gpuUpload_;
+    std::unique_ptr<BlasService> blas_;
+    std::unique_ptr<TlasService> tlas_;
+    std::unique_ptr<SceneResourceService> sceneRes_;
+    std::string resourceDir_;
 };
 
 } // namespace engine

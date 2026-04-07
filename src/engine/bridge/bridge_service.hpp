@@ -36,10 +36,67 @@ struct CmdWorldUnload {};
 
 struct CmdShutdown {};
 
+struct CmdChunkSubmit {
+    int32_t chunkX = 0;
+    int32_t chunkZ = 0;
+    int32_t originX = 0, originY = 0, originZ = 0;
+    std::vector<uint8_t> vertexData;   // 96-byte PBRTriangle vertices
+    std::vector<uint32_t> indexData;
+    uint32_t triangleCount = 0;
+};
+
+struct CmdChunkRemove {
+    int32_t chunkX = 0;
+    int32_t chunkZ = 0;
+};
+
+struct CmdCameraUpdate {
+    // View matrix (column-major, 4x4)
+    float view[16] = {};
+    // Projection matrix (column-major, 4x4)
+    float projection[16] = {};
+    // Camera position in world space
+    float posX = 0.0f, posY = 0.0f, posZ = 0.0f;
+    // Camera direction
+    float dirX = 0.0f, dirY = 0.0f, dirZ = -1.0f;
+    // Near/far planes
+    float nearPlane = 0.05f;
+    float farPlane = 1024.0f;
+    // Frame tick (to detect stale data)
+    uint64_t tick = 0;
+};
+
 // Config patch: a type-erased mutation applied on the main thread.
 // The JNI bridge captures the field write + side effects into a lambda.
 struct CmdConfigPatch {
     std::function<void()> apply;
+};
+
+// Sky/atmosphere parameters bridged from Java each frame.
+// Subset of V1's SkyUBO — the parts Java actually computes (sun/moon dir, fog, weather).
+// Atmosphere LUT params and cloud volumetrics are added later.
+struct CmdSkyUpdate {
+    float baseColor[3] = {};
+    float horizonColor[4] = {};
+    float sunDirection[3] = {};
+    float moonDirection[3] = {};
+    uint32_t skyType = 0;
+    uint32_t sunRisingOrSetting = 0;
+    uint32_t skyDark = 0;
+    uint32_t hasBlindnessOrDarkness = 0;
+    uint32_t cameraSubmersionType = 0;
+    uint32_t moonPhase = 0;
+    float rainGradient = 0.0f;
+    float thunderGradient = 0.0f;
+    uint32_t sunTextureID = 0;
+    uint32_t moonTextureID = 0;
+};
+
+// Replace the texture mapping SSBO contents with raw bytes from Java.
+// Layout matches V1's TextureMapping table (TEX_ENTRY_COUNT * TEX_ENTRY_INTS * 4 bytes).
+// Owning copy — JNI thread allocates, main thread consumes.
+struct CmdTextureMappingUpdate {
+    std::vector<uint8_t> data;
 };
 
 using BridgeCommand = std::variant<
@@ -48,7 +105,12 @@ using BridgeCommand = std::variant<
     CmdWorldLoad,
     CmdWorldUnload,
     CmdShutdown,
-    CmdConfigPatch
+    CmdConfigPatch,
+    CmdChunkSubmit,
+    CmdChunkRemove,
+    CmdCameraUpdate,
+    CmdSkyUpdate,
+    CmdTextureMappingUpdate
 >;
 
 // --- Event types (C++ → Java, fire-and-forget) ---
