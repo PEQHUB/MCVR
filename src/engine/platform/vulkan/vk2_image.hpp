@@ -60,10 +60,11 @@ public:
     // Returns the index into the views array.
     Result<uint32_t> addView(VkDevice device, const VkImageViewCreateInfo& viewInfo);
 
+    Image() = default;
+
     VkImageView view(uint32_t index) const { return views_[index]; }
 
 private:
-    Image() = default;
 
     VkDevice device_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = VK_NULL_HANDLE;

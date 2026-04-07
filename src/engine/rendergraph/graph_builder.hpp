@@ -36,6 +36,9 @@ public:
     // This is the YAML "connect(outputConfig, inputConfig)" equivalent.
     void connect(ResourceHandle output, ResourceHandle input);
 
+    // Set which resource is the final output (composited to swapchain).
+    void setFinalOutput(ResourceHandle handle) { finalOutput_ = handle; }
+
     // Look up a resource by name. Returns invalid handle if not found.
     ResourceHandle findResource(const std::string& name) const;
 
@@ -58,6 +61,7 @@ private:
     std::vector<ImageResourceDesc> resources_;
     std::vector<PassDescriptor> passes_;
     std::unordered_map<std::string, uint32_t> resourceNameMap_;
+    ResourceHandle finalOutput_;
 
     // Adjacency for topological sort: pass → set of passes it depends on
     // (derived from shared resources: if pass A outputs R and pass B inputs R, B depends on A)

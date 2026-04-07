@@ -1,0 +1,16 @@
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D outImage;
+
+layout(push_constant) uniform PushConstants {
+    vec4 color;
+} pc;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outImage);
+    if (pos.x >= size.x || pos.y >= size.y) return;
+    imageStore(outImage, pos, pc.color);
+}

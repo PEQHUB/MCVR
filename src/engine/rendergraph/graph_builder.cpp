@@ -74,6 +74,7 @@ void GraphBuilder::buildEdges(std::vector<Edge>& edges) const {
 CompiledGraph GraphBuilder::compile() const {
     CompiledGraph graph;
     graph.resources = resources_;
+    graph.finalOutput = finalOutput_;
 
     if (passes_.empty()) return graph;
 

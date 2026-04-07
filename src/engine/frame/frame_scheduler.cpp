@@ -1,4 +1,7 @@
 #include "frame_scheduler.hpp"
+#include "offscreen_target.hpp"
+#include "composite_pass.hpp"
+#include "rendergraph/barrier_planner.hpp"
 #include "app/engine_services.hpp"
 #include "config/config_service.hpp"
 #include "bridge/bridge_service.hpp"
@@ -340,14 +343,347 @@ bool FrameScheduler::executeClearFrame(
     return false; // Frame not skipped
 }
 
-void FrameScheduler::executeGraph(const FrameContext& ctx) {
-    if (!graph_.valid()) return;
-    for (const auto& pass : graph_.passes) {
-        if (pass.execute) pass.execute(ctx, pass.resources);
+bool FrameScheduler::executeOffscreenFrame(
+    vk2::DeviceService& device, vk2::SwapchainService& swapchain,
+    OffscreenTarget& offscreen, FrameContext& ctx) {
+
+    if (!syncInitialized_) return false;
+
+    // Handle pending recreate
+    if (swapchain.isRecreateNeeded()) {
+        device.waitIdle();
+        auto r = swapchain.recreate(0, 0);
+        if (!r) {
+            log::warn("frame", "Swapchain recreate failed: " + r.error().message);
+        } else {
+            swapchain.clearRecreateNeeded();
+            imageCount_ = swapchain.imageCount();
+            // Recreate offscreen targets to match new extent
+            auto ext = swapchain.extent();
+            auto offR = offscreen.recreate(device, ext.width, ext.height);
+            if (!offR) log::error("frame", "Offscreen recreate failed: " + offR.error().message);
+        }
+        return true; // Frame skipped
     }
+
+    auto& sync = frameSync_[frameIndex_];
+
+    // Wait for this frame slot's previous submission
+    vkWaitForFences(device.device(), 1, &sync.inFlight, VK_TRUE, UINT64_MAX);
+    vkResetFences(device.device(), 1, &sync.inFlight);
+
+    // Acquire swapchain image
+    auto acquireResult = swapchain.acquireNextImage(sync.imageAcquired);
+    if (!acquireResult) {
+        if (acquireResult.error().vkResult == VK_ERROR_OUT_OF_DATE_KHR) {
+            swapchain.markRecreateNeeded();
+            return true;
+        }
+        log::warn("frame", "Acquire failed: " + acquireResult.error().message);
+        return true;
+    }
+    ctx.swapchainImageIndex = acquireResult.value();
+
+    // Record command buffer
+    VkCommandBuffer cmd = sync.cmd;
+    vkResetCommandBuffer(cmd, 0);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &beginInfo);
+
+    services_.metrics().beginGpuFrame(cmd, ctx.frameIndex);
+
+    // Cycling clear color
+    float t = static_cast<float>(frameNumber_ % 360) / 360.0f;
+    VkClearColorValue clearColor = {{
+        0.5f * (1.0f + std::sin(t * 6.28318f)),
+        0.5f * (1.0f + std::sin(t * 6.28318f + 2.094f)),
+        0.5f * (1.0f + std::sin(t * 6.28318f + 4.189f)),
+        1.0f
+    }};
+
+    auto& offImg = offscreen.image(ctx.frameIndex);
+    VkImage offVkImg = offImg.handle();
+    VkImage swapImage = swapchain.image(ctx.swapchainImageIndex);
+    VkExtent2D swapExtent = swapchain.extent();
+
+    // 1. Offscreen: UNDEFINED → TRANSFER_DST_OPTIMAL
+    {
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+        barrier.srcAccessMask = VK_ACCESS_2_NONE;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = offVkImg;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
+
+    // 2. Clear offscreen image
+    {
+        VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd, offVkImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &clearColor, 1, &range);
+    }
+
+    // 3. Offscreen: TRANSFER_DST → TRANSFER_SRC_OPTIMAL
+    {
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = offVkImg;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
+
+    // 4-5. Composite: blit offscreen → swapchain, transition to PRESENT_SRC
+    CompositePass::record(cmd, offVkImg, offscreen.width(), offscreen.height(),
+                          swapImage, swapExtent.width, swapExtent.height);
+
+    services_.metrics().endGpuFrame(cmd, ctx.frameIndex);
+    vkEndCommandBuffer(cmd);
+
+    // Submit via vkQueueSubmit2
+    VkSemaphoreSubmitInfo waitSemInfo{};
+    waitSemInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    waitSemInfo.semaphore = sync.imageAcquired;
+    waitSemInfo.stageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+
+    VkSemaphoreSubmitInfo signalSemInfo{};
+    signalSemInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    signalSemInfo.semaphore = sync.renderComplete;
+    signalSemInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+    VkCommandBufferSubmitInfo cmdInfo{};
+    cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    cmdInfo.commandBuffer = cmd;
+
+    VkSubmitInfo2 submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submitInfo.waitSemaphoreInfoCount = 1;
+    submitInfo.pWaitSemaphoreInfos = &waitSemInfo;
+    submitInfo.commandBufferInfoCount = 1;
+    submitInfo.pCommandBufferInfos = &cmdInfo;
+    submitInfo.signalSemaphoreInfoCount = 1;
+    submitInfo.pSignalSemaphoreInfos = &signalSemInfo;
+
+    VkResult submitResult = vkQueueSubmit2(device.mainQueue().queue, 1, &submitInfo, sync.inFlight);
+    if (submitResult == VK_ERROR_DEVICE_LOST) {
+        log::error("frame", "DEVICE_LOST on vkQueueSubmit2 — initiating shutdown");
+        services_.bridge().emit(EvtDeviceLost{"vkQueueSubmit2 returned DEVICE_LOST"});
+        deviceLost_ = true;
+        return false;
+    }
+
+    auto presentResult = swapchain.present(ctx.swapchainImageIndex, sync.renderComplete);
+    if (!presentResult) {
+        // OUT_OF_DATE/SUBOPTIMAL handled inside present()
+    }
+
+    return false;
+}
+
+bool FrameScheduler::executeGraphFrame(
+    vk2::DeviceService& device, vk2::SwapchainService& swapchain,
+    FrameContext& ctx) {
+
+    if (!syncInitialized_ || !graph_.valid()) return false;
+
+    // Handle pending recreate
+    if (swapchain.isRecreateNeeded()) {
+        device.waitIdle();
+        auto r = swapchain.recreate(0, 0);
+        if (!r) {
+            log::warn("frame", "Swapchain recreate failed: " + r.error().message);
+        } else {
+            swapchain.clearRecreateNeeded();
+            imageCount_ = swapchain.imageCount();
+        }
+        return true;
+    }
+
+    auto ext = swapchain.extent();
+
+    // Allocate or recreate graph resources if needed
+    if (!resourcePool_.isAllocated()) {
+        auto allocR = resourcePool_.allocate(device, graph_, ext.width, ext.height);
+        if (!allocR) {
+            log::error("frame", "Graph resource allocation failed: " + allocR.error().message);
+            return true;
+        }
+    } else if (resourcePool_.renderWidth() != ext.width || resourcePool_.renderHeight() != ext.height) {
+        device.waitIdle();
+        auto recreR = resourcePool_.recreate(device, graph_, ext.width, ext.height);
+        if (!recreR) {
+            log::error("frame", "Graph resource recreate failed: " + recreR.error().message);
+            return true;
+        }
+    }
+
+    // Plan barriers
+    auto resolved = resourcePool_.resolved();
+    BarrierPlanner::plan(graph_, resolved.images);
+
+    // Wire resolved resources into each pass
+    for (auto& pass : graph_.passes) {
+        pass.resources.resolved = &resolved;
+    }
+
+    auto& sync = frameSync_[frameIndex_];
+
+    // Wait for this frame slot
+    vkWaitForFences(device.device(), 1, &sync.inFlight, VK_TRUE, UINT64_MAX);
+    vkResetFences(device.device(), 1, &sync.inFlight);
+
+    // Acquire swapchain image
+    auto acquireResult = swapchain.acquireNextImage(sync.imageAcquired);
+    if (!acquireResult) {
+        if (acquireResult.error().vkResult == VK_ERROR_OUT_OF_DATE_KHR) {
+            swapchain.markRecreateNeeded();
+            return true;
+        }
+        log::warn("frame", "Acquire failed: " + acquireResult.error().message);
+        return true;
+    }
+    ctx.swapchainImageIndex = acquireResult.value();
+
+    // Record command buffer
+    VkCommandBuffer cmd = sync.cmd;
+    vkResetCommandBuffer(cmd, 0);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &beginInfo);
+
+    services_.metrics().beginGpuFrame(cmd, ctx.frameIndex);
+
+    // Pre-graph scene processing (upload, BLAS, TLAS)
+    if (preGraphFn_) preGraphFn_(cmd);
+
+    // Execute all passes with their pre-barriers
+    for (auto& pass : graph_.passes) {
+        pass.resources.cmd = cmd;
+        // Record pre-barriers
+        if (!pass.preBarriers.imageBarriers.empty()) {
+            VkDependencyInfo dep{};
+            dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dep.imageMemoryBarrierCount = static_cast<uint32_t>(pass.preBarriers.imageBarriers.size());
+            dep.pImageMemoryBarriers = pass.preBarriers.imageBarriers.data();
+            vkCmdPipelineBarrier2(cmd, &dep);
+        }
+
+        // Execute pass
+        if (pass.execute) {
+            pass.execute(ctx, pass.resources);
+        }
+    }
+
+    // Composite: transition final output to TRANSFER_SRC, then blit to swapchain
+    if (graph_.finalOutput.valid() && graph_.finalOutput.index < resolved.count) {
+        VkImage finalImg = resolved.images[graph_.finalOutput.index];
+
+        // Final output → TRANSFER_SRC_OPTIMAL
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = finalImg;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(cmd, &dep);
+
+        auto& finalRes = graph_.resources[graph_.finalOutput.index];
+        uint32_t srcW = finalRes.fixedWidth  ? finalRes.fixedWidth  : ext.width;
+        uint32_t srcH = finalRes.fixedHeight ? finalRes.fixedHeight : ext.height;
+
+        VkImage swapImage = swapchain.image(ctx.swapchainImageIndex);
+        CompositePass::record(cmd, finalImg, srcW, srcH,
+                              swapImage, ext.width, ext.height);
+    }
+
+    services_.metrics().endGpuFrame(cmd, ctx.frameIndex);
+    vkEndCommandBuffer(cmd);
+
+    // Submit
+    VkSemaphoreSubmitInfo waitSemInfo{};
+    waitSemInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    waitSemInfo.semaphore = sync.imageAcquired;
+    waitSemInfo.stageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+
+    VkSemaphoreSubmitInfo signalSemInfo{};
+    signalSemInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    signalSemInfo.semaphore = sync.renderComplete;
+    signalSemInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+    VkCommandBufferSubmitInfo cmdInfo{};
+    cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    cmdInfo.commandBuffer = cmd;
+
+    VkSubmitInfo2 submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submitInfo.waitSemaphoreInfoCount = 1;
+    submitInfo.pWaitSemaphoreInfos = &waitSemInfo;
+    submitInfo.commandBufferInfoCount = 1;
+    submitInfo.pCommandBufferInfos = &cmdInfo;
+    submitInfo.signalSemaphoreInfoCount = 1;
+    submitInfo.pSignalSemaphoreInfos = &signalSemInfo;
+
+    VkResult submitResult = vkQueueSubmit2(device.mainQueue().queue, 1, &submitInfo, sync.inFlight);
+    if (submitResult == VK_ERROR_DEVICE_LOST) {
+        log::error("frame", "DEVICE_LOST on vkQueueSubmit2 — initiating shutdown");
+        services_.bridge().emit(EvtDeviceLost{"vkQueueSubmit2 returned DEVICE_LOST"});
+        deviceLost_ = true;
+        return false;
+    }
+
+    auto presentResult = swapchain.present(ctx.swapchainImageIndex, sync.renderComplete);
+    if (!presentResult) {
+        // OUT_OF_DATE/SUBOPTIMAL handled inside present()
+    }
+
+    return false;
 }
 
 void FrameScheduler::setGraph(CompiledGraph graph) {
+    // Release old resources before replacing graph
+    if (resourcePool_.isAllocated()) {
+        resourcePool_.release(gc_);
+    }
     graph_ = std::move(graph);
     if (graph_.valid()) {
         log::info("frame", "Render graph set: " + std::to_string(graph_.passCount()) +

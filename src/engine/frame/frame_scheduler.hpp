@@ -12,6 +12,7 @@
 #include "frame_context.hpp"
 #include "resource_gc.hpp"
 #include "rendergraph/graph_types.hpp"
+#include "rendergraph/graph_resource_pool.hpp"
 #include "platform/vulkan/vk2_result.hpp"
 
 #include <chrono>
@@ -22,6 +23,7 @@
 namespace engine {
 
 class EngineServices;
+class OffscreenTarget;
 
 namespace vk2 {
 class DeviceService;
@@ -52,14 +54,30 @@ public:
     bool executeClearFrame(vk2::DeviceService& device, vk2::SwapchainService& swapchain,
                            FrameContext& ctx);
 
-    void executeGraph(const FrameContext& ctx);
+    // Acquire, clear offscreen, blit to swapchain, present. Returns true if skipped.
+    bool executeOffscreenFrame(vk2::DeviceService& device, vk2::SwapchainService& swapchain,
+                               OffscreenTarget& offscreen, FrameContext& ctx);
+
+    // Execute the render graph: allocate resources, plan barriers, run passes, composite.
+    // Returns true if frame was skipped.
+    bool executeGraphFrame(vk2::DeviceService& device, vk2::SwapchainService& swapchain,
+                           FrameContext& ctx);
+
     void endFrame(const FrameContext& ctx);
 
     void setGraph(CompiledGraph graph);
     bool hasGraph() const { return graph_.valid(); }
 
+    // Set a callback invoked with the active command buffer before graph passes.
+    // Used for scene processing (upload, BLAS, TLAS builds).
+    using PreGraphFn = std::function<void(VkCommandBuffer)>;
+    void setPreGraphCallback(PreGraphFn fn) { preGraphFn_ = std::move(fn); }
+
     ResourceGC& gc() { return gc_; }
+    GraphResourcePool& resourcePool() { return resourcePool_; }
     uint64_t frameNumber() const { return frameNumber_; }
+    uint32_t currentFrameIndex() const { return frameIndex_; }
+    uint32_t framesInFlight() const { return framesInFlight_; }
     float lastFrameTimeMs() const { return lastFrameTimeMs_; }
     bool isDeviceLost() const { return deviceLost_; }
 
@@ -67,6 +85,8 @@ private:
     EngineServices& services_;
     ResourceGC gc_{32};
     CompiledGraph graph_;
+    GraphResourcePool resourcePool_;
+    PreGraphFn preGraphFn_;
 
     uint64_t frameNumber_ = 0;
     uint32_t frameIndex_ = 0;

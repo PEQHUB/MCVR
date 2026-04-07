@@ -44,11 +44,12 @@ public:
     // Mapped pointer (only valid if created with MAPPED flag)
     void* mappedPtr() const { return mappedPtr_; }
 
+    Buffer() = default;
+
     // Buffer device address (only valid if created with SHADER_DEVICE_ADDRESS usage)
     VkDeviceAddress deviceAddress() const { return deviceAddress_; }
 
 private:
-    Buffer() = default;
 
     VkDevice device_ = VK_NULL_HANDLE;       // Non-owning (device outlives buffer)
     VmaAllocator allocator_ = VK_NULL_HANDLE; // Non-owning
