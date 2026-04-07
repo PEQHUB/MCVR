@@ -164,13 +164,14 @@ bool EngineApp::init(const EngineInitConfig& config) {
             log::warn("app", "Metrics init failed (non-fatal): " + metricsResult.error().message);
         }
 
-        // Initialize scene services
+        // Initialize scene services (with deferred-delete via FrameScheduler::gc())
         {
-            auto gpuR = services_->gpuUpload().init(services_->device(), framesInFlight);
+            auto& gc = services_->frame().gc();
+            auto gpuR = services_->gpuUpload().init(services_->device(), framesInFlight, &gc);
             if (!gpuR) log::warn("app", "GpuUpload init failed (non-fatal): " + gpuR.error().message);
-            auto blasR = services_->blas().init(services_->device());
+            auto blasR = services_->blas().init(services_->device(), &gc);
             if (!blasR) log::warn("app", "BLAS init failed (non-fatal): " + blasR.error().message);
-            auto tlasR = services_->tlas().init(services_->device());
+            auto tlasR = services_->tlas().init(services_->device(), &gc);
             if (!tlasR) log::warn("app", "TLAS init failed (non-fatal): " + tlasR.error().message);
             auto sceneResR = services_->sceneRes().init(services_->device(), framesInFlight);
             if (!sceneResR) log::warn("app", "SceneRes init failed (non-fatal): " + sceneResR.error().message);
@@ -383,7 +384,7 @@ void EngineApp::handleCommand(const CmdConfigPatch& cmd) {
 
 void EngineApp::handleCommand(const CmdChunkSubmit& cmd) {
     ChunkGeometry geo;
-    geo.id = {cmd.chunkX, cmd.chunkZ};
+    geo.id = {cmd.chunkX, cmd.sectionY, cmd.chunkZ};
     geo.vertexData = cmd.vertexData;
     geo.indexData = cmd.indexData;
     geo.triangleCount = cmd.triangleCount;
@@ -394,13 +395,19 @@ void EngineApp::handleCommand(const CmdChunkSubmit& cmd) {
 }
 
 void EngineApp::handleCommand(const CmdChunkRemove& cmd) {
-    ChunkId id{cmd.chunkX, cmd.chunkZ};
+    ChunkId id{cmd.chunkX, cmd.sectionY, cmd.chunkZ};
     services_->scene().chunks().remove(id);
     services_->gpuUpload().removeChunk(id);
     services_->blas().removeChunk(id);
 }
 
 void EngineApp::processScene(VkCommandBuffer cmd) {
+    // First-frame deferred init: clear energy LUT to 1.0.
+    // Idempotent — returns false on subsequent calls.
+    if (services_->sceneRes().isInitialized()) {
+        services_->sceneRes().runDeferredInit(cmd);
+    }
+
     // Update scene resources (WorldUBO with current camera/config)
     if (services_->sceneRes().isInitialized() && latestCamera_.valid) {
         auto cfg = services_->config().snapshot();

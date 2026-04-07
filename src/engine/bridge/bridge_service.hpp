@@ -38,6 +38,7 @@ struct CmdShutdown {};
 
 struct CmdChunkSubmit {
     int32_t chunkX = 0;
+    int32_t sectionY = 0;  // Minecraft section index (-4..19 in 1.21 worlds)
     int32_t chunkZ = 0;
     int32_t originX = 0, originY = 0, originZ = 0;
     std::vector<uint8_t> vertexData;   // 96-byte PBRTriangle vertices
@@ -47,6 +48,7 @@ struct CmdChunkSubmit {
 
 struct CmdChunkRemove {
     int32_t chunkX = 0;
+    int32_t sectionY = 0;
     int32_t chunkZ = 0;
 };
 

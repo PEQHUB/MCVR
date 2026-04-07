@@ -1,16 +1,19 @@
 #include "gpu_upload_service.hpp"
 #include "chunk_registry.hpp"
 #include "platform/vulkan/vk2_device.hpp"
+#include "frame/resource_gc.hpp"
 #include "diagnostics/log.hpp"
 
 #include <volk.h>
 #include <cstring>
+#include <utility>
 
 namespace engine {
 
 vk2::Result<void> GpuUploadService::init(vk2::DeviceService& device, uint32_t framesInFlight,
-                                         VkDeviceSize stagingSize) {
+                                         ResourceGC* gc, VkDeviceSize stagingSize) {
     device_ = &device;
+    gc_ = gc;
     stagingSize_ = stagingSize;
     framesInFlight_ = std::max(framesInFlight, 1u);
     slotSize_ = stagingSize_ / framesInFlight_;
@@ -27,14 +30,18 @@ vk2::Result<void> GpuUploadService::init(vk2::DeviceService& device, uint32_t fr
     stagingBuffer_ = std::move(r.value());
 
     initialized_ = true;
-    log::info("gpu-upload", "Initialized with " + std::to_string(stagingSize / (1024 * 1024)) + " MB staging");
+    log::info("gpu-upload", "Initialized with " + std::to_string(stagingSize / (1024 * 1024)) + " MB staging"
+              + (gc_ ? " (deferred-delete: on)" : " (deferred-delete: OFF)"));
     return {};
 }
 
 void GpuUploadService::shutdown() {
+    // Force synchronous destruction on shutdown — the frame loop is done and the GC
+    // is about to be torn down, so any deferred lambdas would be stranded.
     chunks_.clear();
     stagingBuffer_ = {};
     initialized_ = false;
+    gc_ = nullptr;
 }
 
 uint32_t GpuUploadService::uploadDirtyChunks(VkCommandBuffer cmd,
@@ -48,8 +55,12 @@ uint32_t GpuUploadService::uploadDirtyChunks(VkCommandBuffer cmd,
 
     for (const auto& geo : dirtyChunks) {
         if (geo.empty()) {
-            // Empty chunk — remove existing GPU data
-            chunks_.erase(geo.id);
+            // Empty chunk — retire existing GPU data via GC (if present)
+            auto it = chunks_.find(geo.id);
+            if (it != chunks_.end()) {
+                retireChunk(std::move(it->second));
+                chunks_.erase(it);
+            }
             continue;
         }
 
@@ -101,6 +112,13 @@ uint32_t GpuUploadService::uploadDirtyChunks(VkCommandBuffer cmd,
         VkBufferCopy idxCopy{idxStaging, 0, idxSize};
         vkCmdCopyBuffer(cmd, stagingBuffer_.handle(), idxR.value().handle(), 1, &idxCopy);
 
+        // Retire the old entry before overwriting so in-flight GPU reads finish first.
+        auto existing = chunks_.find(geo.id);
+        if (existing != chunks_.end()) {
+            retireChunk(std::move(existing->second));
+            chunks_.erase(existing);
+        }
+
         // Store GPU data
         GpuChunkData data;
         data.triangleCount = geo.triangleCount;
@@ -122,7 +140,10 @@ uint32_t GpuUploadService::uploadDirtyChunks(VkCommandBuffer cmd,
 }
 
 void GpuUploadService::removeChunk(ChunkId id) {
-    chunks_.erase(id);
+    auto it = chunks_.find(id);
+    if (it == chunks_.end()) return;
+    retireChunk(std::move(it->second));
+    chunks_.erase(it);
 }
 
 const GpuChunkData* GpuUploadService::getChunk(ChunkId id) const {
@@ -141,6 +162,21 @@ VkDeviceSize GpuUploadService::allocStaging(VkDeviceSize size, VkDeviceSize alig
 void GpuUploadService::resetStaging(uint32_t frameIndex) {
     slotBase_ = (frameIndex % framesInFlight_) * slotSize_;
     stagingOffset_ = slotBase_;
+}
+
+void GpuUploadService::retireChunk(GpuChunkData data) {
+    if (gc_) {
+        // Wrap in shared_ptr so the lambda is copyable (std::function requirement).
+        // The buffers are destroyed on GC tick() after the ring cycles past this slot,
+        // guaranteeing in-flight GPU work has completed.
+        auto vb = std::make_shared<vk2::Buffer>(std::move(data.vertexBuffer));
+        auto ib = std::make_shared<vk2::Buffer>(std::move(data.indexBuffer));
+        gc_->defer([vb, ib]() {
+            // shared_ptr release — vk2::Buffer dtors run if this was the last ref
+        });
+    }
+    // If no GC wired, the buffers get destroyed by `data`'s destructor when it goes
+    // out of scope at the end of this function (legacy synchronous fallback).
 }
 
 } // namespace engine

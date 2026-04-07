@@ -2,10 +2,14 @@
 
 // Ownership: EngineServices (1:1).
 // Thread: Main thread only.
-// Dependencies: DeviceService, BlasService.
+// Dependencies: DeviceService, BlasService, optional ResourceGC for deferred-delete.
 //
 // Builds the world TLAS from all chunk BLAS instances.
 // Full rebuild each frame initially. UPDATE mode can be added later.
+//
+// Each TLAS instance carries a translation transform derived from the section
+// origin (originX/Y/Z in BlasData) so the BLAS triangles can stay in the
+// section-local space the mesher produces.
 
 #include "scene_types.hpp"
 #include "platform/vulkan/vk2_buffer.hpp"
@@ -17,6 +21,7 @@
 namespace engine {
 
 class BlasService;
+class ResourceGC;
 
 namespace vk2 { class DeviceService; }
 
@@ -28,7 +33,9 @@ public:
     TlasService(const TlasService&) = delete;
     TlasService& operator=(const TlasService&) = delete;
 
-    vk2::Result<void> init(vk2::DeviceService& device);
+    // gc is optional. When provided, old TLAS destruction on rebuild is deferred
+    // into the ResourceGC ring so the GPU finishes any in-flight work first.
+    vk2::Result<void> init(vk2::DeviceService& device, ResourceGC* gc = nullptr);
     void shutdown();
 
     // Rebuild TLAS from all current BLAS instances.
@@ -45,14 +52,11 @@ public:
     // Indexed by gl_InstanceCustomIndexEXT in shaders.
     VkBuffer vertexBdaBuffer() const { return vertexBdaBuffer_.handle(); }
     VkBuffer indexBdaBuffer() const { return indexBdaBuffer_.handle(); }
-    // Per-instance chunk origin (xyz + pad) SSBO. Used by shaders to offset
-    // ray hits back into world space (chunk origin is baked into vertex pos).
-    VkBuffer chunkOriginBuffer() const { return chunkOriginBuffer_.handle(); }
     VkDeviceSize bdaArraySize() const { return instanceCount_ * sizeof(uint64_t); }
-    VkDeviceSize chunkOriginArraySize() const { return instanceCount_ * sizeof(float) * 4; }
 
 private:
     vk2::DeviceService* device_ = nullptr;
+    ResourceGC* gc_ = nullptr;
 
     VkAccelerationStructureKHR tlas_ = VK_NULL_HANDLE;
     vk2::Buffer tlasBuffer_;
@@ -62,15 +66,14 @@ private:
     // Auxiliary SSBOs for the RT shader's vertex fetch path
     vk2::Buffer vertexBdaBuffer_;     // host-visible uint64[]
     vk2::Buffer indexBdaBuffer_;      // host-visible uint64[]
-    vk2::Buffer chunkOriginBuffer_;   // host-visible vec4[] (xyz + pad)
     VkDeviceSize bdaCapacity_ = 0;    // current allocated capacity in instances
-    VkDeviceSize originCapacity_ = 0;
 
     VkDeviceAddress tlasAddress_ = 0;
     uint32_t instanceCount_ = 0;
     bool initialized_ = false;
 
-    void destroyTlas();
+    // Destroy (or defer destruction of) the old TLAS handle + buffer on rebuild.
+    void retireTlas(VkAccelerationStructureKHR handle, vk2::Buffer buffer);
 };
 
 } // namespace engine

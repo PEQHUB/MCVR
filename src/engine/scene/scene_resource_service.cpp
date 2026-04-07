@@ -122,7 +122,9 @@ vk2::Result<void> SceneResourceService::init(vk2::DeviceService& device, uint32_
         }
     }
 
-    // Energy LUT (64x64 RGBA16F, sampled). Initialized to all-1.0 (no compensation).
+    // Energy LUT (64x64 RGBA16F, sampled). Initialized to all-1.0 (no compensation)
+    // via deferred GPU copy from a host-visible staging buffer. The clear cannot happen
+    // here because the engine has no transfer cmd buffer at init time — see runDeferredInit().
     {
         vk2::Image::Desc id{};
         id.width = ENERGY_LUT_DIM;
@@ -132,6 +134,27 @@ vk2::Result<void> SceneResourceService::init(vk2::DeviceService& device, uint32_
         auto r = vk2::Image::create(device_->device(), device_->vma(), id);
         if (!r) return vk2::makeError(r.error().vkResult, "Energy LUT: " + r.error().message);
         energyLUT_ = std::move(r.value());
+    }
+
+    // Energy LUT staging buffer: host-visible, filled with 1.0 in fp16 format
+    // (4 channels × 2 bytes × 64 × 64 = 32 KB).
+    {
+        constexpr VkDeviceSize lutBytes = ENERGY_LUT_DIM * ENERGY_LUT_DIM * 4 * sizeof(uint16_t);
+        vk2::Buffer::Desc bd{};
+        bd.size = lutBytes;
+        bd.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bd.vmaFlags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                    | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        auto r = vk2::Buffer::create(device_->device(), device_->vma(), bd);
+        if (!r) return vk2::makeError(r.error().vkResult, "Energy LUT staging: " + r.error().message);
+        energyLUTStaging_ = std::move(r.value());
+        // fp16 1.0 = 0x3C00
+        if (energyLUTStaging_.mappedPtr()) {
+            uint16_t* dst = static_cast<uint16_t*>(energyLUTStaging_.mappedPtr());
+            const uint16_t one_fp16 = 0x3C00;
+            const size_t total = ENERGY_LUT_DIM * ENERGY_LUT_DIM * 4;
+            for (size_t i = 0; i < total; ++i) dst[i] = one_fp16;
+        }
     }
 
     // Stub SSBOs — 64 bytes each (small placeholder; real sizes come via bridge)
@@ -178,6 +201,7 @@ void SceneResourceService::shutdown() {
     blueNoiseSobol_ = {};
     blueNoiseScrambling_ = {};
     energyLUT_ = {};
+    energyLUTStaging_ = {};
     textureMappingSSBO_ = {};
     materialClassSSBO_ = {};
     areaLightSSBO_ = {};
@@ -188,6 +212,82 @@ void SceneResourceService::shutdown() {
 
     initialized_ = false;
     device_ = nullptr;
+}
+
+bool SceneResourceService::runDeferredInit(VkCommandBuffer cmd) {
+    if (!initialized_ || !firstFrameInitPending_) return false;
+
+    // 1. Transition energyLUT_ UNDEFINED -> TRANSFER_DST_OPTIMAL
+    {
+        VkImageMemoryBarrier2 bar{};
+        bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        bar.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        bar.srcAccessMask = 0;
+        bar.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        bar.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image = energyLUT_.handle();
+        bar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        bar.subresourceRange.baseMipLevel = 0;
+        bar.subresourceRange.levelCount = 1;
+        bar.subresourceRange.baseArrayLayer = 0;
+        bar.subresourceRange.layerCount = 1;
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &bar;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
+
+    // 2. Copy staging -> LUT
+    {
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {0, 0, 0};
+        region.imageExtent = {ENERGY_LUT_DIM, ENERGY_LUT_DIM, 1};
+        vkCmdCopyBufferToImage(cmd, energyLUTStaging_.handle(), energyLUT_.handle(),
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
+
+    // 3. Transition energyLUT_ TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
+    {
+        VkImageMemoryBarrier2 bar{};
+        bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        bar.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+        bar.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        bar.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                         | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                         | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+        bar.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+        bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        bar.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image = energyLUT_.handle();
+        bar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        bar.subresourceRange.baseMipLevel = 0;
+        bar.subresourceRange.levelCount = 1;
+        bar.subresourceRange.baseArrayLayer = 0;
+        bar.subresourceRange.layerCount = 1;
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &bar;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
+
+    firstFrameInitPending_ = false;
+    log::info("scene-res", "Energy LUT cleared to 1.0 via deferred GPU copy");
+    return true;
 }
 
 void SceneResourceService::updateWorldUBO(uint32_t frameIndex, const CameraData& camera,

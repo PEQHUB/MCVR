@@ -1,19 +1,22 @@
 #include "tlas_service.hpp"
 #include "blas_service.hpp"
 #include "platform/vulkan/vk2_device.hpp"
+#include "frame/resource_gc.hpp"
 #include "diagnostics/log.hpp"
 
 #include <volk.h>
 #include <algorithm>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 namespace engine {
 
 TlasService::~TlasService() { shutdown(); }
 
-vk2::Result<void> TlasService::init(vk2::DeviceService& device) {
+vk2::Result<void> TlasService::init(vk2::DeviceService& device, ResourceGC* gc) {
     device_ = &device;
+    gc_ = gc;
 
     if (!device.caps().accelerationStructure) {
         log::warn("tlas", "Acceleration structures not supported — TLAS service disabled");
@@ -21,20 +24,27 @@ vk2::Result<void> TlasService::init(vk2::DeviceService& device) {
     }
 
     initialized_ = true;
-    log::info("tlas", "TLAS service initialized");
+    log::info("tlas", std::string("TLAS service initialized")
+              + (gc_ ? " (deferred-delete: on)" : " (deferred-delete: OFF)"));
     return {};
 }
 
 void TlasService::shutdown() {
-    destroyTlas();
+    // On shutdown, force synchronous destruction — frame loop is done, GC is about to die.
+    if (tlas_ != VK_NULL_HANDLE && device_) {
+        vkDestroyAccelerationStructureKHR(device_->device(), tlas_, nullptr);
+        tlas_ = VK_NULL_HANDLE;
+    }
+    tlasAddress_ = 0;
+    tlasBuffer_ = {};
     instanceBuffer_ = {};
     scratchBuffer_ = {};
     vertexBdaBuffer_ = {};
     indexBdaBuffer_ = {};
-    chunkOriginBuffer_ = {};
     bdaCapacity_ = 0;
-    originCapacity_ = 0;
+    instanceCount_ = 0;
     initialized_ = false;
+    gc_ = nullptr;
 }
 
 bool TlasService::rebuild(VkCommandBuffer cmd, const BlasService& blasService) {
@@ -44,22 +54,31 @@ bool TlasService::rebuild(VkCommandBuffer cmd, const BlasService& blasService) {
     // Collect instances + parallel BDA arrays.
     // instanceCustomIndex = position in vertexBdas/indexBdas, so the closest-hit
     // shader can use gl_InstanceCustomIndexEXT to find this chunk's vertex/index buffers.
+    //
+    // The section origin is baked into the 3x4 row-major transform as a pure translation:
+    //   | 1 0 0 ox |
+    //   | 0 1 0 oy |
+    //   | 0 0 1 oz |
+    // so the RT hardware transforms the BLAS's section-local vertices into world space
+    // on every ray-triangle intersection, and gl_WorldRayDirectionEXT / gl_WorldRayOriginEXT
+    // in shaders are properly matched to the vertex data.
     std::vector<VkAccelerationStructureInstanceKHR> instances;
     std::vector<uint64_t> vertexBdas;
     std::vector<uint64_t> indexBdas;
-    std::vector<float>    chunkOrigins;  // 4 floats per instance (xyz + pad)
     instances.reserve(blasService.blasCount());
     vertexBdas.reserve(blasService.blasCount());
     indexBdas.reserve(blasService.blasCount());
-    chunkOrigins.reserve(blasService.blasCount() * 4);
 
     uint32_t nextCustomIdx = 0;
     blasService.forEachBlas([&](const ChunkId& id, const BlasData& blas) {
         VkAccelerationStructureInstanceKHR inst{};
-        // Identity transform (chunk origin baked into vertex data)
+        // Translation transform: identity rotation, origin translation in column [3].
         inst.transform.matrix[0][0] = 1.0f;
+        inst.transform.matrix[0][3] = blas.originX;
         inst.transform.matrix[1][1] = 1.0f;
+        inst.transform.matrix[1][3] = blas.originY;
         inst.transform.matrix[2][2] = 1.0f;
+        inst.transform.matrix[2][3] = blas.originZ;
         inst.instanceCustomIndex = nextCustomIdx;
         inst.mask = 0xFF;
         inst.instanceShaderBindingTableRecordOffset = 0;
@@ -69,12 +88,6 @@ bool TlasService::rebuild(VkCommandBuffer cmd, const BlasService& blasService) {
 
         vertexBdas.push_back(blas.vertexAddress);
         indexBdas.push_back(blas.indexAddress);
-        // chunk origin is baked into vertex positions, so the "origin" is 0 for now.
-        // TODO: when GpuChunkData.origin is bridged through, populate this from blas.
-        chunkOrigins.push_back(0.0f);
-        chunkOrigins.push_back(0.0f);
-        chunkOrigins.push_back(0.0f);
-        chunkOrigins.push_back(0.0f);
 
         ++nextCustomIdx;
     });
@@ -123,22 +136,6 @@ bool TlasService::rebuild(VkCommandBuffer cmd, const BlasService& blasService) {
     std::memcpy(vertexBdaBuffer_.mappedPtr(), vertexBdas.data(), bdaSize);
     std::memcpy(indexBdaBuffer_.mappedPtr(), indexBdas.data(), bdaSize);
 
-    // Chunk origin SSBO (vec4 per instance)
-    VkDeviceSize originSize = instanceCount_ * sizeof(float) * 4;
-    if (!chunkOriginBuffer_.handle() || originCapacity_ < instanceCount_) {
-        vk2::Buffer::Desc bd{};
-        VkDeviceSize newCapacity = std::max<VkDeviceSize>(instanceCount_ * 2, 64);
-        bd.size = newCapacity * sizeof(float) * 4;
-        bd.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-        bd.vmaFlags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
-                    | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        auto r = vk2::Buffer::create(device_->device(), device_->vma(), bd);
-        if (!r) { log::error("tlas", "Chunk origin buffer: " + r.error().message); return false; }
-        chunkOriginBuffer_ = std::move(r.value());
-        originCapacity_ = newCapacity;
-    }
-    std::memcpy(chunkOriginBuffer_.mappedPtr(), chunkOrigins.data(), originSize);
-
     // Build geometry info
     VkAccelerationStructureGeometryKHR geometry{};
     geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -162,9 +159,12 @@ bool TlasService::rebuild(VkCommandBuffer cmd, const BlasService& blasService) {
     vkGetAccelerationStructureBuildSizesKHR(device_->device(),
         VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &instanceCount_, &sizeInfo);
 
-    // Recreate TLAS buffer if needed
+    // Recreate TLAS buffer if needed (retire old one via GC)
     if (!tlasBuffer_.handle() || tlasBuffer_.size() < sizeInfo.accelerationStructureSize) {
-        destroyTlas();
+        // Retire the old TLAS handle + backing buffer (deferred if GC is wired)
+        retireTlas(tlas_, std::move(tlasBuffer_));
+        tlas_ = VK_NULL_HANDLE;
+        tlasAddress_ = 0;
 
         vk2::Buffer::Desc bd{};
         bd.size = sizeInfo.accelerationStructureSize;
@@ -229,11 +229,21 @@ bool TlasService::rebuild(VkCommandBuffer cmd, const BlasService& blasService) {
     return true;
 }
 
-void TlasService::destroyTlas() {
-    if (tlas_ != VK_NULL_HANDLE && device_) {
-        vkDestroyAccelerationStructureKHR(device_->device(), tlas_, nullptr);
-        tlas_ = VK_NULL_HANDLE;
-        tlasAddress_ = 0;
+void TlasService::retireTlas(VkAccelerationStructureKHR handle, vk2::Buffer buffer) {
+    if (handle == VK_NULL_HANDLE) return;
+
+    if (gc_) {
+        VkDevice dev = device_->device();
+        auto buf = std::make_shared<vk2::Buffer>(std::move(buffer));
+        gc_->defer([dev, handle, buf]() {
+            vkDestroyAccelerationStructureKHR(dev, handle, nullptr);
+            // buf's shared_ptr releases here; vk2::Buffer dtor runs if last ref
+        });
+    } else {
+        if (device_) {
+            vkDestroyAccelerationStructureKHR(device_->device(), handle, nullptr);
+        }
+        // buffer destructor runs as arg goes out of scope
     }
 }
 

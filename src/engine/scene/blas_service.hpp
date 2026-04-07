@@ -2,7 +2,7 @@
 
 // Ownership: EngineServices (1:1).
 // Thread: Main thread only.
-// Dependencies: DeviceService, GpuUploadService.
+// Dependencies: DeviceService, GpuUploadService, optional ResourceGC for deferred-delete.
 //
 // Builds per-chunk BLAS from uploaded GPU vertex/index buffers.
 // Uses a shared scratch buffer for builds. Batched per-frame.
@@ -12,6 +12,7 @@
 #include "platform/vulkan/vk2_result.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 #include <vulkan/vulkan.h>
@@ -19,6 +20,7 @@
 namespace engine {
 
 struct GpuChunkData;
+class ResourceGC;
 
 namespace vk2 { class DeviceService; }
 
@@ -29,6 +31,11 @@ struct BlasData {
     // Cached for the RT shader's vertex fetch path (TlasService bundles these into SSBOs)
     VkDeviceAddress vertexAddress = 0;
     VkDeviceAddress indexAddress = 0;
+    // Section origin in world space — baked into TLAS instance transform (section-local
+    // vertex data * translation = world-space ray intersection).
+    float originX = 0.0f;
+    float originY = 0.0f;
+    float originZ = 0.0f;
     RevisionId revision;
 };
 
@@ -40,7 +47,10 @@ public:
     BlasService(const BlasService&) = delete;
     BlasService& operator=(const BlasService&) = delete;
 
-    vk2::Result<void> init(vk2::DeviceService& device, VkDeviceSize scratchSize = 32 * 1024 * 1024);
+    // gc is optional. When provided, BLAS destruction on chunk re-upload/removal is
+    // deferred into the ResourceGC ring so the GPU finishes any in-flight work first.
+    vk2::Result<void> init(vk2::DeviceService& device, ResourceGC* gc = nullptr,
+                           VkDeviceSize scratchSize = 32 * 1024 * 1024);
     void shutdown();
 
     // Build BLAS for dirty chunks. Records build commands into cmd.
@@ -65,6 +75,7 @@ public:
 
 private:
     vk2::DeviceService* device_ = nullptr;
+    ResourceGC* gc_ = nullptr;
 
     // Shared scratch buffer for all AS builds
     vk2::Buffer scratchBuffer_;
@@ -74,7 +85,8 @@ private:
     std::unordered_map<ChunkId, BlasData> blas_;
     bool initialized_ = false;
 
-    void destroyBlas(BlasData& data);
+    // Destroy (or defer destruction of) a BLAS, leaving `data` in a zeroed state.
+    void retireBlas(BlasData data);
 };
 
 } // namespace engine

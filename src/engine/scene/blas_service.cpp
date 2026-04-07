@@ -1,16 +1,20 @@
 #include "blas_service.hpp"
 #include "gpu_upload_service.hpp"
 #include "platform/vulkan/vk2_device.hpp"
+#include "frame/resource_gc.hpp"
 #include "diagnostics/log.hpp"
 
+#include <utility>
 #include <volk.h>
 
 namespace engine {
 
 BlasService::~BlasService() { shutdown(); }
 
-vk2::Result<void> BlasService::init(vk2::DeviceService& device, VkDeviceSize scratchSize) {
+vk2::Result<void> BlasService::init(vk2::DeviceService& device, ResourceGC* gc,
+                                     VkDeviceSize scratchSize) {
     device_ = &device;
+    gc_ = gc;
     scratchSize_ = scratchSize;
 
     if (!device.caps().accelerationStructure) {
@@ -30,15 +34,25 @@ vk2::Result<void> BlasService::init(vk2::DeviceService& device, VkDeviceSize scr
     scratchAddress_ = scratchBuffer_.deviceAddress();
 
     initialized_ = true;
-    log::info("blas", "Initialized with " + std::to_string(scratchSize / (1024 * 1024)) + " MB scratch");
+    log::info("blas", "Initialized with " + std::to_string(scratchSize / (1024 * 1024)) + " MB scratch"
+              + (gc_ ? " (deferred-delete: on)" : " (deferred-delete: OFF)"));
     return {};
 }
 
 void BlasService::shutdown() {
-    for (auto& [id, data] : blas_) destroyBlas(data);
+    // On shutdown, force synchronous destruction — the frame loop is done, no GPU work in flight.
+    // Bypass the GC path even if it's wired, since the GC itself is about to be torn down.
+    for (auto& [id, data] : blas_) {
+        if (data.handle != VK_NULL_HANDLE && device_) {
+            vkDestroyAccelerationStructureKHR(device_->device(), data.handle, nullptr);
+            data.handle = VK_NULL_HANDLE;
+        }
+        // vk2::Buffer destructor runs when `data` goes out of scope below.
+    }
     blas_.clear();
     scratchBuffer_ = {};
     initialized_ = false;
+    gc_ = nullptr;
 }
 
 uint32_t BlasService::buildDirtyChunks(VkCommandBuffer cmd,
@@ -130,9 +144,14 @@ uint32_t BlasService::buildDirtyChunks(VkCommandBuffer cmd,
 
         scratchOffset = alignedScratch + sizeInfo.buildScratchSize;
 
-        // Destroy old BLAS if exists
+        // Retire old BLAS (deferred if GC is wired). We move-out the old data so the
+        // in-flight destructor captures by value and the map slot is immediately free
+        // for the new entry.
         auto existing = blas_.find(chunkId);
-        if (existing != blas_.end()) destroyBlas(existing->second);
+        if (existing != blas_.end()) {
+            retireBlas(std::move(existing->second));
+            blas_.erase(existing);
+        }
 
         // Store
         BlasData data;
@@ -141,6 +160,9 @@ uint32_t BlasService::buildDirtyChunks(VkCommandBuffer cmd,
         data.address = asAddr;
         data.vertexAddress = gpu.vertexAddress;
         data.indexAddress = gpu.indexAddress;
+        data.originX = gpu.originX;
+        data.originY = gpu.originY;
+        data.originZ = gpu.originZ;
         data.revision = gpu.revision;
         blas_[chunkId] = std::move(data);
         ++built;
@@ -169,7 +191,7 @@ uint32_t BlasService::buildDirtyChunks(VkCommandBuffer cmd,
 void BlasService::removeChunk(ChunkId id) {
     auto it = blas_.find(id);
     if (it != blas_.end()) {
-        destroyBlas(it->second);
+        retireBlas(std::move(it->second));
         blas_.erase(it);
     }
 }
@@ -179,10 +201,29 @@ const BlasData* BlasService::getBlas(ChunkId id) const {
     return it != blas_.end() ? &it->second : nullptr;
 }
 
-void BlasService::destroyBlas(BlasData& data) {
-    if (data.handle != VK_NULL_HANDLE && device_) {
-        vkDestroyAccelerationStructureKHR(device_->device(), data.handle, nullptr);
-        data.handle = VK_NULL_HANDLE;
+void BlasService::retireBlas(BlasData data) {
+    if (data.handle == VK_NULL_HANDLE) return;
+
+    if (gc_) {
+        // Defer destruction: wrap the AS handle and buffer in a shared state so
+        // the capture is copyable (std::function requires CopyConstructible).
+        // The state is destroyed when the GC ring cycles past the lambda's slot,
+        // guaranteeing the GPU is no longer reading the resources.
+        VkDevice dev = device_->device();
+        VkAccelerationStructureKHR as = data.handle;
+        auto buf = std::make_shared<vk2::Buffer>(std::move(data.buffer));
+        gc_->defer([dev, as, buf]() {
+            if (as != VK_NULL_HANDLE) {
+                vkDestroyAccelerationStructureKHR(dev, as, nullptr);
+            }
+            // buf's shared_ptr releases here; if last reference, vk2::Buffer dtor runs
+        });
+    } else {
+        // Synchronous fallback (used at shutdown)
+        if (device_) {
+            vkDestroyAccelerationStructureKHR(device_->device(), data.handle, nullptr);
+        }
+        // data.buffer destructor runs when `data` goes out of scope
     }
 }
 

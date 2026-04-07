@@ -15,6 +15,12 @@
 #include "core/render/omm_baker.hpp"
 #endif
 
+#ifdef MCVR_ENABLE_ENGINE_V2
+#include "engine/app/engine_app.hpp"
+#include "engine/app/engine_services.hpp"
+#include "engine/bridge/bridge_service.hpp"
+#endif
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -1894,6 +1900,88 @@ void Chunks::queueBlockStateBuild(ChunkBuildTaskV2 task) {
 
     // C++ meshing — generates identical PBRTriangle output
     auto meshOutput = BlockMesher::mesh(input, Renderer::blockModelTable);
+
+#ifdef MCVR_ENABLE_ENGINE_V2
+    // V2 tee: forward the meshed PBRTriangle data to the V2 engine bridge
+    // for BLAS/TLAS construction. Runs alongside the V1 path so both renderers
+    // see identical chunk geometry. Section-Y is part of the key — every 16-block
+    // vertical slice gets its own BLAS.
+    {
+        auto* app = engine::EngineApp::get();
+        if (app && app->isInitialized() && app->mode() == engine::EngineMode::V2) {
+            const size_t solidV  = meshOutput.solidVertices.size();
+            const size_t cutoutV = meshOutput.cutoutVertices.size();
+            const size_t transV  = meshOutput.translucentVertices.size();
+            const size_t totalV  = solidV + cutoutV + transV;
+
+            const size_t solidI  = meshOutput.solidIndices.size();
+            const size_t cutoutI = meshOutput.cutoutIndices.size();
+            const size_t transI  = meshOutput.translucentIndices.size();
+            const size_t totalI  = solidI + cutoutI + transI;
+
+            if (totalV > 0 && totalI > 0) {
+                constexpr size_t VERTEX_STRIDE = sizeof(vk::VertexFormat::PBRTriangle);
+
+                engine::CmdChunkSubmit cmd;
+                // Section-level key. task.x/y/z are world-space block coords of the section
+                // origin (multiples of 16). chunkX/sectionY/chunkZ are section indices.
+                cmd.chunkX   = task.x >> 4;
+                cmd.sectionY = task.y >> 4;
+                cmd.chunkZ   = task.z >> 4;
+                cmd.originX  = task.x;
+                cmd.originY  = task.y;
+                cmd.originZ  = task.z;
+                cmd.triangleCount = static_cast<uint32_t>(totalI / 3);
+
+                // Merge vertex data (solid → cutout → translucent)
+                cmd.vertexData.resize(totalV * VERTEX_STRIDE);
+                size_t voff = 0;
+                if (solidV > 0) {
+                    std::memcpy(cmd.vertexData.data() + voff,
+                                meshOutput.solidVertices.data(),
+                                solidV * VERTEX_STRIDE);
+                    voff += solidV * VERTEX_STRIDE;
+                }
+                if (cutoutV > 0) {
+                    std::memcpy(cmd.vertexData.data() + voff,
+                                meshOutput.cutoutVertices.data(),
+                                cutoutV * VERTEX_STRIDE);
+                    voff += cutoutV * VERTEX_STRIDE;
+                }
+                if (transV > 0) {
+                    std::memcpy(cmd.vertexData.data() + voff,
+                                meshOutput.translucentVertices.data(),
+                                transV * VERTEX_STRIDE);
+                }
+
+                // Merge index data with proper base-vertex offsets per layer
+                cmd.indexData.resize(totalI);
+                size_t ioff = 0;
+                uint32_t baseV = 0;
+                for (auto& src : meshOutput.solidIndices) {
+                    cmd.indexData[ioff++] = src + baseV;
+                }
+                baseV += static_cast<uint32_t>(solidV);
+                for (auto& src : meshOutput.cutoutIndices) {
+                    cmd.indexData[ioff++] = src + baseV;
+                }
+                baseV += static_cast<uint32_t>(cutoutV);
+                for (auto& src : meshOutput.translucentIndices) {
+                    cmd.indexData[ioff++] = src + baseV;
+                }
+
+                app->services().bridge().post(std::move(cmd));
+            } else if (totalV == 0) {
+                // Empty section — issue a remove so V2 cleans up any prior BLAS
+                engine::CmdChunkRemove rm;
+                rm.chunkX   = task.x >> 4;
+                rm.sectionY = task.y >> 4;
+                rm.chunkZ   = task.z >> 4;
+                app->services().bridge().post(std::move(rm));
+            }
+        }
+    }
+#endif
 
     // Build geometry arrays matching the existing ChunkBuildData format
     std::vector<World::GeometryTypes> geometryTypes;

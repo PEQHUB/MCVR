@@ -2,7 +2,7 @@
 
 // Ownership: EngineServices (1:1).
 // Thread: Main thread only.
-// Dependencies: DeviceService (VkDevice, VMA, queues).
+// Dependencies: DeviceService (VkDevice, VMA, queues), optional ResourceGC for deferred-delete.
 //
 // Uploads ChunkGeometry from ExtractedScene into device-local GPU buffers.
 // Uses a staging buffer ring (host-visible, persistently mapped) for async transfer.
@@ -19,6 +19,7 @@
 namespace engine {
 
 struct ChunkGeometry;
+class ResourceGC;
 
 namespace vk2 { class DeviceService; }
 
@@ -46,7 +47,10 @@ public:
     GpuUploadService(const GpuUploadService&) = delete;
     GpuUploadService& operator=(const GpuUploadService&) = delete;
 
+    // gc is optional. When provided, vertex/index buffer destruction on chunk re-upload
+    // or removal is deferred into the ResourceGC ring so the GPU finishes in-flight work first.
     vk2::Result<void> init(vk2::DeviceService& device, uint32_t framesInFlight,
+                           ResourceGC* gc = nullptr,
                            VkDeviceSize stagingSize = 64 * 1024 * 1024);
     void shutdown();
 
@@ -76,6 +80,7 @@ public:
 
 private:
     vk2::DeviceService* device_ = nullptr;
+    ResourceGC* gc_ = nullptr;
 
     // Staging buffer (host-visible, persistently mapped, per-frame-slot regions)
     vk2::Buffer stagingBuffer_;
@@ -95,6 +100,10 @@ private:
 
     // Reset staging to the beginning of the given frame slot's region.
     void resetStaging(uint32_t frameIndex);
+
+    // Retire (or defer) the buffers owned by `data`. After the call, data's vk2::Buffer
+    // members are empty (either destroyed synchronously or captured into the GC lambda).
+    void retireChunk(GpuChunkData data);
 };
 
 } // namespace engine

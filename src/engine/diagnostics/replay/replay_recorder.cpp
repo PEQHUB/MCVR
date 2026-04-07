@@ -37,6 +37,7 @@ void ReplayRecorder::recordChunkInsert(ChunkId id, const void* vertexData, uint3
     if (!file_.is_open()) return;
     writeU8(0x01);
     writeI32(id.x);
+    writeI32(id.y);
     writeI32(id.z);
     writeU32(vertexSize);
     writeU32(indexSize);
@@ -48,6 +49,7 @@ void ReplayRecorder::recordChunkRemove(ChunkId id) {
     if (!file_.is_open()) return;
     writeU8(0x02);
     writeI32(id.x);
+    writeI32(id.y);
     writeI32(id.z);
 }
 
@@ -111,7 +113,7 @@ bool ReplayPlayer::playFrame(const Callbacks& cb) {
 
         switch (type) {
             case 0x01: { // ChunkInsert
-                ChunkId id{readI32(), readI32()};
+                ChunkId id{readI32(), readI32(), readI32()};
                 uint32_t vSize = readU32();
                 uint32_t iSize = readU32();
                 std::vector<uint8_t> vData(vSize), iData(iSize);
@@ -122,7 +124,7 @@ bool ReplayPlayer::playFrame(const Callbacks& cb) {
                 break;
             }
             case 0x02: { // ChunkRemove
-                ChunkId id{readI32(), readI32()};
+                ChunkId id{readI32(), readI32(), readI32()};
                 if (cb.onChunkRemove) cb.onChunkRemove(id);
                 break;
             }

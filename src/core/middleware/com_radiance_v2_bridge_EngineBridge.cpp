@@ -122,7 +122,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_v2_bridge_EngineBridge_na
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_EngineBridge_nativeSubmitChunk0(
     JNIEnv* env, jclass,
-    jint chunkX, jint chunkZ,
+    jint chunkX, jint sectionY, jint chunkZ,
     jint originX, jint originY, jint originZ,
     jlong vertexPtr, jint vertexSize,
     jlong indexPtr, jint indexCount,
@@ -130,11 +130,12 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_EngineBridge_nativ
     if (!g_v2Initialized.load(std::memory_order_acquire)) return;
 
     engine::CmdChunkSubmit cmd;
-    cmd.chunkX = chunkX;
-    cmd.chunkZ = chunkZ;
-    cmd.originX = originX;
-    cmd.originY = originY;
-    cmd.originZ = originZ;
+    cmd.chunkX   = chunkX;
+    cmd.sectionY = sectionY;
+    cmd.chunkZ   = chunkZ;
+    cmd.originX  = originX;
+    cmd.originY  = originY;
+    cmd.originZ  = originZ;
     cmd.triangleCount = static_cast<uint32_t>(triangleCount);
 
     // Copy vertex data
@@ -153,9 +154,9 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_EngineBridge_nativ
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_EngineBridge_nativeRemoveChunk0(
-    JNIEnv*, jclass, jint chunkX, jint chunkZ) {
+    JNIEnv*, jclass, jint chunkX, jint sectionY, jint chunkZ) {
     if (!g_v2Initialized.load(std::memory_order_acquire)) return;
-    g_engineApp.services().bridge().post(engine::CmdChunkRemove{chunkX, chunkZ});
+    g_engineApp.services().bridge().post(engine::CmdChunkRemove{chunkX, sectionY, chunkZ});
 }
 
 // --- Camera update ---

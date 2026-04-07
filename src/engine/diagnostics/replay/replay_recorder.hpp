@@ -19,8 +19,8 @@ namespace engine {
 //   Events: [type(1) + payload...]
 //
 // Event types:
-//   0x01 ChunkInsert: chunkX(4) + chunkZ(4) + vertexSize(4) + indexSize(4) + data
-//   0x02 ChunkRemove: chunkX(4) + chunkZ(4)
+//   0x01 ChunkInsert: chunkX(4) + chunkY(4) + chunkZ(4) + vertexSize(4) + indexSize(4) + data
+//   0x02 ChunkRemove: chunkX(4) + chunkY(4) + chunkZ(4)
 //   0x03 EntityInsert: entityId(4) + posXYZ(12) + rotXYZW(16)
 //   0x04 EntityRemove: entityId(4)
 //   0xFF FrameEnd
@@ -28,7 +28,9 @@ namespace engine {
 class ReplayRecorder {
 public:
     static constexpr uint32_t MAGIC = 0x52455052;   // "REPR"
-    static constexpr uint32_t VERSION = 1;
+    // Version 2 (2026-04-07): ChunkId gained a Y dimension so sections of a
+    // column no longer collide. v1 replay files are no longer readable.
+    static constexpr uint32_t VERSION = 2;
 
     explicit ReplayRecorder(const std::string& path);
     ~ReplayRecorder();

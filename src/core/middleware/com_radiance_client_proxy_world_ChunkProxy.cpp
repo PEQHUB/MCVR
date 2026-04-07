@@ -70,7 +70,9 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
     }
 
 #ifdef MCVR_ENABLE_ENGINE_V2
-    // V2 path: combine all layers into a single ChunkGeometry
+    // V2 path: combine all layers into a single ChunkGeometry.
+    // Section-Y is included in the key so all 24 vertical sections of a column
+    // get distinct BLAS entries instead of overwriting each other.
     auto* app = engine::EngineApp::get();
     if (app && app->isInitialized() && app->mode() == engine::EngineMode::V2) {
         const int* vCounts = reinterpret_cast<const int*>(vertexCounts);
@@ -86,7 +88,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
         uint32_t totalTris = totalVerts / 4 * 2;
 
         engine::ChunkGeometry geo;
-        geo.id = {originX >> 4, originZ >> 4}; // chunk coords from block coords
+        // Section-level key. originX/Y/Z are world-space block coords (multiples of 16).
+        geo.id = {originX >> 4, originY >> 4, originZ >> 4};
         geo.originX = static_cast<float>(originX);
         geo.originY = static_cast<float>(originY);
         geo.originZ = static_cast<float>(originZ);
@@ -121,11 +124,12 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
         }
 
         engine::CmdChunkSubmit cmd;
-        cmd.chunkX = geo.id.x;
-        cmd.chunkZ = geo.id.z;
-        cmd.originX = static_cast<int32_t>(geo.originX);
-        cmd.originY = static_cast<int32_t>(geo.originY);
-        cmd.originZ = static_cast<int32_t>(geo.originZ);
+        cmd.chunkX   = geo.id.x;
+        cmd.sectionY = geo.id.y;
+        cmd.chunkZ   = geo.id.z;
+        cmd.originX  = static_cast<int32_t>(geo.originX);
+        cmd.originY  = static_cast<int32_t>(geo.originY);
+        cmd.originZ  = static_cast<int32_t>(geo.originZ);
         cmd.triangleCount = geo.triangleCount;
         cmd.vertexData = std::move(geo.vertexData);
         cmd.indexData = std::move(geo.indexData);

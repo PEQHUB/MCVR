@@ -100,6 +100,15 @@ public:
 
     bool isInitialized() const { return initialized_; }
 
+    // Record any one-shot GPU init commands into cmd. Idempotent — after the first
+    // successful call, subsequent calls are no-ops. Currently clears the energy LUT
+    // to 1.0 and transitions it to SHADER_READ_ONLY_OPTIMAL.
+    //
+    // Call from processScene() once the first real command buffer is available.
+    // Returns true iff init commands were recorded this call.
+    bool runDeferredInit(VkCommandBuffer cmd);
+    bool isDeferredInitComplete() const { return !firstFrameInitPending_; }
+
     // Update the WorldUBO for the current frame from camera + config.
     // Also snapshots current → last for temporal reprojection.
     void updateWorldUBO(uint32_t frameIndex, const CameraData& camera,
@@ -174,6 +183,13 @@ private:
     // Latest sky data (CPU-side, copied to per-frame UBOs on update)
     SkyUBOData latestSky_{};
     bool skyDirty_ = false;
+
+    // Deferred first-frame init state.
+    // energyLUT_ is device-local, so we can't memset it from the host. Instead we
+    // allocate a host-visible staging buffer at init(), fill it with 1.0 on the CPU,
+    // and have runDeferredInit() record a copy into the first processScene cmd buffer.
+    bool firstFrameInitPending_ = true;
+    vk2::Buffer energyLUTStaging_;
 
     // Helper: create a host-visible UBO buffer.
     vk2::Result<vk2::Buffer> createHostUBO(VkDeviceSize size, VkBufferUsageFlags usage);
