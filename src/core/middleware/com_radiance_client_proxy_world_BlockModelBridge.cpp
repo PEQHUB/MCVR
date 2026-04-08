@@ -3,8 +3,7 @@
 #include "core/render/render_framework.hpp"
 #include "core/render/block_model_table.hpp"
 #include "core/render/block_state_registry.hpp"
-
-#include <iostream>
+#include "engine/diagnostics/log.hpp"
 
 // ---- Block model table (unchanged) ----
 
@@ -12,17 +11,24 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
     JNIEnv *, jclass,
     jlong entryPtr, jint entryCount,
     jlong quadPtr, jint quadCount) {
-    if (!Renderer::is_initialized()) return;
-
+    // V2 mode: Renderer is never initialized but blockModelTable is a static class
+    // member that exists independently. The mesher only needs the static data.
     auto* entries = reinterpret_cast<const BlockModelEntry*>(entryPtr);
     auto* quads = reinterpret_cast<const BlockModelQuad*>(quadPtr);
 
     Renderer::blockModelTable.load(entries, static_cast<uint32_t>(entryCount),
                                    quads, static_cast<uint32_t>(quadCount));
 
+    engine::log::info("BlockModelBridge",
+        "uploadBlockModelTable: entries=" + std::to_string(entryCount) +
+        " quads=" + std::to_string(quadCount) +
+        " rendererInit=" + (Renderer::is_initialized() ? "yes" : "no") +
+        " loaded=" + (Renderer::blockModelTable.isLoaded() ? "yes" : "no"));
+
     // Pre-normalize quad UVs if TextureSystem is already finalized.
     // (Texture finalize happens before model table upload, so this is the normal path.)
-    if (Renderer::textureSystem.isFinalized()) {
+    // Skip if Renderer not initialized — TextureSystem state is moot in V2.
+    if (Renderer::is_initialized() && Renderer::textureSystem.isFinalized()) {
         Renderer::blockModelTable.normalizeQuadUVs();
     }
 }
@@ -30,10 +36,13 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_uploadBiomeTintTable(
     JNIEnv *, jclass,
     jlong tintPtr, jint tintCount) {
-    if (!Renderer::is_initialized()) return;
-
+    // V2 mode: blockModelTable is static, no Renderer init needed.
     auto* tints = reinterpret_cast<const BiomeTintEntry*>(tintPtr);
     Renderer::blockModelTable.loadBiomeTints(tints, static_cast<uint32_t>(tintCount));
+
+    engine::log::info("BlockModelBridge",
+        "uploadBiomeTintTable: tints=" + std::to_string(tintCount) +
+        " rendererInit=" + (Renderer::is_initialized() ? "yes" : "no"));
 }
 
 // ---- TextureSystem: new C++-owned texture pipeline ----
@@ -127,10 +136,14 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeUploadBlockStateRegistry(
     JNIEnv *, jclass,
     jlong dataPtr, jint dataSize) {
-    if (!Renderer::is_initialized()) return;
-
+    // V2 mode: blockStateRegistry is static, no Renderer init needed.
     auto* data = reinterpret_cast<const uint8_t*>(dataPtr);
     Renderer::blockStateRegistry.load(data, static_cast<uint32_t>(dataSize));
+
+    engine::log::info("BlockModelBridge",
+        "uploadBlockStateRegistry: bytes=" + std::to_string(dataSize) +
+        " rendererInit=" + (Renderer::is_initialized() ? "yes" : "no") +
+        " loaded=" + (Renderer::blockStateRegistry.isLoaded() ? "yes" : "no"));
 }
 
 // ---- Animation tick (called per game tick from Java) ----
