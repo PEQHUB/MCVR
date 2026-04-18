@@ -21,6 +21,7 @@ std::shared_ptr<spdlog::logger> g_file;
 std::shared_ptr<spdlog::logger> g_jsonl;
 std::shared_ptr<spdlog::sinks::ringbuffer_sink_mt> g_crashRing;
 std::atomic<bool> g_initialized{false};
+std::string g_logDir = "logs";
 
 std::mutex g_filterMutex;
 std::unordered_set<std::string> g_disabledCategories;
@@ -85,6 +86,8 @@ std::string formatJsonl(std::string_view category, std::string_view eventId,
 void init(const LogConfig& config) {
     if (g_initialized.exchange(true)) return;
 
+    g_logDir = config.logDir;
+
     std::vector<spdlog::sink_ptr> sinks;
 
     // Console sink (stderr, colored)
@@ -128,18 +131,26 @@ void init(const LogConfig& config) {
         jsonlSink->set_pattern("%v");  // Raw message only (we format JSON ourselves)
         g_jsonl = std::make_shared<spdlog::logger>("jsonl", jsonlSink);
         g_jsonl->set_level(spdlog::level::info);
+        // Flush on info so every structured event hits disk immediately.
+        // JSONL volume is low (one line per event) so the cost is negligible
+        // and guarantees records survive a DEVICE_LOST / JVM abort.
+        g_jsonl->flush_on(spdlog::level::info);
     }
 
     // Main logger uses all non-JSONL sinks
     g_console = std::make_shared<spdlog::logger>("engine", sinks.begin(), sinks.end());
     g_console->set_level(spdlog::level::trace);
-    g_console->flush_on(spdlog::level::warn);
+    g_console->flush_on(spdlog::level::info);
 
     spdlog::set_default_logger(g_console);
 }
 
 void shutdown() {
-    if (!g_initialized.load()) return;
+    // Mark uninitialized FIRST so any concurrent or subsequent log calls (including
+    // those fired from ~EngineApp during dllmain_crt_process_detach) bail out at
+    // the g_initialized guard before touching g_filterMutex / g_disabledCategories,
+    // which may already be in a destructed state during Windows DLL unload.
+    if (!g_initialized.exchange(false)) return;
 
     if (g_console) g_console->flush();
     if (g_file) g_file->flush();
@@ -150,7 +161,6 @@ void shutdown() {
     g_file.reset();
     g_jsonl.reset();
     g_crashRing.reset();
-    g_initialized.store(false);
 }
 
 void trace(std::string_view category, std::string_view msg) {
@@ -176,6 +186,9 @@ void warn(std::string_view category, std::string_view msg) {
 void error(std::string_view category, std::string_view msg) {
     if (!g_initialized.load() || !isCategoryEnabled(category)) return;
     g_console->error(formatMessage(category, msg));
+    // Force JSONL flush on every error so structured events (device_lost, etc.)
+    // are guaranteed on disk before any abort or JVM shutdown path runs.
+    if (g_jsonl) g_jsonl->flush();
 }
 
 [[noreturn]] void fatal(std::string_view category, std::string_view msg) {
@@ -188,7 +201,7 @@ void error(std::string_view category, std::string_view msg) {
         // Dump crash ring to file
         if (g_crashRing) {
             auto entries = g_crashRing->last_formatted();
-            std::ofstream crash("logs/engine_crash_ring.txt");
+            std::ofstream crash(g_logDir + "/engine_crash_ring.txt");
             if (crash.is_open()) {
                 for (const auto& entry : entries) {
                     crash << entry;
@@ -222,6 +235,26 @@ void setCategoryEnabled(std::string_view category, bool enabled) {
     } else {
         g_disabledCategories.insert(std::string(category));
     }
+}
+
+void setMinLevel(spdlog::level::level_enum level) {
+    if (g_console) g_console->set_level(level);
+    // Clamp the JSONL sink to info: structured events are always at info level
+    // and must reach disk regardless of the console verbosity setting.
+    // diagLevel=0 (warn) would otherwise block every log::event() call.
+    if (g_jsonl) g_jsonl->set_level(std::min(level, spdlog::level::info));
+}
+
+void setMinLevel(int level) {
+    spdlog::level::level_enum spLevel;
+    switch (level) {
+        case 0:  spLevel = spdlog::level::warn;  break;
+        case 1:  spLevel = spdlog::level::info;  break;
+        case 2:  spLevel = spdlog::level::debug; break;
+        case 3:  spLevel = spdlog::level::trace; break;
+        default: spLevel = spdlog::level::warn;  break;
+    }
+    setMinLevel(spLevel);
 }
 
 bool isInitialized() {

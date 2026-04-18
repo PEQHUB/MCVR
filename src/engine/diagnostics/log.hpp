@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 #include <cstdint>
+#include <spdlog/spdlog.h>
 
 namespace engine::log {
 
@@ -43,6 +44,13 @@ void event(std::string_view category, std::string_view eventId,
 
 // Runtime category filter (all enabled by default).
 void setCategoryEnabled(std::string_view category, bool enabled);
+
+// Set minimum severity level on all sinks (warn=2, info=1, debug=3, trace=4 in spdlog ordering).
+// Use spdlog::level::warn / info / debug / trace constants.
+void setMinLevel(spdlog::level::level_enum level);
+
+// Integer convenience overload: 0=warn, 1=info, 2=debug, 3=trace.
+void setMinLevel(int level);
 
 // Check if initialized (safe to call before init).
 bool isInitialized();

@@ -227,6 +227,13 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_close(JNIEnv *, jclass) {
     std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
     if (g_rendererClosed.load(std::memory_order_acquire)) return;
+    // V2 mode: V1 Renderer singleton was never initialised — calling instance() would throw.
+    // The V2 engine is shut down by EngineBridge.nativeShutdown() on the Java side before
+    // this function is ever reached in normal V2 operation, but guard here as defence-in-depth.
+    if (!Renderer::is_initialized()) {
+        g_rendererClosed.store(true, std::memory_order_release);
+        return;
+    }
 
     g_rendererShuttingDown.store(true, std::memory_order_release);
     auto framework = Renderer::instance().framework();
@@ -308,7 +315,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
  * Returns GPU profiler timings as a flat string: "ModuleName:ms,ModuleName:ms,...,TOTAL:ms"
  * Empty string if profiler disabled or no data available.
  */
-extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetGpuProfile(
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetGpuProfileV1(
     JNIEnv *env, jclass) {
     auto& profiler = Renderer::gpuProfiler;
     if (!profiler.isEnabled()) return env->NewStringUTF("");
