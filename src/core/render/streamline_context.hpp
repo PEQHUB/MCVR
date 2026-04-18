@@ -150,6 +150,16 @@ class StreamlineContext {
     static void advanceFrame() {}
     static bool reflexSleep() { return false; }
     static uint32_t getFrameIndex() { return 0; }
+    // Reflex/PCL stubs
+    static bool setReflexOptions(int /*mode*/, uint32_t /*frameLimitUs*/ = 0) { return false; }
+    static bool pclSetMarker(int /*marker*/) { return false; }
+    // DLSS-G stubs
+    static bool setDlssGOptions(int /*mode*/, uint32_t /*numFramesToGenerate*/ = 1) { return false; }
+    static bool getDlssGState(void * /*state*/) { return false; }
+    static bool setConstants(const void * /*consts*/) { return false; }
+    static bool tagResources(const void * /*tags*/, uint32_t /*numTags*/, void * /*cmdBuffer*/ = nullptr) { return false; }
+    static bool setFeatureLoaded(int /*feature*/, bool /*loaded*/) { return false; }
+    static void *getCurrentFrameToken() { return nullptr; }
 };
 
 #endif // _WIN32

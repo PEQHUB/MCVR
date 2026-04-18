@@ -51,9 +51,14 @@ vk2::Result<void> GraphResourcePool::allocate(vk2::DeviceService& device,
 vk2::Result<void> GraphResourcePool::recreate(vk2::DeviceService& device,
                                               const CompiledGraph& graph,
                                               uint32_t renderWidth,
-                                              uint32_t renderHeight) {
+                                              uint32_t renderHeight,
+                                              ResourceGC& gc) {
     if (renderWidth == renderWidth_ && renderHeight == renderHeight_) return {};
-    releaseImmediate();
+    // Retire old images through GC instead of immediate destruction.
+    // This is safe for callers that have already called device.waitIdle() (the GC
+    // destructor fires synchronously on the next tick), and also correct for future
+    // callers that skip waitIdle() — the ring ensures old GPU work completes first.
+    release(gc);
     return allocate(device, graph, renderWidth, renderHeight);
 }
 

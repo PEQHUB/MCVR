@@ -108,6 +108,9 @@ vk2::Result<void> RtDescriptorLayout::init(VkDevice device) {
         b.push_back(mkBinding(GEO_BINDING_TILE_LIGHT,
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
             VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR));
+        b.push_back(mkBinding(GEO_BINDING_BIOME_COLORS,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+            VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR));
         b.push_back(mkBinding(GEO_BINDING_BLENDER_PBR,
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, kAllRtStages));
         b.push_back(mkBinding(GEO_BINDING_MATERIAL_CLASS,
@@ -204,8 +207,8 @@ std::vector<VkDescriptorPoolSize> RtDescriptorLayout::poolSizes() {
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, rt_layout::TEX_BINDLESS_COUNT + 5 + 1},
         // Set 1: 1 TLAS
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-        // Set 1: 13 storage buffers + Set 2: 2 storage buffers (blue noise)
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 13 + 2},
+        // Set 1: 14 storage buffers + Set 2: 2 storage buffers (blue noise)
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 14 + 2},
         // Set 2: 3 uniform buffers
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3},
         // Set 3: 34 storage images

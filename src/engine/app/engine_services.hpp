@@ -17,8 +17,10 @@ class SceneService;
 class OffscreenTarget;
 class GpuUploadService;
 class BlasService;
+class EntityBlasService;
 class TlasService;
 class SceneResourceService;
+class TextureService;
 
 namespace vk2 {
 class DeviceService;
@@ -67,11 +69,17 @@ public:
     BlasService& blas() { return *blas_; }
     const BlasService& blas() const { return *blas_; }
 
+    EntityBlasService& entityBlas() { return *entityBlas_; }
+    const EntityBlasService& entityBlas() const { return *entityBlas_; }
+
     TlasService& tlas() { return *tlas_; }
     const TlasService& tlas() const { return *tlas_; }
 
     SceneResourceService& sceneRes() { return *sceneRes_; }
     const SceneResourceService& sceneRes() const { return *sceneRes_; }
+
+    TextureService& texture() { return *texture_; }
+    const TextureService& texture() const { return *texture_; }
 
 private:
     std::unique_ptr<ConfigService> config_;
@@ -84,8 +92,10 @@ private:
     std::unique_ptr<OffscreenTarget> offscreen_;
     std::unique_ptr<GpuUploadService> gpuUpload_;
     std::unique_ptr<BlasService> blas_;
+    std::unique_ptr<EntityBlasService> entityBlas_;
     std::unique_ptr<TlasService> tlas_;
     std::unique_ptr<SceneResourceService> sceneRes_;
+    std::unique_ptr<TextureService> texture_;
     std::string resourceDir_;
 };
 

@@ -13,6 +13,14 @@ namespace engine {
 
 // Deferred resource destruction. Resources are kept alive for N frames
 // after the last active reference drops, ensuring GPU work completes.
+//
+// Correctness invariant: ringSize must be >= framesInFlight + 1.
+// With framesInFlight=2, a ring of 3 is the minimum correct size.
+// tick() must be called exactly once per frame, AFTER the fence wait for
+// the current frame slot — this is what guarantees that resources deferred
+// N ticks ago have no live GPU references on any in-flight frame.
+//
+// The recommended constructor argument is: framesInFlight + 1.
 class ResourceGC {
 public:
     // Destructor callback — called when the resource should be freed.

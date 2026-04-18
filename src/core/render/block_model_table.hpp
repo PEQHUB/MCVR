@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 #include <glm/glm.hpp>
 
@@ -77,6 +78,13 @@ class BlockModelTable {
     /// Pre-normalize quad UVs from atlas space to [0,1] within sprite bounds.
     /// Must be called after load() and after TextureSystem is finalized.
     void normalizeQuadUVs();
+
+    /// V2 overload: same operation, but reads sprite bounds from a caller-supplied
+    /// callback instead of the V1 Renderer::textureSystem. Returns
+    /// vec4(minU, maxU, minV, maxV) for a given spriteId, in [0,1] atlas space.
+    /// Used by the V2 engine where TextureSystem is uninitialized — V2's
+    /// TextureService owns the equivalent atlas-bounds data.
+    void normalizeQuadUVsWithBounds(const std::function<glm::vec4(uint16_t)>& getBounds);
 
     /// Query model data for a global block state ID. Returns nullptr if invisible/air.
     const BlockModelEntry* getEntry(uint32_t globalStateId) const;

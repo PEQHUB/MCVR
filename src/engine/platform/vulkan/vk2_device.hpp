@@ -6,6 +6,7 @@
 
 #include "vk2_result.hpp"
 
+#include <volk.h>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -42,6 +43,7 @@ struct DeviceCaps {
     bool deviceFault = false;
     bool debugUtils = false;
     bool memoryBudget = false;
+    bool nvCheckpoints = false;   // VK_NV_device_diagnostic_checkpoints
 
     uint32_t maxRayRecursionDepth = 0;
 
@@ -88,9 +90,23 @@ public:
         SurfaceFactory surfaceFactory;         // Custom surface creation (JNI mode)
         std::vector<const char*> instanceExtensions;  // Override GLFW instance extensions
         bool enableValidation = false;         // Vulkan validation layers
-        bool enableDiagnostics = false;        // NV device diagnostics
+        bool enableDiagnostics = false;        // NV device diagnostics (Aftermath)
+        std::string logsDir;                   // Directory for Aftermath crash dumps (requires enableDiagnostics)
         std::vector<const char*> extraInstanceExtensions;
         std::vector<const char*> extraDeviceExtensions;
+        // Callback fired AFTER physical device is picked but BEFORE logical device is
+        // created. Returns additional device extension names to enable. Used to query
+        // NGX/DLSS for required extensions that depend on the chosen physical device.
+        // The returned strings must remain valid for the duration of init().
+        std::function<std::vector<const char*>(VkInstance, VkPhysicalDevice)>
+            extraDeviceExtensionsCallback;
+
+        // Streamline / DLSS-G integration.
+        // When true, StreamlineContext::init() is called before vkCreateInstance
+        // and Volk's proc-addr function is overridden with the SL interposer.
+        bool enableFrameGen = false;
+        // Absolute path to the directory containing sl.*.dll files.
+        std::wstring streamlinePluginDir;
     };
 
     Result<void> init(const InitConfig& config);
@@ -140,6 +156,18 @@ private:
     uint32_t mainQueueFamilyIndex_ = UINT32_MAX;
     uint32_t secondaryQueueFamilyIndex_ = UINT32_MAX;
     bool sameQueueFamily_ = false;
+    bool slInterposerActive_ = false;  // true when SL interposer overrides Volk
 };
 
 } // namespace engine::vk2
+
+// NV GPU checkpoint helper.
+// Inserts a string marker into the command buffer so vkGetQueueCheckpointDataNV
+// can report the last completed marker before a DEVICE_LOST event.
+// No-op when the extension is unsupported or the crash-diag flag is off.
+inline void nvInsertCheckpoint(VkCommandBuffer cmd, bool enabled, bool supported, const char* marker) {
+    if (!enabled || !supported) return;
+#if defined(VK_NV_device_diagnostic_checkpoints)
+    vkCmdSetCheckpointNV(cmd, static_cast<const void*>(marker));
+#endif
+}

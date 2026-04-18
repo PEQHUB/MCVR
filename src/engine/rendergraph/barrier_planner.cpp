@@ -2,11 +2,13 @@
 
 namespace engine {
 
-void BarrierPlanner::plan(CompiledGraph& graph, const VkImage* resolvedImages) {
+void BarrierPlanner::plan(CompiledGraph& graph,
+                          const VkImage* resolvedImages,
+                          std::vector<VkImageLayout>& currentLayout) {
     uint32_t resourceCount = graph.resourceCount();
-
-    // Track current layout per resource — starts UNDEFINED
-    std::vector<VkImageLayout> currentLayout(resourceCount, VK_IMAGE_LAYOUT_UNDEFINED);
+    if (currentLayout.size() != resourceCount) {
+        currentLayout.assign(resourceCount, VK_IMAGE_LAYOUT_UNDEFINED);
+    }
 
     for (auto& pass : graph.passes) {
         pass.preBarriers.imageBarriers.clear();
@@ -40,14 +42,22 @@ void BarrierPlanner::plan(CompiledGraph& graph, const VkImage* resolvedImages) {
             if (!output.valid() || output.index >= resourceCount) continue;
 
             VkImageLayout required = layoutForOutput(pass.queue);
-            if (currentLayout[output.index] != required) {
+            VkImageLayout current = currentLayout[output.index];
+            const bool layoutMatches = (current == required);
+            // Special case: GENERAL→GENERAL still needs a memory barrier so
+            // writes from a previous frame's pass on the SAME image become
+            // visible to this frame's read/write. This is critical for
+            // persistent history buffers (e.g. temporal denoiser).
+            const bool generalSelfBarrier = layoutMatches && current == VK_IMAGE_LAYOUT_GENERAL;
+
+            if (!layoutMatches || generalSelfBarrier) {
                 VkImageMemoryBarrier2 barrier{};
                 barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-                barrier.srcStageMask = stageForLayout(currentLayout[output.index]);
-                barrier.srcAccessMask = accessForLayout(currentLayout[output.index], true);
+                barrier.srcStageMask = stageForLayout(current);
+                barrier.srcAccessMask = accessForLayout(current, true);
                 barrier.dstStageMask = stageForLayout(required);
                 barrier.dstAccessMask = accessForLayout(required, true);
-                barrier.oldLayout = currentLayout[output.index];
+                barrier.oldLayout = current;
                 barrier.newLayout = required;
                 barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;

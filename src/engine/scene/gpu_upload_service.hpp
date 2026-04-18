@@ -39,6 +39,15 @@ struct GpuChunkData {
     float originZ = 0.0f;
 };
 
+// Result of an upload pass. `uploaded` is the number of chunks successfully
+// committed to GPU memory this frame. `skipped` is the list of ChunkIds that
+// could not fit in the per-frame staging slot and need to be retried next frame
+// (caller should mark them dirty in ChunkRegistry to avoid silent data loss).
+struct UploadResult {
+    uint32_t uploaded = 0;
+    std::vector<ChunkId> skipped;
+};
+
 class GpuUploadService {
 public:
     GpuUploadService() = default;
@@ -49,21 +58,29 @@ public:
 
     // gc is optional. When provided, vertex/index buffer destruction on chunk re-upload
     // or removal is deferred into the ResourceGC ring so the GPU finishes in-flight work first.
+    //
+    // stagingSize defaults to 256 MB — large enough to absorb the initial chunk burst
+    // when a 32-render-distance world first loads (~30k chunks, peak ~50KB each).
+    // Undersizing this causes silent chunk drops that only surface as missing geometry.
     vk2::Result<void> init(vk2::DeviceService& device, uint32_t framesInFlight,
                            ResourceGC* gc = nullptr,
-                           VkDeviceSize stagingSize = 64 * 1024 * 1024);
+                           VkDeviceSize stagingSize = 256 * 1024 * 1024);
     void shutdown();
 
     // Upload dirty chunks from an extracted scene.
     // Records copy commands into cmd. Caller must submit the command buffer.
     // frameIndex selects the staging region to avoid overwriting in-flight data.
-    // Returns the number of chunks uploaded this frame.
-    uint32_t uploadDirtyChunks(VkCommandBuffer cmd,
-                               const std::vector<ChunkGeometry>& dirtyChunks,
-                               uint32_t frameIndex);
+    // Returns an UploadResult containing the upload count and the list of skipped
+    // chunk ids (caller should re-mark these dirty in ChunkRegistry).
+    UploadResult uploadDirtyChunks(VkCommandBuffer cmd,
+                                    const std::vector<ChunkGeometry>& dirtyChunks,
+                                    uint32_t frameIndex);
 
     // Remove GPU data for chunks that no longer exist.
     void removeChunk(ChunkId id);
+
+    // Remove all GPU chunk data (world unload). Retires all buffers via GC.
+    void clearAll();
 
     // Access GPU data for a chunk.
     const GpuChunkData* getChunk(ChunkId id) const;
@@ -77,6 +94,9 @@ public:
     uint32_t chunkCount() const { return static_cast<uint32_t>(chunks_.size()); }
     const std::unordered_map<ChunkId, GpuChunkData>& allChunks() const { return chunks_; }
     bool isInitialized() const { return initialized_; }
+
+    // Diagnostic flags — set each frame from EngineConfig::diagFlags before upload.
+    void setDiagFlags(int f) { diagFlags_ = f; }
 
 private:
     vk2::DeviceService* device_ = nullptr;
@@ -94,6 +114,7 @@ private:
     std::unordered_map<ChunkId, GpuChunkData> chunks_;
 
     bool initialized_ = false;
+    int diagFlags_ = 0;  // Set from EngineConfig::diagFlags each frame via setDiagFlags()
 
     // Allocate from the current frame's staging region. Returns offset, or UINT64_MAX if full.
     VkDeviceSize allocStaging(VkDeviceSize size, VkDeviceSize alignment = 16);

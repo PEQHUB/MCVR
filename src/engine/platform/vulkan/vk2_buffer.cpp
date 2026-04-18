@@ -100,4 +100,16 @@ void Buffer::destroy() {
     }
 }
 
+void Buffer::flush(VkDeviceSize offset, VkDeviceSize size) const {
+    if (allocation_ == VK_NULL_HANDLE || allocator_ == VK_NULL_HANDLE) return;
+    // vmaFlushAllocation is a no-op on HOST_COHERENT memory, so this is always safe.
+    vmaFlushAllocation(allocator_, allocation_, offset, size);
+}
+
+void Buffer::invalidate(VkDeviceSize offset, VkDeviceSize size) const {
+    if (allocation_ == VK_NULL_HANDLE || allocator_ == VK_NULL_HANDLE) return;
+    // vmaInvalidateAllocation is a no-op on HOST_COHERENT memory.
+    vmaInvalidateAllocation(allocator_, allocation_, offset, size);
+}
+
 } // namespace engine::vk2

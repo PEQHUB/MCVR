@@ -6,8 +6,10 @@
 #include "scene/scene_service.hpp"
 #include "scene/gpu_upload_service.hpp"
 #include "scene/blas_service.hpp"
+#include "scene/entity_blas_service.hpp"
 #include "scene/tlas_service.hpp"
 #include "scene/scene_resource_service.hpp"
+#include "scene/texture_service.hpp"
 #include "frame/offscreen_target.hpp"
 #include "platform/vulkan/vk2_device.hpp"
 #include "platform/vulkan/vk2_swapchain.hpp"
@@ -25,8 +27,10 @@ EngineServices::EngineServices()
       offscreen_(std::make_unique<OffscreenTarget>()),
       gpuUpload_(std::make_unique<GpuUploadService>()),
       blas_(std::make_unique<BlasService>()),
+      entityBlas_(std::make_unique<EntityBlasService>()),
       tlas_(std::make_unique<TlasService>()),
-      sceneRes_(std::make_unique<SceneResourceService>()) {}
+      sceneRes_(std::make_unique<SceneResourceService>()),
+      texture_(std::make_unique<TextureService>()) {}
 
 EngineServices::~EngineServices() = default;
 

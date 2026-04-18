@@ -35,6 +35,14 @@ struct ChunkGeometry {
     float originY = 0.0f;
     float originZ = 0.0f;
 
+    // Per-chunk light sources (from ChunkLightCollector via bridge).
+    // Each entry is 16 bytes: float worldX, float worldY, float worldZ, int32_t lightTypeId.
+    struct LightEntry {
+        float worldX, worldY, worldZ;
+        int32_t lightTypeId;
+    };
+    std::vector<LightEntry> lightEntries;
+
     bool empty() const { return triangleCount == 0; }
 };
 
@@ -75,6 +83,12 @@ public:
 
     // Clear dirty flags (called after scene extraction).
     void clearDirty();
+
+    // Re-mark an existing chunk as dirty WITHOUT bumping its revision or mutating
+    // its geometry. Used when an upload/BLAS-build pass dropped the chunk due to
+    // transient resource pressure (staging ring full, scratch buffer full, etc.)
+    // and we need it retried on a future frame. Silently ignores unknown ids.
+    void markDirty(ChunkId id);
 
     // Mark a chunk as uploaded (GPU resources ready).
     void markUploaded(ChunkId id);

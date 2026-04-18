@@ -121,10 +121,19 @@ Result<void> ShaderBindingTable::build(VkDevice device, VmaAllocator vma,
         if (count == 0) { region = {}; return {}; }
 
         uint32_t stride = alignUp(handleSize, handleAlignment);
-        VkDeviceSize size = alignUp(count * stride, baseAlignment);
+        // Region size (for VkStridedDeviceAddressRegionKHR): tight-packed.
+        // VUID-vkCmdTraceRaysKHR-pRayGenShaderBindingTable-04023 requires raygen size == stride.
+        // For count=1 (raygen, miss, hit with single entries), regionSize naturally equals stride.
+        // For count>1, regionSize = count * stride (still valid for miss/hit/callable).
+        VkDeviceSize regionSize = static_cast<VkDeviceSize>(count) * stride;
+        // Buffer allocation size: padded to baseAlignment for size hygiene.
+        // bd.minAlignment = baseAlignment ensures the base address is also aligned,
+        // satisfying the spec requirement on VkStridedDeviceAddressRegionKHR.deviceAddress.
+        VkDeviceSize bufferSize = alignUp(static_cast<uint32_t>(regionSize), baseAlignment);
 
         Buffer::Desc bd{};
-        bd.size = size;
+        bd.size = bufferSize;
+        bd.minAlignment = baseAlignment;  // spec: VkStridedDeviceAddressRegionKHR.deviceAddress must be a multiple of shaderGroupBaseAlignment
         bd.usage = VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR
                  | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         bd.vmaFlags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
@@ -139,11 +148,12 @@ Result<void> ShaderBindingTable::build(VkDevice device, VmaAllocator vma,
         for (uint32_t i = 0; i < count; ++i) {
             std::memcpy(dst + i * stride, handles.data() + (offset + i) * handleSize, handleSize);
         }
+        buffer.flush(); // Ensure SBT is GPU-visible on non-coherent heaps
         offset += count;
 
         region.deviceAddress = buffer.deviceAddress();
         region.stride = stride;
-        region.size = size;
+        region.size = regionSize;
         return {};
     };
 

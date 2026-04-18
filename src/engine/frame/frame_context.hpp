@@ -21,6 +21,7 @@ struct CameraData {
     float dirX = 0.0f, dirY = 0.0f, dirZ = -1.0f;
     float nearPlane = 0.05f;
     float farPlane = 1024.0f;
+    uint64_t gameTick = 0;   // Minecraft game tick (drives animTick for texture animation)
     bool valid = false;
 };
 

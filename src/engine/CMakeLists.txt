@@ -6,6 +6,8 @@ set(ENGINE_SOURCES
     app/engine_services.cpp
     bridge/bridge_service.cpp
     config/config_service.cpp
+    diagnostics/boot_trace.cpp
+    diagnostics/diag_flags.cpp
     diagnostics/log.cpp
     diagnostics/metrics_service.cpp
     frame/frame_scheduler.cpp
@@ -18,6 +20,7 @@ set(ENGINE_SOURCES
     platform/vulkan/vk2_device.cpp
     platform/vulkan/vk2_image.cpp
     platform/vulkan/vk2_pipeline.cpp
+    platform/vulkan/vk2_probe.cpp
     platform/vulkan/vk2_rt_pipeline.cpp
     platform/vulkan/vk2_shader.cpp
     platform/vulkan/vk2_swapchain.cpp
@@ -26,17 +29,27 @@ set(ENGINE_SOURCES
     rendergraph/graph_resource_pool.cpp
     scene/blas_service.cpp
     scene/chunk_registry.cpp
+    scene/entity_blas_service.cpp
     scene/entity_registry.cpp
     scene/gpu_upload_service.cpp
     scene/scene_resource_service.cpp
     scene/scene_service.cpp
+    scene/texture_service.cpp
     scene/tlas_service.cpp
     diagnostics/replay/replay_recorder.cpp
     features/postprocess_adapter.cpp
+    features/atmosphere_adapter.cpp
     features/raytracing_adapter.cpp
     features/rt_descriptor_layout.cpp
+    features/dlss_adapter.cpp
+    features/temporal_denoiser_adapter.cpp
     features/test_compute_adapter.cpp
     features/tonemapping_adapter.cpp
+    features/color_to_depth_adapter.cpp
+    features/post_render_adapter.cpp
+    features/starfield_adapter.cpp
+    features/cloud_adapter.cpp
+    features/frame_gen_adapter.cpp
     ${CMAKE_SOURCE_DIR}/src/generated/bridge/config_bridge.cpp
 )
 
@@ -52,7 +65,12 @@ target_include_directories(engine PUBLIC
     ${CMAKE_SOURCE_DIR}/extern/glm
     ${CMAKE_SOURCE_DIR}/extern/glfw/include
     ${CMAKE_SOURCE_DIR}/extern/stb
+    ${CMAKE_SOURCE_DIR}/extern/DLSS/include
 )
+
+# Link NVIDIA NGX (DLSS SDK) — required for DlssAdapter
+# Link Streamline — required for DLSS-G FrameGenAdapter and Reflex
+target_link_libraries(engine PUBLIC ngx streamline)
 
 target_compile_definitions(engine PUBLIC
     VK_NO_PROTOTYPES       # Required for volk meta-loader

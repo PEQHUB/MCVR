@@ -55,6 +55,14 @@ void ChunkRegistry::clearDirty() {
     dirty_.clear();
 }
 
+void ChunkRegistry::markDirty(ChunkId id) {
+    auto it = states_.find(id);
+    if (it == states_.end()) return;  // Unknown id — silently ignore
+    if (geometries_.find(id) == geometries_.end()) return;  // No geometry to re-upload
+    it->second.dirty = true;
+    dirty_.insert(id);
+}
+
 void ChunkRegistry::markUploaded(ChunkId id) {
     auto it = states_.find(id);
     if (it != states_.end()) {

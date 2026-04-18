@@ -22,6 +22,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <filesystem>
@@ -1883,6 +1884,23 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
 }
 
 void Chunks::queueBlockStateBuild(ChunkBuildTaskV2 task) {
+    // DIAGNOSTIC: log first 5 calls then every 200th
+    static std::atomic<uint32_t> qbsCount{0};
+    uint32_t qn = qbsCount.fetch_add(1) + 1;
+    if (qn <= 5 || qn % 200 == 0) {
+        const char* mtl = Renderer::blockModelTable.isLoaded() ? "Y" : "N";
+#ifdef MCVR_ENABLE_ENGINE_V2
+        const char* v2m = "Y";
+        const char* appOk = (engine::EngineApp::get() != nullptr) ? "OK" : "NULL";
+#else
+        const char* v2m = "N";
+        const char* appOk = "DISABLED";
+#endif
+        std::cout << "[queueBlockStateBuild] #" << qn
+                  << " task=(" << task.x << "," << task.y << "," << task.z << ")"
+                  << " mtl=" << mtl << " v2m=" << v2m << " app=" << appOk << std::endl;
+    }
+
     if (!Renderer::blockModelTable.isLoaded()) {
         // Model table not ready — can't mesh in C++
         return;
@@ -1918,6 +1936,18 @@ void Chunks::queueBlockStateBuild(ChunkBuildTaskV2 task) {
             const size_t cutoutI = meshOutput.cutoutIndices.size();
             const size_t transI  = meshOutput.translucentIndices.size();
             const size_t totalI  = solidI + cutoutI + transI;
+
+            // Diagnostic counter — logs first 5 calls then every 200th
+            static std::atomic<uint32_t> teeCount{0};
+            uint32_t tn = teeCount.fetch_add(1) + 1;
+            if (tn <= 5 || tn % 200 == 0) {
+                std::cout << "[chunks-tee] #" << tn
+                          << " sect=(" << (task.x>>4) << "," << (task.y>>4) << "," << (task.z>>4) << ")"
+                          << " origin=(" << task.x << "," << task.y << "," << task.z << ")"
+                          << " V=" << totalV << " (s=" << solidV << " c=" << cutoutV << " t=" << transV << ")"
+                          << " I=" << totalI
+                          << std::endl;
+            }
 
             if (totalV > 0 && totalI > 0) {
                 constexpr size_t VERTEX_STRIDE = sizeof(vk::VertexFormat::PBRTriangle);

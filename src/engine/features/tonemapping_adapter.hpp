@@ -14,6 +14,7 @@
 #include "platform/vulkan/vk2_image.hpp"
 #include "platform/vulkan/vk2_descriptor.hpp"
 
+#include <atomic>
 #include <cstdint>
 
 namespace engine {
@@ -85,6 +86,10 @@ public:
     void shutdown() override;
     const char* name() const override { return "ToneMapping"; }
 
+    // CPU-side exposure readback (1-frame delayed, classic double-buffer pattern).
+    // Returns 1.0 before the first histogram is computed.
+    float currentExposure() const { return computedExposure_.load(std::memory_order_relaxed); }
+
     // Register histogram + exposure compute pass with graph.
     // inputHandle: the HDR image to meter (e.g. test_compute_output).
     void registerPass(GraphBuilder& builder, ResourceHandle inputHandle);
@@ -108,7 +113,8 @@ private:
 
     // Buffers
     vk2::Buffer histogramBuffer_;    // 256 * uint32
-    vk2::Buffer exposureBuffer_;     // 58 floats
+    vk2::Buffer exposureBuffer_;     // 58 floats (device-local)
+    vk2::Buffer exposureReadback_;   // 1 float (host-visible, persistently mapped)
 
     // Descriptor set layout & per-frame allocator
     VkDescriptorSetLayout descSetLayout_ = VK_NULL_HANDLE;
@@ -127,6 +133,10 @@ private:
     ResourceHandle outputHandle_;
     bool initialized_ = false;
     bool exposureInitialized_ = false;
+
+    // CPU-side exposure value, updated each frame from the readback buffer.
+    // Atomic so it can be safely read from processScene() while execute() writes it.
+    std::atomic<float> computedExposure_{1.0f};
 };
 
 } // namespace engine

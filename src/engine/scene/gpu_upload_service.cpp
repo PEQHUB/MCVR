@@ -3,6 +3,7 @@
 #include "platform/vulkan/vk2_device.hpp"
 #include "frame/resource_gc.hpp"
 #include "diagnostics/log.hpp"
+#include "config/engine_config.hpp"
 
 #include <volk.h>
 #include <cstring>
@@ -44,16 +45,22 @@ void GpuUploadService::shutdown() {
     gc_ = nullptr;
 }
 
-uint32_t GpuUploadService::uploadDirtyChunks(VkCommandBuffer cmd,
-                                              const std::vector<ChunkGeometry>& dirtyChunks,
-                                              uint32_t frameIndex) {
-    if (!initialized_ || dirtyChunks.empty()) return 0;
+UploadResult GpuUploadService::uploadDirtyChunks(VkCommandBuffer cmd,
+                                                   const std::vector<ChunkGeometry>& dirtyChunks,
+                                                   uint32_t frameIndex) {
+    UploadResult result;
+    if (!initialized_ || dirtyChunks.empty()) return result;
 
     resetStaging(frameIndex);
-    uint32_t uploaded = 0;
-    bool useBDA = device_->caps().bufferDeviceAddress;
+    // BDA is always required: VK_KHR_ray_tracing_pipeline mandates bufferDeviceAddress.
+    // The old conditional was wrong — if useBDA were ever false the vertex/index buffers
+    // would be created without SHADER_DEVICE_ADDRESS_BIT, deviceAddress() would return 0,
+    // and the TLAS would embed a null BDA for every instance, causing the RT shader to
+    // dereference 0x0 and produce a GPU IP_FAULT / DEVICE_LOST.
+    constexpr bool useBDA = true;
 
-    for (const auto& geo : dirtyChunks) {
+    for (size_t i = 0; i < dirtyChunks.size(); ++i) {
+        const auto& geo = dirtyChunks[i];
         if (geo.empty()) {
             // Empty chunk — retire existing GPU data via GC (if present)
             auto it = chunks_.find(geo.id);
@@ -71,7 +78,18 @@ uint32_t GpuUploadService::uploadDirtyChunks(VkCommandBuffer cmd,
         VkDeviceSize vertStaging = allocStaging(vertSize);
         VkDeviceSize idxStaging = allocStaging(idxSize);
         if (vertStaging == UINT64_MAX || idxStaging == UINT64_MAX) {
-            log::warn("gpu-upload", "Staging buffer full, skipping remaining chunks");
+            // Staging ring is full — record ALL remaining ids (including this one)
+            // as skipped so the caller can re-queue them. This prevents silent data
+            // loss when the burst exceeds the per-frame slot capacity.
+            result.skipped.reserve(dirtyChunks.size() - i);
+            for (size_t j = i; j < dirtyChunks.size(); ++j) {
+                if (!dirtyChunks[j].empty()) {
+                    result.skipped.push_back(dirtyChunks[j].id);
+                }
+            }
+            log::warn("gpu-upload", "Staging buffer full at chunk " + std::to_string(i)
+                     + "/" + std::to_string(dirtyChunks.size())
+                     + " — " + std::to_string(result.skipped.size()) + " chunks re-queued for next frame");
             break;
         }
 
@@ -90,7 +108,11 @@ uint32_t GpuUploadService::uploadDirtyChunks(VkCommandBuffer cmd,
         vbd.size = vertSize;
         vbd.usage = vertUsage;
         auto vertR = vk2::Buffer::create(device_->device(), device_->vma(), vbd);
-        if (!vertR) { log::warn("gpu-upload", "Vertex buffer failed"); continue; }
+        if (!vertR) {
+            log::warn("gpu-upload", "Vertex buffer alloc failed for chunk — re-queueing for retry");
+            result.skipped.push_back(geo.id);
+            continue;
+        }
 
         // Create device-local index buffer
         VkBufferUsageFlags idxUsage = VK_BUFFER_USAGE_TRANSFER_DST_BIT
@@ -103,7 +125,11 @@ uint32_t GpuUploadService::uploadDirtyChunks(VkCommandBuffer cmd,
         ibd.size = idxSize;
         ibd.usage = idxUsage;
         auto idxR = vk2::Buffer::create(device_->device(), device_->vma(), ibd);
-        if (!idxR) { log::warn("gpu-upload", "Index buffer failed"); continue; }
+        if (!idxR) {
+            log::warn("gpu-upload", "Index buffer alloc failed for chunk — re-queueing for retry");
+            result.skipped.push_back(geo.id);
+            continue;
+        }
 
         // Record copy commands
         VkBufferCopy vertCopy{vertStaging, 0, vertSize};
@@ -133,10 +159,52 @@ uint32_t GpuUploadService::uploadDirtyChunks(VkCommandBuffer cmd,
         data.indexBuffer = std::move(idxR.value());
 
         chunks_[geo.id] = std::move(data);
-        ++uploaded;
+
+        // Structured diagnostic event: upload_complete (gated on DiagFlags::UPLOAD)
+        if ((diagFlags_ & DiagFlags::UPLOAD) != 0) {
+            auto toHex = [](uint64_t v) -> std::string {
+                char buf[20]; std::snprintf(buf, sizeof(buf), "0x%llx", static_cast<unsigned long long>(v));
+                return buf;
+            };
+            const auto& stored = chunks_[geo.id];
+            log::event("gpu-upload", "upload_complete", {
+                {"chunkX",      std::to_string(geo.id.x)},
+                {"chunkY",      std::to_string(geo.id.y)},
+                {"chunkZ",      std::to_string(geo.id.z)},
+                {"vertexBda",   toHex(stored.vertexAddress)},
+                {"indexBda",    toHex(stored.indexAddress)},
+                {"vertexBytes", std::to_string(vertSize)},
+                {"indexBytes",  std::to_string(idxSize)},
+                {"tris",        std::to_string(geo.triangleCount)},
+                {"stagingSlot", std::to_string(frameIndex % framesInFlight_)}
+            });
+        }
+
+        // BDA trace: per-chunk address validation (gated on DiagFlags::BDA)
+        if ((diagFlags_ & DiagFlags::BDA) != 0) {
+            auto toHex = [](uint64_t v) -> std::string {
+                char buf[20]; std::snprintf(buf, sizeof(buf), "0x%llx", static_cast<unsigned long long>(v));
+                return buf;
+            };
+            const auto& stored = chunks_[geo.id];
+            log::trace("gpu-upload", "[BDA] upload chunk ("
+                + std::to_string(geo.id.x) + "," + std::to_string(geo.id.y) + "," + std::to_string(geo.id.z)
+                + ") vertexBda=" + toHex(stored.vertexAddress)
+                + " indexBda=" + toHex(stored.indexAddress)
+                + (stored.vertexAddress == 0 || stored.indexAddress == 0 ? " *** NULL BDA ***" : ""));
+        }
+
+        ++result.uploaded;
     }
 
-    return uploaded;
+    // Flush the staging buffer once after all chunks are written.
+    // This ensures CPU writes are visible to the GPU transfer engine on non-coherent heaps
+    // (vmaFlushAllocation is a no-op on HOST_COHERENT memory, so always safe to call).
+    if (result.uploaded > 0) {
+        stagingBuffer_.flush();
+    }
+
+    return result;
 }
 
 void GpuUploadService::removeChunk(ChunkId id) {
@@ -144,6 +212,13 @@ void GpuUploadService::removeChunk(ChunkId id) {
     if (it == chunks_.end()) return;
     retireChunk(std::move(it->second));
     chunks_.erase(it);
+}
+
+void GpuUploadService::clearAll() {
+    for (auto& [id, data] : chunks_) {
+        retireChunk(std::move(data));
+    }
+    chunks_.clear();
 }
 
 const GpuChunkData* GpuUploadService::getChunk(ChunkId id) const {

@@ -44,6 +44,10 @@ struct CmdChunkSubmit {
     std::vector<uint8_t> vertexData;   // 96-byte PBRTriangle vertices
     std::vector<uint32_t> indexData;
     uint32_t triangleCount = 0;
+    // Per-chunk light sources collected by ChunkLightCollector.
+    // Each entry is 16 bytes: float worldX, float worldY, float worldZ, int32_t lightTypeId.
+    std::vector<uint8_t> lightData;
+    uint32_t lightCount = 0;
 };
 
 struct CmdChunkRemove {
@@ -101,6 +105,91 @@ struct CmdTextureMappingUpdate {
     std::vector<uint8_t> data;
 };
 
+// --- V2 texture upload commands ---
+
+// Sprite metadata table (atlas layout). 16 bytes per sprite.
+struct CmdSpriteTableUpload {
+    std::vector<uint8_t> metadata;  // SpriteMetadata[count], 16 bytes each
+    uint32_t count = 0;
+    uint32_t atlasWidth = 0;
+    uint32_t atlasHeight = 0;
+    uint32_t spriteSize = 16;  // pixels per sprite dimension
+};
+
+// Concatenated RGBA8 pixel data for all sprite albedo layers.
+struct CmdSpritePixelsUpload {
+    std::vector<uint8_t> pixels;  // RGBA8 concatenated for all sprites
+};
+
+// Auxiliary texture layers (LabPBR specular + normal).
+struct CmdSpriteAuxPixelsUpload {
+    std::vector<uint8_t> specularPixels;  // RGBA8 specular (LabPBR)
+    std::vector<uint8_t> normalPixels;    // RGBA8 normal maps
+};
+
+// Per-sprite animation frame data (streamed after initial upload).
+struct CmdAnimationFramesUpload {
+    std::vector<uint8_t> data;  // [spriteId(u16), frameIdx(u16), pixels...] repeated
+};
+
+// Signal that all sprite data has been sent — create GPU resources.
+struct CmdTextureFinalize {};
+
+// Area light SSBO upload. Contains pre-gathered AreaLight structs (48 bytes each,
+// matching vk::Data::AreaLight in common/shared.hpp) ready for GPU consumption.
+// Java gathers emissive blocks near the camera, sorts by contribution, and packs
+// them into this buffer each frame.
+struct CmdAreaLightUpload {
+    std::vector<uint8_t> data;  // AreaLight[lightCount], 48 bytes each
+    uint32_t lightCount = 0;
+};
+
+// Per-emissive-block data for WorldUBO. Sent once at startup and whenever
+// the user changes emission settings (temperature, brightness, gamut sliders).
+// Layout matches WorldUBO::emissionData[50] and WorldUBO::emissiveGamut[13].
+struct CmdEmissionDataUpload {
+    float emissionData[50 * 4] = {};   // vec4[50]: .rgb=BT.2020 color, .a=multiplier (sign=uniform glow)
+    float emissiveGamut[13 * 4] = {};  // vec4[13]: packed per-block Oklab chroma scale (1.0=neutral)
+};
+
+// Entity batch submission. Java pre-converts all entity vertices to 96-byte PBRTriangle
+// format and packs them into a single batch per frame. Each entry describes one entity's
+// slice of the shared vertex/index buffers.
+struct CmdEntityBatchSubmit {
+    struct EntityEntry {
+        uint32_t hashCode;      // For cross-frame matching
+        float posX, posY, posZ; // World position
+        uint8_t rtFlag;         // RayTracingFlags bitmask
+        uint8_t coordSystem;    // 0=WORLD, 1=CAMERA, 2=CAMERA_SHIFT
+        uint32_t vertexOffset;  // Byte offset into vertexData
+        uint32_t indexOffset;   // Element offset into indexData
+        uint32_t triangleCount;
+    };
+    std::vector<EntityEntry> entities;
+    std::vector<uint8_t> vertexData;  // All entity vertices (PBRTriangle, 96 bytes each)
+    std::vector<uint32_t> indexData;  // All entity indices
+};
+
+// Post-entity draw submission (particles, hand items, weather, overlays).
+// These entities are NOT included in the RT BLAS — they are rasterized on top
+// of the tone-mapped output using alpha blending and depth testing against the
+// RT depth buffer. Submitted once per frame from Java.
+struct CmdEntityPostDraw {
+    struct DrawCall {
+        uint32_t vertexByteOffset;    // Byte offset into vertexData
+        uint32_t indexElementOffset;  // Element offset into indexData
+        uint32_t indexCount;          // Number of indices for this draw
+    };
+    std::vector<uint8_t> vertexData;    // PBRTriangle vertices (96 bytes each)
+    std::vector<uint32_t> indexData;    // uint32 indices
+    std::vector<DrawCall> drawCalls;    // Per-entity draw calls
+};
+
+// Reset the offline accumulation counter (Welford N → 0).
+// Sent from Java when the user explicitly requests a fresh accumulation pass
+// (e.g. via the "Reset Accumulation" button in the offline render UI).
+struct CmdResetAccumulation {};
+
 using BridgeCommand = std::variant<
     CmdPing,
     CmdWindowResize,
@@ -112,7 +201,17 @@ using BridgeCommand = std::variant<
     CmdChunkRemove,
     CmdCameraUpdate,
     CmdSkyUpdate,
-    CmdTextureMappingUpdate
+    CmdTextureMappingUpdate,
+    CmdSpriteTableUpload,
+    CmdSpritePixelsUpload,
+    CmdSpriteAuxPixelsUpload,
+    CmdAnimationFramesUpload,
+    CmdTextureFinalize,
+    CmdAreaLightUpload,
+    CmdEmissionDataUpload,
+    CmdEntityBatchSubmit,
+    CmdEntityPostDraw,
+    CmdResetAccumulation
 >;
 
 // --- Event types (C++ → Java, fire-and-forget) ---
@@ -189,6 +288,7 @@ private:
     std::mutex listenerMutex_;
 
     uint64_t totalProcessed_ = 0;
+    uint64_t commandSeq_ = 0;  // monotonic per-command counter for boot_trace classifier
 };
 
 } // namespace engine

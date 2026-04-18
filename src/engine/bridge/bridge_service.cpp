@@ -1,7 +1,46 @@
 #include "bridge_service.hpp"
+#include "diagnostics/boot_trace.hpp"
 #include "diagnostics/log.hpp"
 
 namespace engine {
+
+namespace {
+
+// One name per variant alternative — keep in lockstep with BridgeCommand's
+// std::variant<> declaration in bridge_service.hpp.
+constexpr const char* kCommandNames[] = {
+    "Ping",
+    "WindowResize",
+    "WorldLoad",
+    "WorldUnload",
+    "Shutdown",
+    "ConfigPatch",
+    "ChunkSubmit",
+    "ChunkRemove",
+    "CameraUpdate",
+    "SkyUpdate",
+    "TextureMappingUpdate",
+    "SpriteTableUpload",
+    "SpritePixelsUpload",
+    "SpriteAuxPixelsUpload",
+    "AnimationFramesUpload",
+    "TextureFinalize",
+    "AreaLightUpload",
+    "EmissionDataUpload",
+    "EntityBatchSubmit",
+    "EntityPostDraw",
+    "ResetAccumulation",
+};
+constexpr size_t kCommandNameCount = sizeof(kCommandNames) / sizeof(kCommandNames[0]);
+static_assert(kCommandNameCount == std::variant_size_v<BridgeCommand>,
+              "kCommandNames must mirror BridgeCommand variant alternatives 1:1");
+
+const char* commandName(const BridgeCommand& cmd) {
+    size_t idx = cmd.index();
+    return idx < kCommandNameCount ? kCommandNames[idx] : "<unknown>";
+}
+
+} // anonymous namespace
 
 void BridgeService::post(BridgeCommand cmd) {
     std::lock_guard lock(queueMutex_);
@@ -19,6 +58,9 @@ uint32_t BridgeService::flush() {
     uint32_t count = static_cast<uint32_t>(processing_.size());
     if (count > 0 && handler_) {
         for (const auto& cmd : processing_) {
+            // Record before dispatch so the crash classifier knows which
+            // command the handler was processing if it crashes mid-call.
+            boot_trace::recordBridgeCommand(commandName(cmd), ++commandSeq_);
             handler_(cmd);
         }
         totalProcessed_ += count;

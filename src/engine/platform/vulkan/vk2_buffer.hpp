@@ -44,6 +44,18 @@ public:
     // Mapped pointer (only valid if created with MAPPED flag)
     void* mappedPtr() const { return mappedPtr_; }
 
+    // Flush a range of the mapped allocation to make CPU writes visible to the GPU.
+    // Required on non-HOST_COHERENT memory (e.g. certain discrete GPU heaps).
+    // On HOST_COHERENT heaps this is a no-op inside VMA, so always safe to call.
+    // Call after every mapped write before submitting commands that read the buffer.
+    //
+    // offset/size: byte range within the buffer. Pass 0/VK_WHOLE_SIZE for the full buffer.
+    void flush(VkDeviceSize offset = 0, VkDeviceSize size = VK_WHOLE_SIZE) const;
+
+    // Invalidate a range to make GPU writes visible to the CPU (for readback buffers).
+    // Call before reading mappedPtr() on buffers written by the GPU.
+    void invalidate(VkDeviceSize offset = 0, VkDeviceSize size = VK_WHOLE_SIZE) const;
+
     Buffer() = default;
 
     // Buffer device address (only valid if created with SHADER_DEVICE_ADDRESS usage)

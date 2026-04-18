@@ -1,5 +1,6 @@
 #include "tonemapping_adapter.hpp"
 #include "app/engine_services.hpp"
+#include "diagnostics/metrics_service.hpp"
 #include "frame/frame_scheduler.hpp"
 #include "platform/vulkan/vk2_device.hpp"
 #include "rendergraph/graph_builder.hpp"
@@ -53,6 +54,22 @@ void ToneMappingAdapter::init(EngineServices& services) {
         auto r = vk2::Buffer::create(device_, vma, bd);
         if (!r) { log::error("tonemapping", "Exposure buffer: " + r.error().message); return; }
         exposureBuffer_ = std::move(r.value());
+    }
+
+    // Create exposure readback buffer (host-visible, persistently mapped, 1 float)
+    {
+        vk2::Buffer::Desc bd{};
+        bd.size = sizeof(float);
+        bd.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bd.vmaFlags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT
+                    | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        auto r = vk2::Buffer::create(device_, vma, bd);
+        if (!r) { log::error("tonemapping", "Exposure readback buffer: " + r.error().message); return; }
+        exposureReadback_ = std::move(r.value());
+        // Initialize to 1.0 so first-frame reads get a sane default
+        if (exposureReadback_.mappedPtr()) {
+            *static_cast<float*>(exposureReadback_.mappedPtr()) = 1.0f;
+        }
     }
 
     // Create dummy 1x1 image for unused sampler bindings (0, 3)
@@ -157,13 +174,14 @@ void ToneMappingAdapter::init(EngineServices& services) {
         d.vertexShader = vertShader_.handle();
         d.fragmentShader = fragShader_.handle();
         d.layout = pipelineLayout_.handle();
-        d.colorAttachmentFormat = VK_FORMAT_R8G8B8A8_SRGB;
+        d.colorAttachmentFormat = VK_FORMAT_R8G8B8A8_UNORM;
         auto r = vk2::GraphicsPipeline::create(device_, d);
         if (!r) { log::error("tonemapping", "Graphics pipeline: " + r.error().message); return; }
         graphicsPipeline_ = std::move(r.value());
     }
 
     initialized_ = true;
+    profileSlot_ = services.metrics().registerTimer("ToneMapping");
     log::info("tonemapping", "ToneMappingAdapter initialized (histogram + exposure compute)");
 }
 
@@ -183,10 +201,18 @@ void ToneMappingAdapter::execute(const FrameContext& ctx, const PassResources& r
 
     VkCommandBuffer cmd = resources.cmd;
 
+    // Begin per-pass GPU timer
+    if (profileSlot_ != UINT32_MAX)
+        services_->metrics().beginNamedTimer(cmd, ctx.frameIndex, profileSlot_);
+
     // Allocate a fresh descriptor set for this frame (avoids race with in-flight frames)
     descAllocator_.resetFrame(ctx.frameIndex);
     auto setResult = descAllocator_.allocate(descSetLayout_, ctx.frameIndex);
-    if (!setResult) return;
+    if (!setResult) {
+        if (profileSlot_ != UINT32_MAX)
+            services_->metrics().endNamedTimer(cmd, ctx.frameIndex, profileSlot_);
+        return;
+    }
     VkDescriptorSet descSet = setResult.value();
 
     // Write all bindings to the fresh set
@@ -308,10 +334,58 @@ void ToneMappingAdapter::execute(const FrameContext& ctx, const PassResources& r
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, exposurePipeline_.handle());
     vkCmdDispatch(cmd, 1, 1, 1);
 
+    // --- Exposure readback: read previous frame's value, then schedule GPU→CPU copy ---
+    // Read the value written by the PREVIOUS frame's copy (1-frame delay).
+    if (exposureReadback_.mappedPtr()) {
+        exposureReadback_.invalidate(); // Ensure we see the GPU-written value, not cached CPU view
+        float readback = *static_cast<const float*>(exposureReadback_.mappedPtr());
+        // Guard against zero/negative/NaN — snap to 1.0 if invalid
+        if (readback > 0.0f && readback == readback) {  // readback == readback filters NaN
+            computedExposure_.store(readback, std::memory_order_relaxed);
+        }
+    }
+
+    // Barrier: exposure compute → transfer (for the copy to readback buffer)
+    {
+        VkBufferMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = exposureBuffer_.handle();
+        barrier.offset = 0;
+        barrier.size = sizeof(float);  // only first float (exposure)
+
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.bufferMemoryBarrierCount = 1;
+        dep.pBufferMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
+
+    // Copy the first float (exposure) from device-local to host-visible readback buffer
+    VkBufferCopy copyRegion{};
+    copyRegion.srcOffset = 0;
+    copyRegion.dstOffset = 0;
+    copyRegion.size = sizeof(float);
+    vkCmdCopyBuffer(cmd, exposureBuffer_.handle(), exposureReadback_.handle(), 1, &copyRegion);
+
+    // Barrier: transfer → fragment (the fragment shader still needs to read the full exposure buffer)
+    // Note: the fragment shader reads from exposureBuffer_ (device-local), not the readback buffer.
+    // We need the transfer to complete before the readback buffer is read NEXT frame (host read),
+    // which is implicitly guaranteed by the frame fence.
+
     // --- Stage 3: Fullscreen triangle tone curve ---
 
     // Check we have an output image to render to
-    if (resources.outputs.empty() || !resources.outputs[0].valid()) return;
+    if (resources.outputs.empty() || !resources.outputs[0].valid()) {
+        if (profileSlot_ != UINT32_MAX)
+            services_->metrics().endNamedTimer(cmd, ctx.frameIndex, profileSlot_);
+        return;
+    }
 
     uint32_t outIdx = resources.outputs[0].index;
     VkImageView outView = resources.resolved->views[outIdx];
@@ -319,12 +393,17 @@ void ToneMappingAdapter::execute(const FrameContext& ctx, const PassResources& r
     uint32_t outW = outImg.width();
     uint32_t outH = outImg.height();
 
-    // Barrier: exposure buffer compute → fragment read
+    // Barrier: exposure buffer transfer (readback copy) → fragment read.
+    // The compute→transfer barrier above covered the first float; now we need
+    // to ensure both the compute writes (full buffer) and the transfer read
+    // (first float) are visible to the fragment shader.
     {
         VkBufferMemoryBarrier2 barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-        barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                             | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
+                              | VK_ACCESS_2_TRANSFER_READ_BIT;
         barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
         barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -373,6 +452,10 @@ void ToneMappingAdapter::execute(const FrameContext& ctx, const PassResources& r
     vkCmdDraw(cmd, 3, 1, 0, 0);  // Fullscreen triangle
 
     vkCmdEndRendering(cmd);
+
+    // End per-pass GPU timer
+    if (profileSlot_ != UINT32_MAX)
+        services_->metrics().endNamedTimer(cmd, ctx.frameIndex, profileSlot_);
 }
 
 void ToneMappingAdapter::shutdown() {
@@ -388,6 +471,7 @@ void ToneMappingAdapter::shutdown() {
     fragShader_ = {};
     histogramBuffer_ = {};
     exposureBuffer_ = {};
+    exposureReadback_ = {};
     dummyImage_ = {};
 
     if (linearSampler_ != VK_NULL_HANDLE) {
@@ -410,7 +494,7 @@ void ToneMappingAdapter::registerPass(GraphBuilder& builder, ResourceHandle inpu
     // Output: tone-mapped LDR image
     ImageResourceDesc outDesc;
     outDesc.name = "mapped_output";
-    outDesc.format = VK_FORMAT_R8G8B8A8_SRGB;
+    outDesc.format = VK_FORMAT_R8G8B8A8_UNORM;
     outputHandle_ = builder.addResource(outDesc);
 
     PassDescriptor pass;

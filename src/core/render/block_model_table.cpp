@@ -99,6 +99,37 @@ void BlockModelTable::normalizeQuadUVs() {
     std::cout << "[BlockModelTable] Pre-normalized UVs for " << normalized << " quads" << std::endl;
 }
 
+void BlockModelTable::normalizeQuadUVsWithBounds(
+        const std::function<glm::vec4(uint16_t)>& getBounds) {
+    if (uvsNormalized_) {
+        std::cout << "[BlockModelTable] UVs already normalized, skipping (V2 path)" << std::endl;
+        return;
+    }
+    if (quads_.empty()) {
+        std::cout << "[BlockModelTable] No quads to normalize (V2 path)" << std::endl;
+        return;
+    }
+
+    uint32_t normalized = 0;
+    for (auto& quad : quads_) {
+        glm::vec4 b = getBounds(quad.spriteId);  // (minU, maxU, minV, maxV)
+        float sizeU = b.y - b.x;
+        float sizeV = b.w - b.z;
+        if (sizeU < 1e-6f) sizeU = 1.0f;
+        if (sizeV < 1e-6f) sizeV = 1.0f;
+
+        for (int v = 0; v < 4; v++) {
+            quad.uvs[v][0] = (quad.uvs[v][0] - b.x) / sizeU;
+            quad.uvs[v][1] = (quad.uvs[v][1] - b.z) / sizeV;
+        }
+        normalized++;
+    }
+
+    uvsNormalized_ = true;
+    std::cout << "[BlockModelTable] Pre-normalized UVs for " << normalized
+              << " quads (V2 path)" << std::endl;
+}
+
 const BlockModelEntry* BlockModelTable::getEntry(uint32_t globalStateId) const {
     if (globalStateId > maxStateId_) return nullptr;
     const auto& entry = entries_[globalStateId];

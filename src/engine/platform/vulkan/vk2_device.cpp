@@ -5,6 +5,14 @@
 #include "vk2_device.hpp"
 #include "diagnostics/log.hpp"
 
+#ifdef MCVR_ENABLE_AFTERMATH
+#include "core/render/aftermath_integration.hpp"
+#endif
+
+#ifdef _WIN32
+#include "core/render/streamline_context.hpp"
+#endif
+
 #include <volk.h>
 #include <GLFW/glfw3.h>
 
@@ -32,9 +40,42 @@ DeviceService::~DeviceService() {
 }
 
 Result<void> DeviceService::init(const InitConfig& config) {
-    if (volkInitialize() != VK_SUCCESS) {
-        return makeError(VK_ERROR_INITIALIZATION_FAILED, "volkInitialize failed");
+#ifdef _WIN32
+    // Streamline must intercept Vulkan BEFORE vkCreateInstance.
+    // Initialize the SL interposer first, then override Volk's proc-addr loader.
+    if (config.enableFrameGen && !config.streamlinePluginDir.empty()) {
+        bool slOk = StreamlineContext::init(config.streamlinePluginDir.c_str());
+        if (slOk) {
+            // Override Volk's vkGetInstanceProcAddr with SL's interposer version.
+            // This must happen before volkInitialize() so Volk uses the SL-hooked
+            // version for all subsequent instance/device creation.
+            auto slProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+                StreamlineContext::getVkGetInstanceProcAddr());
+            if (slProcAddr) {
+                volkInitializeCustom(slProcAddr); // returns void
+                slInterposerActive_ = true;
+                log::info("vulkan", "Streamline interposer active (DLSS-G)");
+            } else {
+                log::warn("vulkan", "Streamline interposer proc-addr is null — frame gen disabled");
+                StreamlineContext::shutdown();
+            }
+        } else {
+            log::warn("vulkan", "StreamlineContext::init() failed — frame gen disabled");
+        }
     }
+    if (!slInterposerActive_)
+#endif
+    {
+        if (volkInitialize() != VK_SUCCESS) {
+            return makeError(VK_ERROR_INITIALIZATION_FAILED, "volkInitialize failed");
+        }
+    }
+
+#ifdef MCVR_ENABLE_AFTERMATH
+    if (config.enableDiagnostics && !config.logsDir.empty()) {
+        AftermathIntegration::init(config.logsDir);
+    }
+#endif
 
     if (!config.window && !config.surfaceFactory) {
         return makeError(VK_ERROR_INITIALIZATION_FAILED, "No window or surface factory provided");
@@ -66,6 +107,19 @@ Result<void> DeviceService::init(const InitConfig& config) {
 
     log::info("vulkan", "volkLoadDevice...");
     volkLoadDevice(device_);
+
+#ifdef _WIN32
+    // Notify SL interposer that the device is now created so it can load feature
+    // function pointers. Must be called AFTER volkLoadDevice so that SL can
+    // query the device-level proc-addrs through our now-loaded dispatch table.
+    if (slInterposerActive_) {
+        if (!StreamlineContext::onDeviceCreated()) {
+            log::warn("vulkan", "StreamlineContext::onDeviceCreated() failed — frame gen may not work");
+        } else {
+            log::info("vulkan", "Streamline device hook complete");
+        }
+    }
+#endif
 
     log::info("vulkan", "Getting queues (main=" + std::to_string(mainQueueFamilyIndex_) +
               ", sec=" + std::to_string(secondaryQueueFamilyIndex_) +
@@ -99,6 +153,14 @@ void DeviceService::shutdown() {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
     }
+#ifdef _WIN32
+    // Shut down Streamline before the device is destroyed.
+    // SL holds references to VkDevice internals — must be released while device is alive.
+    if (slInterposerActive_) {
+        StreamlineContext::shutdown();
+        slInterposerActive_ = false;
+    }
+#endif
     if (vma_ != VK_NULL_HANDLE) {
         vmaDestroyAllocator(vma_);
         vma_ = VK_NULL_HANDLE;
@@ -155,6 +217,16 @@ Result<void> DeviceService::createInstance(const InitConfig& config) {
         extensions.push_back(ext);
     }
 
+#ifdef _WIN32
+    // Add Streamline-required instance extensions (e.g. VK_KHR_get_physical_device_properties2).
+    // StreamlineContext::init() must have been called already (above in DeviceService::init).
+    if (slInterposerActive_) {
+        for (const auto& ext : StreamlineContext::getRequiredInstanceExtensions()) {
+            extensions.push_back(ext.c_str());
+        }
+    }
+#endif
+
     // Deduplicate
     std::set<std::string> unique(extensions.begin(), extensions.end());
     std::vector<std::string> storage(unique.begin(), unique.end());
@@ -177,6 +249,12 @@ Result<void> DeviceService::createInstance(const InitConfig& config) {
     if (result != VK_SUCCESS) {
         return makeError(result, "vkCreateInstance failed");
     }
+
+    // Load instance-level function pointers through volk IMMEDIATELY after
+    // instance creation, before calling any instance-level extension functions
+    // like vkCreateDebugUtilsMessengerEXT below. Without this, those calls
+    // dispatch through NULL function pointers and crash with DEP violation.
+    volkLoadInstance(instance_);
 
     if (config.enableValidation) {
         VkDebugUtilsMessengerCreateInfoEXT dbgInfo{};
@@ -367,6 +445,14 @@ Result<void> DeviceService::createDevice(const InitConfig& config) {
     supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     supported12.pNext = &supported13;
 
+    // VK_EXT_device_fault feature query (only wired if the extension is supported)
+    VkPhysicalDeviceFaultFeaturesEXT supportedDeviceFault{};
+    supportedDeviceFault.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
+    if (hasExtension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
+        supportedDeviceFault.pNext = supported12.pNext;
+        supported12.pNext = &supportedDeviceFault;
+    }
+
     VkPhysicalDeviceFeatures2 supportedFeatures{};
     supportedFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     supportedFeatures.pNext = &supported12;
@@ -431,10 +517,43 @@ Result<void> DeviceService::createDevice(const InitConfig& config) {
         extensions.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         caps_.deviceFault = true;
     }
+    if (config.enableDiagnostics && hasExtension("VK_NV_device_diagnostic_checkpoints")) {
+        extensions.push_back("VK_NV_device_diagnostic_checkpoints");
+        caps_.nvCheckpoints = true;
+        log::info("vulkan", "VK_NV_device_diagnostic_checkpoints enabled");
+    }
 
     for (auto ext : config.extraDeviceExtensions) {
         if (hasExtension(ext)) extensions.push_back(ext);
     }
+
+    // Callback-driven extensions (e.g. NGX/DLSS query) — these depend on the chosen
+    // physical device so they cannot be supplied at config time.
+    if (config.extraDeviceExtensionsCallback) {
+        auto callbackExts = config.extraDeviceExtensionsCallback(instance_, physicalDevice_);
+        for (auto ext : callbackExts) {
+            if (hasExtension(ext)) {
+                extensions.push_back(ext);
+                log::info("vulkan", std::string("Callback-requested device extension: ") + ext);
+            } else {
+                log::warn("vulkan", std::string("Callback requested unsupported extension: ") + ext);
+            }
+        }
+    }
+
+#ifdef _WIN32
+    // Add Streamline-required device extensions.
+    if (slInterposerActive_) {
+        for (const auto& ext : StreamlineContext::getRequiredDeviceExtensions()) {
+            if (hasExtension(ext.c_str())) {
+                extensions.push_back(ext.c_str());
+                log::info("vulkan", std::string("SL required device extension: ") + ext);
+            } else {
+                log::warn("vulkan", std::string("SL required device extension not available: ") + ext);
+            }
+        }
+    }
+#endif
 
     // Deduplicate
     std::set<std::string> uniqueExts(extensions.begin(), extensions.end());
@@ -460,6 +579,9 @@ Result<void> DeviceService::createDevice(const InitConfig& config) {
     VkPhysicalDeviceVulkan12Features enable12{};
     enable12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 
+    VkPhysicalDeviceFaultFeaturesEXT enableDeviceFault{};
+    enableDeviceFault.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
+
     VkPhysicalDeviceFeatures2 enableFeatures{};
     enableFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 
@@ -479,6 +601,20 @@ Result<void> DeviceService::createDevice(const InitConfig& config) {
         pNextTail = &enableAS.pNext;
         *pNextTail = &enableRT;
         pNextTail = &enableRT.pNext;
+    }
+
+    // Enable VK_EXT_device_fault feature when the extension is in the list.
+    // The extension alone is not enough — we must also enable the feature bit,
+    // otherwise vkGetDeviceFaultInfoEXT is a no-op on DEVICE_LOST.
+    if (caps_.deviceFault && supportedDeviceFault.deviceFault == VK_TRUE) {
+        enableDeviceFault.deviceFault = VK_TRUE;
+        enableDeviceFault.deviceFaultVendorBinary = supportedDeviceFault.deviceFaultVendorBinary;
+        *pNextTail = &enableDeviceFault;
+        pNextTail = &enableDeviceFault.pNext;
+    } else {
+        // Feature not actually supported despite extension being present — disable
+        // the cap so frame_scheduler doesn't try to call vkGetDeviceFaultInfoEXT.
+        caps_.deviceFault = false;
     }
 
     // Enable features based on profile + what's actually supported

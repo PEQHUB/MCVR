@@ -1,4 +1,5 @@
 file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS "*.cpp")
+list(FILTER SOURCE_FILES EXCLUDE REGEX ".*/middleware/generated/.*\\.cpp$")
 
 add_library(core SHARED ${SOURCE_FILES})
 target_link_libraries(core PUBLIC ngx ${JNI_LIBRARIES} VulkanMemoryAllocator volk::volk glfw streamline)

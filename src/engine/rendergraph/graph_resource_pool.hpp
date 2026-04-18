@@ -33,8 +33,12 @@ public:
                                uint32_t renderWidth, uint32_t renderHeight);
 
     // Recreate all images at a new resolution. No-op if resolution unchanged.
+    // Old images are retired through gc (deferred destruction) — safe even if
+    // the device is not idle, provided the GC ring covers all frames in flight.
+    // Callers that precede this with device.waitIdle() may pass a gc that flushes
+    // immediately; all others rely on the ring to defer until GPU work completes.
     vk2::Result<void> recreate(vk2::DeviceService& device, const CompiledGraph& graph,
-                               uint32_t renderWidth, uint32_t renderHeight);
+                               uint32_t renderWidth, uint32_t renderHeight, ResourceGC& gc);
 
     // Release all images via deferred GC (safe for in-flight frames).
     void release(ResourceGC& gc);
@@ -43,6 +47,7 @@ public:
     void releaseImmediate();
 
     bool isAllocated() const { return !images_.empty(); }
+    uint32_t imageCount() const { return static_cast<uint32_t>(images_.size()); }
     uint32_t renderWidth() const { return renderWidth_; }
     uint32_t renderHeight() const { return renderHeight_; }
 

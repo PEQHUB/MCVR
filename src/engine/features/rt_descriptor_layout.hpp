@@ -4,9 +4,10 @@
 //
 // Set 0 (textures, 6 bindings):    bindless texture array, atmosphere LUT/cube,
 //                                   sprite albedo/specular/normal arrays
-// Set 1 (geometry, 14 bindings):   TLAS, BLAS offsets, vtx/idx BDAs (cur+prev),
+// Set 1 (geometry, 15 bindings):   TLAS, BLAS offsets, vtx/idx BDAs (cur+prev),
 //                                   prev transforms, texture/material/light SSBOs,
-//                                   blender PBR, displaced face data, sprite registry
+//                                   biome colors (10), material class (11), displaced face (12),
+//                                   sprite registry (13), blender PBR stub (14)
 // Set 2 (uniforms, 6 bindings):    WorldUBO (cur), LastWorldUBO, SkyUBO,
 //                                   energy LUT (binding 4), blue noise sobol+scrambling
 //                                   (bindings 9, 10) — note V1 has gaps in this set
@@ -49,10 +50,11 @@ constexpr uint32_t GEO_BINDING_LAST_TRANSFORMS = 6;
 constexpr uint32_t GEO_BINDING_TEXTURE_MAPPING = 7;
 constexpr uint32_t GEO_BINDING_AREA_LIGHT = 8;
 constexpr uint32_t GEO_BINDING_TILE_LIGHT = 9;
-constexpr uint32_t GEO_BINDING_BLENDER_PBR = 10;
-constexpr uint32_t GEO_BINDING_MATERIAL_CLASS = 11;
+constexpr uint32_t GEO_BINDING_BIOME_COLORS = 10;  // uvec4[] per-instance biome tint (grass/foliage/water)
+constexpr uint32_t GEO_BINDING_MATERIAL_CLASS = 11; // MaterialClass[] — matches material_properties.glsl binding 11
 constexpr uint32_t GEO_BINDING_DISPLACED_FACE = 12;
-constexpr uint32_t GEO_BINDING_SPRITE_REGISTRY = 13;
+constexpr uint32_t GEO_BINDING_SPRITE_REGISTRY = 13; // SpriteEntry[] — matches sprite_fetch.glsl binding 13
+constexpr uint32_t GEO_BINDING_BLENDER_PBR = 14;    // BlenderPBR stub — GLSL does not declare this binding
 
 // --- Set 2 (uniforms + blue noise + energy LUT) ---
 constexpr uint32_t SET_UNIFORMS = 2;

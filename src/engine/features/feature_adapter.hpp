@@ -10,6 +10,9 @@
 #include "frame/frame_context.hpp"
 #include "rendergraph/graph_types.hpp"
 
+#include <cstdint>
+#include <limits>
+
 namespace engine {
 
 class EngineServices;
@@ -32,6 +35,13 @@ public:
 
     // Human-readable name for logging.
     virtual const char* name() const = 0;
+
+protected:
+    // GPU profiler slot registered via MetricsService::registerTimer().
+    // UINT32_MAX means "not registered" (default). Adapters that want
+    // per-pass GPU timing set this during init() and wrap execute() with
+    // services.metrics().beginNamedTimer / endNamedTimer.
+    uint32_t profileSlot_ = UINT32_MAX;
 };
 
 } // namespace engine
