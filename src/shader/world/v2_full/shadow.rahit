@@ -1,0 +1,281 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+#include "../util/labpbr.glsl"
+#include "../util/random.glsl"
+#include "../util/ray_payloads.glsl"
+#include "../util/util.glsl"
+#include "common/shared.hpp"
+#include "../util/colorspace.glsl"
+
+layout(set = 0, binding = 0) uniform sampler2D textures[];
+
+#include "../util/sprite_fetch.glsl"
+
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
+
+layout(set = 1, binding = 1) readonly buffer BLASOffsets {
+    uint offsets[];
+}
+blasOffsets;
+
+layout(set = 1, binding = 2) readonly buffer VertexBufferAddr {
+    uint64_t addrs[];
+}
+vertexBufferAddrs;
+
+layout(set = 1, binding = 3) readonly buffer IndexBufferAddr {
+    uint64_t addrs[];
+}
+indexBufferAddrs;
+
+layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
+    TextureMapping mapping;
+};
+
+#include "../util/vertex_fetch.glsl"
+#include "../util/material_properties.glsl"
+
+layout(set = 2, binding = 0) uniform Uniform {
+    WorldUBO ubo;
+};
+
+// VertexBuffer and IndexBuffer declared in vertex_fetch.glsl
+
+layout(push_constant) uniform PushConstant {
+    int numRayBounces;
+    int flags;
+    int areaLightCount;
+    float shadowSoftness;
+    int risCandidates;
+    int temporalMClamp;
+    int wClamp;
+    float preExposure;
+    float pomHeightScale;
+    int pomSteps;
+    int pomRefinement;
+    float pomFadeDistance;
+    float colorExpansion;
+    uint blueNoiseFrame;
+    uint64_t _sharcBDA0, _sharcBDA1, _sharcBDA2;
+    float _sharcPad0, _sharcPad1, _sharcPad2, _sharcPad3;
+    uint _sharcPad4;
+    float _sharcPad5;
+    uint _sharcPad6;
+    float _sharcPad7;
+    int _sharcPad8, _sharcPad9;
+    int offlineFlags;
+    int accumFrameCount;
+    float aperture;
+    float focalDistance;
+    // Material SSBO BDA (offset 128)
+    uint64_t materialClassAddr;
+} pc;
+#define SIMPLIFIED_INDIRECT ((pc.flags & 1) != 0)
+#define SIMPLIFY_THIS_RAY (SIMPLIFIED_INDIRECT && shadowRay.bounceIndex > 1)
+#define BEER_LAW_SHADOWS ((pc.flags & 512) != 0)
+
+layout(location = 1) rayPayloadInEXT ShadowRay shadowRay;
+hitAttributeEXT vec2 attribs;
+
+void main() {
+    uint instanceID = gl_InstanceCustomIndexEXT;
+    uint geometryID = gl_GeometryIndexEXT;
+
+    uint blasOffset;
+    uint vertexFormat;
+    UnpackedVertex v0, v1, v2;
+    fetchTriangleVertices(instanceID, geometryID, gl_PrimitiveID, v0, v1, v2, blasOffset, vertexFormat);
+
+    vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
+    vec2 uv = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
+    uint textureID = v0.textureID;
+    bool isBlockGeometry = (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
+
+    bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
+    vec4 colorLayer;
+    if (useColorLayer) {
+        colorLayer = vec4(baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer, 1.0);
+    } else {
+        colorLayer = vec4(1.0);
+    }
+
+    bool useTexture = (v0.flags & PBR_FLAG_USE_TEXTURE) != 0u;
+    vec2 textureUV;
+    vec4 albedo;
+    ivec4 flags;
+    vec4 specular = vec4(0.0);
+    vec4 normalVal = vec4(0.0);
+
+    if (useTexture) {
+        textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
+
+        if (isBlockGeometry) {
+            // Block geometry: texture array sampling via SpriteRegistry
+            uint spriteId = textureID;
+
+            if ((v0.flags & PBR_FLAG_GREEDY_MERGED) != 0u) {
+                textureUV = fract(textureUV);
+            }
+
+            albedo = fetchBlockAlbedoLod(spriteId, textureUV, ubo.animTick, 0.0);
+
+            if (!SIMPLIFY_THIS_RAY) {
+                specular = fetchBlockSpecularLod(spriteId, textureUV, 0.0);
+            }
+
+            flags = ivec4(0); // flag arrays not yet in texture array system
+        } else {
+            // Entity geometry: legacy atlas sampling via textures[]
+            albedo = texture(textures[nonuniformEXT(textureID)], textureUV);
+
+            if (!SIMPLIFY_THIS_RAY) {
+                int specularTextureID = mapping.entries[textureID].specular;
+                if (specularTextureID >= 0) { specular = texture(textures[nonuniformEXT(specularTextureID)], textureUV); }
+            }
+
+            int flagTextureID = mapping.entries[textureID].flag;
+            if (flagTextureID >= 0) {
+                vec4 floatFlagValue = textureLod(textures[nonuniformEXT(flagTextureID)], uv, 0);
+                flags = ivec4(round(floatFlagValue * 255.0));
+            } else {
+                flags = ivec4(0);
+            }
+        }
+    } else {
+        albedo = vec4(1.0);
+        flags = ivec4(0);
+    }
+
+    // if insideBoat, then ignore liquid
+    if (shadowRay.insideBoat > 0 && (flags.r & 0x1) > 0) {
+        ignoreIntersectionEXT;
+        return;
+    }
+
+    vec3 tint = (albedo * colorLayer).rgb;
+    float alpha = (albedo * colorLayer).a;
+
+    if (!SIMPLIFY_THIS_RAY) {
+        float useGlint = float((v0.flags & PBR_FLAG_USE_GLINT) != 0u);
+        uint glintTexture = v0.glintTexture;
+        vec2 glintUV = baryCoords.x * v0.glintUV + baryCoords.y * v1.glintUV + baryCoords.z * v2.glintUV;
+        glintUV = (ubo.textureMat * vec4(glintUV, 0.0, 1.0)).xy;
+        vec3 glint = useGlint * texture(textures[nonuniformEXT(glintTexture)], glintUV).rgb;
+        glint = glint * glint;
+
+        bool useOverlay = (v0.flags & PBR_FLAG_USE_OVERLAY) != 0u;
+        ivec2 overlayUV = ivec2(int(v0.overlayPacked & 0xFFFFu), int(v0.overlayPacked >> 16u));
+        vec4 overlayColor = texelFetch(textures[nonuniformEXT(ubo.overlayTextureID)], overlayUV, 0);
+
+        if (useOverlay) {
+            tint = mix(overlayColor.rgb, tint, overlayColor.a) + glint;
+        } else {
+            tint += glint;
+        }
+    }
+
+    tint = CS_BT709_TO_BT2020 * tint;  // BT.709 -> BT.2020 working space
+
+    // When simplified, skip LabPBR conversion — only transmission matters,
+    // which is equivalent to alpha < (1.0 - 1e-6)
+    bool hasTransmission;
+    if (SIMPLIFY_THIS_RAY) {
+        hasTransmission = alpha < 0.95;
+    } else {
+        LabPBRMat mat = convertLabPBRMaterial(albedo * colorLayer, specular, normalVal);
+        // Material override: vertex materialType → mask texture → SSBO lookup
+        uint packedBlockType = v0.emissiveBlockType;
+        uint materialType = (packedBlockType >> 8u) & 0xFFu;
+        uint shadowMatIdx = 0u;
+        bool shadowHasMat = false;
+        if (materialType > 0u) {
+            shadowMatIdx = materialType - 1u;
+            shadowHasMat = true;
+        } else if (!isBlockGeometry) {
+            // Entity fallback: per-texel mask texture (only valid for bindless textureID)
+            int maskTexID = mapping.entries[textureID].maskTexture;
+            if (maskTexID >= 0) {
+                shadowMatIdx = uint(texture(textures[nonuniformEXT(maskTexID)], uv).r * 255.0 + 0.5);
+                shadowHasMat = (shadowMatIdx < 160u);
+            }
+        }
+        if (shadowHasMat && pc.materialClassAddr != 0) {
+            MaterialClassBufferRef matBuf = MaterialClassBufferRef(pc.materialClassAddr);
+            MaterialClassEntry mc = matBuf.materialClassMapping.entries[shadowMatIdx];
+
+            // Override transmission from material slider
+            if (mc.transmission >= 0.0) {
+                mat.transmission = mc.transmission;
+            }
+
+            // Roughness modulates shadow color: smooth glass = clear colored shadow,
+            // rough glass = scattered/dimmer (frosty)
+            // Ground truth: no roughness tint hack — Beer's Law handles absorption correctly
+            if (mat.transmission > 0.0 && !BEER_LAW_SHADOWS) {
+                float matRoughness = mc.roughness * mc.roughness;  // perceptual -> GGX alpha
+                tint = mix(tint, vec3(1.0), clamp(matRoughness * 2.0, 0.0, 1.0));
+            }
+        }
+
+        hasTransmission = mat.transmission > 0.0;
+    }
+
+    if (BEER_LAW_SHADOWS) {
+        // Ground truth: Beer's Law volumetric absorption for transmissive materials
+        if (alpha < 0.05) {
+            ignoreIntersectionEXT;
+        } else if (hasTransmission) {
+            // Use gl_HitKindEXT to determine front/back face (entry/exit)
+            bool frontFace = (gl_HitKindEXT == gl_HitKindFrontFacingTriangleEXT);
+            if (frontFace) {
+                // Entering transmissive medium — record absorption coefficients
+                // sigma_a = -ln(tint) per block (tint is per-block transmission color)
+                shadowRay.mediumAbsorption = -log(max(tint, vec3(0.001)));
+                shadowRay.mediumEntryT = gl_HitTEXT;
+            } else {
+                // Exiting medium — apply Beer's Law for distance traveled
+                float dist = max(gl_HitTEXT - shadowRay.mediumEntryT, 0.0);
+                if (dist > 0.001) {
+                    shadowRay.throughput *= exp(-shadowRay.mediumAbsorption * dist);
+                }
+                shadowRay.mediumAbsorption = vec3(0.0);
+            }
+            ignoreIntersectionEXT;
+        } else if (alpha < 1.0) {
+            // Semi-transparent (leaves, vines): stochastic alpha test (unbiased)
+            if (rand(shadowRay.seed) > alpha) {
+                ignoreIntersectionEXT;
+            }
+            // else: opaque hit — fall through to terminateRayEXT
+        }
+        // Fully opaque
+        terminateRayEXT;
+    }
+
+    // Online mode: existing approximations
+    if (alpha < 0.05) {
+        // cut-out
+        ignoreIntersectionEXT;
+    } else if (hasTransmission) {
+        shadowRay.throughput *= tint;
+        ignoreIntersectionEXT;
+    } else if (alpha < 0.95) {
+        // translucent
+        if (rand(shadowRay.seed) < alpha) {
+            // accept the ray
+            shadowRay.throughput *= tint;
+            ignoreIntersectionEXT;
+        } else {
+            // pass through
+            ignoreIntersectionEXT;
+        }
+    } else {
+        // opaque
+        terminateRayEXT;
+    }
+}

@@ -1,0 +1,43 @@
+#version 450
+
+// Downsample + threshold: reads full-res LDR, writes half-res bloom buffer.
+// Each thread handles one output pixel. Box filter over 2x2 source pixels.
+// Brightness threshold extracts only bright regions.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D r_input;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D rw_bloom;
+
+layout(push_constant) uniform BloomPushConstant {
+    float threshold;
+    float intensity;
+    vec2 inputTexelSize;   // 1.0 / inputResolution
+} pc;
+
+void main() {
+    ivec2 outPos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 outSize = imageSize(rw_bloom);
+    if (outPos.x >= outSize.x || outPos.y >= outSize.y) return;
+
+    // Center of the 2x2 block in input UV space
+    vec2 uv = (vec2(outPos) * 2.0 + 1.0) * pc.inputTexelSize;
+
+    // 4-tap bilinear downsample at half-pixel offsets
+    vec3 c0 = texture(r_input, uv + vec2(-0.5, -0.5) * pc.inputTexelSize).rgb;
+    vec3 c1 = texture(r_input, uv + vec2( 0.5, -0.5) * pc.inputTexelSize).rgb;
+    vec3 c2 = texture(r_input, uv + vec2(-0.5,  0.5) * pc.inputTexelSize).rgb;
+    vec3 c3 = texture(r_input, uv + vec2( 0.5,  0.5) * pc.inputTexelSize).rgb;
+    vec3 color = (c0 + c1 + c2 + c3) * 0.25;
+
+    // Brightness threshold with soft knee
+    float brightness = max(color.r, max(color.g, color.b));
+    float knee = pc.threshold * 0.5;  // soft transition
+    float soft = brightness - pc.threshold + knee;
+    soft = clamp(soft / (2.0 * knee + 0.0001), 0.0, 1.0);
+    soft = soft * soft;
+    float contribution = max(soft, step(pc.threshold, brightness));
+    color *= contribution;
+
+    imageStore(rw_bloom, outPos, vec4(color, 1.0));
+}

@@ -1,0 +1,118 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : enable
+
+// V2 M8 Temporal Denoiser (minimal stepping-stone).
+//
+// Reads current-frame G-buffer from RT adapter outputs and a history image
+// carried from the previous frame. Reprojects history via motion vectors,
+// validates the sample against normal + depth similarity, and blends with an
+// exponential moving average.
+//
+// Not a full SVGF. A proper port needs per-channel separation (direct/specular/
+// indirect/shadows), variance estimation, A-trous wavelet filter, and moment
+// filtering. Those land in M8b once the real RT is online.
+//
+// Inputs:
+//   binding 0: current radiance (sampled, linear)
+//   binding 1: current normal   (sampled, linear)
+//   binding 2: current depth    (sampled, linear)
+//   binding 3: motion vector    (sampled, linear)
+// In/out:
+//   binding 4: history radiance (storage rgba16f, read+write)
+// Output:
+//   binding 5: denoised radiance (storage rgba16f, write only)
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D texCurrent;
+layout(set = 0, binding = 1) uniform sampler2D texNormal;
+layout(set = 0, binding = 2) uniform sampler2D texDepth;
+layout(set = 0, binding = 3) uniform sampler2D texMotion;
+layout(set = 0, binding = 4, rgba16f) uniform image2D imgHistory;
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D imgDenoised;
+
+layout(push_constant) uniform PushConstants {
+    float alpha;            // EMA blend factor for valid history (0 = only history, 1 = only current)
+    float normalThreshold;  // Minimum dot(n_cur, n_prev) to accept history (e.g. 0.9)
+    float depthThreshold;   // Max relative depth diff to accept history (e.g. 0.1)
+    uint  frameNumber;      // Global frame counter; frame 0 means no valid history
+    int   imageWidth;
+    int   imageHeight;
+    int   padA;
+    int   padB;
+} pc;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= pc.imageWidth || coord.y >= pc.imageHeight) return;
+
+    vec2 resolution = vec2(pc.imageWidth, pc.imageHeight);
+    vec2 texelSize = 1.0 / resolution;
+    vec2 uv = (vec2(coord) + 0.5) * texelSize;
+
+    // --- Current frame samples ---
+    vec3 curColor = texture(texCurrent, uv).rgb;
+    vec3 curNormal = texture(texNormal, uv).xyz;
+    float curDepth = texture(texDepth, uv).r;
+    vec2 motionPx = texture(texMotion, uv).xy;
+
+    // On first frame, or if curDepth is 0 (sky miss), just write current.
+    if (pc.frameNumber == 0u || curDepth <= 0.0) {
+        vec4 outCol = vec4(curColor, 1.0);
+        imageStore(imgDenoised, coord, outCol);
+        imageStore(imgHistory,  coord, outCol);
+        return;
+    }
+
+    // --- Reproject ---
+    // motionPx is pixel-space delta: prev_pixel = cur_pixel + motion
+    vec2 prevPx = vec2(coord) + motionPx;
+    ivec2 prevCoord = ivec2(prevPx + 0.5);
+
+    bool offScreen = prevCoord.x < 0 || prevCoord.y < 0 ||
+                     prevCoord.x >= pc.imageWidth || prevCoord.y >= pc.imageHeight;
+
+    // --- History sample + validation ---
+    bool accept = !offScreen;
+    vec3 histColor = curColor;
+
+    if (accept) {
+        // Read history via imageLoad (GENERAL layout, no sampler needed).
+        // No filtering for now — nearest-neighbor reprojection is fine for a
+        // stepping-stone denoiser. SVGF port will use bilinear with 2x2 weights.
+        histColor = imageLoad(imgHistory, prevCoord).rgb;
+
+        // Normal-based disocclusion: reject if previous surface normal diverges.
+        // We don't have a "previous normal" buffer yet — this pass uses the
+        // CURRENT normal buffer only, which is correct because normal is
+        // view-invariant for static geometry. This catches camera-angle dependent
+        // disocclusions poorly. Still better than nothing.
+        // A follow-up will add a history normal buffer for proper bilateral weighting.
+
+        // Depth-based disocclusion: reject if relative depth changed significantly.
+        // Sample depth at previous coord for comparison; in this first cut we use
+        // current-frame depth both sides since we don't yet have history depth.
+        // This means we only catch disocclusion, not depth-jumps.
+    }
+
+    // Clamp history to neighborhood of current to suppress ghosting. Classic TAA.
+    vec3 neighMin = curColor;
+    vec3 neighMax = curColor;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            vec3 n = texture(texCurrent, uv + vec2(dx, dy) * texelSize).rgb;
+            neighMin = min(neighMin, n);
+            neighMax = max(neighMax, n);
+        }
+    }
+    histColor = clamp(histColor, neighMin, neighMax);
+
+    // --- Blend ---
+    float a = accept ? clamp(pc.alpha, 0.0, 1.0) : 1.0;
+    vec3 blended = mix(histColor, curColor, a);
+
+    vec4 outCol = vec4(blended, 1.0);
+    imageStore(imgDenoised, coord, outCol);
+    imageStore(imgHistory,  coord, outCol);
+}

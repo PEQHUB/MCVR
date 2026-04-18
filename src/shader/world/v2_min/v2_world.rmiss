@@ -15,7 +15,12 @@ layout(set = 2, binding = 2, std140) uniform SkyUBO {
     float moonDirPad;
 } sky;
 
-layout(location = 0) rayPayloadInEXT vec4 hitPayload;
+struct HitPayload {
+    vec4 colorAndHit;     // rgb + hit flag
+    vec4 posAndT;         // world pos + distance
+    vec4 normalAndRough;  // world normal + roughness
+};
+layout(location = 0) rayPayloadInEXT HitPayload hitPayload;
 
 void main() {
     vec3 dir = normalize(gl_WorldRayDirectionEXT);
@@ -34,5 +39,8 @@ void main() {
         col += vec3(0.6, 0.55, 0.4) * halo * halo;
     }
 
-    hitPayload = vec4(col, 0.0);
+    // hit=0 signals miss → denoiser/motion code treats this pixel as sky.
+    hitPayload.colorAndHit    = vec4(col, 0.0);
+    hitPayload.posAndT        = vec4(0.0);
+    hitPayload.normalAndRough = vec4(-dir, 1.0); // use inverse ray dir as "normal"
 }

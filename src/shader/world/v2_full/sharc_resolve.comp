@@ -1,0 +1,76 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_atomic_int64 : require
+#extension GL_EXT_shader_16bit_storage : enable
+#extension GL_EXT_control_flow_attributes : require
+
+// SHARC compile-time gate: controlled by CMake MCVR_ENABLE_SHARC option.
+#ifndef SHARC_COMPILE_ENABLE
+#define SHARC_COMPILE_ENABLE 0
+#endif
+
+#if SHARC_COMPILE_ENABLE
+#define SHARC_ENABLE_GLSL 1
+#define SHARC_ENABLE_64_BIT_ATOMICS 1
+#define SHARC_PROPAGATION_DEPTH 4
+
+#include "SharcGlsl.h"
+#include "SharcCommon.h"
+#endif
+
+layout(push_constant) uniform PushConstant {
+    // SharcResolveParameters
+    float cameraPositionPrevX;
+    float cameraPositionPrevY;
+    float cameraPositionPrevZ;
+    uint accumulationFrameNum;
+    uint staleFrameNumMax;
+    uint frameIndex;
+    // Buffer BDAs
+    uint64_t hashEntriesBDA;
+    uint64_t accumulationBDA;
+    uint64_t resolvedBDA;
+    // Grid parameters
+    float cameraX;
+    float cameraY;
+    float cameraZ;
+    float sceneScale;
+    // Cache config
+    uint capacity;
+    float radianceScale;
+    uint enableAntiFirefly;
+} pc;
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+#if !SHARC_COMPILE_ENABLE
+    return;
+#else
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.capacity) return;
+
+    SharcParameters sharcParams;
+    sharcParams.gridParameters.cameraPosition = float3(pc.cameraX, pc.cameraY, pc.cameraZ);
+    sharcParams.gridParameters.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
+    sharcParams.gridParameters.sceneScale = pc.sceneScale;
+    sharcParams.gridParameters.levelBias = float(SHARC_GRID_LEVEL_BIAS);
+    sharcParams.hashMapData.capacity = pc.capacity;
+    sharcParams.hashMapData.hashEntriesBuffer = RWStructuredBuffer_uint64_t(pc.hashEntriesBDA);
+    sharcParams.radianceScale = pc.radianceScale;
+    sharcParams.enableAntiFireflyFilter = pc.enableAntiFirefly != 0;
+    sharcParams.accumulationBuffer = RWStructuredBuffer_SharcAccumulationData(pc.accumulationBDA);
+    sharcParams.resolvedBuffer = RWStructuredBuffer_SharcPackedData(pc.resolvedBDA);
+
+    SharcResolveParameters resolveParams;
+    resolveParams.cameraPositionPrev = float3(pc.cameraPositionPrevX, pc.cameraPositionPrevY, pc.cameraPositionPrevZ);
+    resolveParams.accumulationFrameNum = pc.accumulationFrameNum;
+    resolveParams.staleFrameNumMax = pc.staleFrameNumMax;
+    resolveParams.frameIndex = pc.frameIndex;
+
+    SharcResolveEntry(idx, sharcParams, resolveParams);
+#endif // SHARC_COMPILE_ENABLE
+}

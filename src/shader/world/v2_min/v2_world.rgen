@@ -5,16 +5,19 @@
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
-// V2 PR39-prep MVP raygen.
+// V2 M8-prep raygen with G-buffer outputs.
 //
-// Reads camera matrices from WorldUBO (set 2 binding 0).
+// Reads camera matrices from WorldUBO (set 2 binding 0) and prev-frame matrices
+// from LastWorldUBO (set 2 binding 1) for motion vector reprojection.
 // Reads sky from SkyUBO (set 2 binding 2).
 // Traces against TLAS (set 1 binding 0).
-// Closest-hit shader fills payload with shaded color.
-// Writes final color to output radiance image (set 3 binding 0).
+// Closest-hit shader fills payload with shaded color + world hit position + normal.
 //
-// No PBR, no shadows, no GI. Just enough to prove the descriptor layout works
-// end-to-end with real geometry data.
+// Writes 4 output images:
+//   set 3 binding 0 = HDR radiance (rgba16f) — for denoiser
+//   set 3 binding 3 = world normal (rgba32f, xyz = normal, w = roughness placeholder)
+//   set 3 binding 4 = motion vector (rg32f, pixel-space dx/dy from prev→cur)
+//   set 3 binding 5 = linear depth (r32f, view-space Z of primary hit)
 
 layout(set = 1, binding = 0) uniform accelerationStructureEXT tlas;
 
@@ -27,6 +30,15 @@ layout(set = 2, binding = 0, std140) uniform WorldUBO {
     mat4 cameraProjMatInv;
 } world;
 
+layout(set = 2, binding = 1, std140) uniform LastWorldUBO {
+    mat4 cameraViewMat;
+    mat4 cameraEffectedViewMat;
+    mat4 cameraProjMat;
+    mat4 cameraViewMatInv;
+    mat4 cameraEffectedViewMatInv;
+    mat4 cameraProjMatInv;
+} lastWorld;
+
 layout(set = 2, binding = 2, std140) uniform SkyUBO {
     vec3 baseColor;
     uint skyType;
@@ -37,7 +49,13 @@ layout(set = 2, binding = 2, std140) uniform SkyUBO {
     float moonDirPad;
 } sky;
 
-layout(set = 3, binding = 0, rgba16f) uniform writeonly image2D outImage;
+layout(set = 3, binding = 0, rgba16f) uniform writeonly image2D outRadiance;
+layout(set = 3, binding = 3, rgba32f) uniform writeonly image2D outNormal;
+layout(set = 3, binding = 4, rg32f)   uniform writeonly image2D outMotion;
+layout(set = 3, binding = 5, r32f)    uniform writeonly image2D outLinearDepth;
+
+// Matches V1 world.rgen flag definitions for HDR clamp behaviour.
+#define NO_EMISSION_CLAMP ((pc.flags & 1024) != 0)
 
 // V1-compatible 160-byte push constant. Most fields ignored by MVP.
 layout(push_constant, std430) uniform PushConstants {
@@ -78,8 +96,19 @@ layout(push_constant, std430) uniform PushConstants {
     int displacementQuality;
 } pc;
 
-// Payload: rgb = color, a = hit (0=miss, 1=hit)
-layout(location = 0) rayPayloadEXT vec4 hitPayload;
+// Payload layout (48 bytes):
+//   xyz = shaded RGB
+//   w   = hit flag (0=miss, 1=hit)
+//   xyz = world hit position
+//   w   = hit distance (0 on miss)
+//   xyz = world normal
+//   w   = roughness placeholder (0 for MVP)
+struct HitPayload {
+    vec4 colorAndHit;     // rgb + hit flag
+    vec4 posAndT;         // world pos + distance
+    vec4 normalAndRough;  // world normal + roughness
+};
+layout(location = 0) rayPayloadEXT HitPayload hitPayload;
 
 void main() {
     ivec2 pos = ivec2(gl_LaunchIDEXT.xy);
@@ -90,18 +119,59 @@ void main() {
     // Flip Y for Vulkan NDC
     ndc.y = -ndc.y;
 
-    vec4 origin = world.cameraViewMatInv * vec4(0, 0, 0, 1);
-    vec4 target = world.cameraProjMatInv * vec4(ndc.x, ndc.y, 1, 1);
-    target /= target.w;
-    vec4 direction = world.cameraViewMatInv * vec4(normalize(target.xyz), 0);
+    vec4 originH = world.cameraViewMatInv * vec4(0, 0, 0, 1);
+    vec4 targetH = world.cameraProjMatInv * vec4(ndc.x, ndc.y, 1, 1);
+    targetH /= targetH.w;
+    vec4 directionH = world.cameraViewMatInv * vec4(normalize(targetH.xyz), 0);
+    vec3 rayOrigin = originH.xyz;
+    vec3 rayDir    = directionH.xyz;
 
-    hitPayload = vec4(0.0);
+    hitPayload.colorAndHit = vec4(0.0);
+    hitPayload.posAndT     = vec4(0.0);
+    hitPayload.normalAndRough = vec4(0.0, 0.0, 1.0, 1.0); // default = view-up
 
     traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFF,
                 0, 0, 0,
-                origin.xyz, 0.001,
-                direction.xyz, 10000.0,
+                rayOrigin, 0.001,
+                rayDir, 10000.0,
                 0);
 
-    imageStore(outImage, pos, vec4(hitPayload.rgb, 1.0));
+    // --- Radiance ---
+    // Clamp HDR radiance before pre-exposure multiply to keep fp16 in range for DLSS-RR.
+    // Matches V1 world.rgen:1120-1125 and v2_full/world.rgen:1120-1125.
+    float maxRadiance = (NO_EMISSION_CLAMP ? 65504.0 : 65000.0) / max(pc.preExposure, 1.0);
+    imageStore(outRadiance, pos, vec4(min(hitPayload.colorAndHit.rgb, vec3(maxRadiance)) * pc.preExposure, 1.0));
+
+    // --- Normal ---
+    // RGBA16F: write world normal directly, w holds roughness (placeholder 1.0).
+    imageStore(outNormal, pos, vec4(hitPayload.normalAndRough.xyz, hitPayload.normalAndRough.w));
+
+    // --- Linear depth (view-space Z of primary hit) ---
+    // gl_HitTEXT is the world-space distance along the ray. For linear depth we
+    // want the view-space Z coordinate of the hit point. Project hit pos through
+    // the current view matrix and take -z (view-space forward is -Z in GL/Vulkan).
+    float linearZ = 0.0;
+    if (hitPayload.colorAndHit.w > 0.5) {
+        vec4 hitView = world.cameraViewMat * vec4(hitPayload.posAndT.xyz, 1.0);
+        linearZ = -hitView.z;
+    }
+    imageStore(outLinearDepth, pos, vec4(linearZ, 0.0, 0.0, 0.0));
+
+    // --- Motion vector (pixel-space, current → previous) ---
+    // For miss pixels, motion is 0 (sky reprojects with sky).
+    // For hits, reproject world position through PREVIOUS view+proj to get prev NDC,
+    // then convert to pixel-space delta relative to current pixel.
+    vec2 motionPx = vec2(0.0);
+    if (hitPayload.colorAndHit.w > 0.5) {
+        vec4 prevClip = lastWorld.cameraProjMat * (lastWorld.cameraViewMat * vec4(hitPayload.posAndT.xyz, 1.0));
+        if (prevClip.w > 0.0) {
+            vec3 prevNDC = prevClip.xyz / prevClip.w;
+            // Undo the Y flip we applied at ray gen
+            vec2 prevUV = vec2(prevNDC.x, -prevNDC.y) * 0.5 + 0.5;
+            vec2 curUV = uv;
+            // Motion is (prev - cur) in pixel space: add this to curUV to sample history
+            motionPx = (prevUV - curUV) * vec2(size);
+        }
+    }
+    imageStore(outMotion, pos, vec4(motionPx, 0.0, 0.0));
 }

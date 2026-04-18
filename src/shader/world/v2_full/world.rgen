@@ -1,0 +1,1126 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_atomic_int64 : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_EXT_shader_16bit_storage : enable
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_opacity_micromap : require
+#extension GL_NV_shader_invocation_reorder : enable
+
+// SHARC compile-time gate: controlled by CMake MCVR_ENABLE_SHARC option.
+// NVIDIA 595.97 crashes compiling SHARC SDK Int64-atomics+BDA in nvgpucomp64.dll.
+#ifndef SHARC_COMPILE_ENABLE
+#define SHARC_COMPILE_ENABLE 0
+#endif
+
+#if SHARC_COMPILE_ENABLE
+#define SHARC_ENABLE_GLSL 1
+#define SHARC_ENABLE_64_BIT_ATOMICS 1
+#define SHARC_PROPAGATION_DEPTH 4
+#endif
+
+#include "../util/labpbr.glsl"
+#include "../util/random.glsl"
+#include "../util/blue_noise.glsl"
+#include "../util/ray_cone.glsl"
+#include "../util/ray_payloads.glsl"
+#include "../util/util.glsl"
+#include "common/shared.hpp"
+#include "../util/colorspace.glsl"
+
+#if SHARC_COMPILE_ENABLE
+#include "SharcGlsl.h"
+#include "SharcCommon.h"
+#endif
+
+layout(set = 0, binding = 0) uniform sampler2D textures[];
+
+layout(set = 0, binding = 2) uniform samplerCube skyFull;
+
+#include "../util/clouds.glsl"
+
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
+
+layout(set = 1, binding = 1) readonly buffer BLASOffsets {
+    uint offsets[];
+}
+blasOffsets;
+
+layout(set = 1, binding = 2) readonly buffer VertexBufferAddr {
+    uint64_t addrs[];
+}
+vertexBufferAddrs;
+
+layout(set = 1, binding = 3) readonly buffer IndexBufferAddr {
+    uint64_t addrs[];
+}
+indexBufferAddrs;
+
+layout(set = 1, binding = 4) readonly buffer LastVertexBufferAddr {
+    uint64_t addrs[];
+}
+lastVertexBufferAddrs;
+
+layout(set = 1, binding = 5) readonly buffer LastIndexBufferAddr {
+    uint64_t addrs[];
+}
+lastIndexBufferAddrs;
+
+layout(set = 1, binding = 6) readonly buffer LastObjToWorldMat {
+    mat4 mat[];
+}
+lastObjToWorldMats;
+
+layout(set = 1, binding = 8) readonly buffer AreaLightBuffer {
+    AreaLight lights[];
+} areaLightBuffer;
+
+layout(set = 1, binding = 9) readonly buffer TileLightBuffer {
+    uint data[];
+} tileLightBuffer;
+
+#include "../util/vertex_fetch.glsl"
+
+const int TILE_SIZE = 16;
+const int MAX_LIGHTS_PER_TILE = 128;
+
+#define AREA_LIGHTS_ON ((pc.flags & 2) != 0)
+
+layout(set = 2, binding = 0) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+
+layout(set = 2, binding = 1) uniform LastWorldUniform {
+    WorldUBO lastWorldUBO;
+};
+
+layout(set = 2, binding = 2) uniform SkyUniform {
+    SkyUBO skyUBO;
+};
+
+layout(set = 2, binding = 3) uniform LightMapUniform {
+    LightMapUBO lightMapUBO;
+};
+
+layout(set = 3, binding = 0, rgba32f) uniform image2D outputImage;
+layout(set = 3, binding = 1, rgba8) uniform image2D diffuseAlbedoImage;
+layout(set = 3, binding = 2, rgba8) uniform image2D specularAlbedoImage;
+layout(set = 3, binding = 3, rgba32f) uniform image2D normalRoughnessImage;
+layout(set = 3, binding = 4, rg32f) uniform image2D motionVectorImage;
+layout(set = 3, binding = 5, r32f) uniform image2D linearDepthImage;
+layout(set = 3, binding = 6, r32f) uniform image2D specularHitDepthImage;
+layout(set = 3, binding = 7, r16f) uniform image2D firstHitDepthImage;
+layout(set = 3, binding = 8, rgba16f) uniform image2D firstHitDiffuseDirectLightImage;
+layout(set = 3, binding = 9, rgba16f) uniform image2D firstHitDiffuseIndirectLightImage;
+layout(set = 3, binding = 10, rgba16f) uniform image2D firstHitSpecularImage;
+layout(set = 3, binding = 11, rgba16f) uniform image2D firstHitClearImage;
+layout(set = 3, binding = 12, rgba16f) uniform image2D firstHitBaseEmissionImage;
+layout(set = 3, binding = 13, r16f) uniform image2D directLightDepthImage;
+layout(set = 3, binding = 16, rgba16f) uniform image2D diffuseRayDirHitDistImage;
+layout(set = 3, binding = 17, rgba16f) uniform image2D specularRayDirHitDistImage;
+layout(set = 3, binding = 21, rg32f)   uniform image2D reflectionMvImage;
+layout(set = 3, binding = 22, r16f)    uniform image2D animTexMaskImage;
+layout(set = 3, binding = 23, r16f)    uniform image2D particleMaskImage;
+layout(set = 3, binding = 24, r16f)    uniform image2D biasMaskImage;
+layout(set = 3, binding = 25, r16f)    uniform image2D rtHitDistImage;
+layout(set = 3, binding = 26, rgba16f) uniform image2D motionVectors3DImage;
+layout(set = 3, binding = 27, r16f)    uniform image2D gbufferMetallicImage;
+layout(set = 3, binding = 28, r16f)    uniform image2D gbufferShadingModelIdImage;
+layout(set = 3, binding = 29, r16f)    uniform image2D gbufferMaterialIdImage;
+layout(set = 3, binding = 30, rgba32f) uniform image2D positionViewSpaceImage;
+// DLSS-RR transparency layer (stable planes for glass/water)
+layout(set = 3, binding = 31, rgba16f) uniform image2D transparencyLayerImage;
+layout(set = 3, binding = 32, rgba16f) uniform image2D transparencyLayerOpacityImage;
+layout(set = 3, binding = 33, rg32f)   uniform image2D transparencyLayerMvecsImage;
+
+// VertexBuffer and IndexBuffer declared in vertex_fetch.glsl
+
+layout(push_constant) uniform PushConstant {
+    int numRayBounces;
+    int flags;
+    int areaLightCount;
+    float shadowSoftness;
+    int risCandidates;
+    int temporalMClamp;
+    int wClamp;
+    float preExposure;
+    float pomHeightScale;
+    int pomSteps;
+    int pomRefinement;
+    float pomFadeDistance;
+    // Color expansion
+    float colorExpansion;
+    uint blueNoiseFrame;
+    // SHARC fields
+    uint64_t sharcHashEntries;
+    uint64_t sharcAccumulation;
+    uint64_t sharcResolved;
+    float sharcCameraX;
+    float sharcCameraY;
+    float sharcCameraZ;
+    float sharcSceneScale;
+    uint sharcCapacity;
+    float sharcRadianceScale;
+    uint sharcFrameIndex;
+    float sharcRoughnessThreshold;
+    int sharcUpdateBlockSize;
+    int sharcUpdateBounces;
+    // Offline accumulation
+    int offlineFlags;
+    int accumFrameCount;
+    float aperture;
+    float focalDistance;
+    // Material SSBO BDA (offset 128)
+    uint64_t materialClassAddr;
+}
+pc;
+
+#define SHARC_ENABLED ((pc.flags & 32) != 0)
+#define SER_ENABLED   ((pc.flags & 8192) != 0)
+#define SER_HINTS     ((pc.flags & 16384) != 0)
+#define NO_EMISSION_CLAMP  ((pc.flags & 1024) != 0)
+#define OFFLINE_ACCUMULATING  ((pc.offlineFlags & 1) != 0)
+#define OFFLINE_DISABLE_RR    ((pc.offlineFlags & 2) != 0)
+#define OFFLINE_DISABLE_CLAMP ((pc.offlineFlags & 4) != 0)
+
+layout(location = 0) rayPayloadEXT PrimaryRay mainRay;
+layout(location = 1) rayPayloadEXT ShadowRay reflectionProbe;
+
+#define NUM_PSR_PER_RAY 2
+
+// Disables the vanilla-style render-distance fog band that tends to read as a bright ring
+// (especially at night / when flying above clouds). Underwater fog is kept.
+#define DISABLE_RENDER_DISTANCE_FOG 1
+
+vec3 applyFog(vec3 radiance, float t, float fogStart, float dBase, float dFog, vec3 fogRadiance) {
+    float opticalDepth = 0.0;
+
+    if (t <= fogStart) {
+        opticalDepth = t * dBase;
+    } else {
+        float distOutside = fogStart;
+        float distInside = t - fogStart;
+        opticalDepth = (distOutside * dBase) + (distInside * dFog);
+    }
+
+    float transmittance = exp(-opticalDepth);
+
+    return mix(fogRadiance, radiance, transmittance);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+    vec2 pixelCenter = pixel + 0.5;
+    vec2 unjitteredPixelCenter = pixelCenter;
+    pixelCenter += worldUBO.cameraJitter;
+
+    vec2 resolution = vec2(gl_LaunchSizeEXT.xy);
+    float fovY = fovYFromProj(worldUBO.cameraProjMat);
+    float fovX = fovXFromProj(worldUBO.cameraProjMat);
+
+    vec2 ndc = pixelCenter / resolution * 2.0 - 1.0;
+
+    vec4 nearPoint = vec4(ndc, 0.0, 1.0);
+
+    vec4 viewNear = worldUBO.cameraProjMatInv * nearPoint;
+    viewNear /= viewNear.w; 
+
+    vec3 origin = vec3(worldUBO.cameraEffectedViewMatInv *
+                       vec4(0, 0, 0, 1)); // even though camera-centered, view mat contains still small shifts
+    const vec3 eyePos = origin;
+    vec3 direction = normalize(vec3(worldUBO.cameraEffectedViewMatInv * vec4(viewNear.xyz, 0.0)));
+    const vec3 orgDirection = direction;
+
+    // Thin lens DOF (active when aperture > 0: both FREE preview and ACCUMULATING)
+    if (pc.aperture > 0.0) {
+        vec2 dofBN = blueNoise2D(gl_LaunchIDEXT.xy, pc.blueNoiseFrame);
+        float r1 = dofBN.x;
+        float r2 = dofBN.y;
+        // Concentric disk sample for uniform lens sampling
+        float theta = 2.0 * 3.14159265 * r2;
+        float r = pc.aperture * sqrt(r1);
+        vec2 lensUV = vec2(r * cos(theta), r * sin(theta));
+        vec3 focalPoint = origin + direction * pc.focalDistance;
+        vec3 cameraRight = normalize(vec3(worldUBO.cameraEffectedViewMatInv * vec4(1, 0, 0, 0)));
+        vec3 cameraUp = normalize(vec3(worldUBO.cameraEffectedViewMatInv * vec4(0, 1, 0, 0)));
+        origin += cameraRight * lensUV.x + cameraUp * lensUV.y;
+        direction = normalize(focalPoint - origin);
+    }
+
+    const uint rayFlags = gl_RayFlagsCullBackFacingTrianglesEXT;
+    float surfaceDepth = 0.0;
+    float psrHitDepth = 0.0;
+    bool psrHitSky = false;
+    vec3 psrHitPosition;
+
+    LabPBRMat firstHitMat;
+    bool hasSecondHit = false;
+    float distFirstToSecond = 0.0;
+    bool isFirstHitNoisy = false;
+    bool isFirstHitDiffuse = false;
+    vec3 firstHitEmission = vec3(0.0);
+    vec3 firstHitDirectRadiance = vec3(0.0);
+    vec3 firstHitIndirectRadiance = vec3(0.0);
+    vec3 firstHitBaseEmission = vec3(0.0);
+    // Local intermediateRadiance (moved out of payload — never crosses traceRayEXT boundary)
+    vec3 intermediateRadiance = vec3(0.0);
+
+    // DLSS-RR guide: first-bounce ray direction + hit distance
+    vec3 diffuseRayDir = vec3(0.0);
+    float diffuseHitDist = 0.0;
+    vec3 specularRayDir = vec3(0.0);
+    float specularHitDist = 0.0;
+    // DLSS-RR guide: world-space 3D velocity (computed inside MV block)
+    vec3 velocity3D = vec3(0.0);
+    // Dense reflection probe: deterministic mirror-reflection hit distance for reflection MVs
+    float reflectionProbeHitT = INF_DISTANCE;
+    vec3 reflectionProbeVirtualDir = vec3(0.0);
+
+    // Transparency layer: glass/water surface data for DLSS-RR stable planes
+    bool hitGlass = false;
+    vec3 glassWorldPos = vec3(0.0);
+    vec3 glassNormal = vec3(0.0);
+    float glassHitT = 0.0;
+    vec3 glassTint = vec3(1.0);
+    float glassFresnelReflect = 0.0;
+    uint glassInstanceIndex = 0;
+    uint glassGeometryIndex = 0;
+    uint glassPrimitiveIndex = 0;
+    vec3 glassBaryCoords = vec3(0.0);
+
+    mainRay.seed = worldUBO.seed;
+    for (int isHand = 0; isHand <= 1; isHand++) {
+        // Result of trace
+        bool hitSky = false;
+        bool isPsr = false;
+        mat4 psrMirror = mat4(1.0);
+        float T = 0.0;
+        bool surfaceDepthSampled = false;
+
+        //====================================================================================================================
+        // STEP 1 - Find first non-mirror primary hit.
+        // The first non-mirror hit surface is used as 'Primary Surface Replacement'.
+        // Collect G-Buffer hit information.
+        //====================================================================================================================
+        int psrDepth = 0;
+        mainRay.origin = origin;
+        mainRay.direction = direction;
+        mainRay.radiance = vec3(0.0);
+        mainRay.throughput = vec3(1.0);
+        mainRay.seed = xxhash32(uvec3(gl_LaunchIDEXT.x, gl_LaunchIDEXT.y, mainRay.seed));
+        mainRay.coneWidth = 0;
+        mainRay.coneSpread = coneSpreadFromFov(fovY, fovX, resolution);
+        // Initialize packed flags: isHand in bit 3, emBlockTypeOut=255 in bits 8-15
+        mainRay.flags = (isHand != 0 ? PR_ISHAND_BIT : 0u);
+        mainRay.pixelPacked = gl_LaunchIDEXT.x | (gl_LaunchIDEXT.y << 16u);
+        do {
+            mainRay.index = psrDepth;
+            mainRay.hitT = 0;
+            mainRay.directLightRadiance = vec3(0.0);
+            mainRay.directLightHitT = 0.0;
+            mainRay.albedoEmission = 0.0;
+            // Reset per-trace flags: clear stop/cont/noisy/lobeType, set emBlockTypeOut=255, preserve isHand/insideBoat
+            mainRay.flags = (mainRay.flags & (PR_ISHAND_BIT | PR_INSIDEBOAT_BIT)) | (255u << PR_EMBLOCK_SHIFT);
+            mainRay.roughness = 1.0;
+
+            float len;
+            uint mask;
+            uint missId;
+            if (isHand == 0) {
+                missId = 0;
+                if (psrDepth == 0) {
+                    len = 1000;
+                    if (worldUBO.isFirstPerson == 1) {
+                        // Regular first person: hide player entirely
+                        mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    } else if (worldUBO.isFirstPerson == 2) {
+                        // FPV: show body but hide head from direct rays
+                        mask = WORLD_MASK | PLAYER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    } else {
+                        // Third person: show both body and head
+                        mask =
+                            WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    }
+                } else if (psrDepth <= 1) {
+                    len = 1000;
+                    mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                } else {
+                    len = 384;
+                    mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                }
+            } else {
+                if (psrDepth == 0) {
+                    len = 10;
+                    mask = HAND_MASK;
+                    missId = 1;
+                } else if (psrDepth <= 1) {
+                    len = 384;
+                    mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    missId = 0;
+                } else {
+                    len = 384;
+                    mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                    missId = 0;
+                }
+            }
+
+            // Preserve ray state; closest-hit shaders will overwrite origin/direction for the next bounce.
+            vec3 traceOrigin = mainRay.origin;
+            vec3 traceDir = mainRay.direction;
+            vec3 radianceBeforeTrace = mainRay.radiance;
+            vec3 throughputBeforeTrace = mainRay.throughput;
+
+            // Camera-inside-block: use cameraTmin for primary camera rays to skip enclosing
+            // block geometry (grass, vines, water). Bounces and hand rays keep tmin=0
+            // (bounces use offset_ray() for self-intersection avoidance).
+            float tmin = (psrDepth == 0 && isHand == 0) ? worldUBO.cameraTmin : 0.0;
+
+            // SER: reorder PSR traces by hit geometry for material coherence
+            if (SER_ENABLED) {
+                hitObjectNV hitObject;
+                hitObjectTraceRayNV(hitObject, topLevelAS, rayFlags, mask,
+                                    1, 1, missId,
+                                    mainRay.origin, tmin, mainRay.direction, len, 0);
+                if (SER_HINTS && hitObjectIsHitNV(hitObject)) {
+                    // Coherence hint: geometry index within BLAS correlates with block material.
+                    // Chunks pack different block types into separate geometries, so grouping
+                    // by geometry index groups threads hitting similar materials (iron, glass, etc.)
+                    // 8 hint bits → 256 buckets, more than enough for geometry diversity per chunk.
+                    uint geoIdx = hitObjectGetGeometryIndexNV(hitObject);
+                    uint hint = geoIdx & 0xFFu;
+                    reorderThreadNV(hitObject, hint, 8);
+                } else {
+                    reorderThreadNV(hitObject);
+                }
+                hitObjectExecuteShaderNV(hitObject, 0);
+            } else {
+                traceRayEXT(topLevelAS, rayFlags, mask,
+                            1, 1, missId,
+                            mainRay.origin, tmin, mainRay.direction, len, 0);
+            }
+
+            // Fancy clouds (volumetric): integrate only on the primary camera ray.
+            // (Fast clouds are geometry-based; OFF disables both.)
+            if (isHand == 0 && psrDepth == 0 && skyUBO.cloudTile.x >= 0) {
+                // Only pay cloud integration for sky / far-horizon rays.
+                // Soft horizon fade: smoothstep 0.0→0.06 eliminates the hard cutoff line at the horizon edge.
+                bool farOrSky = (mainRay.hitT == INF_DISTANCE) || (mainRay.hitT > 256.0);
+                float cloudHorizonWeight = smoothstep(0.0, 0.06, traceDir.y);
+                if (farOrSky && cloudHorizonWeight > 0.0) {
+                    float tMax = len;
+                    if (mainRay.hitT != INF_DISTANCE) {
+                        tMax = min(mainRay.hitT, len);
+                    }
+
+                    CloudSegmentResult seg = integrateCloudSegment(traceOrigin, traceDir, 0.0, tMax, worldUBO, skyUBO,
+                                                                  skyFull, mainRay.seed,
+                                                                  8, 4);
+
+                    vec3 dL = mainRay.radiance - radianceBeforeTrace;
+                    // Blend cloud result by horizon weight: weight=1 → full clouds, weight=0 → no change.
+                    vec3 cloudRadiance = radianceBeforeTrace + seg.L * throughputBeforeTrace + dL * seg.T;
+                    mainRay.radiance = mix(mainRay.radiance, cloudRadiance, cloudHorizonWeight);
+                    mainRay.throughput *= mix(vec3(1.0), seg.T, cloudHorizonWeight);
+                }
+            }
+
+            if (!surfaceDepthSampled) {
+                if (isHand == 0) {
+                    surfaceDepth = mainRay.hitT;
+                } else {
+                    if (mainRay.hitT != INF_DISTANCE) surfaceDepth = mainRay.hitT;
+                }
+                surfaceDepthSampled = true;
+            }
+
+            if (mainRay.hitT != INF_DISTANCE) { T += mainRay.hitT; }
+
+            // first hit depth
+            float firstHitLinearDepth = INF_DISTANCE;
+            if (psrDepth == 0 && mainRay.hitT != INF_DISTANCE) {
+                vec3 hitPos = eyePos + orgDirection * T;
+                hitPos -= worldUBO.cameraViewMatInv[3].xyz;
+                firstHitLinearDepth = -(mat3(worldUBO.cameraEffectedViewMat) * hitPos).z;
+            }
+            if (isHand == 0) {
+                if (psrDepth == 0) {
+                    imageStore(firstHitDepthImage, pixel, vec4(firstHitLinearDepth));
+                }
+            } else {
+                if (psrDepth == 0 && mainRay.hitT != INF_DISTANCE) {
+                    imageStore(firstHitDepthImage, pixel, vec4(firstHitLinearDepth));
+                }
+            }
+
+            ++psrDepth;
+
+            hitSky = (mainRay.hitT == INF_DISTANCE);
+            if (hitSky) { break; }
+
+            if (prGetCont(mainRay)) continue;
+
+            // Glass/water: capture surface for transparency layer, skip mirror matrix.
+            // Glass CHS sets lobeType=2 (transmission) and refracted origin/direction.
+            // Previously, glass fell through to buildMirrorMatrix4 which is geometrically wrong.
+            if (prGetLobeType(mainRay) == 2u && mainRay.roughness < 0.001 && !hitGlass) {
+                hitGlass = true;
+                glassWorldPos = mainRay.worldPos;
+                glassNormal = mainRay.normal;
+                glassHitT = T;
+                glassTint = mainRay.albedoValue.rgb;
+                glassInstanceIndex = mainRay.instanceIndex;
+                glassGeometryIndex = mainRay.geometryIndex;
+                glassPrimitiveIndex = mainRay.primitiveIndex;
+                glassBaryCoords = mainRay.baryCoords;
+                // Physical Fresnel reflectance (Schlick) for transparency layer opacity.
+                // Uses mainRay.f0 from CHS (IOR-derived for dielectrics, grayscale).
+                // Deliberately omits the CHS's (1-transmission) sampling weight — the
+                // transparency layer wants physical surface reflectance, not path probability.
+                vec3 viewDir = -normalize(traceDir);
+                bool entering = dot(mainRay.direction, glassNormal) < 0.0;
+                vec3 faceNormal = entering ? glassNormal : -glassNormal;
+                float cosTheta = max(dot(viewDir, faceNormal), 0.0);
+                float r0 = dot(mainRay.f0, vec3(0.333));
+                glassFresnelReflect = r0 + (1.0 - r0) * pow(1.0 - cosTheta, 5.0);
+                isPsr = true;
+                continue;  // CHS already set refracted origin/direction
+            }
+
+            // Did we hit anything other than a mirror?
+            // If so, stop PSR — the final non-mirror surface becomes the primary surface.
+            if (mainRay.roughness >= 0.001) { break; }
+
+            // special stop
+            if (prGetStop(mainRay)) { break; }
+
+            // At least one mirror hit
+            isPsr = true;
+            psrMirror *= buildMirrorMatrix4(mainRay.normal, mainRay.worldPos);
+        } while (psrDepth < NUM_PSR_PER_RAY);
+
+        imageStore(directLightDepthImage, pixel, vec4(mainRay.directLightHitT));
+
+        vec3 virtualOrigin = eyePos + orgDirection * T;
+        // viewZ is the 'Z' of the world hit position in camera space
+        float viewDepth = -(worldUBO.cameraEffectedViewMat * vec4(virtualOrigin, 1.0)).z;
+
+        // get camera pos and delta
+        dvec3 currCameraPos = worldUBO.cameraPos.xyz;
+        dvec3 lastCameraPos = lastWorldUBO.cameraPos.xyz;
+        vec3 cameraDelta = vec3(currCameraPos - lastCameraPos);
+        mat4 prevRelativeMVP = lastWorldUBO.cameraProjMat * lastWorldUBO.cameraEffectedViewMat;
+
+        // Early out when hitting sky (even via mirrors)
+        if (hitSky) {
+            // either:
+            // 1. not for hand, can be directly or reflected towards sky
+            // 2. for hand, must be reflected towards sky
+            if (isHand == 0 || (isHand == 1 && psrDepth > 1)) {
+                imageStore(outputImage, pixel, vec4(mainRay.radiance, 1.0));
+                imageStore(diffuseAlbedoImage, pixel, vec4(reinhardMax(mainRay.radiance), 0));
+                imageStore(specularAlbedoImage, pixel, vec4(0));
+                imageStore(normalRoughnessImage, pixel, vec4(0));
+                imageStore(gbufferMetallicImage, pixel, vec4(0));
+                imageStore(gbufferShadingModelIdImage, pixel, vec4(0));
+                imageStore(gbufferMaterialIdImage, pixel, vec4(0));
+                imageStore(positionViewSpaceImage, pixel, vec4(0));
+
+                vec4 motionOrigin;
+                if (!isPsr) {
+                    // This is the case when we hit the skybox directly.
+                    // Treat it like a point at infinity along the view vector
+                    imageStore(linearDepthImage, pixel, vec4(INF_DISTANCE));
+                    // motion origin is point at infinity along view vector
+                    motionOrigin = vec4(orgDirection, 0.0);
+                } else {
+                    // Here we hit the sky through a reflection on the primary surface
+                    // Pretend the sky is "texture mapped" onto the mirror and moves with it.
+                    imageStore(linearDepthImage, pixel, vec4(viewDepth));
+                    vec3 virtualRelativeOrigin = origin + orgDirection * T;
+                    vec3 originRelativeToPrevCam = virtualRelativeOrigin + cameraDelta;
+                    motionOrigin = vec4(originRelativeToPrevCam, 1.0);
+                }
+
+                vec2 motionVec = computeCameraMotionVector(prevRelativeMVP, pixelCenter, motionOrigin);
+                imageStore(motionVectorImage, pixel, vec4(motionVec, vec2(0.0)));
+
+                intermediateRadiance = mainRay.radiance;
+                psrHitSky = true;
+                psrHitDepth = 0.0;
+            } else {
+                mainRay.radiance = intermediateRadiance;
+            }
+            continue;
+        } else {
+            psrHitSky = false;
+            psrHitDepth = T;
+        }
+
+        // Use post-override material values from CHS payload for DLSS-RR guide buffers.
+        // Previously re-decoded from raw specularValue, which missed WorldUBO overrides —
+        // causing guide buffer mismatch vs rendered output → permanent DLSS-RR boiling.
+        firstHitMat.roughness = mainRay.roughness;
+        firstHitMat.metallic = mainRay.metallic;
+        firstHitMat.f0 = mainRay.f0;
+        firstHitMat.emission = mainRay.emission;
+        firstHitMat.subSurface = mainRay.subSurface;
+        firstHitMat.albedo = mainRay.albedoValue.rgb;
+
+        // Diffuse Albedo for DLSS-RR guide. Metals have zero diffuse reflectance —
+        // their color is entirely in specular F0. Detect metals by BOTH the metallic
+        // flag AND F0 magnitude: material overrides may set high F0 without metallic=1.
+        // smoothstep(0.08, 0.20) catches metals (F0 > 0.2) while preserving dielectrics (F0 ≈ 0.04).
+        float maxF0 = max(firstHitMat.f0.r, max(firstHitMat.f0.g, firstHitMat.f0.b));
+        float kD = (1.0 - firstHitMat.metallic) * (1.0 - smoothstep(0.08, 0.20, maxF0));
+        imageStore(diffuseAlbedoImage, pixel,
+                   vec4(mainRay.albedoValue.rgb * mainRay.albedoValue.a * kD, firstHitMat.metallic));
+
+        imageStore(specularAlbedoImage, pixel, vec4(firstHitMat.f0, 0.0));
+
+        // Normal/Roughness buffer
+        {
+            // Transform surface normal from "virtual world normal" to world normal through a series of mirror-matrix.
+            // In case of NOT hitting any mirror, 'psrMirror' is just the identity matrix
+            vec3 worldNormal = (psrMirror * vec4(mainRay.normal, 0.0)).xyz;
+
+            vec4 normalRoughness = vec4(worldNormal, firstHitMat.roughness);
+            imageStore(normalRoughnessImage, pixel, normalRoughness);
+        }
+
+        // GBuffer: metallic factor
+        imageStore(gbufferMetallicImage, pixel, vec4(firstHitMat.metallic, 0.0, 0.0, 0.0));
+        // GBuffer: shading model ID (0=default, 0.25=metal, 0.5=transmissive, 0.75=emissive, 1.0=subsurface)
+        {
+            float shadingId = 0.0;
+            if (firstHitMat.metallic > 0.5) shadingId = 0.25;
+            else if (prGetLobeType(mainRay) == 2u) shadingId = 0.5;
+            else if (firstHitMat.emission > 0.0) shadingId = 0.75;
+            else if (firstHitMat.subSurface > 0.0) shadingId = 1.0;
+            imageStore(gbufferShadingModelIdImage, pixel, vec4(shadingId, 0.0, 0.0, 0.0));
+        }
+        // GBuffer: material ID (geometry-based hash for cross-material temporal filtering)
+        {
+            uint matHash = mainRay.instanceIndex * 31u + mainRay.geometryIndex;
+            float materialId = float(matHash % 256u) / 255.0;
+            imageStore(gbufferMaterialIdImage, pixel, vec4(materialId, 0.0, 0.0, 0.0));
+        }
+        // View-space hit position (for DLSS-RR spatial reuse)
+        {
+            vec3 virtualRelPos = origin + orgDirection * T;
+            vec4 viewPos = worldUBO.cameraEffectedViewMat * vec4(virtualRelPos, 1.0);
+            imageStore(positionViewSpaceImage, pixel, vec4(viewPos.xyz, 1.0));
+        }
+
+        // ViewZ buffer
+        imageStore(linearDepthImage, pixel, vec4(viewDepth));
+
+        // Motion Vector Buffer
+        {
+            vec3 virtualRelativeOrigin = origin + orgDirection * T;
+            vec3 originRelativeToPrevCam = virtualRelativeOrigin + cameraDelta;
+
+            uint instanceID = mainRay.instanceIndex;
+            uint geometryID = mainRay.geometryIndex;
+
+            uint rawOffset = blasOffsets.offsets[instanceID];
+            uint vtxFormat = rawOffset >> 30u;
+            uint blasOffset = decodeBlasOffset(rawOffset);
+
+            uint64_t lastIndexBufferAddr = lastIndexBufferAddrs.addrs[blasOffset + geometryID];
+            uint64_t lastVertexBufferAddr = lastVertexBufferAddrs.addrs[blasOffset + geometryID];
+            if (lastIndexBufferAddr > 0 && lastVertexBufferAddr > 0) {
+                vec3 baryCoords = mainRay.baryCoords;
+                vec3 prevLocalPos;
+                fetchTrianglePositions(vtxFormat, lastVertexBufferAddr, lastIndexBufferAddr,
+                                       mainRay.primitiveIndex, baryCoords, prevLocalPos);
+
+                mat4 lastModelMat = lastObjToWorldMats.mat[instanceID];
+                vec3 lastModelRotLocal = mat3(lastModelMat) * prevLocalPos;
+                vec3 lastModelRelToCam = lastModelMat[3].xyz;
+                vec3 simpleRelPos = lastModelRotLocal + lastModelRelToCam;
+
+                if (isPsr) {
+                    vec3 prevWorldPos = simpleRelPos - cameraDelta;
+                    // 这里逻辑很复杂，记录一下
+                    // 通过镜面看到的物体：
+                    // 对上一帧 world pos 应用和当前帧 PSR 相同的一串镜面变换，
+                    // 得到上一帧的“虚拟世界位置”（注意在世界坐标系里做反射）
+                    vec3 prevVirtualWorldPos = (psrMirror * vec4(prevWorldPos, 1.0)).xyz;
+
+                    // 仍然保持“以相机为中心”：把上一帧虚拟位置转成“以前一帧相机为原点”的坐标
+                    originRelativeToPrevCam = prevVirtualWorldPos + cameraDelta;
+                } else {
+                    // 非镜面：直接使用上一帧 world pos，以以前一帧相机为原点
+                    originRelativeToPrevCam = simpleRelPos;
+                }
+            }
+            vec2 motionVec =
+                computeCameraMotionVector(prevRelativeMVP, pixelCenter, vec4(originRelativeToPrevCam, 1.0));
+            imageStore(motionVectorImage, pixel, vec4(motionVec, 0.0, 0.0));
+            // 3D world-space velocity: prevWorldPos - currWorldPos (camera motion removed)
+            // For static geo → 0; for moving objects → actual displacement
+            velocity3D = originRelativeToPrevCam - cameraDelta - virtualRelativeOrigin;
+        }
+
+        // sightly make the first non-mirror hit brighter
+        if (psrDepth == 1) {
+            // Remove artificial ambient light for pitch black shadows
+            float ambientFactor = 0.0;
+            mainRay.radiance += ambientFactor * mainRay.albedoValue.rgb * mainRay.albedoValue.a * mainRay.throughput;
+        }
+
+        psrHitPosition = mainRay.origin;
+
+        isFirstHitNoisy = prGetNoisy(mainRay);
+        if (isFirstHitNoisy) {
+            // Emission in scene-referred units (1.0 = EMISSION_REFERENCE_NITS cd/m²).
+            // Vertex nits (albedoEmission) are authoritative when set; LabPBR is fallback only.
+            const float EMISSION_REFERENCE_NITS = 200.0;
+            float absAlbedoEmission = abs(mainRay.albedoEmission);
+            float combinedEmission = (absAlbedoEmission > 0.0) ? absAlbedoEmission : (firstHitMat.emission * EMISSION_REFERENCE_NITS);
+            float sceneEmission = combinedEmission / EMISSION_REFERENCE_NITS;
+
+            // Texture-based emission mask (must match CHS smoothstep)
+            vec3 emTint = mainRay.albedoValue.rgb;
+            float texLum = dot(emTint, vec3(0.2627, 0.6780, 0.0593));
+            sceneEmission *= smoothstep(0.10, 0.40, texLum);
+
+            // Flame color override for bloom
+            if (prGetEmBlockType(mainRay) < 50u) {
+                vec3 co = worldUBO.emissionData[prGetEmBlockType(mainRay)].rgb;
+                if (dot(co, co) > 0.0001) {
+                    float flameMask = smoothstep(0.15, 0.5, texLum);
+                    emTint = mix(emTint, co, flameMask);
+                }
+                // Per-emissive gamut boost (Oklab chroma scaling)
+                float emGamut = worldUBO.emissiveGamut[prGetEmBlockType(mainRay) >> 2u][prGetEmBlockType(mainRay) & 3u];
+                if (emGamut != 1.0) {
+                    const mat3 bt2020_to_lms = mat3(
+                        0.6167557871, 0.2651330639, 0.1001026342,
+                        0.3601983994, 0.6358393640, 0.2039065193,
+                        0.0230458134, 0.0990275718, 0.6959908464);
+                    const mat3 lms_to_lab = mat3(
+                        0.2104542553,  1.9779984951,  0.0259040371,
+                        0.7936177850, -2.4285922050,  0.7827717662,
+                       -0.0040720468,  0.4505937099, -0.8086757660);
+                    const mat3 lab_to_lms = mat3(
+                        1.0,           1.0,           1.0,
+                        0.3963377774, -0.1055613458, -0.0894841775,
+                        0.2158037573, -0.0638541728, -1.2914855480);
+                    const mat3 lms_to_bt2020 = mat3(
+                         2.1399067359, -0.8847358624, -0.0485737581,
+                        -1.2463895090,  2.1632309822, -0.4545031427,
+                         0.1064827729, -0.2784951194,  1.5030769008);
+
+                    vec3 lms = bt2020_to_lms * max(emTint, vec3(0.0));
+                    vec3 lms_g = sign(lms) * pow(abs(lms), vec3(1.0 / 3.0));
+                    vec3 lab = lms_to_lab * lms_g;
+                    lab.yz *= emGamut;
+                    vec3 lms_g2 = lab_to_lms * lab;
+                    vec3 lms2 = lms_g2 * lms_g2 * lms_g2;
+                    emTint = lms_to_bt2020 * lms2;
+                    float minC = min(emTint.r, min(emTint.g, emTint.b));
+                    if (minC < 0.0) {
+                        float luma = dot(emTint, vec3(0.2627, 0.6780, 0.0593));
+                        float t = luma / (luma - minC);
+                        emTint = mix(vec3(luma), emTint, t);
+                    }
+                }
+            }
+            firstHitEmission = emTint * sceneEmission;
+            if (prGetLobeType(mainRay) == 0 || prGetLobeType(mainRay) == 2) { // Diffuse OR Refraction
+                isFirstHitDiffuse = true;
+                firstHitDirectRadiance = mainRay.directLightRadiance;
+            } else {
+                isFirstHitDiffuse = false;
+            }
+        }
+
+        // DLSS-RR guide: capture first-bounce ray direction (set by primary CHS)
+        if (isFirstHitNoisy) {
+            if (isFirstHitDiffuse) {
+                diffuseRayDir = mainRay.direction;
+            } else {
+                specularRayDir = mainRay.direction;
+            }
+        }
+
+        // Dense reflection probe: trace a lightweight ray in the deterministic mirror
+        // reflection direction to find the reflected geometry's distance. This gives
+        // DLSS-RR dense, stable reflection MVs for glossy/metallic pixels (roughness <= 0.24).
+        // Uses the shadow hit group (SBT offset 0) which just writes gl_HitTEXT — no
+        // shading, no BSDF. OpaqueEXT skips any-hit for minimal traversal cost.
+        if (isFirstHitNoisy && !hitSky && firstHitMat.roughness <= 0.24) {
+            // Real-space incoming direction at PSR-resolved surface
+            vec3 incomingDir = (psrMirror * vec4(orgDirection, 0.0)).xyz;
+            // Real-space reflection direction for the probe trace
+            vec3 realReflDir = reflect(incomingDir, mainRay.normal);
+            // Virtual-space reflection direction for MV computation
+            vec3 virtualNormal = (psrMirror * vec4(mainRay.normal, 0.0)).xyz;
+            reflectionProbeVirtualDir = reflect(orgDirection, virtualNormal);
+
+            // Initialize probe payload (throughput=0 so shadow miss shader is a no-op)
+            reflectionProbe.throughput = vec3(0.0);
+            reflectionProbe.hitT = INF_DISTANCE;
+
+            traceRayEXT(topLevelAS,
+                gl_RayFlagsOpaqueEXT,       // skip any-hit, treat all geometry as opaque
+                WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK,
+                0,                          // sbtRecordOffset (shadow hit group)
+                0,                          // sbtRecordStride
+                2,                          // missIndex (shadow miss)
+                mainRay.origin,             // origin (PSR-resolved surface, already offset by CHS)
+                0.001,                      // tMin
+                realReflDir,                // direction (deterministic mirror reflection)
+                128.0,                      // tMax (128 blocks)
+                1                           // payload location 1 (ShadowRay)
+            );
+
+            reflectionProbeHitT = reflectionProbe.hitT;
+        }
+
+        //====================================================================================================================
+        // STEP 2 - Get the indirect contribution at non-mirror hit position
+        //====================================================================================================================
+        // Track minimum roughness along the bounce path for SHARC gating.
+        // Industry standard: if ANY bounce was specular/transmissive (roughness < threshold),
+        // skip radiance cache for the entire remaining path. This prevents view-independent
+        // cached radiance from appearing in view-dependent reflections and refractions.
+        float minPathRoughness = mainRay.roughness; // PSR termination surface roughness
+
+        for (int b = psrDepth; b < pc.numRayBounces; b++) {
+            if (prGetStop(mainRay)) break;
+
+            mainRay.index = b;
+
+            uint mask;
+            uint len;
+            if (b == 0) {
+                len = 1000;
+                if (worldUBO.isFirstPerson == 1) {
+                    mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                } else if (worldUBO.isFirstPerson == 2) {
+                    mask = WORLD_MASK | PLAYER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                } else {
+                    mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+                }
+            } else if (b <= 1) {
+                len = 1000;
+                mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+            } else {
+                len = 384;
+                mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+            }
+
+            // Force 2-state OMM on indirect bounces: eliminates all AHS invocations
+            // on secondary rays (visual approximation at alpha edges is invisible on indirect lighting)
+            uint bounceFlags = rayFlags;
+            if (b >= 1) {
+                bounceFlags |= gl_RayFlagsForceOpacityMicromap2StateEXT;
+            }
+
+            // Save state before trace for SHARC cache hit replacement.
+            // On a cache hit, we discard the CHS contribution (which includes direct light
+            // at this hit) and replace it with the cached total outgoing radiance (which
+            // already contains that same direct light plus all further bounces).
+            vec3 radianceBeforeBounce = mainRay.radiance;
+            vec3 throughputBeforeBounce = mainRay.throughput;
+
+            // SER: Shader Execution Reordering for material coherence.
+            // Hit object separates traversal from shader execution, allowing the GPU
+            // to regroup threads by hit shader + geometry before CHS invocation.
+            // 24-47% RT cost reduction in production titles (Indiana Jones, Black Myth Wukong).
+            if (SER_ENABLED) {
+                hitObjectNV hitObject;
+                hitObjectTraceRayNV(hitObject, topLevelAS, bounceFlags, mask,
+                                    1, 1, 0,
+                                    mainRay.origin, 0.0, mainRay.direction, len, 0);
+                // Reorder threads for material coherence
+                if (SER_HINTS && hitObjectIsHitNV(hitObject)) {
+                    // Bounce rays diverge heavily — hints by geometry index recover coherence.
+                    // Indiana Jones showed 24% GPU savings from hint-based reordering.
+                    uint geoIdx = hitObjectGetGeometryIndexNV(hitObject);
+                    uint hint = geoIdx & 0xFFu;
+                    reorderThreadNV(hitObject, hint, 8);
+                } else {
+                    reorderThreadNV(hitObject);
+                }
+                hitObjectExecuteShaderNV(hitObject, 0);
+            } else {
+                traceRayEXT(topLevelAS, bounceFlags, mask,
+                            1, 1, 0,
+                            mainRay.origin, 0.0, mainRay.direction, len, 0);
+            }
+
+            if (b == psrDepth) {
+                distFirstToSecond = mainRay.hitT;
+                if (mainRay.hitT != INF_DISTANCE) {
+                    hasSecondHit = true;
+                }
+                // DLSS-RR guide: capture first-bounce hit distance
+                if (isFirstHitNoisy) {
+                    float clampedHitDist = min(mainRay.hitT, 10000.0);
+                    if (isFirstHitDiffuse) {
+                        diffuseHitDist = clampedHitDist;
+                    } else {
+                        specularHitDist = clampedHitDist;
+                    }
+                }
+            }
+
+            // SHARC cache query: early terminate indirect bounces using cached radiance.
+            // Query at b >= 1 (skip primary PSR hit — always needs full CHS evaluation).
+            // Gate on BOTH path roughness (no specular/transmissive bounces along path)
+            // AND current surface roughness (don't cache view-dependent specular outgoing).
+            // On cache hit, REPLACE the CHS contribution with the cached total outgoing
+            // radiance to avoid double-counting direct light at this surface.
+#if SHARC_COMPILE_ENABLE
+            if (SHARC_ENABLED && b >= 1 && !prGetStop(mainRay) && mainRay.hitT != INF_DISTANCE
+                && minPathRoughness >= pc.sharcRoughnessThreshold
+                && mainRay.roughness >= pc.sharcRoughnessThreshold) {
+                SharcParameters sharcParams;
+                sharcParams.gridParameters.cameraPosition = float3(pc.sharcCameraX, pc.sharcCameraY, pc.sharcCameraZ);
+                sharcParams.gridParameters.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
+                sharcParams.gridParameters.sceneScale = pc.sharcSceneScale;
+                sharcParams.gridParameters.levelBias = float(SHARC_GRID_LEVEL_BIAS);
+                sharcParams.hashMapData.capacity = pc.sharcCapacity;
+                sharcParams.hashMapData.hashEntriesBuffer = RWStructuredBuffer_uint64_t(pc.sharcHashEntries);
+                sharcParams.resolvedBuffer = RWStructuredBuffer_SharcPackedData(pc.sharcResolved);
+
+                // Convert camera-relative hit position to absolute world coords
+                vec3 absoluteHitPos = mainRay.worldPos + vec3(worldUBO.cameraPos.xyz);
+
+                // Voxel size guard: reject queries where hitT is shorter than the voxel.
+                // Without this, short-segment bounces can read cached radiance from the
+                // opposite side of thin walls (light leaking through 1-block walls).
+                uint queryLevel = HashGridGetLevel(absoluteHitPos, sharcParams.gridParameters);
+                float queryVoxelSize = HashGridGetVoxelSize(queryLevel, sharcParams.gridParameters);
+                if (mainRay.hitT < queryVoxelSize) {
+                    // Skip SHARC query — ray segment too short for this voxel resolution
+                } else {
+                    SharcHitData hitData;
+                    hitData.positionWorld = absoluteHitPos;
+                    hitData.normalWorld = mainRay.normal;
+
+                    vec3 cachedRadiance;
+                    if (SharcGetCachedRadiance(sharcParams, hitData, cachedRadiance, false)) {
+                        // Discard the CHS contribution at this hit and use cached total instead.
+                        // radianceBeforeBounce = accumulated radiance from all previous bounces.
+                        // throughputBeforeBounce = path throughput BEFORE CHS modified it.
+                        // cachedRadiance = total outgoing radiance at this surface (direct + all indirect).
+                        mainRay.radiance = radianceBeforeBounce + throughputBeforeBounce * cachedRadiance;
+                        break; // Early path termination — cache hit
+                    }
+                }
+            }
+#endif
+
+            // Update path roughness tracking (before next bounce).
+            // Once the path goes through a specular/transmissive surface, it stays specular.
+            minPathRoughness = min(minPathRoughness, mainRay.roughness);
+
+            // Russian roulette for path termination (skip for first few bounces and perfect mirrors)
+            // Perfect specular surfaces (roughness < 0.001) are exempt: their throughput decays
+            // via Fresnel each bounce but must never be stochastically terminated — otherwise
+            // the mirror chain abruptly shows albedo instead of continued reflection.
+            if (b > 2 && mainRay.roughness >= 0.001 && !OFFLINE_DISABLE_RR) {
+                float maxComponent = max(mainRay.throughput.r, max(mainRay.throughput.g, mainRay.throughput.b));
+                float rrProbability = min(maxComponent, 0.9);
+                if (rand(mainRay.seed) > rrProbability) { break; }
+                mainRay.throughput /= rrProbability;
+            }
+
+            // Per-bounce throughput clamp to prevent firefly paths
+            float tMag = max(mainRay.throughput.r, max(mainRay.throughput.g, mainRay.throughput.b));
+            if (tMag > 10.0 && !OFFLINE_DISABLE_CLAMP) {
+                mainRay.throughput *= 10.0 / tMag;
+            }
+        }
+
+        if (isFirstHitNoisy) {
+            if (isFirstHitDiffuse) { // Diffuse
+                firstHitIndirectRadiance = mainRay.radiance - firstHitDirectRadiance;
+                // Subtract primary-hit emission to prevent double-counting with NRD compose:
+                // NRD compose adds raw emission from firstHitBaseEmissionImage separately,
+                // so the denoised indirect channel must NOT contain it.
+                firstHitIndirectRadiance = max(firstHitIndirectRadiance - firstHitEmission, vec3(0.0));
+            }
+        }
+
+        if (isHand == 0) { intermediateRadiance = mainRay.radiance; }
+    }
+
+    if (isnan(mainRay.radiance.r) || isinf(mainRay.radiance.r)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
+    if (isnan(mainRay.radiance.g) || isinf(mainRay.radiance.g)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
+    if (isnan(mainRay.radiance.b) || isinf(mainRay.radiance.b)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
+
+    float densityAir = 0.0000;
+    float densityFog = 2.0 / max(worldUBO.fogEnd - worldUBO.fogStart, 1e-3);
+    if (skyUBO.cameraSubmersionType == 1) { // underwater
+        vec3 waterColor = CS_BT709_TO_BT2020 * skyUBO.envWaterTintFog.rgb;
+        float waterFogStrength = max(0.0, skyUBO.envWaterTintFog.a);
+        mainRay.radiance *= waterColor;
+
+        if (surfaceDepth == INF_DISTANCE) surfaceDepth = 0;
+        mainRay.radiance =
+            applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog * waterFogStrength, waterColor * 0.01);
+    } else if (DISABLE_RENDER_DISTANCE_FOG == 0) {
+        if (worldUBO.skyType == 0) { // None
+            mainRay.radiance = applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog,
+                                        CS_BT709_TO_BT2020 * worldUBO.fogColor.rgb);
+        } else if (worldUBO.skyType == 1) { // Normal
+            if (!psrHitSky) {
+                vec3 eyeToPSRHitPosition = psrHitPosition - eyePos;
+                eyeToPSRHitPosition.y = 0;
+                float len = length(eyeToPSRHitPosition);
+
+                vec3 sunDir = normalize(skyUBO.sunDirection);
+                vec3 rayDir = orgDirection;
+                float progress = clamp(skyUBO.rainGradient * skyUBO.envSky.y, 0.0, 1.0);
+                vec3 rainyRadiance = CS_BT709_TO_BT2020 * mix(vec3(0.04, 0.05, 0.1), vec3(0.1), smoothstep(-0.3, 0.3, sunDir.y));
+                vec3 sunnyRadiance = CS_BT709_TO_BT2020 * (texture(skyFull, rayDir).rgb * skyUBO.envSky.x);
+                vec3 fogRadiance = mix(sunnyRadiance, rainyRadiance, progress);
+
+                mainRay.radiance =
+                    applyFog(mainRay.radiance, len, worldUBO.fogStart, densityAir, densityFog, fogRadiance);
+            }
+        } else if (worldUBO.skyType == 2) { // End
+            mainRay.radiance = applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog,
+                                        CS_BT709_TO_BT2020 * worldUBO.fogColor.rgb);
+        }
+    }
+
+    if (!psrHitSky && isFirstHitNoisy) {
+        if (isFirstHitDiffuse) {
+            imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(firstHitDirectRadiance, 1.0));
+            imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(firstHitIndirectRadiance, 1.0));
+            imageStore(firstHitSpecularImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitClearImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        } else {
+            imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
+            // Subtract primary-hit emission to prevent double-counting with NRD compose
+            // (NRD compose adds raw emission from firstHitBaseEmissionImage separately)
+            vec3 specularRadiance = max(mainRay.radiance - firstHitEmission, vec3(0.0));
+            float specLum = dot(specularRadiance, vec3(0.2126, 0.7152, 0.0722));
+            if (specLum > 1000.0) specularRadiance *= 1000.0 / specLum;
+            imageStore(firstHitSpecularImage, ivec2(pixel), vec4(specularRadiance, 1.0));
+            imageStore(firstHitClearImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        }
+    } else {
+        imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitSpecularImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitClearImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+    }
+    imageStore(firstHitBaseEmissionImage, ivec2(pixel), vec4(firstHitEmission, 1.0));
+    float specHitDepth = hasSecondHit ? distFirstToSecond : (isFirstHitNoisy && !isFirstHitDiffuse ? 1000.0 : 0.0);
+    imageStore(specularHitDepthImage, ivec2(pixel), vec4(specHitDepth, vec3(1.0)));
+    imageStore(diffuseRayDirHitDistImage, ivec2(pixel), vec4(diffuseRayDir, diffuseHitDist));
+    imageStore(specularRayDirHitDistImage, ivec2(pixel), vec4(specularRayDir, specularHitDist));
+    // Reflection motion vectors: dense field for DLSS-RR temporal reprojection of
+    // specular content. Only for glossy/metallic surfaces (roughness <= 0.24) where the
+    // reflection probe traced above found geometry. Rough surfaces (> 0.24) get zero —
+    // DLSS-RR ignores reflection MVs for high roughness via the normalRoughness guide.
+    {
+        vec2 rv = vec2(0.0);
+        if (isFirstHitNoisy && reflectionProbeHitT < INF_DISTANCE
+            && reflectionProbeHitT > 0.0) {
+            // Virtual mirror image position: reflected content appears along the original
+            // view ray at depth = surface depth + reflection depth. This is always in front
+            // of the camera (positive depth), unlike the real-world reflected position which
+            // can be behind the camera and produces garbage when projected to screen space.
+            vec3 virtualReflPos = eyePos + orgDirection * (psrHitDepth + reflectionProbeHitT);
+            vec3 cd = vec3(worldUBO.cameraPos.xyz - lastWorldUBO.cameraPos.xyz);
+            mat4 prevMVP = lastWorldUBO.cameraProjMat * lastWorldUBO.cameraEffectedViewMat;
+            rv = computeCameraMotionVector(prevMVP, pixelCenter, vec4(virtualReflPos + cd, 1.0));
+        }
+        imageStore(reflectionMvImage, ivec2(pixel), vec4(rv, 0.0, 0.0));
+    }
+    // Animated texture mask: 1.0 for pixels whose primary surface has temporally unstable texels
+    // (lava emBlockTypeOut==0, or water lobeType==2). Helps DLSS-RR reduce ghosting on animated surfaces.
+    {
+        bool isAnimated = isFirstHitNoisy &&
+                          (prGetEmBlockType(mainRay) == 0u || prGetLobeType(mainRay) == 2u);
+        imageStore(animTexMaskImage, ivec2(pixel), vec4(isAnimated ? 1.0 : 0.0, 0.0, 0.0, 0.0));
+    }
+    // Particle/refractive mask: 1.0 for transparent/refractive surfaces (water, glass).
+    // Helps DLSS-RR distinguish refracted surfaces from opaque geometry.
+    {
+        bool isRefractive = isFirstHitNoisy && (prGetLobeType(mainRay) == 2u);
+        imageStore(particleMaskImage, ivec2(pixel), vec4(isRefractive ? 1.0 : 0.0, 0.0, 0.0, 0.0));
+    }
+    // Bias current color mask: downweight stale history on temporally unstable pixels.
+    // 1.0 for lava (animated texture), 0.5 for other emissive surfaces, 0.0 otherwise.
+    {
+        float biasMask = 0.0;
+        if (isFirstHitNoisy) {
+            bool isLava = (prGetEmBlockType(mainRay) == 0u);  // lava: animated emissive
+            bool isEmissive = (dot(firstHitEmission, firstHitEmission) > 0.0001);
+            biasMask = isLava ? 1.0 : (isEmissive ? 0.5 : 0.0);
+        }
+        imageStore(biasMaskImage, ivec2(pixel), vec4(biasMask, 0.0, 0.0, 0.0));
+    }
+    // RT hit distance noise hint: roughness × normalized primary-hit distance.
+    // Higher roughness + longer ray = more variance for DLSS-RR to account for.
+    // Use if-else (not ternary) to avoid reading uninitialized firstHitMat when !isFirstHitNoisy.
+    {
+        float noisiness = 0.0;
+        if (isFirstHitNoisy) {
+            noisiness = firstHitMat.roughness * clamp(psrHitDepth / 32.0, 0.0, 1.0);
+        }
+        imageStore(rtHitDistImage, ivec2(pixel), vec4(noisiness, 0.0, 0.0, 0.0));
+    }
+    // World-space 3D velocity: object displacement from prev to current frame (camera motion removed).
+    // Computed inside the Motion Vector block above; zero for sky and non-noisy pixels.
+    imageStore(motionVectors3DImage, ivec2(pixel), vec4(velocity3D, 0.0));
+
+    // Transparency layer: glass/water surface data for DLSS-RR stable planes.
+    // Provides glass surface MVs, opacity, and tint so DLSS-RR can track the glass
+    // independently from the behind-glass scene for temporal stability.
+    if (hitGlass) {
+        // Glass tint * Fresnel as foreground color (pre-exposed to match pInColor range)
+        vec3 glassColor = glassTint * glassFresnelReflect;
+        imageStore(transparencyLayerImage, ivec2(pixel), vec4(glassColor * pc.preExposure, glassFresnelReflect));
+        imageStore(transparencyLayerOpacityImage, ivec2(pixel), vec4(vec3(glassFresnelReflect), glassFresnelReflect));
+
+        // Glass surface MVs (same pattern as primary MV computation)
+        vec3 glassCameraDelta = vec3(worldUBO.cameraPos.xyz - lastWorldUBO.cameraPos.xyz);
+        mat4 glassPrevMVP = lastWorldUBO.cameraProjMat * lastWorldUBO.cameraEffectedViewMat;
+
+        vec3 glassVirtualOrigin = eyePos + orgDirection * glassHitT;
+        vec3 glassRelToPrevCam = glassVirtualOrigin + glassCameraDelta;
+
+        uint rawOffset = blasOffsets.offsets[glassInstanceIndex];
+        uint vtxFormat = rawOffset >> 30u;
+        uint glassBOffset = decodeBlasOffset(rawOffset);
+        uint64_t lastIdxAddr = lastIndexBufferAddrs.addrs[glassBOffset + glassGeometryIndex];
+        uint64_t lastVtxAddr = lastVertexBufferAddrs.addrs[glassBOffset + glassGeometryIndex];
+        if (lastIdxAddr > 0 && lastVtxAddr > 0) {
+            vec3 prevLocalPos;
+            fetchTrianglePositions(vtxFormat, lastVtxAddr, lastIdxAddr,
+                                   glassPrimitiveIndex, glassBaryCoords, prevLocalPos);
+            mat4 lastModelMat = lastObjToWorldMats.mat[glassInstanceIndex];
+            glassRelToPrevCam = mat3(lastModelMat) * prevLocalPos + lastModelMat[3].xyz;
+        }
+        vec2 glassMV = computeCameraMotionVector(glassPrevMVP, pixelCenter, vec4(glassRelToPrevCam, 1.0));
+        imageStore(transparencyLayerMvecsImage, ivec2(pixel), vec4(glassMV, 0.0, 0.0));
+    } else {
+        imageStore(transparencyLayerImage, ivec2(pixel), vec4(0.0));
+        imageStore(transparencyLayerOpacityImage, ivec2(pixel), vec4(0.0));
+        imageStore(transparencyLayerMvecsImage, ivec2(pixel), vec4(0.0));
+    }
+
+    // Prevent RGBA16F overflow: clamp radiance BEFORE pre-exposure so
+    // radiance * preExposure <= 65000. Clamping before multiplication
+    // preserves DLSS-RR contract: receives clampedRad*E, undoes /E → clampedRad (exact).
+    // Ground truth: use format max (65504) to minimize bias — Welford RGBA32F accumulator
+    // handles averaging correctly even with per-sample RGBA16F quantization.
+    float maxRadiance = (NO_EMISSION_CLAMP ? 65504.0 : 65000.0) / max(pc.preExposure, 1.0);
+    imageStore(outputImage, ivec2(pixel), vec4(min(mainRay.radiance, vec3(maxRadiance)) * pc.preExposure, 1.0));
+}
