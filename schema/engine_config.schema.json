@@ -4,7 +4,7 @@
   "title": "RadSER Engine Configuration",
   "description": "Single source of truth for all engine options. Generates C++ structs, Java classes, and JNI bridge code.",
   "type": "object",
-  "x-version": 22,
+  "x-version": 23,
   "x-properties-file": "options.properties",
 
   "properties": {
@@ -105,6 +105,24 @@
           "x-runtime-scope": "session",
           "x-doc": "Manual resolution scale override (only when quality = Custom)",
           "x-cpp-side-effect": "needRecreate = true"
+        },
+        "dlssQuality": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 4,
+          "x-enum": {
+            "0": "DLAA",
+            "1": "Quality",
+            "2": "Balanced",
+            "3": "Performance",
+            "4": "Ultra Performance"
+          },
+          "x-ui-control": "dropdown",
+          "x-restart-scope": "pipeline",
+          "x-runtime-scope": "session",
+          "x-doc": "DLSS quality mode (affects render resolution)",
+          "x-cpp-side-effect": "needRecreate = true"
         }
       }
     },
@@ -132,6 +150,134 @@
           "x-restart-scope": "none",
           "x-runtime-scope": "frame",
           "x-doc": "Use simplified BRDF for indirect bounces (faster, less accurate)"
+        },
+        "areaLightsEnabled": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Enable area light evaluation in RT shaders"
+        },
+        "shadowSoftness": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0.0,
+          "maximum": 2.0,
+          "x-ui-control": "slider",
+          "x-step": 0.05,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Shadow penumbra softness"
+        },
+        "restirEnabled": {
+          "type": "boolean",
+          "default": true,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "ReSTIR Direct Illumination"
+        },
+        "restirBounceEnabled": {
+          "type": "boolean",
+          "default": true,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "ReSTIR bounce light resampling"
+        },
+        "restirCandidates": {
+          "type": "integer",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 32,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "RIS candidate count for ReSTIR"
+        },
+        "restirSimplifiedBRDF": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Simplified BRDF for ReSTIR evaluation"
+        },
+        "restirTemporalMClamp": {
+          "type": "integer",
+          "default": 20,
+          "minimum": 0,
+          "maximum": 100,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Temporal M-clamping for ReSTIR"
+        },
+        "restirWClamp": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 0,
+          "maximum": 1000,
+          "x-ui-control": "slider",
+          "x-step": 10,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "W-clamping for ReSTIR"
+        },
+        "pomEnabled": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Enable parallax occlusion mapping"
+        },
+        "pomHeightScale": {
+          "type": "number",
+          "default": 0.15,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "x-ui-control": "slider",
+          "x-step": 0.01,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Parallax occlusion mapping height scale"
+        },
+        "pomSteps": {
+          "type": "integer",
+          "default": 32,
+          "minimum": 4,
+          "maximum": 128,
+          "x-ui-control": "slider",
+          "x-step": 4,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "POM max ray march steps"
+        },
+        "pomRefinement": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 0,
+          "maximum": 16,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "POM binary search refinement steps"
+        },
+        "pomFadeDistance": {
+          "type": "number",
+          "default": 64.0,
+          "minimum": 8.0,
+          "maximum": 256.0,
+          "x-ui-control": "slider",
+          "x-step": 8.0,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "POM fade distance in blocks"
         },
         "serEnabled": {
           "type": "boolean",
@@ -201,6 +347,58 @@
           "x-restart-scope": "renderer",
           "x-runtime-scope": "session",
           "x-doc": "OMM subdivision level (higher = more precise, more memory)"
+        },
+        "sharcEnabled": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Enable SHARC radiance cache for indirect lighting"
+        },
+        "sharcSceneScale": {
+          "type": "number",
+          "default": 4.0,
+          "minimum": 0.5,
+          "maximum": 32.0,
+          "x-ui-control": "slider",
+          "x-step": 0.5,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "SHARC hash grid scene scale"
+        },
+        "sharcRoughnessThreshold": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "x-ui-control": "slider",
+          "x-step": 0.05,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Roughness threshold above which SHARC cache is used"
+        },
+        "restirSpatialTaps": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 8,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Number of spatial neighbor taps for ReSTIR DI"
+        },
+        "restirSpatialRadius": {
+          "type": "integer",
+          "default": 16,
+          "minimum": 1,
+          "maximum": 64,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Spatial reuse radius in pixels for ReSTIR DI"
         }
       }
     },
@@ -452,6 +650,44 @@
       }
     },
 
+    "bloom": {
+      "type": "object",
+      "x-category": "options.video.category.bloom",
+      "x-order": 5,
+      "properties": {
+        "bloomEnabled": {
+          "type": "boolean",
+          "default": true,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Enable bloom post-process effect"
+        },
+        "bloomIntensity": {
+          "type": "number",
+          "default": 0.15,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "x-ui-control": "slider",
+          "x-step": 0.01,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Bloom strength (additive blend factor)"
+        },
+        "bloomThreshold": {
+          "type": "number",
+          "default": 0.8,
+          "minimum": 0.0,
+          "maximum": 2.0,
+          "x-ui-control": "slider",
+          "x-step": 0.05,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Brightness threshold for bloom extraction"
+        }
+      }
+    },
+
     "chunks": {
       "type": "object",
       "x-category": "options.video.category.chunks",
@@ -534,6 +770,306 @@
           "x-restart-scope": "renderer",
           "x-runtime-scope": "startup",
           "x-doc": "Enable Vulkan validation layers (significant perf cost)"
+        }
+      }
+    },
+
+    "frameGen": {
+      "type": "object",
+      "x-category": "options.video.category.framegen",
+      "x-order": 6,
+      "properties": {
+        "frameGenEnabled": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "pipeline",
+          "x-runtime-scope": "session",
+          "x-doc": "Enable DLSS Frame Generation (DLSS-G)"
+        },
+        "frameGenMultiplier": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 2,
+          "maximum": 4,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-restart-scope": "pipeline",
+          "x-runtime-scope": "session",
+          "x-doc": "Frame generation multiplier (2=2x, 3=3x, 4=4x)"
+        },
+        "reflexEnabled": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Enable NVIDIA Reflex low-latency"
+        },
+        "reflexBoost": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Enable Reflex Boost (higher GPU clocks)"
+        },
+        "maxFpsLimit": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000,
+          "x-ui-control": "slider",
+          "x-step": 10,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Frame rate cap for Reflex (0 = unlimited)"
+        }
+      }
+    },
+
+    "clouds": {
+      "type": "object",
+      "x-category": "options.video.category.clouds",
+      "x-order": 7,
+      "properties": {
+        "cloudQuality": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 6,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Volumetric cloud quality level (0=off)"
+        },
+        "cloudDensity": {
+          "type": "number",
+          "default": 1.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Cloud density multiplier"
+        },
+        "cloudCoverage": {
+          "type": "number",
+          "default": 0.5,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Cloud coverage (0=clear, 1=overcast)"
+        },
+        "cloudType": {
+          "type": "number",
+          "default": 0.5,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Cloud type blend (0=stratus, 1=cumulus)"
+        },
+        "cloudSpeed": {
+          "type": "number",
+          "default": 1.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Cloud animation speed multiplier"
+        },
+        "cloudAltitude": {
+          "type": "number",
+          "default": 512.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Cloud layer base altitude in blocks"
+        },
+        "cloudThickness": {
+          "type": "number",
+          "default": 256.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Cloud layer thickness in blocks"
+        },
+        "cloudDetailStrength": {
+          "type": "number",
+          "default": 0.3,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Cloud high-frequency detail strength"
+        },
+        "cloudScatterOctaves": {
+          "type": "integer",
+          "default": 2,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Number of scattering octaves for volumetric clouds"
+        },
+        "cloudAmbientStrength": {
+          "type": "number",
+          "default": 0.5,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Cloud ambient light contribution"
+        },
+        "cloudTemporalBlend": {
+          "type": "number",
+          "default": 0.05,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Temporal accumulation blend factor for clouds"
+        },
+        "cloudNoiseScale": {
+          "type": "number",
+          "default": 1.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Base noise scale for cloud shape"
+        },
+        "cloudCellFrequency": {
+          "type": "number",
+          "default": 1.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Worley cell frequency for cloud erosion"
+        },
+        "cloudAtmosphereFadeDist": {
+          "type": "number",
+          "default": 2000.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Distance at which clouds fade into atmosphere (blocks)"
+        },
+        "cloudDebugMode": {
+          "type": "integer",
+          "default": 0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Cloud debug visualization mode (0=off)"
+        },
+        "cloudWindAngle": {
+          "type": "number",
+          "default": 0.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Cloud wind direction angle in degrees"
+        }
+      }
+    },
+
+    "offlineAccum": {
+      "type": "object",
+      "x-category": "options.video.category.offline",
+      "x-order": 8,
+      "properties": {
+        "offlineAccumEnabled": {
+          "type": "boolean",
+          "default": false,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "pipeline",
+          "x-runtime-scope": "session",
+          "x-doc": "Enable offline accumulation mode (path tracing convergence)"
+        },
+        "offlineBounces": {
+          "type": "integer",
+          "default": 8,
+          "x-ui-control": "slider",
+          "x-restart-scope": "pipeline",
+          "x-runtime-scope": "session",
+          "x-doc": "Ray bounce depth for offline accumulation"
+        },
+        "offlineDenoised": {
+          "type": "boolean",
+          "default": true,
+          "x-ui-control": "toggle",
+          "x-restart-scope": "pipeline",
+          "x-runtime-scope": "session",
+          "x-doc": "Apply denoiser in offline accumulation mode"
+        },
+        "offlineAperture": {
+          "type": "number",
+          "default": 0.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Depth-of-field aperture for offline rendering (0=off)"
+        },
+        "offlineFocalDistance": {
+          "type": "number",
+          "default": 10.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Depth-of-field focal distance in blocks"
+        },
+        "offlineDlssEpochLength": {
+          "type": "integer",
+          "default": 32,
+          "x-ui-control": "slider",
+          "x-restart-scope": "pipeline",
+          "x-runtime-scope": "session",
+          "x-doc": "Number of frames per DLSS-RR accumulation epoch"
+        }
+      }
+    },
+
+    "displacement": {
+      "type": "object",
+      "x-category": "options.video.category.displacement",
+      "x-order": 9,
+      "properties": {
+        "displacementQuality": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 4,
+          "x-ui-control": "slider",
+          "x-step": 1,
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Displacement mapping quality (0=off, 1=DDA, 2=Tessellation, 3=Hybrid, 4=CLAS)"
+        },
+        "tessMaxLevel": {
+          "type": "integer",
+          "default": 4,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Maximum tessellation subdivision level"
+        },
+        "tessNearDist": {
+          "type": "number",
+          "default": 4.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Distance for full tessellation (blocks)"
+        },
+        "tessMidDist": {
+          "type": "number",
+          "default": 16.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Distance for half tessellation (blocks)"
+        },
+        "tessFarDist": {
+          "type": "number",
+          "default": 64.0,
+          "x-ui-control": "slider",
+          "x-restart-scope": "none",
+          "x-runtime-scope": "frame",
+          "x-doc": "Distance for quarter tessellation (blocks)"
         }
       }
     }

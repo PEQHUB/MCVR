@@ -57,6 +57,12 @@ bool ConfigService::load(const std::string& path) {
             try { field = std::stof(it->second); } catch (...) {}
         }
     };
+    auto getInt = [&](const std::string& k, int32_t& field) {
+        auto it = props.find(k);
+        if (it != props.end()) {
+            try { field = std::stoi(it->second); } catch (...) {}
+        }
+    };
 
     // display
     getBool("vsync", live_.vsync);
@@ -68,6 +74,7 @@ bool ConfigService::load(const std::string& path) {
     getUint("upscalerMode", live_.upscalerMode);
     getUint("upscalerQuality", live_.upscalerQuality);
     getUint("upscalerResOverride", live_.upscalerResOverride);
+    getUint("dlssQuality", live_.dlssQuality);
 
     // rayTracing
     getUint("rayBounces", live_.rayBounces);
@@ -80,6 +87,24 @@ bool ConfigService::load(const std::string& path) {
     getBool("greedyMeshingEnabled", live_.greedyMeshingEnabled);
     getBool("ommEnabled", live_.ommEnabled);
     getUint("ommBakerLevel", live_.ommBakerLevel);
+    getBool("areaLightsEnabled", live_.areaLightsEnabled);
+    getFloat("shadowSoftness", live_.shadowSoftness);
+    getBool("restirEnabled", live_.restirEnabled);
+    getBool("restirBounceEnabled", live_.restirBounceEnabled);
+    getBool("restirSimplifiedBRDF", live_.restirSimplifiedBRDF);
+    getUint("restirCandidates", live_.restirCandidates);
+    getUint("restirTemporalMClamp", live_.restirTemporalMClamp);
+    getUint("restirWClamp", live_.restirWClamp);
+    getBool("pomEnabled", live_.pomEnabled);
+    getFloat("pomHeightScale", live_.pomHeightScale);
+    getUint("pomSteps", live_.pomSteps);
+    getUint("pomRefinement", live_.pomRefinement);
+    getFloat("pomFadeDistance", live_.pomFadeDistance);
+    getBool("sharcEnabled", live_.sharcEnabled);
+    getFloat("sharcSceneScale", live_.sharcSceneScale);
+    getFloat("sharcRoughnessThreshold", live_.sharcRoughnessThreshold);
+    getUint("restirSpatialTaps", live_.restirSpatialTaps);
+    getUint("restirSpatialRadius", live_.restirSpatialRadius);
 
     // exposure (Java stores tenths/percent — but v2 config stores native floats)
     getFloat("exposureCompensation", live_.exposureCompensation);
@@ -102,6 +127,11 @@ bool ConfigService::load(const std::string& path) {
     getFloat("casSharpness", live_.casSharpness);
     getFloat("psychoPeakSDR", live_.psychoPeakSDR);
 
+    // bloom
+    getBool("bloomEnabled", live_.bloomEnabled);
+    getFloat("bloomIntensity", live_.bloomIntensity);
+    getFloat("bloomThreshold", live_.bloomThreshold);
+
     // chunks
     getUint("chunkBuildingBatchSize", live_.chunkBuildingBatchSize);
     getUint("chunkBuildingTotalBatches", live_.chunkBuildingTotalBatches);
@@ -109,9 +139,50 @@ bool ConfigService::load(const std::string& path) {
     getFloat("chunkLodDistance", live_.chunkLodDistance);
 
     // debug
-    getBool("loggingEnabled", live_.loggingEnabled);
     getBool("gpuDiagnostics", live_.gpuDiagnostics);
     getBool("validationLayers", live_.validationLayers);
+
+    // frameGen
+    getBool("frameGenEnabled", live_.frameGenEnabled);
+    getUint("frameGenMultiplier", live_.frameGenMultiplier);
+
+    // reflex
+    getBool("reflexEnabled", live_.reflexEnabled);
+    getBool("reflexBoost", live_.reflexBoost);
+    getUint("maxFpsLimit", live_.maxFpsLimit);
+
+    // clouds
+    getUint("cloudQuality", live_.cloudQuality);
+    getFloat("cloudDensity", live_.cloudDensity);
+    getFloat("cloudCoverage", live_.cloudCoverage);
+    getFloat("cloudType", live_.cloudType);
+    getFloat("cloudSpeed", live_.cloudSpeed);
+    getFloat("cloudAltitude", live_.cloudAltitude);
+    getFloat("cloudThickness", live_.cloudThickness);
+    getFloat("cloudDetailStrength", live_.cloudDetailStrength);
+    getUint("cloudScatterOctaves", live_.cloudScatterOctaves);
+    getFloat("cloudAmbientStrength", live_.cloudAmbientStrength);
+    getFloat("cloudTemporalBlend", live_.cloudTemporalBlend);
+    getFloat("cloudNoiseScale", live_.cloudNoiseScale);
+    getFloat("cloudCellFrequency", live_.cloudCellFrequency);
+    getFloat("cloudAtmosphereFadeDist", live_.cloudAtmosphereFadeDist);
+    getUint("cloudDebugMode", live_.cloudDebugMode);
+    getFloat("cloudWindAngle", live_.cloudWindAngle);
+
+    // offlineAccum
+    getBool("offlineAccumEnabled", live_.offlineAccumEnabled);
+    getUint("offlineBounces", live_.offlineBounces);
+    getBool("offlineDenoised", live_.offlineDenoised);
+    getFloat("offlineAperture", live_.offlineAperture);
+    getFloat("offlineFocalDistance", live_.offlineFocalDistance);
+    getUint("offlineDlssEpochLength", live_.offlineDlssEpochLength);
+
+    // displacement
+    getUint("displacementQuality", live_.displacementQuality);
+    getUint("tessMaxLevel", live_.tessMaxLevel);
+    getFloat("tessNearDist", live_.tessNearDist);
+    getFloat("tessMidDist", live_.tessMidDist);
+    getFloat("tessFarDist", live_.tessFarDist);
 
     validate();
 
@@ -136,6 +207,7 @@ bool ConfigService::save(const std::string& path) const {
     auto putBool = [&](const char* k, bool v) { file << k << '=' << (v ? "true" : "false") << '\n'; };
     auto putUint = [&](const char* k, uint32_t v) { file << k << '=' << v << '\n'; };
     auto putFloat = [&](const char* k, float v) { file << k << '=' << v << '\n'; };
+    auto putInt = [&](const char* k, int32_t v) { file << k << '=' << v << '\n'; };
 
     putBool("vsync", live_.vsync);
     putUint("maxFps", live_.maxFps);
@@ -144,6 +216,7 @@ bool ConfigService::save(const std::string& path) const {
     putUint("upscalerMode", live_.upscalerMode);
     putUint("upscalerQuality", live_.upscalerQuality);
     putUint("upscalerResOverride", live_.upscalerResOverride);
+    putUint("dlssQuality", live_.dlssQuality);
     putUint("rayBounces", live_.rayBounces);
     putBool("simplifiedIndirect", live_.simplifiedIndirect);
     putBool("serEnabled", live_.serEnabled);
@@ -154,6 +227,24 @@ bool ConfigService::save(const std::string& path) const {
     putBool("greedyMeshingEnabled", live_.greedyMeshingEnabled);
     putBool("ommEnabled", live_.ommEnabled);
     putUint("ommBakerLevel", live_.ommBakerLevel);
+    putBool("areaLightsEnabled", live_.areaLightsEnabled);
+    putFloat("shadowSoftness", live_.shadowSoftness);
+    putBool("restirEnabled", live_.restirEnabled);
+    putBool("restirBounceEnabled", live_.restirBounceEnabled);
+    putBool("restirSimplifiedBRDF", live_.restirSimplifiedBRDF);
+    putUint("restirCandidates", live_.restirCandidates);
+    putUint("restirTemporalMClamp", live_.restirTemporalMClamp);
+    putUint("restirWClamp", live_.restirWClamp);
+    putBool("pomEnabled", live_.pomEnabled);
+    putFloat("pomHeightScale", live_.pomHeightScale);
+    putUint("pomSteps", live_.pomSteps);
+    putUint("pomRefinement", live_.pomRefinement);
+    putFloat("pomFadeDistance", live_.pomFadeDistance);
+    putBool("sharcEnabled", live_.sharcEnabled);
+    putFloat("sharcSceneScale", live_.sharcSceneScale);
+    putFloat("sharcRoughnessThreshold", live_.sharcRoughnessThreshold);
+    putUint("restirSpatialTaps", live_.restirSpatialTaps);
+    putUint("restirSpatialRadius", live_.restirSpatialRadius);
     putFloat("exposureCompensation", live_.exposureCompensation);
     putBool("manualExposureEnabled", live_.manualExposureEnabled);
     putFloat("manualExposure", live_.manualExposure);
@@ -171,13 +262,50 @@ bool ConfigService::save(const std::string& path) const {
     putUint("sharpenerMode", live_.sharpenerMode);
     putFloat("casSharpness", live_.casSharpness);
     putFloat("psychoPeakSDR", live_.psychoPeakSDR);
+    putBool("bloomEnabled", live_.bloomEnabled);
+    putFloat("bloomIntensity", live_.bloomIntensity);
+    putFloat("bloomThreshold", live_.bloomThreshold);
     putUint("chunkBuildingBatchSize", live_.chunkBuildingBatchSize);
     putUint("chunkBuildingTotalBatches", live_.chunkBuildingTotalBatches);
     putFloat("chunkCullDistance", live_.chunkCullDistance);
     putFloat("chunkLodDistance", live_.chunkLodDistance);
-    putBool("loggingEnabled", live_.loggingEnabled);
     putBool("gpuDiagnostics", live_.gpuDiagnostics);
     putBool("validationLayers", live_.validationLayers);
+    putBool("frameGenEnabled", live_.frameGenEnabled);
+    putUint("frameGenMultiplier", live_.frameGenMultiplier);
+    putBool("reflexEnabled", live_.reflexEnabled);
+    putBool("reflexBoost", live_.reflexBoost);
+    putUint("maxFpsLimit", live_.maxFpsLimit);
+    // clouds
+    putUint("cloudQuality", live_.cloudQuality);
+    putFloat("cloudDensity", live_.cloudDensity);
+    putFloat("cloudCoverage", live_.cloudCoverage);
+    putFloat("cloudType", live_.cloudType);
+    putFloat("cloudSpeed", live_.cloudSpeed);
+    putFloat("cloudAltitude", live_.cloudAltitude);
+    putFloat("cloudThickness", live_.cloudThickness);
+    putFloat("cloudDetailStrength", live_.cloudDetailStrength);
+    putUint("cloudScatterOctaves", live_.cloudScatterOctaves);
+    putFloat("cloudAmbientStrength", live_.cloudAmbientStrength);
+    putFloat("cloudTemporalBlend", live_.cloudTemporalBlend);
+    putFloat("cloudNoiseScale", live_.cloudNoiseScale);
+    putFloat("cloudCellFrequency", live_.cloudCellFrequency);
+    putFloat("cloudAtmosphereFadeDist", live_.cloudAtmosphereFadeDist);
+    putUint("cloudDebugMode", live_.cloudDebugMode);
+    putFloat("cloudWindAngle", live_.cloudWindAngle);
+    // offlineAccum
+    putBool("offlineAccumEnabled", live_.offlineAccumEnabled);
+    putUint("offlineBounces", live_.offlineBounces);
+    putBool("offlineDenoised", live_.offlineDenoised);
+    putFloat("offlineAperture", live_.offlineAperture);
+    putFloat("offlineFocalDistance", live_.offlineFocalDistance);
+    putUint("offlineDlssEpochLength", live_.offlineDlssEpochLength);
+    // displacement
+    putUint("displacementQuality", live_.displacementQuality);
+    putUint("tessMaxLevel", live_.tessMaxLevel);
+    putFloat("tessNearDist", live_.tessNearDist);
+    putFloat("tessMidDist", live_.tessMidDist);
+    putFloat("tessFarDist", live_.tessFarDist);
 
     return true;
 }
