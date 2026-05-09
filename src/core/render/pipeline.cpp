@@ -7,8 +7,7 @@
 
 #include "core/render/modules/ui_module.hpp"
 #include "core/render/modules/world/dlss/dlss_module.hpp"
-#include "core/render/modules/world/fsr_upscaler/upscaler_module.hpp"
-#include "core/render/modules/world/nrd/nrd_module.hpp"
+
 #include "core/render/modules/world/post_render/post_render_module.hpp"
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/modules/world/svgf/svgf_module.hpp"
@@ -71,30 +70,19 @@ void WorldPipeline::init(std::shared_ptr<Framework> framework, std::shared_ptr<P
     contexts_.resize(frameNum);
 
     // Determine initial render resolution from upscaler quality (if present)
-    VkExtent2D extent = framework->swapchain()->vkExtent();
-    uint32_t renderWidth = extent.width;
-    uint32_t renderHeight = extent.height;
-    size_t upscalerIndex = std::numeric_limits<size_t>::max();
-    UpscalerModule::QualityMode upscalerMode = UpscalerModule::QualityMode::NativeAA;
-    for (size_t i = 0; i < blueprint->moduleNames_.size(); i++) {
-        if (blueprint->moduleNames_[i] != UpscalerModule::NAME &&
-            blueprint->moduleNames_[i] != DLSSModule::NAME) continue;
-        upscalerIndex = i;
-        const auto &kvs = blueprint->attributeKVs_[i];
-        for (size_t k = 0; k + 1 < kvs.size(); k += 2) {
-            const std::string &key = kvs[k];
-            const std::string &value = kvs[k + 1];
-            if (UpscalerModule::isQualityModeAttributeKey(key)) {
-                UpscalerModule::parseQualityModeValue(value, upscalerMode);
-            }
-        }
-        // Render resolution is always based on actual display extent (not 2x)
-        if (upscalerMode != UpscalerModule::QualityMode::NativeAA) {
-            UpscalerModule::getRenderResolution(extent.width, extent.height, upscalerMode, &renderWidth, &renderHeight);
-        }
-        break;
-    }
-
+ // Determine initial render resolution from DLSS quality mode (if present)
+ VkExtent2D extent = framework->swapchain()->vkExtent();
+ uint32_t renderWidth = extent.width;
+ uint32_t renderHeight = extent.height;
+ size_t upscalerIndex = std::numeric_limits<size_t>::max();
+ for (size_t i = 0; i < blueprint->moduleNames_.size(); i++) {
+ if (blueprint->moduleNames_[i] != DLSSModule::NAME) continue;
+ upscalerIndex = i;
+ // DLSS-RR queries its own render resolution from NVIDIA API during build().
+ // The render resolution calculation is handled internally by DLSSModule
+ // based on the attribute mode (performance/balanced/quality/dlaa).
+ break;
+ }
 
     for (int frameIndex = 0; frameIndex < frameNum; frameIndex++) {
         // Keep the primary output at display resolution
@@ -250,8 +238,6 @@ void WorldPipelineContext::render() {
     // Short human-readable names for Nsight labels + GPU profiler
     static const std::map<std::string, std::string> moduleShortNames = {
         {"render_pipeline.module.ray_tracing.name", "RayTracing"},
-        {"render_pipeline.module.nrd.name", "NRD"},
-        {"render_pipeline.module.fsr3_upscaler.name", "FSR3"},
         {"render_pipeline.module.dlss.name", "DLSS-RR"},
         {"render_pipeline.module.tone_mapping.name", "ToneMapping"},
         {"render_pipeline.module.post_render.name", "PostRender"},
@@ -325,86 +311,64 @@ void Pipeline::collectWorldModules() {
             return RayTracingModule::create(framework, worldPipeline);
         }));
     worldModuleInOutImageNums.insert(std::make_pair(
-        RayTracingModule::NAME, std::make_pair(RayTracingModule::inputImageNum, RayTracingModule::outputImageNum)));
+      RayTracingModule::NAME, std::make_pair(RayTracingModule::inputImageNum, RayTracingModule::outputImageNum)));
 
+  // NRD removed — NVIDIA-only hard fork uses DLSS-RR's built-in denoiser
+
+  // SVGF not working well, leave it here for future use
+  // worldModuleConstructors.insert(std::make_pair(
+  //     SvgfModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+  //       return SvgfModule::create(framework, worldPipeline); }));
+  // worldModuleInOutImageNums.insert(
+  //     std::make_pair(SvgfModule::NAME, std::make_pair(SvgfModule::inputImageNum, SvgfModule::outputImageNum)));
+
+  worldModuleConstructors.insert(
+      std::make_pair(TemporalAccumulationModule::NAME,
+      [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+        return TemporalAccumulationModule::create(framework, worldPipeline);
+      }));
+  worldModuleInOutImageNums.insert(
+      std::make_pair(TemporalAccumulationModule::NAME, std::make_pair(TemporalAccumulationModule::inputImageNum,
+      TemporalAccumulationModule::outputImageNum)));
+
+  // FSR upscaler removed — NVIDIA-only hard fork uses DLSS-RR
+
+  worldModuleConstructors.insert(std::make_pair(
+      ToneMappingModule::NAME,
+      [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+        return ToneMappingModule::create(framework, worldPipeline);
+      }));
+  worldModuleInOutImageNums.insert(std::make_pair(
+      ToneMappingModule::NAME, std::make_pair(ToneMappingModule::inputImageNum, ToneMappingModule::outputImageNum)));
+
+  bool result = DLSSModule::initNGXContext();
+  if (result) {
     worldModuleConstructors.insert(std::make_pair(
-        NrdModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-            return NrdModule::create(framework, worldPipeline);
+        DLSSModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+          return DLSSModule::create(framework, worldPipeline);
         }));
-
     worldModuleInOutImageNums.insert(
-        std::make_pair(NrdModule::NAME, std::make_pair(NrdModule::inputImageNum, NrdModule::outputImageNum)));
+        std::make_pair(DLSSModule::NAME, std::make_pair(DLSSModule::inputImageNum, DLSSModule::outputImageNum)));
+    worldModuleStaticPreCloser.insert(std::make_pair(DLSSModule::NAME, DLSSModule::deinitNGXContext));
+  }
 
-    // Not working well, just leave it here
-    // worldModuleConstructors.insert(std::make_pair(
-    //     SvgfModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-    //         return SvgfModule::create(framework, worldPipeline);
-    //     }));
+  worldModuleConstructors.insert(
+      std::make_pair(PostRenderModule::NAME,
+      [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+        return PostRenderModule::create(framework, worldPipeline);
+      }));
+  worldModuleInOutImageNums.insert(std::make_pair(
+      PostRenderModule::NAME, std::make_pair(PostRenderModule::inputImageNum, PostRenderModule::outputImageNum)));
 
-    // worldModuleInOutImageNums.insert(
-    //     std::make_pair(SvgfModule::NAME, std::make_pair(SvgfModule::inputImageNum, SvgfModule::outputImageNum)));
+  worldModuleConstructors.insert(std::make_pair(
+      CloudModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
+        return CloudModule::create(framework, worldPipeline);
+      }));
+  worldModuleInOutImageNums.insert(std::make_pair(
+      CloudModule::NAME, std::make_pair(CloudModule::inputImageNum, CloudModule::outputImageNum)));
 
-    worldModuleConstructors.insert(
-        std::make_pair(TemporalAccumulationModule::NAME,
-                       [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-                           return TemporalAccumulationModule::create(framework, worldPipeline);
-                       }));
-    worldModuleInOutImageNums.insert(
-        std::make_pair(TemporalAccumulationModule::NAME, std::make_pair(TemporalAccumulationModule::inputImageNum,
-                                                                        TemporalAccumulationModule::outputImageNum)));
-
-    worldModuleConstructors.insert(std::make_pair(
-        UpscalerModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-            return UpscalerModule::create(framework, worldPipeline);
-        }));
-    worldModuleInOutImageNums.insert(std::make_pair(
-        UpscalerModule::NAME, std::make_pair(UpscalerModule::inputImageNum, UpscalerModule::outputImageNum)));
-
-    worldModuleConstructors.insert(
-        std::make_pair(ToneMappingModule::NAME,
-                       [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-                           return ToneMappingModule::create(framework, worldPipeline);
-                       }));
-    worldModuleInOutImageNums.insert(std::make_pair(
-        ToneMappingModule::NAME, std::make_pair(ToneMappingModule::inputImageNum, ToneMappingModule::outputImageNum)));
-
-    bool result = DLSSModule::initNGXContext();
-    if (result) {
-        worldModuleConstructors.insert(std::make_pair(
-            DLSSModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-                return DLSSModule::create(framework, worldPipeline);
-            }));
-        worldModuleInOutImageNums.insert(
-            std::make_pair(DLSSModule::NAME, std::make_pair(DLSSModule::inputImageNum, DLSSModule::outputImageNum)));
-        worldModuleStaticPreCloser.insert(std::make_pair(DLSSModule::NAME, DLSSModule::deinitNGXContext));
-    }
-
-    worldModuleConstructors.insert(
-        std::make_pair(TemporalAccumulationModule::NAME,
-                       [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-                           return TemporalAccumulationModule::create(framework, worldPipeline);
-                       }));
-    worldModuleInOutImageNums.insert(
-        std::make_pair(TemporalAccumulationModule::NAME, std::make_pair(TemporalAccumulationModule::inputImageNum,
-                                                                        TemporalAccumulationModule::outputImageNum)));
-
-    worldModuleConstructors.insert(std::make_pair(
-        PostRenderModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-            return PostRenderModule::create(framework, worldPipeline);
-        }));
-    worldModuleInOutImageNums.insert(std::make_pair(
-        PostRenderModule::NAME, std::make_pair(PostRenderModule::inputImageNum, PostRenderModule::outputImageNum)));
-
-    worldModuleConstructors.insert(std::make_pair(
-        CloudModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-            return CloudModule::create(framework, worldPipeline);
-        }));
-    worldModuleInOutImageNums.insert(std::make_pair(
-        CloudModule::NAME, std::make_pair(CloudModule::inputImageNum, CloudModule::outputImageNum)));
-
-    // TODO: invoke extension's collection
+  // TODO: invoke extension's collection
 }
-
 void Pipeline::recollectWorldModules() {
     // Shut down any existing NGX context BEFORE re-collecting modules.
     // NVSDK_NGX_VULKAN_Init() is a process-level call — Shutdown1() must be called
