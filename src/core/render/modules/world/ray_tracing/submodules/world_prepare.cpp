@@ -1,11 +1,11 @@
 #include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
-
 #include "core/render/buffers.hpp"
 #include "core/render/gpu_diagnostics.hpp"
 #include "core/render/chunks.hpp"
 #include "core/render/entities.hpp"
-#include "core/render/lights.hpp"
+#include "core/render/radiance_logger.hpp"
 #include "core/render/colorspace.hpp"
+#include "core/render/lights.hpp"
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
@@ -287,17 +287,11 @@ void WorldPrepareContext::render() {
                     if (!entities1[i]->blas) continue; // entity BLAS not yet built
                     instanceBuilder.defineInstance(transform, blasIndex, entities1[i]->rtFlag, blasGroupAccu, flags,
                                                    entities1[i]->blas);
-                } else {
-                    // auto &prebuiltBLAS =
-                    //     Renderer::instance().framework()->prebuiltBLASs()[entityRenderData->prebuiltBLAS];
-                    // transform = prebuiltBLAS.align(*entityRenderData->vertices, *entityRenderData->indices);
-
-                    // instanceBuilder.defineInstance(transform, blasIndex, entityRenderData->rtFlag, blasGroupAccu,
-                    // flags,
-                    //                                prebuiltBLAS.blas);
-                    throw std::runtime_error("prebuilt blas not implemented yet!");
-                }
-
+		} else {
+			// Prebuilt BLAS not implemented — skip this entity
+			RadianceLogger::log("world_prepare", "WARN", "Skipping entity with prebuiltBLAS=%d", entities1[i]->prebuiltBLAS);
+			continue;
+			}
                 geometryTypes.push_back(World::GeometryTypes::SHADOW);
                 geometryTypes.insert(geometryTypes.end(), entities1[i]->geometryTypes->begin(),
                                      entities1[i]->geometryTypes->end());

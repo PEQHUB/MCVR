@@ -16,6 +16,7 @@
 #include "core/render/modules/world/tone_mapping/tone_mapping_module.hpp"
 
 #include "core/render/gpu_profiler.hpp"
+#include "core/render/radiance_logger.hpp"
 
 #include <cstdlib>
 #include <set>
@@ -252,27 +253,25 @@ void WorldPipelineContext::render() {
     auto wp = worldPipeline.lock();
 
     for (int i = 0; i < worldModuleContexts.size(); i++) {
-        // Resolve module name
-        std::string name = "Module_" + std::to_string(i);
-        if (wp && i < wp->moduleNames_.size()) {
-            auto it = moduleShortNames.find(wp->moduleNames_[i]);
-            name = (it != moduleShortNames.end()) ? it->second : wp->moduleNames_[i];
-        }
-
-        // Vulkan debug label (visible in Nsight Systems/Graphics)
-        worldCommandBuffer->beginLabel(name.c_str());
-
-        // Native GPU profiler timestamp
-        if (profiling) profiler.beginModule(rawCmd, name);
-
-        worldModuleContexts[i]->render();
-
-        if (profiling) profiler.endModule(rawCmd);
-        worldCommandBuffer->endLabel();
+    // Resolve module name
+    std::string name = "Module_" + std::to_string(i);
+    if (wp && i < wp->moduleNames_.size()) {
+      auto it = moduleShortNames.find(wp->moduleNames_[i]);
+      name = (it != moduleShortNames.end()) ? it->second : wp->moduleNames_[i];
     }
 
-    GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::FRAME_COMPLETE);
+    // Vulkan debug label (visible in Nsight Systems/Graphics)
+    worldCommandBuffer->beginLabel(name.c_str());
 
+    // Native GPU profiler timestamp
+    if (profiling) profiler.beginModule(rawCmd, name);
+
+    		worldModuleContexts[i]->render();
+		if (profiling) profiler.endModule(rawCmd);
+		worldCommandBuffer->endLabel();
+	}
+
+	GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::FRAME_COMPLETE);
     worldCommandBuffer->barriersBufferImage(
         {}, {{
                 .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT |

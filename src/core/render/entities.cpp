@@ -1,6 +1,6 @@
 #include "core/render/entities.hpp"
-
 #include "core/render/buffers.hpp"
+#include "core/render/radiance_logger.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
@@ -808,8 +808,62 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                     break;
                 }
+		case World::DrawMode::TRIANGLES: {
+			for (int j = 0; j < task.vertexCounts[geometryIndex + i]; j += 3) {
+				geometryIndices.push_back(j + 0);
+				geometryIndices.push_back(j + 1);
+				geometryIndices.push_back(j + 2);
+
+				if (task.normalOffset) {
+					if (geometryVertices[j + 0].flags & vk::VertexFormat::PBR_FLAG_USE_NORM)
+						geometryVertices[j + 0].pos += 0.00001f * glm::normalize(geometryVertices[j + 0].norm);
+					if (geometryVertices[j + 1].flags & vk::VertexFormat::PBR_FLAG_USE_NORM)
+						geometryVertices[j + 1].pos += 0.00001f * glm::normalize(geometryVertices[j + 1].norm);
+					if (geometryVertices[j + 2].flags & vk::VertexFormat::PBR_FLAG_USE_NORM)
+						geometryVertices[j + 2].pos += 0.00001f * glm::normalize(geometryVertices[j + 2].norm);
+				}
+
+				geometryVertices[j + 0].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
+				geometryVertices[j + 1].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
+				geometryVertices[j + 2].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
+
+				if (post) {
+					geometryVertices[j + 0].postBase = {x, y, z};
+					geometryVertices[j + 1].postBase = {x, y, z};
+					geometryVertices[j + 2].postBase = {x, y, z};
+				}
+			}
+			// Convert triangle list to quad-indexed format (degenerate 4th vertex per tri)
+			std::vector<vk::VertexFormat::PBRTriangle> quadVertices;
+			std::vector<uint32_t> quadIndices;
+			int accu = 0;
+			for (int j = 0; j + 2 < geometryIndices.size(); j += 3) {
+				quadVertices.push_back(geometryVertices[geometryIndices[j + 0]]);
+				quadVertices.push_back(geometryVertices[geometryIndices[j + 1]]);
+				quadVertices.push_back(geometryVertices[geometryIndices[j + 2]]);
+				quadVertices.push_back(geometryVertices[geometryIndices[j + 2]]); // degenerate
+				quadIndices.push_back(accu + 0); quadIndices.push_back(accu + 1);
+				quadIndices.push_back(accu + 2); quadIndices.push_back(accu + 2);
+				quadIndices.push_back(accu + 3); quadIndices.push_back(accu + 0);
+				accu += 4;
+			}
+			geometryVertices = quadVertices;
+			geometryIndices = quadIndices;
+			break;
+		}
+		case World::DrawMode::DEBUG_LINES:
+		case World::DrawMode::DEBUG_LINE_STRIP: {
+			// Debug line rendering is not supported in RT — skip
+			geometryVertices.clear();
+			break;
+		}
+
                 default: {
-                    throw std::runtime_error("Shouldn't be touched");
+                    // Unsupported draw mode (DEBUG_LINES, DEBUG_LINE_STRIP, TRIANGLES, TRIANGLE_FAN)
+                    // Skip this geometry to avoid crashing the JVM
+                    RadianceLogger::log("entities", "WARN", "Skipping unsupported draw mode: %d", static_cast<int>(task.indexFormats[geometryIndex + i]));
+                    geometryVertices.clear();
+                    break;
                 }
             }
 

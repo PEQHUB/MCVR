@@ -15,6 +15,7 @@
 
 #include "core/render/crash_ring_buffer.hpp"
 #include "core/render/radiance_logger.hpp"
+#include "core/vulkan/vma.hpp"
 #include "core/render/modules/world/frame_gen/frame_gen_manager.hpp"
 #include "core/render/frame_slot_ring.hpp"
 #include "core/render/overlay_compositor.hpp"
@@ -554,10 +555,29 @@ void Framework::submitCommand() {
         FrameTiming::Clock::now() - FrameTiming::acquireEnd).count();
 
     renderDiag("submitCommand shouldRender=%d overlayActive=%d",
-               (int)Renderer::instance().world()->shouldRender(),
-               (int)(overlayCompositor_ && overlayCompositor_->isActive()));
-
-    // PCL: simulation phase ends, render phase begins
+            (int)Renderer::instance().world()->shouldRender(),
+            (int)(overlayCompositor_ && overlayCompositor_->isActive()));
+  // Log VRAM state on every shouldRender=1 transition (first real render frame)
+  static bool sLoggedFirstRender = false;
+  bool shouldRender = Renderer::instance().world()->shouldRender();
+  if (shouldRender && !sLoggedFirstRender) {
+    sLoggedFirstRender = true;
+    auto vma = vma_;
+    if (vma) {
+      VmaTotalStatistics vts{};
+      vmaCalculateStatistics(vma->allocator(), &vts);
+      VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+      vmaGetHeapBudgets(vma->allocator(), budgets);
+      uint64_t totalBudget = 0, totalUsage = 0;
+      for (uint32_t i = 0; i < VK_MAX_MEMORY_HEAPS; ++i) { totalBudget += budgets[i].budget; totalUsage += budgets[i].usage; }
+      float usedGB = (float)totalUsage / (1024.f * 1024.f * 1024.f);
+      float budgetGB = (float)totalBudget / (1024.f * 1024.f * 1024.f);
+      float allocGB = (float)vts.total.statistics.blockBytes / (1024.f * 1024.f * 1024.f);
+      std::cerr << "[Radiance] FIRST RENDER VRAM: usage=" << usedGB << "GB budget=" << budgetGB
+                << "GB allocated=" << allocGB << "GB allocs=" << vts.total.statistics.allocationCount
+                << " blocks=" << vts.total.statistics.blockCount << std::endl;
+    }
+  }
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::eSimulationEnd);
 #endif
@@ -580,7 +600,17 @@ void Framework::submitCommand() {
     if (Renderer::instance().world()->shouldRender() && pipelineContext->worldPipelineContext) {
         Renderer::gpuProfiler.beginFrame(
             currentContext_->worldCommandBuffer->vkCommandBuffer(), currentContextIndex_);
-        pipelineContext->worldPipelineContext->render();
+        try {
+            pipelineContext->worldPipelineContext->render();
+        } catch (const std::exception& e) {
+            renderDiag("FATAL: WorldPipelineContext::render() threw: %s", e.what());
+            renderDiag("FATAL: render() threw: %s", e.what());
+            throw; // re-throw so JVM still sees the failure
+        } catch (...) {
+            renderDiag("FATAL: WorldPipelineContext::render() threw unknown exception");
+            renderDiag("FATAL: render() threw unknown exception");
+            throw;
+        }
         Renderer::gpuProfiler.endFrame(
             currentContext_->worldCommandBuffer->vkCommandBuffer());
     }

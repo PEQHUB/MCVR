@@ -99,7 +99,7 @@ void Buffers::initializeBuffer(uint32_t id, uint32_t size, VkBufferUsageFlags us
 void Buffers::buildIndexBuffer(uint32_t dstId, int type, int drawMode, int vertexCount, int expectedIndexCount) {
     auto buildQuadIndices = [this, dstId, vertexCount, expectedIndexCount]<typename V>() {
         int indexCount = vertexCount / 4 * 6;
-        if (indexCount != expectedIndexCount) { throw std::runtime_error("index count not match!"); }
+		if (indexCount != expectedIndexCount) { std::cout << "Warning: index count mismatch: " << indexCount << " != " << expectedIndexCount << std::endl; return; }
 
         std::vector<V> indices;
         for (int i = 0; i < vertexCount; i += 4) {
@@ -130,8 +130,8 @@ void Buffers::buildIndexBuffer(uint32_t dstId, int type, int drawMode, int verte
         }
 
         default: {
-            std::cout << "Get draw mode=" << drawMode << std::endl;
-            throw std::runtime_error("not implemented yet");
+		std::cout << "Warning: unsupported overlay draw mode=" << drawMode << ", skipping" << std::endl;
+		break;
         }
     }
 }
