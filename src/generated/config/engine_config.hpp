@@ -25,7 +25,7 @@ struct EngineConfig {
     // --- rayTracing ---
     bool areaLightsEnabled = false;  // Enable area light evaluation in RT shaders
     bool eonDiffuse = true;  // EON diffuse BRDF (replaces Lambertian)
-    bool greedyMeshingEnabled = true;  // CPU-side coplanar face merging for chunk geometry
+    bool greedyMeshingEnabled = false;  // Disabled: unsafe across native block and Java atlas geometry
     bool multiScatterGGX = true;  // Multi-scatter GGX energy compensation (Kulla-Conty)
     bool noiseLOD = true;  // Noise-based LOD for distant surfaces
     uint32_t ommBakerLevel = 4;  // OMM subdivision level (higher = more precise, more memory)

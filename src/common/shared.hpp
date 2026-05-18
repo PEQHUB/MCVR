@@ -134,6 +134,7 @@ namespace VertexFormat {
     static constexpr uint32_t PBR_FLAG_BIOME_TINT_SHIFT = 12u;
     static constexpr uint32_t PBR_FLAG_BIOME_TINT_MASK  = 0x3u << 12u;
     static constexpr uint32_t PBR_FLAG_BLOCK_GEOMETRY   = 1u << 14; // block chunk: use texture array, not bindless atlas
+    static constexpr uint32_t PBR_FLAG_FLUID_GEOMETRY   = 1u << 15; // fluid surface: alpha is not a cutout mask
 #else
     #define PBR_FLAG_USE_NORM        (1u << 0)
     #define PBR_FLAG_USE_COLOR_LAYER (1u << 1)
@@ -149,6 +150,7 @@ namespace VertexFormat {
     #define PBR_FLAG_BIOME_TINT_SHIFT 12u
     #define PBR_FLAG_BIOME_TINT_MASK  (0x3u << 12u)
     #define PBR_FLAG_BLOCK_GEOMETRY   (1u << 14)
+    #define PBR_FLAG_FLUID_GEOMETRY   (1u << 15)
 #endif
 
     // 96 bytes per vertex, std430 aligned (6 x vec4)
@@ -438,8 +440,10 @@ namespace Data {
 
 #ifdef __cplusplus
     static constexpr int TEX_PROP_HAS_HEIGHT_MAP = 1;
+    static constexpr int TEX_PROP_TEXTURE_ARRAY = 1 << 8;
 #else
     #define TEX_PROP_HAS_HEIGHT_MAP 1
+    #define TEX_PROP_TEXTURE_ARRAY (1 << 8)
 #endif
 
     struct TextureMapping {
@@ -463,12 +467,30 @@ namespace Data {
     static constexpr uint32_t SPRITE_FLAG_HAS_SPECULAR = 1u << 0;
     static constexpr uint32_t SPRITE_FLAG_HAS_NORMAL   = 1u << 1;
     static constexpr uint32_t SPRITE_FLAG_HAS_HEIGHT   = 1u << 2;
+    static constexpr uint32_t SPRITE_FLAG_SPEC_SOURCE_SHIFT = 3u;
+    static constexpr uint32_t SPRITE_FLAG_NORMAL_SOURCE_SHIFT = 5u;
+    static constexpr uint32_t SPRITE_FLAG_SOURCE_MASK = 0x3u;
+    static constexpr uint32_t SPRITE_FLAG_SPEC_SOURCE_MASK = SPRITE_FLAG_SOURCE_MASK << SPRITE_FLAG_SPEC_SOURCE_SHIFT;
+    static constexpr uint32_t SPRITE_FLAG_NORMAL_SOURCE_MASK = SPRITE_FLAG_SOURCE_MASK << SPRITE_FLAG_NORMAL_SOURCE_SHIFT;
+    static constexpr uint32_t SPRITE_SOURCE_GENERATED = 0u;
+    static constexpr uint32_t SPRITE_SOURCE_PACK_AUTHORED = 1u;
+    static constexpr uint32_t SPRITE_SOURCE_USER_CUSTOM = 2u;
+    static constexpr uint32_t SPRITE_SOURCE_FLAT = 3u;
     static constexpr uint32_t SPRITE_MAX_ENTRIES        = 2048u;
     static_assert(sizeof(SpriteEntry) == 32, "SpriteEntry must be exactly 32 bytes");
 #else
     #define SPRITE_FLAG_HAS_SPECULAR (1u << 0)
     #define SPRITE_FLAG_HAS_NORMAL   (1u << 1)
     #define SPRITE_FLAG_HAS_HEIGHT   (1u << 2)
+    #define SPRITE_FLAG_SPEC_SOURCE_SHIFT 3u
+    #define SPRITE_FLAG_NORMAL_SOURCE_SHIFT 5u
+    #define SPRITE_FLAG_SOURCE_MASK 0x3u
+    #define SPRITE_FLAG_SPEC_SOURCE_MASK (SPRITE_FLAG_SOURCE_MASK << SPRITE_FLAG_SPEC_SOURCE_SHIFT)
+    #define SPRITE_FLAG_NORMAL_SOURCE_MASK (SPRITE_FLAG_SOURCE_MASK << SPRITE_FLAG_NORMAL_SOURCE_SHIFT)
+    #define SPRITE_SOURCE_GENERATED 0u
+    #define SPRITE_SOURCE_PACK_AUTHORED 1u
+    #define SPRITE_SOURCE_USER_CUSTOM 2u
+    #define SPRITE_SOURCE_FLAT 3u
     #define SPRITE_MAX_ENTRIES       2048u
 #endif
 

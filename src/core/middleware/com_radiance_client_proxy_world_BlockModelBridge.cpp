@@ -113,6 +113,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
     }
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeSetTextureGeneration(
+    JNIEnv *, jclass, jlong generation) {
+    Renderer::textureSystem.setGeneration(static_cast<uint64_t>(generation));
+}
+
 // ---- Block state registry (for C++-only chunk loading from region files) ----
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeUploadBlockStateRegistry(

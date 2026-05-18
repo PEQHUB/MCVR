@@ -260,15 +260,50 @@ void WorldPipelineContext::render() {
       name = (it != moduleShortNames.end()) ? it->second : wp->moduleNames_[i];
     }
 
-    // Vulkan debug label (visible in Nsight Systems/Graphics)
-    worldCommandBuffer->beginLabel(name.c_str());
+    bool labelOpen = false;
+    bool profilerOpen = false;
+    try {
+        if (!worldModuleContexts[i]) {
+            throw std::runtime_error("null world module context");
+        }
 
-    // Native GPU profiler timestamp
-    if (profiling) profiler.beginModule(rawCmd, name);
+        // Vulkan debug label (visible in Nsight Systems/Graphics)
+        worldCommandBuffer->beginLabel(name.c_str());
+        labelOpen = true;
 
-    		worldModuleContexts[i]->render();
-		if (profiling) profiler.endModule(rawCmd);
-		worldCommandBuffer->endLabel();
+        // Native GPU profiler timestamp
+        if (profiling) {
+            profiler.beginModule(rawCmd, name);
+            profilerOpen = true;
+        }
+
+        worldModuleContexts[i]->render();
+
+        if (profilerOpen) {
+            profiler.endModule(rawCmd);
+            profilerOpen = false;
+        }
+        worldCommandBuffer->endLabel();
+        labelOpen = false;
+    } catch (const std::exception& e) {
+        renderDiag("FATAL: world module %d (%s) threw: %s", i, name.c_str(), e.what());
+        try {
+            if (profilerOpen) profiler.endModule(rawCmd);
+        } catch (...) {}
+        try {
+            if (labelOpen) worldCommandBuffer->endLabel();
+        } catch (...) {}
+        throw;
+    } catch (...) {
+        renderDiag("FATAL: world module %d (%s) threw unknown exception", i, name.c_str());
+        try {
+            if (profilerOpen) profiler.endModule(rawCmd);
+        } catch (...) {}
+        try {
+            if (labelOpen) worldCommandBuffer->endLabel();
+        } catch (...) {}
+        throw;
+    }
 	}
 
 	GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::FRAME_COMPLETE);

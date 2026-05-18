@@ -29,7 +29,7 @@ struct Options {
     uint32_t rayBounces = 16;
     bool ommEnabled = false; // Opacity Micro Maps (disabled by default until Phase 1 validated)
     uint32_t ommBakerLevel = 4; // OMM baker max subdivision level (1-8)
-    bool greedyMeshingEnabled = true; // Merge coplanar block faces (50-70% triangle reduction)
+    bool greedyMeshingEnabled = false; // Disabled: unsafe across native block and Java atlas geometry
     bool simplifiedIndirect = false; // Skip detail textures on indirect bounces + simplify shadow AHS
     bool outputScale2x = false;     // Render world at 2x display resolution, FSR1 EASU downscale
     bool reflexEnabled = false;     // NVIDIA Reflex low-latency mode (VK_NV_low_latency2)

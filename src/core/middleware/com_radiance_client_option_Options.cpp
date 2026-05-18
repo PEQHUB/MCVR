@@ -89,9 +89,10 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGreedyMeshingEnabled(
-    JNIEnv *, jclass, jboolean enabled, jboolean write) {
-    Renderer::options.greedyMeshingEnabled = enabled;
-    if (write) {
+    JNIEnv *, jclass, jboolean, jboolean write) {
+    bool wasEnabled = Renderer::options.greedyMeshingEnabled;
+    Renderer::options.greedyMeshingEnabled = false;
+    if (write && wasEnabled) {
         Renderer::options.needRecreate = true;
         Renderer::instance().world()->chunks()->resetScheduler();
     }

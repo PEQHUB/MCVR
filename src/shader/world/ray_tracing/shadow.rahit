@@ -95,6 +95,7 @@ void main() {
     vec2 uv = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
     uint textureID = v0.textureID;
     bool isBlockGeometry = (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
+    bool isFluidGeometry = (v0.flags & PBR_FLAG_FLUID_GEOMETRY) != 0u;
 
     bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
     vec4 colorLayer;
@@ -159,6 +160,9 @@ void main() {
 
     vec3 tint = (albedo * colorLayer).rgb;
     float alpha = (albedo * colorLayer).a;
+    if (isFluidGeometry) {
+        alpha = 1.0;
+    }
 
     if (!SIMPLIFY_THIS_RAY) {
         float useGlint = float((v0.flags & PBR_FLAG_USE_GLINT) != 0u);
@@ -185,7 +189,7 @@ void main() {
     // which is equivalent to alpha < (1.0 - 1e-6)
     bool hasTransmission;
     if (SIMPLIFY_THIS_RAY) {
-        hasTransmission = alpha < 0.95;
+        hasTransmission = isFluidGeometry || alpha < 0.95;
     } else {
         LabPBRMat mat = convertLabPBRMaterial(albedo * colorLayer, specular, normalVal);
         // Material override: vertex materialType → mask texture → SSBO lookup

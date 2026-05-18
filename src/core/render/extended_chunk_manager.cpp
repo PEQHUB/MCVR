@@ -150,6 +150,11 @@ void ExtendedChunkManager::workerLoop() {
                 input.originZ = cz * 16;
                 input.blockAtlasTextureId = 0; // Texture array system doesn't use this
 
+                uint64_t textureGeneration = Renderer::textureSystem.generation();
+                if (Renderer::blockModelTable.generation() != textureGeneration) {
+                    continue;
+                }
+
                 // Mesh
                 auto meshOutput = BlockMesher::mesh(input, Renderer::blockModelTable);
 
@@ -188,6 +193,7 @@ void ExtendedChunkManager::workerLoop() {
                 chunkBuildData->biomeGrassColor = 0x91BD59;
                 chunkBuildData->biomeFoliageColor = 0x77AB2F;
                 chunkBuildData->biomeWaterColor = 0x3F76E4;
+                chunkBuildData->textureGeneration = textureGeneration;
 
                 // Submit to existing build pipeline
                 chunks_->submitExtendedBuild(extId, chunkBuildData);

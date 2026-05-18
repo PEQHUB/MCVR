@@ -1,7 +1,16 @@
 #include "block_model_table.hpp"
 #include "core/render/renderer.hpp"
+#include <cstdint>
 #include <cstring>
 #include <iostream>
+
+namespace {
+uint8_t fluidBaseType(uint8_t fluidType) {
+    if (fluidType == 3) return 1;
+    if (fluidType == 4) return 2;
+    return fluidType;
+}
+}
 
 void BlockModelTable::load(const BlockModelEntry* entries, uint32_t entryCount,
                            const BlockModelQuad* quads, uint32_t quadCount) {
@@ -25,12 +34,12 @@ void BlockModelTable::load(const BlockModelEntry* entries, uint32_t entryCount,
         if (entries[i].renderType != 0) modelCount++;
     }
 
-    // Extract water data from pure water entry (renderType==2, fluidType==1)
+    // Extract water data from a pure water entry (source or flowing).
     waterSpriteStill_ = 0;
     waterSpriteFlow_  = 0;
     waterMaterialOrdinal_ = 255;
     for (uint32_t i = 0; i < entryCount; i++) {
-        if (entries[i].renderType == 2 && entries[i].fluidType == 1) {
+        if (entries[i].renderType == 2 && fluidBaseType(entries[i].fluidType) == 1) {
             waterSpriteStill_ = entries[i].fluidSpriteStill();
             waterSpriteFlow_  = entries[i].fluidSpriteFlow();
             waterMaterialOrdinal_ = entries[i].materialOrdinal;
@@ -41,10 +50,12 @@ void BlockModelTable::load(const BlockModelEntry* entries, uint32_t entryCount,
     // Copy quad array (UVs are in atlas space, need normalizeQuadUVs() later)
     quads_.assign(quads, quads + quadCount);
     uvsNormalized_ = false;
+    generation_ = Renderer::textureSystem.generation();
 
     std::cout << "[BlockModelTable] Loaded " << entryCount << " block states ("
               << modelCount << " with models), " << quadCount << " quads, "
-              << "max stateId=" << maxStateId_ << std::endl;
+              << "max stateId=" << maxStateId_
+              << ", generation=" << generation_ << std::endl;
 }
 
 void BlockModelTable::loadBiomeTints(const BiomeTintEntry* tints, uint32_t count) {
@@ -130,4 +141,3 @@ glm::u8vec3 BlockModelTable::getBiomeTint(uint16_t biomeId, uint8_t tintType) co
     if (idx >= biomeTints_.size()) return glm::u8vec3(255, 255, 255);
     return biomeTints_[idx];
 }
-

@@ -3,6 +3,7 @@
 
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 using PBRTriangle = vk::VertexFormat::PBRTriangle;
 
@@ -135,6 +136,22 @@ void BlockMesher::emitQuad(std::vector<PBRTriangle>& vertices,
 uint32_t BlockMesher::getBlockAt(const SectionInput& input, int x, int y, int z) {
     if (x >= 0 && x < 16 && y >= 0 && y < 16 && z >= 0 && z < 16)
         return input.blockStates[y * 256 + z * 16 + x];
+
+    if (input.hasHaloStates &&
+        x >= -1 && x <= 16 &&
+        y >= -1 && y <= 16 &&
+        z >= -1 && z <= 16) {
+        return input.haloStates[(y + 1) * 18 * 18 + (z + 1) * 18 + (x + 1)];
+    }
+
+    // Neighbor faces only cover single-axis section boundaries. Diagonal samples
+    // happen during fluid corner-height averaging; treat those as air instead of
+    // indexing the wrong row of a neighbor face.
+    const int outAxes = (x < 0 || x > 15 ? 1 : 0)
+                      + (y < 0 || y > 15 ? 1 : 0)
+                      + (z < 0 || z > 15 ? 1 : 0);
+    if (outAxes != 1) return 0;
+
     // Single-axis out of bounds: use neighbor face data
     if (y < 0)  return input.neighborStates[0][z * 16 + x];    // DOWN
     if (y > 15) return input.neighborStates[1][z * 16 + x];    // UP
@@ -142,7 +159,7 @@ uint32_t BlockMesher::getBlockAt(const SectionInput& input, int x, int y, int z)
     if (z > 15) return input.neighborStates[3][y * 16 + x];    // SOUTH
     if (x < 0)  return input.neighborStates[4][y * 16 + z];    // WEST
     if (x > 15) return input.neighborStates[5][y * 16 + z];    // EAST
-    return 0; // diagonal out-of-bounds: treat as air
+    return 0;
 }
 
 float BlockMesher::getFluidHeightAt(const SectionInput& input, const BlockModelTable& table,
@@ -150,7 +167,8 @@ float BlockMesher::getFluidHeightAt(const SectionInput& input, const BlockModelT
     uint32_t stateId = getBlockAt(input, x, y, z);
     if (stateId == 0) return 0.0f;
     const BlockModelEntry* entry = table.getEntry(stateId);
-    if (!entry || entry->fluidType == 0) return 0.0f;
+    if (!entry) return 0.0f;
+    if (entry->fluidType == 0) return entry->isFullOpaqueCube ? -1.0f : 0.0f;
     // Must be same fluid type (water=1, lava=2)
     uint8_t ft = entry->fluidType;
     uint8_t baseType = (ft <= 2) ? ft : ((ft == 3) ? 1 : 2); // normalize flowing→base
@@ -178,23 +196,48 @@ float BlockMesher::getFluidHeightAt(const SectionInput& input, const BlockModelT
     return static_cast<float>(level) / 9.0f; // source=8/9, flowing 1-7 proportional
 }
 
-static float averageCornerHeight(float h0, float h1, float h2, float h3) {
-    // Average non-zero heights (Minecraft's corner averaging algorithm)
-    float sum = 0; int count = 0;
-    if (h0 > 0) { sum += h0; count++; }
-    if (h1 > 0) { sum += h1; count++; }
-    if (h2 > 0) { sum += h2; count++; }
-    if (h3 > 0) { sum += h3; count++; }
-    return count > 0 ? sum / count : 0.0f;
+static void addVanillaFluidHeight(float& weightedSum, float& weight, float height) {
+    if (height >= 0.8f) {
+        weightedSum += height * 10.0f;
+        weight += 10.0f;
+    } else if (height >= 0.0f) {
+        weightedSum += height;
+        weight += 1.0f;
+    }
+}
+
+static float calculateVanillaCornerHeight(float originHeight,
+                                          float northSouthHeight,
+                                          float eastWestHeight,
+                                          float diagonalHeight) {
+    if (eastWestHeight >= 1.0f || northSouthHeight >= 1.0f) {
+        return 1.0f;
+    }
+
+    float weightedSum = 0.0f;
+    float weight = 0.0f;
+    if (eastWestHeight > 0.0f || northSouthHeight > 0.0f) {
+        if (diagonalHeight >= 1.0f) {
+            return 1.0f;
+        }
+        addVanillaFluidHeight(weightedSum, weight, diagonalHeight);
+    }
+
+    addVanillaFluidHeight(weightedSum, weight, originHeight);
+    addVanillaFluidHeight(weightedSum, weight, eastWestHeight);
+    addVanillaFluidHeight(weightedSum, weight, northSouthHeight);
+    return weight > 0.0f ? weightedSum / weight : 0.0f;
 }
 
 static void emitFluidFace(std::vector<PBRTriangle>& vertices, std::vector<uint32_t>& indices,
                            const glm::vec3 pos[4], glm::vec3 normal,
                            uint16_t spriteId, uint8_t fluidMaterialOrdinal,
-                           uint8_t tintType, const BlockModelEntry& entry) {
+                           uint8_t tintType, const BlockModelEntry& entry,
+                           const glm::vec2* customUvs = nullptr) {
     uint32_t flags = vk::VertexFormat::PBR_FLAG_USE_NORM
                    | vk::VertexFormat::PBR_FLAG_USE_TEXTURE
-                   | vk::VertexFormat::PBR_FLAG_BLOCK_GEOMETRY;
+                   | vk::VertexFormat::PBR_FLAG_BLOCK_GEOMETRY
+                   | vk::VertexFormat::PBR_FLAG_FLUID_GEOMETRY;
 
     // Biome tint (use override tintType — allows waterlogged blocks to force TINT_WATER)
     if (tintType <= 2) {
@@ -210,6 +253,7 @@ static void emitFluidFace(std::vector<PBRTriangle>& vertices, std::vector<uint32
 
     // Simple UV mapping: 4 corners of the sprite [0,1]
     static const glm::vec2 uvs[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    const glm::vec2* faceUvs = customUvs ? customUvs : uvs;
 
     uint32_t baseIdx = static_cast<uint32_t>(vertices.size());
     for (int v = 0; v < 4; v++) {
@@ -222,7 +266,7 @@ static void emitFluidFace(std::vector<PBRTriangle>& vertices, std::vector<uint32
         vert.colorLayer = glm::vec4(1.0f);
         vert.postBase = vert.pos;
         vert.emissiveBlockType = emissiveBlockType;
-        vert.textureUV = uvs[v];
+        vert.textureUV = faceUvs[v];
         vert.textureID = spriteId;
         vertices.push_back(vert);
     }
@@ -276,11 +320,15 @@ void BlockMesher::emitFluidQuads(const SectionInput& input, const BlockModelTabl
     float hSE = getFluidHeightAt(input, table, x + 1, y, z + 1, fluidType);
     float hSW = getFluidHeightAt(input, table, x - 1, y, z + 1, fluidType);
 
-    // Corner heights: average of 4 blocks touching each corner
-    float cNW = averageCornerHeight(hCenter, hN, hW, hNW);
-    float cNE = averageCornerHeight(hCenter, hN, hE, hNE);
-    float cSW = averageCornerHeight(hCenter, hS, hW, hSW);
-    float cSE = averageCornerHeight(hCenter, hS, hE, hSE);
+    float cNW, cNE, cSW, cSE;
+    if (hCenter >= 1.0f) {
+        cNW = cNE = cSW = cSE = 1.0f;
+    } else {
+        cNW = calculateVanillaCornerHeight(hCenter, hN, hW, hNW);
+        cNE = calculateVanillaCornerHeight(hCenter, hN, hE, hNE);
+        cSW = calculateVanillaCornerHeight(hCenter, hS, hW, hSW);
+        cSE = calculateVanillaCornerHeight(hCenter, hS, hE, hSE);
+    }
 
     // Helper: check if neighbor is same fluid
     auto isSameFluid = [&](int nx, int ny, int nz) -> bool {
@@ -293,28 +341,53 @@ void BlockMesher::emitFluidQuads(const SectionInput& input, const BlockModelTabl
         return nBase == myBase;
     };
 
-    auto isOpaqueAt = [&](int nx, int ny, int nz) -> bool {
+    auto isSideCoveredAt = [&](int nx, int ny, int nz, int direction, float height) -> bool {
         uint32_t ns = getBlockAt(input, nx, ny, nz);
         if (ns == 0) return false;
         const BlockModelEntry* ne = table.getEntry(ns);
-        return ne && ne->isFullOpaqueCube;
+        if (!ne || !ne->isFullOpaqueCube) return false;
+        // Mirrors vanilla FluidRenderer.isSideCovered for full-cube culling faces:
+        // horizontal/down sides are covered by a full cube, but UP only covers a full-height fluid.
+        return direction != 1 || height >= 0.999f;
     };
 
-    // TOP FACE: render if block above is not same fluid
-    if (!isSameFluid(x, y + 1, z)) {
+    bool renderBottom = !isSameFluid(x, y - 1, z) && !isSideCoveredAt(x, y - 1, z, 0, 8.0f / 9.0f);
+    float bottomYOffset = renderBottom ? 0.001f : 0.0f;
+
+    float sideNW = cNW;
+    float sideNE = cNE;
+    float sideSW = cSW;
+    float sideSE = cSE;
+
+    float minSurfaceHeight = std::min(std::min(cNW, cSW), std::min(cSE, cNE));
+    bool renderTop = !isSameFluid(x, y + 1, z) && !isSideCoveredAt(x, y + 1, z, 1, minSurfaceHeight);
+
+    // TOP FACE: render if block above is not same fluid and vanilla culling would not cover it.
+    if (renderTop) {
+        sideNW = std::max(0.0f, cNW - 0.001f);
+        sideNE = std::max(0.0f, cNE - 0.001f);
+        sideSE = std::max(0.0f, cSE - 0.001f);
+        sideSW = std::max(0.0f, cSW - 0.001f);
         glm::vec3 pos[4] = {
-            {bx,     by + cNW, bz},       // NW
-            {bx + 1, by + cNE, bz},       // NE
-            {bx + 1, by + cSE, bz + 1},   // SE
-            {bx,     by + cSW, bz + 1},   // SW
+            {bx,     by + sideNW, bz},       // NW
+            {bx + 1, by + sideNE, bz},       // NE
+            {bx + 1, by + sideSE, bz + 1},   // SE
+            {bx,     by + sideSW, bz + 1},   // SW
         };
         // Normal from height gradient
-        glm::vec3 normal = glm::normalize(glm::vec3(cNW - cNE + cSW - cSE, 2.0f, cNW + cNE - cSW - cSE));
-        emitFluidFace(verts, idxs, pos, normal, stillSprite, fluidMaterial, fluidTint, entry);
+        glm::vec3 normal = glm::normalize(glm::vec3(sideNW - sideNE + sideSW - sideSE, 1.0f, sideNW + sideNE - sideSW - sideSE));
+        bool flowingSurface = (fluidType == 3 || fluidType == 4)
+            || std::abs(sideNW - sideNE) > 0.0005f
+            || std::abs(sideNW - sideSW) > 0.0005f
+            || std::abs(sideSE - sideNE) > 0.0005f
+            || std::abs(sideSE - sideSW) > 0.0005f;
+        emitFluidFace(verts, idxs, pos, normal,
+                      flowingSurface ? flowSprite : stillSprite,
+                      fluidMaterial, fluidTint, entry);
     }
 
-    // BOTTOM FACE: render if block below is not same fluid and not opaque
-    if (!isSameFluid(x, y - 1, z) && !isOpaqueAt(x, y - 1, z)) {
+    // BOTTOM FACE: render if vanilla would expose the lower fluid side.
+    if (renderBottom) {
         glm::vec3 pos[4] = {
             {bx,     by + 0.001f, bz + 1},
             {bx + 1, by + 0.001f, bz + 1},
@@ -324,53 +397,85 @@ void BlockMesher::emitFluidQuads(const SectionInput& input, const BlockModelTabl
         emitFluidFace(verts, idxs, pos, {0, -1, 0}, stillSprite, fluidMaterial, fluidTint, entry);
     }
 
-    // SIDE FACES: render if neighbor is not same fluid and not full opaque
+    auto sideV = [](float height) {
+        return std::clamp((1.0f - height) * 0.5f, 0.0f, 0.5f);
+    };
+
+    // SIDE FACES: follow the upstream vanilla mixin's side offsets and corner pairing.
     // NORTH (z-1)
-    if (!isSameFluid(x, y, z - 1) && !isOpaqueAt(x, y, z - 1)) {
-        float hL = cNW, hR = cNE;
+    if (!isSameFluid(x, y, z - 1) && !isSideCoveredAt(x, y, z - 1, 2, std::max(sideNW, sideNE))) {
+        float yStart = sideNW;
+        float yEnd = sideNE;
         glm::vec3 pos[4] = {
-            {bx + 1, by + hR, bz},
-            {bx,     by + hL, bz},
-            {bx,     by,      bz},
-            {bx + 1, by,      bz},
+            {bx,     by + yStart,        bz + 0.001f},
+            {bx + 1, by + yEnd,          bz + 0.001f},
+            {bx + 1, by + bottomYOffset, bz + 0.001f},
+            {bx,     by + bottomYOffset, bz + 0.001f},
         };
-        emitFluidFace(verts, idxs, pos, {0, 0, -1}, flowSprite, fluidMaterial, fluidTint, entry);
+        glm::vec2 uvs[4] = {
+            {0.0f, sideV(yStart)},
+            {0.5f, sideV(yEnd)},
+            {0.5f, 0.5f},
+            {0.0f, 0.5f},
+        };
+        emitFluidFace(verts, idxs, pos, {0, 0, -1}, flowSprite, fluidMaterial, fluidTint, entry, uvs);
     }
 
     // SOUTH (z+1)
-    if (!isSameFluid(x, y, z + 1) && !isOpaqueAt(x, y, z + 1)) {
-        float hL = cSE, hR = cSW;
+    if (!isSameFluid(x, y, z + 1) && !isSideCoveredAt(x, y, z + 1, 3, std::max(sideSE, sideSW))) {
+        float yStart = sideSE;
+        float yEnd = sideSW;
         glm::vec3 pos[4] = {
-            {bx,     by + hR, bz + 1},
-            {bx + 1, by + hL, bz + 1},
-            {bx + 1, by,      bz + 1},
-            {bx,     by,      bz + 1},
+            {bx + 1, by + yStart,        bz + 1 - 0.001f},
+            {bx,     by + yEnd,          bz + 1 - 0.001f},
+            {bx,     by + bottomYOffset, bz + 1 - 0.001f},
+            {bx + 1, by + bottomYOffset, bz + 1 - 0.001f},
         };
-        emitFluidFace(verts, idxs, pos, {0, 0, 1}, flowSprite, fluidMaterial, fluidTint, entry);
+        glm::vec2 uvs[4] = {
+            {0.0f, sideV(yStart)},
+            {0.5f, sideV(yEnd)},
+            {0.5f, 0.5f},
+            {0.0f, 0.5f},
+        };
+        emitFluidFace(verts, idxs, pos, {0, 0, 1}, flowSprite, fluidMaterial, fluidTint, entry, uvs);
     }
 
     // WEST (x-1)
-    if (!isSameFluid(x - 1, y, z) && !isOpaqueAt(x - 1, y, z)) {
-        float hL = cSW, hR = cNW;
+    if (!isSameFluid(x - 1, y, z) && !isSideCoveredAt(x - 1, y, z, 4, std::max(sideSW, sideNW))) {
+        float yStart = sideSW;
+        float yEnd = sideNW;
         glm::vec3 pos[4] = {
-            {bx, by + hR, bz},
-            {bx, by + hL, bz + 1},
-            {bx, by,      bz + 1},
-            {bx, by,      bz},
+            {bx + 0.001f, by + yStart,        bz + 1},
+            {bx + 0.001f, by + yEnd,          bz},
+            {bx + 0.001f, by + bottomYOffset, bz},
+            {bx + 0.001f, by + bottomYOffset, bz + 1},
         };
-        emitFluidFace(verts, idxs, pos, {-1, 0, 0}, flowSprite, fluidMaterial, fluidTint, entry);
+        glm::vec2 uvs[4] = {
+            {0.0f, sideV(yStart)},
+            {0.5f, sideV(yEnd)},
+            {0.5f, 0.5f},
+            {0.0f, 0.5f},
+        };
+        emitFluidFace(verts, idxs, pos, {-1, 0, 0}, flowSprite, fluidMaterial, fluidTint, entry, uvs);
     }
 
     // EAST (x+1)
-    if (!isSameFluid(x + 1, y, z) && !isOpaqueAt(x + 1, y, z)) {
-        float hL = cNE, hR = cSE;
+    if (!isSameFluid(x + 1, y, z) && !isSideCoveredAt(x + 1, y, z, 5, std::max(sideNE, sideSE))) {
+        float yStart = sideNE;
+        float yEnd = sideSE;
         glm::vec3 pos[4] = {
-            {bx + 1, by + hR, bz + 1},
-            {bx + 1, by + hL, bz},
-            {bx + 1, by,      bz},
-            {bx + 1, by,      bz + 1},
+            {bx + 1 - 0.001f, by + yStart,        bz},
+            {bx + 1 - 0.001f, by + yEnd,          bz + 1},
+            {bx + 1 - 0.001f, by + bottomYOffset, bz + 1},
+            {bx + 1 - 0.001f, by + bottomYOffset, bz},
         };
-        emitFluidFace(verts, idxs, pos, {1, 0, 0}, flowSprite, fluidMaterial, fluidTint, entry);
+        glm::vec2 uvs[4] = {
+            {0.0f, sideV(yStart)},
+            {0.5f, sideV(yEnd)},
+            {0.5f, 0.5f},
+            {0.0f, 0.5f},
+        };
+        emitFluidFace(verts, idxs, pos, {1, 0, 0}, flowSprite, fluidMaterial, fluidTint, entry, uvs);
     }
 }
 

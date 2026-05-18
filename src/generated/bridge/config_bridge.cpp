@@ -122,8 +122,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativ
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetGreedyMeshingEnabled(
-    JNIEnv*, jclass, jboolean value, jboolean /*write*/) {
-    bool captured = static_cast<bool>(value);
+    JNIEnv*, jclass, jboolean, jboolean /*write*/) {
+    bool captured = false;
     engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
         auto& cfg = engine::activeConfig();
         cfg.greedyMeshingEnabled = captured;

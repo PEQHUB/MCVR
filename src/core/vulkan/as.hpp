@@ -213,20 +213,19 @@ class TLASBuilder : public SharedObject<TLASBuilder> {
                                             uint32_t offset,
                                             VkGeometryInstanceFlagsKHR flag,
                                             std::shared_ptr<BLAS> blas);
-        std::shared_ptr<TLASBuilder> endInstanceBuilder(std::shared_ptr<Device> device, std::shared_ptr<VMA> vma);
+        void endInstanceBuilder(std::shared_ptr<Device> device, std::shared_ptr<VMA> vma);
     };
 
   public:
     TLASBuilder();
 
     TLASInstanceBuilder &beginInstanceBuilder();
-    std::shared_ptr<TLASBuilder> defineBuildProperty(VkBuildAccelerationStructureFlagsKHR flags);
-    std::shared_ptr<TLASBuilder> defineUpdateProperty(VkBuildAccelerationStructureFlagsKHR flags,
-                                                      VkAccelerationStructureKHR srcTLAS);
-    std::shared_ptr<TLASBuilder> querySizeInfo(std::shared_ptr<Device> device);
-    std::shared_ptr<TLASBuilder> allocateBuffers(std::shared_ptr<PhysicalDevice> physicalDevice,
-                                                 std::shared_ptr<Device> device,
-                                                 std::shared_ptr<VMA> vma);
+    void defineBuildProperty(VkBuildAccelerationStructureFlagsKHR flags);
+    void defineUpdateProperty(VkBuildAccelerationStructureFlagsKHR flags, VkAccelerationStructureKHR srcTLAS);
+    void querySizeInfo(std::shared_ptr<Device> device);
+    void allocateBuffers(std::shared_ptr<PhysicalDevice> physicalDevice,
+                         std::shared_ptr<Device> device,
+                         std::shared_ptr<VMA> vma);
     std::shared_ptr<TLAS> buildAndSubmit(std::shared_ptr<Device> device, std::shared_ptr<CommandBuffer> commandBuffer);
 
     /// In-place UPDATE: reuses existing TLAS handle/buffer, only updates instance transforms.

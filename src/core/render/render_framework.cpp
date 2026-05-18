@@ -85,7 +85,7 @@ namespace FrameTiming {
         frameCount = 0;
     }
 }
-static void renderDiag(const char *fmt, ...) {
+void renderDiag(const char *fmt, ...) {
     char buf[512];
     va_list args;
     va_start(args, fmt);

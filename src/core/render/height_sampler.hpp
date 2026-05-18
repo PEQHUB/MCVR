@@ -6,6 +6,19 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
+#include <vector>
+
+struct HeightLayerView {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::shared_ptr<const std::vector<uint8_t>> values;
+
+    bool valid() const {
+        return values && width > 0 && height > 0 &&
+               values->size() >= static_cast<size_t>(width) * height;
+    }
+};
 
 // CPU-side height sampling that mirrors the GPU pipeline (pom.glsl).
 // Used during chunk BLAS build to displace tessellated vertices.
@@ -29,9 +42,14 @@ class HeightSampler {
     // Filter-mode dispatch: calls sampleNearest or sampleBilinear.
     static float sampleFiltered(const uint8_t *rgba, uint32_t width, uint32_t height,
                                 float u, float v, int channel, int filterMode);
+    static float sampleFilteredPlane(const uint8_t *values, uint32_t width, uint32_t height,
+                                     float u, float v, int filterMode);
 
     // LabPBR height: sample normal texture alpha channel.
     static float sampleLabPBR(const Textures::TextureRGBAData *normalRGBA,
+                              float u, float v, float uvMinX, float uvMinY,
+                              float uvMaxX, float uvMaxY, int filterMode = FILTER_BILINEAR);
+    static float sampleLabPBR(const HeightLayerView& heightLayer,
                               float u, float v, float uvMinX, float uvMinY,
                               float uvMaxX, float uvMaxY, int filterMode = FILTER_BILINEAR);
 
@@ -42,11 +60,25 @@ class HeightSampler {
                                int heightSourceMode, int filterMode,
                                float lumMin, float lumSpan, bool invertH,
                                float remapMin, float remapMax, float contrast, float offset);
+    static float sampleAutoPBR(const HeightLayerView& heightLayer,
+                               float u, float v, float uvMinX, float uvMinY,
+                               float uvMaxX, float uvMaxY,
+                               int filterMode, float lumMin, float lumSpan,
+                               bool invertH, float remapMin, float remapMax,
+                               float contrast, float offset);
 
     // Unified: sample height using material class params.
     // Returns height in [0,1] where 1.0 = surface, 0.0 = max depth.
     // Reads heightFilter and heightSource from pomPacked0 (new bit layout).
     static float sample(const Textures::TextureRGBAData *normalRGBA,
+                        const Textures::TextureRGBAData *albedoRGBA,
+                        const vk::Data::MaterialClassEntry *material,
+                        bool hasLabPBRHeight, bool isAutoPBR,
+                        float u, float v, float uvMinX, float uvMinY,
+                        float uvMaxX, float uvMaxY);
+    static float sample(const HeightLayerView& labPbrHeight,
+                        const HeightLayerView& autoPbrHeight,
+                        const Textures::TextureRGBAData *normalRGBA,
                         const Textures::TextureRGBAData *albedoRGBA,
                         const vk::Data::MaterialClassEntry *material,
                         bool hasLabPBRHeight, bool isAutoPBR,

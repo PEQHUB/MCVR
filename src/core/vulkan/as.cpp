@@ -434,7 +434,7 @@ vk::TLASBuilder::TLASInstanceBuilder::defineInstance(VkTransformMatrixKHR transf
     return *this;
 }
 
-std::shared_ptr<vk::TLASBuilder>
+void
 vk::TLASBuilder::TLASInstanceBuilder::endInstanceBuilder(std::shared_ptr<Device> device, std::shared_ptr<VMA> vma) {
     // Filter out instances with null BLAS (entity/chunk not yet built)
     instances.erase(
@@ -466,7 +466,6 @@ vk::TLASBuilder::TLASInstanceBuilder::endInstanceBuilder(std::shared_ptr<Device>
     geometry.geometry.instances.data.deviceAddress = instanceBuffer->bufferAddress();
     geometries.push_back(geometry);
 
-    return parent.shared_from_this();
 }
 
 vk::TLASBuilder::TLASBuilder() : tlasInstanceBuilder_(*this) {}
@@ -475,21 +474,18 @@ vk::TLASBuilder::TLASBuilder::TLASInstanceBuilder &vk::TLASBuilder::beginInstanc
     return tlasInstanceBuilder_;
 }
 
-std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::defineBuildProperty(VkBuildAccelerationStructureFlagsKHR flags) {
+void vk::TLASBuilder::defineBuildProperty(VkBuildAccelerationStructureFlagsKHR flags) {
     mode_ = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     flags_ = flags;
-    return shared_from_this();
 }
 
-std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::defineUpdateProperty(VkBuildAccelerationStructureFlagsKHR flags,
-                                                                       VkAccelerationStructureKHR srcTLAS) {
+void vk::TLASBuilder::defineUpdateProperty(VkBuildAccelerationStructureFlagsKHR flags, VkAccelerationStructureKHR srcTLAS) {
     mode_ = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
     flags_ = flags;
     srcTLAS_ = srcTLAS;
-    return shared_from_this();
 }
 
-std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::querySizeInfo(std::shared_ptr<Device> device) {
+void vk::TLASBuilder::querySizeInfo(std::shared_ptr<Device> device) {
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
@@ -502,12 +498,11 @@ std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::querySizeInfo(std::shared_ptr<
     sizeInfo_.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
     vkGetAccelerationStructureBuildSizesKHR(device->vkDevice(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
                                             &buildInfo, &instanceCount, &sizeInfo_);
-    return shared_from_this();
 }
 
-std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::allocateBuffers(std::shared_ptr<PhysicalDevice> physicalDevice,
-                                                                  std::shared_ptr<Device> device,
-                                                                  std::shared_ptr<VMA> vma) {
+void vk::TLASBuilder::allocateBuffers(std::shared_ptr<PhysicalDevice> physicalDevice,
+                                      std::shared_ptr<Device> device,
+                                      std::shared_ptr<VMA> vma) {
     tlasBuffer_ = DeviceLocalBuffer::create(vma, device, false, sizeInfo_.accelerationStructureSize,
                                             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
                                                 VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
@@ -519,8 +514,6 @@ std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::allocateBuffers(std::shared_pt
                                                                   sizeInfo_.updateScratchSize,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 0, VMA_MEMORY_USAGE_GPU_ONLY,
         physicalDevice->accelerationStructProperties().minAccelerationStructureScratchOffsetAlignment);
-
-    return shared_from_this();
 }
 
 std::shared_ptr<vk::TLAS> vk::TLASBuilder::buildAndSubmit(std::shared_ptr<Device> device,

@@ -279,6 +279,10 @@ void main() {
     tExit = min(tExit, tEnter + MARCH_CLAMP);
     // Clamp to weather map extent — probes/samples beyond this have zero coverage
     tExit = min(tExit, WEATHER_EXTENT * 0.45);
+    if (tExit <= tEnter) {
+        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
 
     // Scene depth occlusion
     ivec2 depthTexel = ivec2(uv * vec2(pc.renderWidth, pc.renderHeight));

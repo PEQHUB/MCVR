@@ -91,6 +91,7 @@ class BlockModelTable {
 
     /// Is the table loaded and ready?
     bool isLoaded() const { return !entries_.empty(); }
+    uint64_t generation() const { return generation_; }
 
     /// Total block states loaded.
     uint32_t stateCount() const { return static_cast<uint32_t>(entries_.size()); }
@@ -115,6 +116,7 @@ class BlockModelTable {
 
     // Guard: UVs are only normalized once per load
     bool uvsNormalized_ = false;
+    uint64_t generation_ = 0;
 
     // Water data (from pure water FluidBlock, for waterlogged block meshing)
     uint16_t waterSpriteStill_ = 0;

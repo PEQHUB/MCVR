@@ -16,6 +16,12 @@ void main() {
 
     vec4 scene = imageLoad(uRadiance, texel);
 
+    if (pc.densityMultiplier <= 0.0 || pc.cloudBase > 90000.0 ||
+        pc.cloudWidth < 2u || pc.cloudHeight < 2u) {
+        imageStore(uCloudRadiance, texel, scene);
+        return;
+    }
+
     // Bilinear interpolation from cloud resolution to render resolution.
     // Nearest-neighbor creates blocky artifacts at half/quarter res.
     vec2 cloudUV = (vec2(texel) + 0.5) / vec2(pc.renderWidth, pc.renderHeight)
@@ -28,6 +34,11 @@ void main() {
     vec4 c01 = imageLoad(uCloudColor, base + ivec2(0, 1));
     vec4 c11 = imageLoad(uCloudColor, base + ivec2(1, 1));
     vec4 cloud = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+    if (cloud.a < 0.001 && dot(cloud.rgb, cloud.rgb) < 1e-10) {
+        imageStore(uCloudRadiance, texel, scene);
+        return;
+    }
+    cloud.a = clamp(cloud.a, 0.0, 1.0);
 
     // cloud.rgb = scattered light, cloud.a = transmittance
     // Front-to-back compositing: result = cloud_color + scene * transmittance.

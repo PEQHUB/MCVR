@@ -32,7 +32,7 @@ uint32_t TextureArrayManager::createArray(std::shared_ptr<vk::VMA> vma,
 
     auto sampler = vk::Sampler::create(
         device, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST,
-        VK_SAMPLER_ADDRESS_MODE_REPEAT);
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 
     ArrayInfo info;
     info.image = image;

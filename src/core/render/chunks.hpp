@@ -29,28 +29,32 @@ struct ChunkBuildTask {
     int *vertexFormats;
     int *vertexCounts;
     vk::VertexFormat::PBRTriangle **vertices;
-    bool isImportant;
+ bool isImportant;
+ uint64_t textureGeneration = 0;
 };
-
 /// Block-state-based chunk build task (Phase 2: C++ meshing).
 /// Sends ~12KB of block state data instead of ~200-500KB of pre-meshed vertices.
 struct ChunkBuildTaskV2 {
-    int x, y, z;
-    int64_t id;
-    uint32_t blockStates[4096];    // palette-decoded global state IDs
-    uint16_t biomes[64];           // 4x4x4 biome grid
-    uint32_t neighborStates[6][256]; // neighbor block states per face
-    uint32_t blockAtlasTextureId;  // GL texture ID for block atlas
-    bool isImportant;
-    // Per-section biome colors (packed 0x00RRGGBB) for shader-side tinting
-    uint32_t biomeGrassColor;
-    uint32_t biomeFoliageColor;
-    uint32_t biomeWaterColor;
+ int x, y, z;
+ int64_t id;
+ uint32_t blockStates[4096]; // palette-decoded global state IDs
+ uint16_t biomes[64]; // 4x4x4 biome grid
+ uint32_t neighborStates[6][256]; // neighbor block states per face
+ uint32_t blockAtlasTextureId; // GL texture ID for block atlas
+ bool isImportant;
+ // Per-section biome colors (packed 0x00RRGGBB) for shader-side tinting
+ uint32_t biomeGrassColor;
+ uint32_t biomeFoliageColor;
+ uint32_t biomeWaterColor;
+ uint64_t textureGeneration = 0;
+ // One-block halo for vanilla fluid corner-height parity
+ uint32_t haloStates[4096] = {};
+ bool hasHaloStates = false;
 };
 
 struct ChunkBuildData : public SharedObject<ChunkBuildData> {
-    int64_t id;
     int x, y, z;
+    int64_t id;
     int64_t version;
     uint32_t allVertexCount;
     uint32_t allIndexCount;
@@ -94,10 +98,11 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     uint32_t biomeFoliageColor = 0x77AB2F;
     uint32_t biomeWaterColor = 0x3F76E4;
 
+    uint64_t textureGeneration = 0;
+
     std::shared_ptr<vk::BLAS> blas;
     std::shared_ptr<vk::BLASBuilder> blasBuilder;
-    std::shared_ptr<vk::BLAS> preCompactionBlas;  // kept alive until render thread GCs via Chunk1::enqueue()
-
+    std::shared_ptr<vk::BLAS> preCompactionBlas; // kept alive until render thread GCs via Chunk1::enqueue()
     // DDA displacement: separate AABB BLAS (can't mix with triangle BLAS due to shadow stride=0).
     // Face data accessible via BDA in the intersection shader.
     std::vector<VkAabbPositionsKHR> displacedAABBs;
@@ -297,12 +302,12 @@ struct Chunk1 : public SharedObject<Chunk1> {
     uint32_t biomeGrassColor = 0x91BD59;    // default plains green
     uint32_t biomeFoliageColor = 0x77AB2F;  // default foliage
     uint32_t biomeWaterColor = 0x3F76E4;    // default water blue
+    uint64_t textureGeneration = 0;
 
     float buildFactor(std::chrono::steady_clock::time_point currentTime, glm::vec3 cameraPos);
-
-    void enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData);
-    void invalidate();
-    std::shared_ptr<ChunkRenderData> tryGetValid();
+ void enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData);
+ void invalidate();
+ std::shared_ptr<ChunkRenderData> tryGetValid();
 };
 
 struct ChunkPackedData {

@@ -393,7 +393,6 @@ void WorldPrepareContext::render() {
             prevBlasSnapshot_ = {};
             prevTlasInstanceCount_ = 0;
             tlas = nullptr;
-            tlasBuilder = nullptr;
         }
 
         // Parallel pass 1: update cache + distance cull → collect visible chunk indices
@@ -410,10 +409,12 @@ void WorldPrepareContext::render() {
             uint32_t start = t * numChunks / numThreads;
             uint32_t end = (t + 1) * numChunks / numThreads;
             auto &local = locals[t];
+            uint64_t textureGeneration = Renderer::textureSystem.generation();
 
             for (uint32_t i = start; i < end; i++) {
                 auto &chunk1 = chunk1s[i];
                 if (chunk1->blas == nullptr) continue;
+                if (chunk1->textureGeneration != textureGeneration) continue;
 
                 // Update cache if generation changed
                 auto &cc = cachedChunks_[i];
@@ -593,7 +594,9 @@ void WorldPrepareContext::render() {
                 // Content hash: detect when any constituent chunk changed
                 uint64_t contentHash = 0;
                 for (int idx : chunkIndices) {
-                    contentHash ^= chunk1s[idx]->blasGeneration * 2654435761u + static_cast<uint64_t>(idx);
+                    uint64_t chunkHash = chunk1s[idx]->blasGeneration;
+                    chunkHash ^= chunk1s[idx]->textureGeneration + 0x9e3779b97f4a7c15ull + (chunkHash << 6) + (chunkHash >> 2);
+                    contentHash ^= chunkHash * 2654435761u + static_cast<uint64_t>(idx);
                 }
 
                 // Check cache

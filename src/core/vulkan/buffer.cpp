@@ -398,6 +398,12 @@ void vk::DeviceLocalBuffer::uploadToStagingBuffer(void *src) {
 }
 
 void vk::DeviceLocalBuffer::uploadToStagingBuffer(void *src, size_t size, size_t offset) {
+    if (offset > size_ || size > size_ - offset) {
+        bufferCerr() << "uploadToStagingBuffer: out-of-range upload size=" << size
+                     << " offset=" << offset << " bufferSize=" << size_ << std::endl;
+        sBufferDiag.flush();
+        return;
+    }
     if (!persistStaging_) {
         if (stagingBuffer_ != VK_NULL_HANDLE || stagingAllocation_ != VK_NULL_HANDLE || mappedPtr_ != nullptr) {
             bufferCerr() << "if not persist staging, the staging buffer should not exist!" << std::endl;
@@ -430,7 +436,13 @@ void vk::DeviceLocalBuffer::uploadToStagingBuffer(void *src, size_t size, size_t
 		return;
 	}
 
-	std::memcpy(mappedPtr_, src, size);
+	std::memcpy(static_cast<char *>(mappedPtr_) + offset, src, size);
+	VkResult flushRes = vmaFlushAllocation(vma_->allocator(), stagingAllocation_, offset, size);
+	if (flushRes != VK_SUCCESS) {
+		bufferCerr() << "uploadToStagingBuffer: vmaFlushAllocation failed result=" << flushRes
+		             << " size=" << size << " offset=" << offset << std::endl;
+		sBufferDiag.flush();
+	}
 
     if (!persistStaging_) {
         vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);

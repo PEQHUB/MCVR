@@ -39,7 +39,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
                                                                                      jlong vertexFormats,
                                                                                      jlong vertexCounts,
                                                                                      jlong vertexAddrs,
-                                                                                     jboolean important) {
+                                                                                     jboolean important,
+                                                                                     jlong textureGeneration) {
     auto world = Renderer::instance().world();
     if (world == nullptr) return;
     world->chunks()->queueChunkBuild(ChunkBuildTask{
@@ -54,6 +55,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
         .vertexCounts = reinterpret_cast<int *>(vertexCounts),
         .vertices = reinterpret_cast<vk::VertexFormat::PBRTriangle **>(vertexAddrs),
         .isImportant = static_cast<bool>(important),
+        .textureGeneration = static_cast<uint64_t>(textureGeneration),
     });
 }
 
@@ -61,9 +63,10 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
     JNIEnv *, jclass,
     jint originX, jint originY, jint originZ, jlong index,
     jlong blockStateArrayPtr, jlong palettePtr, jint paletteSize,
-    jlong biomeDataPtr, jlong neighborFacesPtr, jint blockAtlasTextureId,
+    jlong biomeDataPtr, jlong neighborFacesPtr, jlong haloStatesPtr, jint blockAtlasTextureId,
     jboolean important,
-    jint biomeGrassColor, jint biomeFoliageColor, jint biomeWaterColor) {
+    jint biomeGrassColor, jint biomeFoliageColor, jint biomeWaterColor,
+    jlong textureGeneration) {
 
     auto world = Renderer::instance().world();
     if (world == nullptr) return;
@@ -75,6 +78,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
     task.id = index;
     task.blockAtlasTextureId = static_cast<uint32_t>(blockAtlasTextureId);
     task.isImportant = static_cast<bool>(important);
+    task.textureGeneration = static_cast<uint64_t>(textureGeneration);
     task.biomeGrassColor = static_cast<uint32_t>(biomeGrassColor);
     task.biomeFoliageColor = static_cast<uint32_t>(biomeFoliageColor);
     task.biomeWaterColor = static_cast<uint32_t>(biomeWaterColor);
@@ -101,6 +105,16 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
                     sizeof(task.neighborStates));
     } else {
         std::memset(task.neighborStates, 0, sizeof(task.neighborStates));
+    }
+
+    // Copy optional one-block halo used for vanilla fluid corner-height parity.
+    if (haloStatesPtr != 0) {
+        std::memcpy(task.haloStates, reinterpret_cast<const void*>(haloStatesPtr),
+                    sizeof(task.haloStates));
+        task.hasHaloStates = true;
+    } else {
+        std::memset(task.haloStates, 0, sizeof(task.haloStates));
+        task.hasHaloStates = false;
     }
 
     world->chunks()->queueBlockStateBuild(std::move(task));

@@ -23,6 +23,8 @@ class Tessellator {
         uint32_t faceAxis;
 
         // Height data
+        HeightLayerView labPbrHeight;  // Texture-array LabPBR height plane (normal alpha)
+        HeightLayerView autoPbrHeight; // Texture-array AutoPBR luminance plane
         const Textures::TextureRGBAData *normalRGBA;  // For LabPBR height (normal alpha)
         const Textures::TextureRGBAData *albedoRGBA;   // For AutoPBR height (albedo luminance)
         const vk::Data::MaterialClassEntry *material;  // Material class params (may be null)

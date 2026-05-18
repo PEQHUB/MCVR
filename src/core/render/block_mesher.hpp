@@ -30,6 +30,12 @@ class BlockMesher {
         /// DOWN/UP: 16x16 (z*16+x), NORTH/SOUTH: 16x16 (y*16+x), WEST/EAST: 16x16 (y*16+z)
         uint32_t neighborStates[6][256];
 
+        /// Optional one-block halo around the section, indexed as
+        /// (y + 1) * 18 * 18 + (z + 1) * 18 + (x + 1), where x/y/z are in [-1, 16].
+        /// This gives fluid corner-height sampling the same diagonal neighborhood vanilla sees.
+        uint32_t haloStates[18 * 18 * 18]{};
+        bool hasHaloStates = false;
+
         /// Section origin in world coordinates.
         int originX, originY, originZ;
 
@@ -69,7 +75,7 @@ class BlockMesher {
                          const glm::vec4* overlayBounds = nullptr);
 
     /// Get block state at arbitrary position within or adjacent to the section.
-    /// Handles section boundaries using neighborStates. Returns 0 (air) for diagonal out-of-bounds.
+    /// Handles section boundaries using haloStates when present, otherwise neighborStates.
     static uint32_t getBlockAt(const SectionInput& input, int x, int y, int z);
 
     /// Get fluid height at a position (0.0 if not fluid, up to 1.0 for submerged).

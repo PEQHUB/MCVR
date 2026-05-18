@@ -5,6 +5,8 @@
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
+#include <algorithm>
+
 std::ostream &texturesCout() {
     return std::cout << "[Textures] ";
 }
@@ -76,6 +78,9 @@ void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width,
     framework->gc().collect(textures_[id]);
     textures_[id] = vk::DeviceLocalImage::create(device, vma, false, maxLevel, width, height, 1, format,
                                                  VK_IMAGE_USAGE_SAMPLED_BIT, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    textureAlphaClass_.erase(id);
+    textureAlphaData_.erase(id);
+    textureRGBAData_.erase(id);
 
     auto samplerIter = samplers.find(id);
     if (samplerIter == samplers.end()) {
@@ -155,6 +160,26 @@ void Textures::queueUpload(uint8_t *srcPointer,
         exit(EXIT_FAILURE);
     }
     auto dstTexture = (*dstTextureIter).second;
+    if (srcPointer == nullptr || width == 0 || height == 0 || srcRowPixels == 0 || srcOffsetX < 0 || srcOffsetY < 0 ||
+        dstOffsetX < 0 || dstOffsetY < 0) {
+        texturesCerr() << "Invalid texture upload parameters for dstID " << dstId << std::endl;
+        return;
+    }
+
+    auto format = dstTexture->vkFormat();
+    uint32_t bytePerPixel = vk::formatToByte(format);
+    uint32_t mipWidth = std::max(1u, dstTexture->width() >> level);
+    uint32_t mipHeight = std::max(1u, dstTexture->height() >> level);
+    uint32_t srcEndX = static_cast<uint32_t>(srcOffsetX) + width;
+    uint32_t srcEndY = static_cast<uint32_t>(srcOffsetY) + height;
+    size_t requiredSourceBytes =
+        (static_cast<size_t>(srcEndY - 1) * srcRowPixels + srcEndX) * bytePerPixel;
+    if (bytePerPixel == 0 || requiredSourceBytes > srcSizeInBytes ||
+        static_cast<uint32_t>(dstOffsetX) + width > mipWidth ||
+        static_cast<uint32_t>(dstOffsetY) + height > mipHeight) {
+        texturesCerr() << "Out-of-bounds texture upload for dstID " << dstId << std::endl;
+        return;
+    }
 
     auto cacheIter = caches_.find(dstId);
     if (cacheIter == caches_.end()) {
@@ -166,9 +191,6 @@ void Textures::queueUpload(uint8_t *srcPointer,
 
     auto cache = cacheIter->second;
     size_t offset = cache->append(srcPointer, srcSizeInBytes);
-
-    auto format = dstTexture->vkFormat();
-    uint32_t bytePerPixel = vk::formatToByte(format);
 
     VkBufferImageCopy region = {};
     region.bufferRowLength = srcRowPixels;
@@ -191,13 +213,12 @@ void Textures::queueUpload(uint8_t *srcPointer,
         uint32_t texH = dstTexture->height();
 
         auto it = textureAlphaData_.find(dstId);
-        if (it != textureAlphaData_.end()) {
-            // Re-upload: alpha data is overwritten below, no special handling needed
-        } else {
+        if (it == textureAlphaData_.end() || it->second.width != texW || it->second.height != texH ||
+            it->second.alpha.size() != static_cast<size_t>(texW) * texH) {
             TextureAlphaData &data = textureAlphaData_[dstId];
             data.width = texW;
             data.height = texH;
-            data.alpha.resize(texW * texH, 255);
+            data.alpha.assign(static_cast<size_t>(texW) * texH, 255);
             data.animated = false;
             it = textureAlphaData_.find(dstId);
         }
@@ -225,11 +246,12 @@ void Textures::queueUpload(uint8_t *srcPointer,
         uint32_t texH = dstTexture->height();
 
         auto it = textureRGBAData_.find(dstId);
-        if (it == textureRGBAData_.end()) {
+        if (it == textureRGBAData_.end() || it->second.width != texW || it->second.height != texH ||
+            it->second.rgba.size() != static_cast<size_t>(texW) * texH * 4) {
             TextureRGBAData &data = textureRGBAData_[dstId];
             data.width = texW;
             data.height = texH;
-            data.rgba.resize(texW * texH * 4, 0);
+            data.rgba.assign(static_cast<size_t>(texW) * texH * 4, 0);
             it = textureRGBAData_.find(dstId);
         }
 

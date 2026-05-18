@@ -63,7 +63,8 @@ LabPBRMat convertLabPBRMaterial(vec4 texAlbedo, vec4 texSpecular, vec4 texNormal
         float sqrtF0 = sqrt(min(F0, 0.99));
         mat.ior = (1.0 + sqrtF0) / max(1.0 - sqrtF0, EPS);
 
-        if (texAlbedo.a < 1.0 - EPS) { mat.transmission = 1.0; }
+        // Albedo alpha is vanilla coverage/blend data. Physical transmission
+        // comes from material-class overrides for glass, fluids, slime, etc.
     } else if (metalIdx <= 237) {
         vec3 n = vec3(1.0);
         vec3 k = vec3(0.0);
@@ -110,11 +111,17 @@ LabPBRMat convertLabPBRMaterial(vec4 texAlbedo, vec4 texSpecular, vec4 texNormal
     mat.coatWeight = 0.0;
     mat.coatRoughness = 0.0;
 
-    mat.normal.xy = texNormal.xy * 2.0 - 1.0;
-    mat.normal.z = sqrt(1.0 - dot(mat.normal.xy, mat.normal.xy));
+    vec2 normalXY = texNormal.xy * 2.0 - 1.0;
+    float normalXYLenSq = dot(normalXY, normalXY);
+    if (normalXYLenSq > 1.0) {
+        normalXY *= inversesqrt(normalXYLenSq);
+        normalXYLenSq = 1.0;
+    }
+    mat.normal.xy = normalXY;
+    mat.normal.z = sqrt(max(0.0, 1.0 - normalXYLenSq));
 
-    mat.ao = texNormal.z;
-    mat.height = texNormal.w;
+    mat.ao = clamp(texNormal.z, 0.0, 1.0);
+    mat.height = clamp(texNormal.w, 0.0, 1.0);
 
     return mat;
 }

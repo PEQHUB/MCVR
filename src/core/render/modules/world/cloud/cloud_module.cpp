@@ -124,9 +124,6 @@ void CloudModule::setAttributes(int attributeCount, std::vector<std::string> &at
 }
 
 void CloudModule::build() {
-    // TEMPORARY: Force clouds off to stabilize game while cloud system is rebuilt
-    Renderer::options.cloudQuality = 0;
-
     auto framework = framework_.lock();
     if (!framework) return;
     auto worldPipeline = worldPipeline_.lock();
@@ -617,6 +614,27 @@ void CloudModuleContext::render() {
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CloudPushConstant), &pc);
 
     worldCommandBuffer->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE);
+
+    if (!module->enabled_) {
+        worldCommandBuffer->bindComputePipeline(module->compositePipeline_);
+        uint32_t compX = (module->width_ + 7) / 8;
+        uint32_t compY = (module->height_ + 7) / 8;
+        vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), compX, compY, 1);
+
+        worldCommandBuffer->barriersBufferImage({}, {{
+            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = mainQueueIndex,
+            .dstQueueFamilyIndex = mainQueueIndex,
+            .image = cloudRadianceImage,
+            .subresourceRange = subresourceFor(cloudRadianceImage),
+        }});
+        return;
+    }
 
     // --- Pass 0: Noise generation (first frame only) ---
     if (!module->noiseGenerated_) {

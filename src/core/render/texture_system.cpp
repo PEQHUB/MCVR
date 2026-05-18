@@ -6,8 +6,53 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <cmath>
+#include <sstream>
 
 const TextureSystem::SpriteBounds TextureSystem::DEFAULT_BOUNDS = {0.0f, 1.0f, 0.0f, 1.0f};
+
+namespace {
+uint64_t fnv1a64(const uint8_t* data, size_t size) {
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t i = 0; i < size; i++) {
+        hash ^= static_cast<uint64_t>(data[i]);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+HeightLayerView makeHeightLayerFromRGBA(const uint8_t* rgba, uint32_t size, int channel) {
+    HeightLayerView view;
+    if (!rgba || size == 0 || channel < 0 || channel > 3) return view;
+
+    auto values = std::make_shared<std::vector<uint8_t>>();
+    values->resize(static_cast<size_t>(size) * size);
+    for (uint32_t i = 0; i < size * size; i++) {
+        (*values)[i] = rgba[static_cast<size_t>(i) * 4 + channel];
+    }
+    view.width = size;
+    view.height = size;
+    view.values = std::move(values);
+    return view;
+}
+
+HeightLayerView makeLumaLayerFromRGBA(const uint8_t* rgba, uint32_t size) {
+    HeightLayerView view;
+    if (!rgba || size == 0) return view;
+
+    auto values = std::make_shared<std::vector<uint8_t>>();
+    values->resize(static_cast<size_t>(size) * size);
+    for (uint32_t i = 0; i < size * size; i++) {
+        const uint8_t* p = rgba + static_cast<size_t>(i) * 4;
+        float luma = p[0] * 0.2627f + p[1] * 0.6780f + p[2] * 0.0593f;
+        (*values)[i] = static_cast<uint8_t>(std::clamp(luma, 0.0f, 255.0f));
+    }
+    view.width = size;
+    view.height = size;
+    view.values = std::move(values);
+    return view;
+}
+}
 
 void TextureSystem::receiveSpriteTable(const SpriteMetadata* table, uint32_t count,
                                         uint32_t atlasWidth, uint32_t atlasHeight) {
@@ -38,9 +83,39 @@ void TextureSystem::receiveSpriteTable(const SpriteMetadata* table, uint32_t cou
 void TextureSystem::receiveSpritePixels(const uint8_t* data, uint32_t totalBytes) {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    if (!data || totalBytes == 0) {
+        spritePixels_.clear();
+        layerSize_ = 0;
+        std::cerr << "[TextureSystem] Received empty sprite pixel payload" << std::endl;
+        return;
+    }
+    if (sprites_.empty()) {
+        spritePixels_.clear();
+        layerSize_ = 0;
+        std::cerr << "[TextureSystem] Ignoring sprite pixels before sprite table" << std::endl;
+        return;
+    }
+
+    size_t bytesPerLayer = totalBytes / sprites_.size();
+    size_t pixelsPerLayer = bytesPerLayer / 4;
+    uint32_t inferredLayerSize = static_cast<uint32_t>(
+        std::sqrt(static_cast<double>(pixelsPerLayer)));
+    if (bytesPerLayer == 0 || bytesPerLayer % 4 != 0 ||
+        static_cast<size_t>(inferredLayerSize) * inferredLayerSize != pixelsPerLayer ||
+        bytesPerLayer * sprites_.size() != totalBytes) {
+        spritePixels_.clear();
+        layerSize_ = 0;
+        std::cerr << "[TextureSystem] Invalid fixed-layer sprite payload: bytes="
+                  << totalBytes << ", sprites=" << sprites_.size() << std::endl;
+        return;
+    }
+
+    layerSize_ = inferredLayerSize;
     spritePixels_.assign(data, data + totalBytes);
 
-    std::cout << "[TextureSystem] Received " << (totalBytes / 1024) << " KB sprite pixels" << std::endl;
+    std::cout << "[TextureSystem] Received " << (totalBytes / 1024)
+              << " KB sprite pixels (" << layerSize_ << "x" << layerSize_
+              << " layers)" << std::endl;
 }
 
 void TextureSystem::receiveAuxPixels(const uint8_t* specularData, const uint8_t* normalData,
@@ -58,12 +133,26 @@ void TextureSystem::receiveAnimationFrames(const uint8_t* data, uint32_t totalBy
     std::lock_guard<std::mutex> lock(mutex_);
 
     animEntries_.clear();
+    if (!data || totalBytes == 0) {
+        std::cout << "[TextureSystem] Received animation data for 0 animated sprites (0 bytes)" << std::endl;
+        return;
+    }
+    if (sprites_.empty()) {
+        std::cerr << "[TextureSystem] Ignoring animation data before sprite table" << std::endl;
+        return;
+    }
 
-    // Parse bulk format: [spriteId(u16), frameIndex(u16), pixels(w*h*4)] repeated
+    // Parse bulk format: [spriteId(u16), frameIndex(u16), pixels(layerSize^2*4)] repeated
+    // Java writes every frame as a fixed-size texture-array layer.
+    size_t frameBytes = static_cast<size_t>(layerSize_) * layerSize_ * 4;
+    if (frameBytes == 0) {
+        std::cerr << "[TextureSystem] Ignoring animation data with zero frame size" << std::endl;
+        return;
+    }
     const uint8_t* ptr = data;
     const uint8_t* end = data + totalBytes;
 
-    while (ptr + 4 <= end) {
+    while (ptr + 4 + frameBytes <= end) {
         uint16_t spriteId = *reinterpret_cast<const uint16_t*>(ptr);
         uint16_t frameIndex = *reinterpret_cast<const uint16_t*>(ptr + 2);
         ptr += 4;
@@ -71,18 +160,11 @@ void TextureSystem::receiveAnimationFrames(const uint8_t* data, uint32_t totalBy
         if (spriteId >= sprites_.size()) {
             std::cerr << "[TextureSystem] Animation spriteId " << spriteId
                       << " out of range (" << sprites_.size() << "), skipping" << std::endl;
-            // Can't determine frame size without metadata — must abort
-            break;
+            ptr += frameBytes;
+            continue;
         }
 
         auto& meta = sprites_[spriteId];
-        size_t frameBytes = static_cast<size_t>(meta.width) * meta.height * 4;
-        if (ptr + frameBytes > end) {
-            std::cerr << "[TextureSystem] Animation data truncated at spriteId " << spriteId
-                      << " frame " << frameIndex
-                      << " (need " << frameBytes << ", have " << (end - ptr) << ")" << std::endl;
-            break;
-        }
 
         // Find or create AnimEntry for this spriteId
         AnimEntry* entry = nullptr;
@@ -105,6 +187,10 @@ void TextureSystem::receiveAnimationFrames(const uint8_t* data, uint32_t totalBy
         }
 
         ptr += frameBytes;
+    }
+    if (ptr != end) {
+        std::cerr << "[TextureSystem] Animation payload has " << (end - ptr)
+                  << " trailing bytes after fixed-layer parsing" << std::endl;
     }
 
     std::cout << "[TextureSystem] Received animation data for " << animEntries_.size()
@@ -139,7 +225,21 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     }
 
     uint32_t count = static_cast<uint32_t>(sprites_.size());
-    uint32_t spriteSize = sprites_[0].width;
+    uint32_t spriteSize = layerSize_;
+    if (spriteSize == 0 && !spritePixels_.empty() && count > 0) {
+        size_t bytesPerLayer = spritePixels_.size() / count;
+        size_t pixelsPerLayer = bytesPerLayer / 4;
+        uint32_t inferredLayerSize = static_cast<uint32_t>(
+            std::sqrt(static_cast<double>(pixelsPerLayer)));
+        if (static_cast<size_t>(inferredLayerSize) * inferredLayerSize == pixelsPerLayer) {
+            spriteSize = inferredLayerSize;
+            layerSize_ = inferredLayerSize;
+        }
+    }
+    if (spriteSize == 0) {
+        std::cerr << "[TextureSystem] Cannot finalize: no valid fixed sprite layer size" << std::endl;
+        return;
+    }
 
     // Validate against hardware limit
     auto framework = Renderer::instance().framework();
@@ -147,11 +247,13 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     VkPhysicalDeviceProperties props = physDevice->properties();
     uint32_t maxLayers = props.limits.maxImageArrayLayers;
 
-    if (count > maxLayers) {
+    uint32_t maxSupportedSprites = std::min(maxLayers, vk::Data::SPRITE_MAX_ENTRIES);
+    if (count > maxSupportedSprites) {
         std::cerr << "[TextureSystem] WARNING: " << count
-                  << " sprites exceeds maxImageArrayLayers=" << maxLayers
+                  << " sprites exceeds supported texture-array registry layers="
+                  << maxSupportedSprites
                   << ". Clamping." << std::endl;
-        count = maxLayers;
+        count = maxSupportedSprites;
     }
 
     std::cout << "[TextureSystem] Finalizing: " << count << " sprites, "
@@ -167,6 +269,11 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     // Pixels are concatenated in sorted order in spritePixels_.
     // Java uses FIXED offset: i * spriteSize * spriteSize * 4 (all sprites assumed same size).
     size_t bytesPerSprite = static_cast<size_t>(spriteSize) * spriteSize * 4;
+    albedoChecksums_.assign(count, 0);
+    specularChecksums_.assign(count, 0);
+    normalChecksums_.assign(count, 0);
+    albedoHeightLayers_.assign(count, {});
+    normalHeightLayers_.assign(count, {});
     for (uint32_t i = 0; i < count; i++) {
         // For animated sprites, prefer frame 0 from animation data (more reliable)
         const uint8_t* frameData = nullptr;
@@ -186,6 +293,8 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         if (frameData) {
             arrayManager_.stageLayerPixels(blockAlbedoArrayId_, i, 0,
                                            frameData, bytesPerSprite);
+            albedoChecksums_[i] = fnv1a64(frameData, bytesPerSprite);
+            albedoHeightLayers_[i] = makeLumaLayerFromRGBA(frameData, spriteSize);
         } else {
             std::cerr << "[TextureSystem] Missing pixel data for sprite " << i << std::endl;
         }
@@ -201,8 +310,10 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         for (uint32_t i = 0; i < count; i++) {
             size_t pixelOffset = static_cast<size_t>(i) * bytesPerSprite;
             if (pixelOffset + bytesPerSprite <= specularPixels_.size()) {
+                const uint8_t* layer = specularPixels_.data() + pixelOffset;
                 arrayManager_.stageLayerPixels(blockSpecularArrayId_, i, 0,
-                    specularPixels_.data() + pixelOffset, bytesPerSprite);
+                    layer, bytesPerSprite);
+                specularChecksums_[i] = fnv1a64(layer, bytesPerSprite);
             }
         }
         std::cout << "[TextureSystem] Staged " << count << " specular layers" << std::endl;
@@ -216,8 +327,11 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         for (uint32_t i = 0; i < count; i++) {
             size_t pixelOffset = static_cast<size_t>(i) * bytesPerSprite;
             if (pixelOffset + bytesPerSprite <= normalPixels_.size()) {
+                const uint8_t* layer = normalPixels_.data() + pixelOffset;
                 arrayManager_.stageLayerPixels(blockNormalArrayId_, i, 0,
-                    normalPixels_.data() + pixelOffset, bytesPerSprite);
+                    layer, bytesPerSprite);
+                normalChecksums_[i] = fnv1a64(layer, bytesPerSprite);
+                normalHeightLayers_[i] = makeHeightLayerFromRGBA(layer, spriteSize, 3);
             }
         }
         std::cout << "[TextureSystem] Staged " << count << " normal layers" << std::endl;
@@ -240,8 +354,17 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
 
         // Flags from Java metadata (padding field repurposed)
         uint32_t flags = 0;
-        if (meta.padding & 1u) flags |= 1u; // SPRITE_FLAG_HAS_SPECULAR
-        if (meta.padding & 2u) flags |= 2u; // SPRITE_FLAG_HAS_NORMAL
+        if (meta.padding & vk::Data::SPRITE_FLAG_HAS_SPECULAR) {
+            flags |= vk::Data::SPRITE_FLAG_HAS_SPECULAR;
+        }
+        if (meta.padding & vk::Data::SPRITE_FLAG_HAS_NORMAL) {
+            flags |= vk::Data::SPRITE_FLAG_HAS_NORMAL;
+        }
+        if (meta.padding & vk::Data::SPRITE_FLAG_HAS_HEIGHT) {
+            flags |= vk::Data::SPRITE_FLAG_HAS_HEIGHT;
+        }
+        flags |= (meta.padding &
+            (vk::Data::SPRITE_FLAG_SPEC_SOURCE_MASK | vk::Data::SPRITE_FLAG_NORMAL_SOURCE_MASK));
 
         // All sprites get a layer in aux arrays (defaults for missing)
         int32_t specLayer = (blockSpecularArrayId_ != UINT32_MAX) ? static_cast<int32_t>(i) : -1;
@@ -382,6 +505,74 @@ const TextureSystem::SpriteBounds& TextureSystem::getSpriteBounds(uint16_t sprit
     return DEFAULT_BOUNDS;
 }
 
+HeightLayerView TextureSystem::getAlbedoHeightLayer(uint16_t spriteId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (spriteId < albedoHeightLayers_.size()) return albedoHeightLayers_[spriteId];
+    return {};
+}
+
+HeightLayerView TextureSystem::getNormalHeightLayer(uint16_t spriteId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (spriteId < normalHeightLayers_.size()) return normalHeightLayers_[spriteId];
+    return {};
+}
+
+std::string TextureSystem::statusString() const {
+    std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) return "texturesBusy:1,generation:" + std::to_string(generation());
+    std::ostringstream out;
+    out << "finalized:" << (finalized_ ? 1 : 0)
+        << ",generation:" << generation()
+        << ",sprites:" << sprites_.size()
+        << ",atlasWidth:" << atlasWidth_
+        << ",atlasHeight:" << atlasHeight_
+        << ",layerSize:" << layerSize_
+        << ",animated:" << animEntries_.size()
+        << ",albedoArray:" << blockAlbedoArrayId_
+        << ",specularArray:" << blockSpecularArrayId_
+        << ",normalArray:" << blockNormalArrayId_
+        << ",heightLayers:" << normalHeightLayers_.size();
+    return out.str();
+}
+
+bool TextureSystem::dumpDebug(const std::string& path, uint32_t limit) const {
+    std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+    std::ofstream out(path, std::ios::trunc);
+    if (!out.is_open()) return false;
+
+    uint32_t count = static_cast<uint32_t>(sprites_.size());
+    uint32_t n = limit == 0 ? count : std::min(limit, count);
+    out << "TextureSystem generation=" << generation()
+        << " finalized=" << finalized_
+        << " sprites=" << count
+        << " atlas=" << atlasWidth_ << "x" << atlasHeight_
+        << " layerSize=" << layerSize_ << "\n";
+    out << "arrays albedo=" << blockAlbedoArrayId_
+        << " specular=" << blockSpecularArrayId_
+        << " normal=" << blockNormalArrayId_ << "\n";
+    out << "spriteId,atlasX,atlasY,width,height,frames,flags,specLayer,normalLayer,albedoHash,specHash,normalHash\n";
+
+    for (uint32_t i = 0; i < n; i++) {
+        const auto& m = sprites_[i];
+        const auto* se = registry_.getEntry(static_cast<uint16_t>(i));
+        out << i << ','
+            << m.atlasX << ','
+            << m.atlasY << ','
+            << m.width << ','
+            << m.height << ','
+            << m.frameCount << ','
+            << (se ? se->flags : 0) << ','
+            << (se ? se->specularLayer : -1) << ','
+            << (se ? se->normalLayer : -1) << ','
+            << (i < albedoChecksums_.size() ? albedoChecksums_[i] : 0) << ','
+            << (i < specularChecksums_.size() ? specularChecksums_[i] : 0) << ','
+            << (i < normalChecksums_.size() ? normalChecksums_[i] : 0)
+            << "\n";
+    }
+    return true;
+}
+
 void TextureSystem::reset() {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -390,8 +581,14 @@ void TextureSystem::reset() {
     spritePixels_.clear();
     specularPixels_.clear();
     normalPixels_.clear();
+    albedoChecksums_.clear();
+    specularChecksums_.clear();
+    normalChecksums_.clear();
+    albedoHeightLayers_.clear();
+    normalHeightLayers_.clear();
     atlasWidth_ = 0;
     atlasHeight_ = 0;
+    layerSize_ = 0;
     animEntries_.clear();
     arrayManager_.reset();
     registry_.reset();

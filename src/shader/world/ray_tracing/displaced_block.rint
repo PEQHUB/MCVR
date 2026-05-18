@@ -7,8 +7,13 @@
 
 #include "../../common/mapping.hpp"
 #include "../../common/shared.hpp"
+#include "../util/sprite_fetch.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
+
+layout(set = 2, binding = 0) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
 
 layout(set = 1, binding = 1) readonly buffer BLASOffsets {
     uint offsets[];
@@ -39,11 +44,15 @@ hitAttributeEXT vec3 hitAttribs;
 float sampleHeight(uint texID, vec2 uv, vec2 uvMin, vec2 uvMax, int filterMode,
                    int heightSource, float lumMin, float lumMax, bool invertH,
                    float remapMin, float remapMax, float contrast, float hOffset,
-                   bool hasLabPBR, int normalTexID) {
+                   bool hasLabPBR, int normalTexID, bool textureArray) {
     vec2 cUV = clamp(uv, uvMin, uvMax);
 
     // LabPBR: height is in normal texture alpha
-    if (hasLabPBR && normalTexID >= 0) {
+    if (hasLabPBR) {
+        if (textureArray) {
+            return fetchBlockNormalLod(texID, cUV, 0.0).a;
+        }
+        if (normalTexID < 0) return 1.0;
         if (filterMode == 0) {
             // NEAREST: texelFetch equivalent via high LOD bias + nearest filtering
             return textureLod(textures[nonuniformEXT(uint(normalTexID))], cUV, 0).a;
@@ -53,7 +62,9 @@ float sampleHeight(uint texID, vec2 uv, vec2 uvMin, vec2 uvMax, int filterMode,
     }
 
     // AutoPBR: derive height from albedo
-    vec4 s = textureLod(textures[nonuniformEXT(texID)], cUV, 0);
+    vec4 s = textureArray
+        ? fetchBlockAlbedoLod(texID, cUV, worldUBO.animTick, 0.0)
+        : textureLod(textures[nonuniformEXT(texID)], cUV, 0);
     float raw;
     if (heightSource == 1) raw = s.r;
     else if (heightSource == 2) raw = s.g;
@@ -65,7 +76,7 @@ float sampleHeight(uint texID, vec2 uv, vec2 uvMin, vec2 uvMax, int filterMode,
 
     // Height pipeline: normalize → invert → remap → contrast → offset
     float lumSpan = lumMax - lumMin;
-    float h = (lumSpan > 1e-6) ? clamp((raw - lumMin) / lumSpan, 0.0, 1.0) : 0.5;
+    float h = (lumSpan > 1e-6) ? clamp((raw - lumMin) / lumSpan, 0.0, 1.0) : (textureArray ? raw : 0.5);
     if (invertH) h = 1.0 - h;
     h = mix(remapMin, remapMax, h);
     if (contrast != 1.0) h = pow(clamp(h, 0.001, 1.0), contrast);
@@ -97,7 +108,9 @@ void main() {
     float remapMax = float((face.pomPacked2 >> 8u) & 0xFFu) / 100.0;
     float hOffset  = (float((face.pomPacked2 >> 16u) & 0xFFu) - 100.0) / 100.0;
     bool invertH   = ((face.flags >> 6u) & 1u) != 0u;
-    bool hasLabPBR = (face.properties & TEX_PROP_HAS_HEIGHT_MAP) != 0u && face.normalTexID >= 0;
+    bool textureArray = (face.properties & TEX_PROP_TEXTURE_ARRAY) != 0u;
+    bool hasLabPBR = (face.properties & TEX_PROP_HAS_HEIGHT_MAP) != 0u &&
+                     (textureArray || face.normalTexID >= 0);
     bool isAutoPBR = (face.flags & 0x8u) != 0u;
 
     // Ray in object space (identity transform for chunks)
@@ -127,7 +140,9 @@ void main() {
     if (tEntry >= tExit) return;
 
     // Edge fade width scales with displacement depth to prevent clipping perpendicular faces
-    vec2 texSize = vec2(textureSize(textures[nonuniformEXT(face.textureID)], 0));
+    vec2 texSize = textureArray
+        ? vec2(textureSize(blockAlbedo, 0).xy)
+        : vec2(textureSize(textures[nonuniformEXT(face.textureID)], 0));
     vec2 uvSpan = face.uvMax - face.uvMin;
     float texelsU = max(texSize.x * uvSpan.x, 1.0);
     float texelsV = max(texSize.y * uvSpan.y, 1.0);
@@ -158,7 +173,7 @@ void main() {
             float h = sampleHeight(face.textureID, texUV, face.uvMin, face.uvMax,
                                    filterMode, heightSource, face.lumMin, face.lumMax,
                                    invertH, remapMin, remapMax, heightContrast, hOffset,
-                                   hasLabPBR, face.normalTexID);
+                                   hasLabPBR, face.normalTexID, textureArray);
 
             // Fade displacement to zero near face edges so adjacent faces meet
             // at the original cube boundary (prevents edge tears).
@@ -191,7 +206,7 @@ void main() {
                     float hMid = sampleHeight(face.textureID, uvMid, face.uvMin, face.uvMax,
                                               filterMode, heightSource, face.lumMin, face.lumMax,
                                               invertH, remapMin, remapMax, heightContrast, hOffset,
-                                              hasLabPBR, face.normalTexID);
+                                              hasLabPBR, face.normalTexID, textureArray);
                     // Apply same edge fade during refinement
                     float uMidC = clamp(uMid, 0, 1), vMidC = clamp(vMid, 0, 1);
                     float fadeMid = 1.0;

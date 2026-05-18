@@ -90,11 +90,17 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
         if (slMode == sl::DLSSGMode::eAuto) multiplier = maxFrames_;
         if (multiplier > maxFrames_) multiplier = maxFrames_;
         if (multiplier < 1) multiplier = 1;
-        StreamlineContext::setDlssGOptions(slMode, multiplier);
-        active_ = true;
-        deferredActivation_ = false;
-        currentMode_ = Renderer::options.frameGenMode;
-        fgCout() << "activated (deferred, shouldRender became true)" << std::endl;
+        if (StreamlineContext::setDlssGOptions(slMode, multiplier)) {
+            active_ = true;
+            deferredActivation_ = false;
+            currentMode_ = Renderer::options.frameGenMode;
+            fgCout() << "activated (deferred, shouldRender became true)" << std::endl;
+        } else {
+            Renderer::options.frameGenEnabled = false;
+            Renderer::options.frameGenMode = 0;
+            deferredActivation_ = false;
+            fgCerr() << "deferred activation failed; disabling Frame Generation" << std::endl;
+        }
     }
 
     if (!active_) return;
@@ -350,11 +356,25 @@ void FrameGenManager::afterSwapchainRecreate() {
     // sl.dlss_g.dll crash. SL hooks now attach to future swapchain operations,
     // so we need one more recreate for hooks to be active on a fresh swapchain.
     if (wantActive && !featureLoaded_) {
-        StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, true);
+        if (!StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, true)) {
+            Renderer::options.frameGenEnabled = false;
+            Renderer::options.frameGenMode = 0;
+            deferredActivation_ = false;
+            fgCerr() << "feature load failed; disabling Frame Generation" << std::endl;
+            return;
+        }
         featureLoaded_ = true;
         // Initialize DLSS-G state immediately (eOff) so that the NEXT recreate's
         // vkDestroySwapchainKHR hook won't crash on uninitialized state.
-        StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOff, 1);
+        if (!StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOff, 1)) {
+            StreamlineContext::setFeatureLoaded(sl::kFeatureDLSS_G, false);
+            featureLoaded_ = false;
+            Renderer::options.frameGenEnabled = false;
+            Renderer::options.frameGenMode = 0;
+            deferredActivation_ = false;
+            fgCerr() << "initial eOff failed; disabling Frame Generation" << std::endl;
+            return;
+        }
         Renderer::options.needRecreate = true;
         deferredActivation_ = true;
         fgCout() << "feature loaded + initialized, triggering second recreate" << std::endl;
@@ -369,10 +389,17 @@ void FrameGenManager::afterSwapchainRecreate() {
             if (slMode == sl::DLSSGMode::eAuto) multiplier = maxFrames_;
             if (multiplier > maxFrames_) multiplier = maxFrames_;
             if (multiplier < 1) multiplier = 1;
-            StreamlineContext::setDlssGOptions(slMode, multiplier);
-            active_ = true;
-            currentMode_ = Renderer::options.frameGenMode;
-            fgCout() << "activated after swapchain recreate" << std::endl;
+            if (StreamlineContext::setDlssGOptions(slMode, multiplier)) {
+                active_ = true;
+                currentMode_ = Renderer::options.frameGenMode;
+                fgCout() << "activated after swapchain recreate" << std::endl;
+            } else {
+                Renderer::options.frameGenEnabled = false;
+                Renderer::options.frameGenMode = 0;
+                active_ = false;
+                deferredActivation_ = false;
+                fgCerr() << "activation failed after swapchain recreate; disabling Frame Generation" << std::endl;
+            }
         } else {
             deferredActivation_ = true;
             fgCout() << "deferred activation (waiting for shouldRender)" << std::endl;

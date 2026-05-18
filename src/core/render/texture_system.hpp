@@ -2,10 +2,13 @@
 
 #include "core/render/sprite_registry.hpp"
 #include "core/render/texture_arrays.hpp"
+#include "core/render/height_sampler.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <vector>
 
 class Framework;
@@ -106,6 +109,18 @@ class TextureSystem {
 
     /// Sprite count.
     uint32_t spriteCount() const { return static_cast<uint32_t>(sprites_.size()); }
+    uint32_t layerSize() const { return layerSize_; }
+    uint32_t atlasWidth() const { return atlasWidth_; }
+    uint32_t atlasHeight() const { return atlasHeight_; }
+
+    void setGeneration(uint64_t generation) { generation_.store(generation, std::memory_order_release); }
+    uint64_t generation() const { return generation_.load(std::memory_order_acquire); }
+
+    HeightLayerView getAlbedoHeightLayer(uint16_t spriteId) const;
+    HeightLayerView getNormalHeightLayer(uint16_t spriteId) const;
+
+    std::string statusString() const;
+    bool dumpDebug(const std::string& path, uint32_t limit) const;
 
     /// Access underlying managers for descriptor binding.
     TextureArrayManager& arrayManager() { return arrayManager_; }
@@ -125,6 +140,7 @@ class TextureSystem {
     std::vector<SpriteBounds> spriteBounds_;
     uint32_t atlasWidth_ = 0;
     uint32_t atlasHeight_ = 0;
+    uint32_t layerSize_ = 0;
     static const SpriteBounds DEFAULT_BOUNDS;
 
     // Frame-0 pixel data for all sprites (concatenated, RGBA8)
@@ -133,6 +149,11 @@ class TextureSystem {
     // Auxiliary pixel data (specular + normal, concatenated per sprite, RGBA8)
     std::vector<uint8_t> specularPixels_;
     std::vector<uint8_t> normalPixels_;
+    std::vector<uint64_t> albedoChecksums_;
+    std::vector<uint64_t> specularChecksums_;
+    std::vector<uint64_t> normalChecksums_;
+    std::vector<HeightLayerView> albedoHeightLayers_;
+    std::vector<HeightLayerView> normalHeightLayers_;
 
     // Animation: per-sprite frame data (RGBA pixels per frame)
     struct AnimEntry {
@@ -154,5 +175,6 @@ class TextureSystem {
     bool normMipsInitialized_ = false;
 
     bool finalized_ = false;
+    std::atomic<uint64_t> generation_{0};
     mutable std::mutex mutex_;
 };

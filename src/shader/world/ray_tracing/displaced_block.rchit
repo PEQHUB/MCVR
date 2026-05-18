@@ -8,6 +8,7 @@
 #include "../../common/mapping.hpp"
 #include "../../common/shared.hpp"
 #include "../util/ray_payloads.glsl"
+#include "../util/sprite_fetch.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
@@ -79,6 +80,43 @@ layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
 layout(location = 1) rayPayloadEXT ShadowRay shadowRay;
 hitAttributeEXT vec3 hitAttribs;
 
+const vec3 BT2020_LUM = vec3(0.2627, 0.6780, 0.0593);
+
+float sampleDisplacementHeight(DisplacedFaceData face, vec2 uv, bool textureArray, bool hasLabPBR) {
+    vec2 cUV = clamp(uv, face.uvMin, face.uvMax);
+    if (hasLabPBR) {
+        if (textureArray) return fetchBlockNormalLod(face.textureID, cUV, 0.0).a;
+        if (face.normalTexID >= 0) return textureLod(textures[nonuniformEXT(uint(face.normalTexID))], cUV, 0).a;
+        return 1.0;
+    }
+
+    vec4 s = textureArray
+        ? fetchBlockAlbedoLod(face.textureID, cUV, worldUBO.animTick, 0.0)
+        : textureLod(textures[nonuniformEXT(face.textureID)], cUV, 0);
+    int heightSource = int((face.pomPacked0 >> 6u) & 0x7u);
+    float raw;
+    if (heightSource == 1) raw = s.r;
+    else if (heightSource == 2) raw = s.g;
+    else if (heightSource == 3) raw = s.b;
+    else if (heightSource == 4) raw = s.a;
+    else if (heightSource == 5) raw = max(s.r, max(s.g, s.b));
+    else if (heightSource == 6) raw = min(s.r, min(s.g, s.b));
+    else raw = dot(s.rgb, BT2020_LUM);
+
+    float heightContrast = float((face.pomPacked1 >> 24u) & 0xFFu) / 10.0;
+    float remapMin = float((face.pomPacked2 >> 0u) & 0xFFu) / 100.0;
+    float remapMax = float((face.pomPacked2 >> 8u) & 0xFFu) / 100.0;
+    float hOffset = (float((face.pomPacked2 >> 16u) & 0xFFu) - 100.0) / 100.0;
+    bool invertH = ((face.flags >> 6u) & 1u) != 0u;
+
+    float lumSpan = face.lumMax - face.lumMin;
+    float h = (lumSpan > 1e-6) ? clamp((raw - face.lumMin) / lumSpan, 0.0, 1.0) : raw;
+    if (invertH) h = 1.0 - h;
+    h = mix(remapMin, remapMax, h);
+    if (heightContrast != 1.0) h = pow(clamp(h, 0.001, 1.0), heightContrast);
+    return clamp(h + hOffset, 0.0, 1.0);
+}
+
 void main() {
     uint instanceID = gl_InstanceID;
     uint geometryID = gl_GeometryIndexEXT;
@@ -97,9 +135,15 @@ void main() {
     vec2 uvMax = face.uvMax;
     texUV = clamp(texUV, uvMin, uvMax);
 
+    bool textureArray = (face.properties & TEX_PROP_TEXTURE_ARRAY) != 0u;
+    bool hasLabPBR = (face.properties & TEX_PROP_HAS_HEIGHT_MAP) != 0u &&
+                     (textureArray || face.normalTexID >= 0);
+
     // Sample albedo
-    vec4 albedo = textureLod(textures[nonuniformEXT(face.textureID)], texUV, 0);
-    vec3 albedoLinear = pow(albedo.rgb, vec3(2.2)); // sRGB → linear
+    vec4 albedo = textureArray
+        ? fetchBlockAlbedoLod(face.textureID, texUV, worldUBO.animTick, 0.0)
+        : textureLod(textures[nonuniformEXT(face.textureID)], texUV, 0);
+    vec3 albedoLinear = textureArray ? albedo.rgb : pow(albedo.rgb, vec3(2.2));
 
     // Face normal (flat — no displaced normal derivation yet, will add central differences later)
     vec3 geomNormal = FACE_NORMALS[face.faceAxis];
@@ -107,13 +151,15 @@ void main() {
     // Compute displaced normal via central differences on height field
     vec3 normal = geomNormal;
     {
-        vec2 texSize = vec2(textureSize(textures[nonuniformEXT(face.textureID)], 0));
+        vec2 texSize = textureArray
+            ? vec2(textureSize(blockAlbedo, 0).xy)
+            : vec2(textureSize(textures[nonuniformEXT(face.textureID)], 0));
         vec2 dU = vec2(1.0 / texSize.x, 0.0);
         vec2 dV = vec2(0.0, 1.0 / texSize.y);
 
-        float hC = textureLod(textures[nonuniformEXT(face.textureID)], texUV, 0).r;
-        float hR = textureLod(textures[nonuniformEXT(face.textureID)], clamp(texUV + dU, uvMin, uvMax), 0).r;
-        float hU = textureLod(textures[nonuniformEXT(face.textureID)], clamp(texUV + dV, uvMin, uvMax), 0).r;
+        float hC = sampleDisplacementHeight(face, texUV, textureArray, hasLabPBR);
+        float hR = sampleDisplacementHeight(face, texUV + dU, textureArray, hasLabPBR);
+        float hU = sampleDisplacementHeight(face, texUV + dV, textureArray, hasLabPBR);
 
         // Edge fade: flatten normals near face edges to match displacement fade.
         // Width formula matches displaced_block.rint exactly.

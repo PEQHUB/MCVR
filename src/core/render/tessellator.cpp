@@ -162,6 +162,7 @@ Tessellator::Output Tessellator::tessellate(const Input &input) {
                 glm::vec2 texUV = bilerp(q.c00->textureUV, q.c10->textureUV,
                                          q.c01->textureUV, q.c11->textureUV, centerU, centerV);
                 float height = HeightSampler::sample(
+                    input.labPbrHeight, input.autoPbrHeight,
                     input.normalRGBA, input.albedoRGBA, input.material,
                     input.hasLabPBRHeight, input.isAutoPBR,
                     texUV.x, texUV.y,
@@ -364,6 +365,7 @@ Tessellator::Output Tessellator::tessellate(const Input &input) {
                 interpVertex(vert, q, u, v);
 
                 float height = HeightSampler::sample(
+                    input.labPbrHeight, input.autoPbrHeight,
                     input.normalRGBA, input.albedoRGBA, input.material,
                     input.hasLabPBRHeight, input.isAutoPBR,
                     vert.textureUV.x, vert.textureUV.y,

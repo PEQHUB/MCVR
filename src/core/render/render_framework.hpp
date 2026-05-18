@@ -17,6 +17,8 @@ class FrameSlotRing;
 class PresentThread;
 class OverlayCompositor;
 
+void renderDiag(const char *fmt, ...);
+
 class GarbageCollector : public SharedObject<GarbageCollector> {
   public:
     GarbageCollector(std::shared_ptr<Framework> framework);
