@@ -118,6 +118,7 @@ layout(push_constant) uniform PushConstant {
     float colorExpansion;       // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
     uint blueNoiseFrame;
     uint rtDebugFlags;
+    uint handInstanceCount;
     // SHARC BDA fields
     uint64_t _sharcBDA0;
     uint64_t _sharcBDA1;

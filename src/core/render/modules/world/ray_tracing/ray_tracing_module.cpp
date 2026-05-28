@@ -1934,6 +1934,7 @@ void RayTracingModuleContext::render() {
     pushConstant.colorExpansion = Renderer::options.colorExpansion;
     pushConstant.blueNoiseFrame = context->frameIndex;
     pushConstant.rtDebugFlags = Renderer::options.rtDebugFlags;
+    pushConstant.handInstanceCount = worldPrepareContext->handInstanceCount;
 
     // Structured logging: push constants (every ~1 second)
     if (RadianceLogger::isEnabled()) {
@@ -1942,8 +1943,9 @@ void RayTracingModuleContext::render() {
         if (curFrame - lastPCLog >= 60) {
             lastPCLog = curFrame;
             RadianceLogger::log("RayTracing", "INFO",
-                "pushConst: bounces=%d flags=0x%x lights=%d shadowSoft=%.2f displacementEnabled=%d displacementQuality=%u displacementDepth=%.4f displacementSteps=%d displacementRefinement=%d displacementFade=%.0f",
-                pushConstant.numRayBounces, pushConstant.flags, pushConstant.areaLightCount,
+                "pushConst: bounces=%d flags=0x%x rtDebug=0x%x handInst=%u lights=%d shadowSoft=%.2f displacementEnabled=%d displacementQuality=%u displacementDepth=%.4f displacementSteps=%d displacementRefinement=%d displacementFade=%.0f",
+                pushConstant.numRayBounces, pushConstant.flags, pushConstant.rtDebugFlags,
+                pushConstant.handInstanceCount, pushConstant.areaLightCount,
                 pushConstant.shadowSoftness, Renderer::options.pomEnabled ? 1 : 0,
                 Renderer::options.displacementQuality, pushConstant.pomHeightScale,
                 pushConstant.pomSteps, pushConstant.pomRefinement, pushConstant.pomFadeDistance);

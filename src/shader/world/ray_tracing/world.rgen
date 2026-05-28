@@ -157,6 +157,7 @@ layout(push_constant) uniform PushConstant {
     float colorExpansion;
     uint blueNoiseFrame;
     uint rtDebugFlags;
+    uint handInstanceCount;
     // SHARC fields
     uint64_t sharcHashEntries;
     uint64_t sharcAccumulation;
@@ -190,6 +191,7 @@ pc;
 #define OFFLINE_DISABLE_CLAMP ((pc.offlineFlags & 4) != 0)
 #define RT_DEBUG_DISABLE_REFLECTION_PROBE ((pc.rtDebugFlags & 1u) != 0u)
 #define RT_DEBUG_DISABLE_HAND_PASS        ((pc.rtDebugFlags & 2u) != 0u)
+#define HAND_PASS_ACTIVE                  (pc.handInstanceCount != 0u)
 
 layout(location = 0) rayPayloadEXT PrimaryRay mainRay;
 layout(location = 1) rayPayloadEXT ShadowRay reflectionProbe;
@@ -298,7 +300,7 @@ void main() {
 
     mainRay.seed = worldUBO.seed;
     for (int isHand = 0; isHand <= 1; isHand++) {
-        if (RT_DEBUG_DISABLE_HAND_PASS && isHand != 0) {
+        if (isHand != 0 && (RT_DEBUG_DISABLE_HAND_PASS || !HAND_PASS_ACTIVE)) {
             continue;
         }
 

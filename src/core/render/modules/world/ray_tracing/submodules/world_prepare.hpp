@@ -137,6 +137,7 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
 
     std::shared_ptr<vk::DeviceLocalBuffer> areaLightBuffer;
     int areaLightCount = 0;
+    uint32_t handInstanceCount = 0;
 
     // Per-instance biome colors for shader-side tinting (binding 10)
     std::shared_ptr<vk::DeviceLocalBuffer> biomeColorBuffer;

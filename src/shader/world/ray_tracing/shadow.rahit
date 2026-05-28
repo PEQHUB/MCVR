@@ -62,6 +62,7 @@ layout(push_constant) uniform PushConstant {
     float colorExpansion;
     uint blueNoiseFrame;
     uint rtDebugFlags;
+    uint handInstanceCount;
     uint64_t _sharcBDA0, _sharcBDA1, _sharcBDA2;
     float _sharcPad0, _sharcPad1, _sharcPad2, _sharcPad3;
     uint _sharcPad4;

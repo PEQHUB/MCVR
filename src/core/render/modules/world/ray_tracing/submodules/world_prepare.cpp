@@ -228,6 +228,7 @@ void WorldPrepareContext::uploadBuffer(std::vector<uint32_t> &blasOffsets,
 void WorldPrepareContext::render() {
     auto module = worldPrepare.lock();
     if (!module) return;
+    handInstanceCount = 0;
 
     std::shared_ptr<Framework> framework = Renderer::instance().framework();
     std::shared_ptr<FrameworkContext> context = frameworkContext.lock();
@@ -1125,6 +1126,7 @@ void WorldPrepareContext::render() {
         g_crashRing.record("WP:noInstances");
         tlas = nullptr;
         prevTlasInstanceCount_ = 0;
+        handInstanceCount = 0;
         return;
     }
 
@@ -1143,6 +1145,7 @@ void WorldPrepareContext::render() {
     // was rebuilt (generation changed) or instance count changed, we must full BUILD.
     currBlasSnapshot.instanceCount = static_cast<uint32_t>(instanceBuilder.instances.size());
     uint32_t currentInstanceCount = currBlasSnapshot.instanceCount;
+    handInstanceCount = currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_HAND];
 
     bool canUpdate = tlas != nullptr
         && currBlasSnapshot.instanceCount == prevBlasSnapshot_.instanceCount

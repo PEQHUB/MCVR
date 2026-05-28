@@ -32,6 +32,7 @@ This is not primarily Java, texture upload, image barrier, present, or CPU world
 ## Files
 
 - [evidence/2026-05-28-1128-run.md](evidence/2026-05-28-1128-run.md) - measured facts from the latest run.
+- [evidence/2026-05-28-rt-floor-sweeps.md](evidence/2026-05-28-rt-floor-sweeps.md) - two-scene RT sweep and floor-sweep findings.
 - [evidence/profiler-gaps.md](evidence/profiler-gaps.md) - what the current logs do and do not prove.
 - [evidence/git-history-landmines.md](evidence/git-history-landmines.md) - prior optimization attempts that caused crashes, TDRs, or reversions.
 - [agent-findings-compiled.md](agent-findings-compiled.md) - all completed agent findings folded into one reference.
