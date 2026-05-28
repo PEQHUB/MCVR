@@ -1,6 +1,7 @@
 #include "core/vulkan/command.hpp"
 
 #include "core/vulkan/buffer.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/descriptor.hpp"
 #include "core/vulkan/device.hpp"
 #include "core/vulkan/framebuffer.hpp"
@@ -50,6 +51,9 @@ vk::CommandPool::CommandPool(std::shared_ptr<PhysicalDevice> physicalDevice,
         commandPoolCout() << "created command pool" << std::endl;
 #endif
     }
+
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_COMMAND_POOL,
+                                  commandPool_, "Radiance CommandPool");
 }
 
 vk::CommandPool::~CommandPool() {
@@ -80,6 +84,9 @@ vk::CommandBuffer::CommandBuffer(std::shared_ptr<Device> device, std::shared_ptr
         commandBufferCout() << "allocated command buffer" << std::endl;
 #endif
     }
+
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_COMMAND_BUFFER,
+                                  commandBuffer_, "Radiance CommandBuffer");
 }
 
 VkCommandBuffer &vk::CommandBuffer::vkCommandBuffer() {
@@ -273,6 +280,8 @@ void vk::CommandBuffer::submitMainQueueIndividual(std::shared_ptr<vk::Device> de
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer_;
 
+    vk::DebugUtils::ScopedQueueLabel queueLabel(
+        device->mainVkQueue(), "Radiance QueueSubmit: Individual", 0.2f, 0.7f, 1.0f);
     vkQueueSubmit(device->mainVkQueue(), 1, &submitInfo, fence == nullptr ? VK_NULL_HANDLE : fence->vkFence());
 }
 
@@ -296,5 +305,7 @@ void vk::CommandBuffer::submitMainQueue(std::shared_ptr<Device> device, SubmitIn
     vkSubmitInfo.signalSemaphoreCount = signalSemaphores.size();
     vkSubmitInfo.pSignalSemaphores = signalSemaphores.data();
 
+    vk::DebugUtils::ScopedQueueLabel queueLabel(
+        device->mainVkQueue(), "Radiance QueueSubmit: CommandBuffer", 0.2f, 0.7f, 1.0f);
     vkQueueSubmit(device->mainVkQueue(), 1, &vkSubmitInfo, submitInfo.signalFence);
 }

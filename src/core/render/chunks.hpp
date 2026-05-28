@@ -103,16 +103,6 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     std::shared_ptr<vk::BLAS> blas;
     std::shared_ptr<vk::BLASBuilder> blasBuilder;
     std::shared_ptr<vk::BLAS> preCompactionBlas; // kept alive until render thread GCs via Chunk1::enqueue()
-    // DDA displacement: separate AABB BLAS (can't mix with triangle BLAS due to shadow stride=0).
-    // Face data accessible via BDA in the intersection shader.
-    std::vector<VkAabbPositionsKHR> displacedAABBs;
-    std::vector<vk::Data::DisplacedFaceData> displacedFaceData;
-    uint32_t displacedFaceCount = 0; // Cached count, survives releaseHostGeometry()
-    std::shared_ptr<vk::DeviceLocalBuffer> displacedAABBBuffer;
-    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
-    std::shared_ptr<vk::BLAS> displacedBlas;
-    std::shared_ptr<vk::BLASBuilder> displacedBlasBuilder;
-
     ChunkBuildData(int64_t id,
                    int x,
                    int y,
@@ -167,6 +157,18 @@ struct ChunkBuildDataBatch : public SharedObject<ChunkBuildDataBatch> {
                         glm::vec3 cameraPos);
 };
 
+struct ChunkBuildSchedulerStats {
+    uint32_t inputQueue = 0;
+    uint32_t completedQueue = 0;
+    uint32_t inFlight = 0;
+    uint64_t enqueued = 0;
+    uint64_t submitted = 0;
+    uint64_t completed = 0;
+    uint64_t integrated = 0;
+    uint64_t lastSubmittedTimeline = 0;
+    uint64_t currentTimeline = 0;
+};
+
 class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
   public:
     ChunkBuildScheduler(std::vector<std::shared_ptr<Chunk1>> &chunks,
@@ -187,8 +189,8 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
     uint32_t chunkBuildingBatchSize();
 
     // Pause BLAS thread during swapchain recreate to prevent submits in the critical window.
-    // Blocks until BLAS thread acknowledges pause (no pending submits).
-    void pause();
+    // Returns false if the thread does not acknowledge before the timeout.
+    bool pause(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
     void resume();
 
     // Last BLAS timeline value submitted to secondary queue (for cross-queue GC sync)
@@ -199,6 +201,9 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
         std::lock_guard<std::mutex> lock(inputMtx_);
         return static_cast<uint32_t>(inputQueue_.size());
     }
+
+    // Diagnostic snapshot — non-blocking, no waits
+    ChunkBuildSchedulerStats stats();
 
   private:
     std::vector<std::shared_ptr<Chunk1>> &chunks_;
@@ -212,6 +217,7 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
     // Hands off fully-built, compacted BLASes to render thread via completedQueue_.
     std::thread blasThread_;
     std::atomic<bool> stop_{false};
+    std::atomic<bool> blasThreadExited_{false};
     std::atomic<bool> paused_{false};
     std::atomic<bool> pausedAck_{false};
     std::atomic<float> cameraPosX_{0}, cameraPosY_{0}, cameraPosZ_{0};
@@ -245,6 +251,12 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
 
     // Last submitted timeline value — atomic for cross-thread read by render thread GC sync
     std::atomic<uint64_t> lastSubmittedTimeline_{0};
+
+    // Diagnostic counters (atomic for cross-thread reads)
+    std::atomic<uint64_t> totalEnqueued_{0};
+    std::atomic<uint64_t> totalSubmitted_{0};
+    std::atomic<uint64_t> totalCompleted_{0};
+    std::atomic<uint64_t> totalIntegrated_{0};
 
     // BLAS thread cmd pool — owned exclusively, no mutex
     std::queue<std::shared_ptr<vk::CommandBuffer>> cmdPool_;
@@ -292,10 +304,6 @@ struct Chunk1 : public SharedObject<Chunk1> {
     uint32_t geometryCount;
     std::shared_ptr<std::vector<World::GeometryTypes>> geometryTypes;
 
-    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer; // DDA face data (BDA access)
-    std::shared_ptr<vk::BLAS> displacedBlas; // Separate AABB BLAS for DDA displacement
-    uint32_t displacedFaceCount = 0;
-
     std::vector<ChunkLightEntry> lightSources;
 
     // Per-section biome colors for shader-side tinting (packed 0x00RRGGBB)
@@ -321,7 +329,7 @@ class Chunks : public SharedObject<Chunks> {
     Chunks(std::shared_ptr<Framework> framework);
 
     void reset(uint32_t numChunks);
-    void resetScheduler();
+    void resetScheduler(bool invalidateExisting = false);
     void resetFrame();
     void invalidateChunk(int id);
     void queueChunkBuild(ChunkBuildTask task);

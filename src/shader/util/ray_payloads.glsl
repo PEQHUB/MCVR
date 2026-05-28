@@ -76,6 +76,8 @@ struct PrimaryRay {
     T_VEC3 f0;
     T_FLOAT emission;
     T_FLOAT subSurface;
+    T_VEC3 prevWorldPos;
+    T_UINT hasPrevWorldPos;
 };
 
 // ── PrimaryRay.flags bitfield accessors (GLSL only) ──

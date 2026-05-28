@@ -2,12 +2,21 @@
 
 #include "core/render/renderer.hpp"
 #include "core/vulkan/descriptor.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/device.hpp"
 #include "core/vulkan/render_pass.hpp"
 #include "core/vulkan/shader.hpp"
 
+#include <atomic>
 #include <iostream>
+#include <string>
 #include <vector>
+
+namespace {
+std::atomic_uint64_t gGraphicsPipelineId{0};
+std::atomic_uint64_t gRayTracingPipelineId{0};
+std::atomic_uint64_t gComputePipelineId{0};
+}
 
 std::ostream &graphicsPipelineCout() {
     return std::cout << "[GraphicsPipeline] ";
@@ -18,7 +27,10 @@ std::ostream &graphicsPipelineCerr() {
 }
 
 vk::GraphicsPipeline::GraphicsPipeline(std::shared_ptr<Device> device, VkPipeline pipeline)
-    : device_(device), pipeline_(pipeline) {}
+    : device_(device), pipeline_(pipeline) {
+    auto name = std::string("Radiance GraphicsPipeline #") + std::to_string(++gGraphicsPipelineId);
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_PIPELINE, pipeline_, name);
+}
 
 vk::GraphicsPipeline::~GraphicsPipeline() {
     vkDestroyPipeline(device_->vkDevice(), pipeline_, nullptr);
@@ -33,7 +45,10 @@ VkPipeline &vk::GraphicsPipeline::vkPipeline() {
 }
 
 vk::RayTracingPipeline::RayTracingPipeline(std::shared_ptr<Device> device, VkPipeline pipeline)
-    : device_(device), pipeline_(pipeline) {}
+    : device_(device), pipeline_(pipeline) {
+    auto name = std::string("Radiance RayTracingPipeline #") + std::to_string(++gRayTracingPipelineId);
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_PIPELINE, pipeline_, name);
+}
 
 vk::RayTracingPipeline::~RayTracingPipeline() {
     vkDestroyPipeline(device_->vkDevice(), pipeline_, nullptr);
@@ -44,7 +59,10 @@ VkPipeline &vk::RayTracingPipeline::vkPipeline() {
 }
 
 vk::ComputePipeline::ComputePipeline(std::shared_ptr<Device> device, VkPipeline pipeline)
-    : device_(device), pipeline_(pipeline) {}
+    : device_(device), pipeline_(pipeline) {
+    auto name = std::string("Radiance ComputePipeline #") + std::to_string(++gComputePipelineId);
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_PIPELINE, pipeline_, name);
+}
 
 vk::ComputePipeline::~ComputePipeline() {
     vkDestroyPipeline(device_->vkDevice(), pipeline_, nullptr);

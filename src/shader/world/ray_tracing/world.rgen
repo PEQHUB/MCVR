@@ -321,6 +321,8 @@ void main() {
         do {
             mainRay.index = psrDepth;
             mainRay.hitT = 0;
+            mainRay.prevWorldPos = vec3(0.0);
+            mainRay.hasPrevWorldPos = 0u;
             mainRay.directLightRadiance = vec3(0.0);
             mainRay.directLightHitT = 0.0;
             mainRay.albedoEmission = 0.0;
@@ -633,7 +635,9 @@ void main() {
 
             uint64_t lastIndexBufferAddr = lastIndexBufferAddrs.addrs[blasOffset + geometryID];
             uint64_t lastVertexBufferAddr = lastVertexBufferAddrs.addrs[blasOffset + geometryID];
-            if (lastIndexBufferAddr > 0 && lastVertexBufferAddr > 0) {
+            if (!isPsr && mainRay.hasPrevWorldPos != 0u) {
+                originRelativeToPrevCam = mainRay.prevWorldPos;
+            } else if (lastIndexBufferAddr > 0 && lastVertexBufferAddr > 0) {
                 vec3 baryCoords = mainRay.baryCoords;
                 vec3 prevLocalPos;
                 fetchTrianglePositions(vtxFormat, lastVertexBufferAddr, lastIndexBufferAddr,

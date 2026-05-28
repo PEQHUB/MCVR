@@ -131,8 +131,20 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 // ---- Animation tick (called per game tick from Java) ----
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeTickAnimation(
-    JNIEnv *, jclass,
-    jint gameTick) {
-
+    JNIEnv *, jclass, jint gameTick, jlong generation) {
+    Renderer::options.textureArrayAnimationUpdatesEnabled = true;
+    // Reject animation ticks from stale texture generations (e.g., after F3+T reload
+    // but before the new texture system is finalized). This prevents uploading
+    // animation frames from the old atlas into the new texture arrays.
+    auto currentGen = Renderer::textureSystem.generation();
+    if (generation != 0 && generation != currentGen) {
+        return;  // stale tick — skip
+    }
     Renderer::textureSystem.tickAnimation(static_cast<uint32_t>(gameTick));
+}
+
+// ---- Set texture array animation enabled state ----
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeSetTextureArrayAnimationEnabled(
+    JNIEnv *, jclass, jboolean enabled) {
+    Renderer::options.textureArrayAnimationUpdatesEnabled = (enabled == JNI_TRUE);
 }

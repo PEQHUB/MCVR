@@ -34,6 +34,8 @@ uint32_t FrameGenManager::maxFrames_ = 0;
 uint32_t FrameGenManager::currentMode_ = 0;
 bool FrameGenManager::deferredActivation_ = false;
 bool FrameGenManager::featureLoaded_ = false;
+bool FrameGenManager::recreateInProgress_ = false;
+uint32_t FrameGenManager::recreateGeneration_ = 0;
 
 bool FrameGenManager::init() {
 #ifdef _WIN32
@@ -80,10 +82,12 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
     if (!StreamlineContext::isDlssGSupported()) return;
     if (!context) return;
 
+    if (recreateInProgress_) return;
+
     bool shouldRender = Renderer::instance().world()->shouldRender();
 
     // Deferred activation: feature is loaded, waiting for shouldRender to go true
-    if (deferredActivation_ && shouldRender) {
+    if (deferredActivation_ && shouldRender && !Renderer::options.needRecreate) {
         sl::DLSSGMode slMode = toSlMode(Renderer::options.frameGenMode);
         uint32_t multiplier = Renderer::options.frameGenMultiplier;
         // In Auto mode, give the plugin the full hardware range to dynamically vary
@@ -320,15 +324,17 @@ void FrameGenManager::beforeSwapchainRecreate() {
 #ifdef _WIN32
     if (!initialized_ || !StreamlineContext::isDlssGSupported()) return;
 
+    recreateInProgress_ = true;
+    recreateGeneration_++;
+
     bool wantActive = Renderer::options.frameGenEnabled;
-    bool wasActive = active_;
 
     // §19.0: DLSS-G must be eOff before swapchain teardown to prevent deadlocks.
     if (active_) {
         StreamlineContext::setDlssGOptions(sl::DLSSGMode::eOff, 1);
         active_ = false;
         deferredActivation_ = false;
-        fgCout() << "eOff before swapchain recreate" << std::endl;
+        fgCout() << "eOff before swapchain recreate (gen=" << recreateGeneration_ << ")" << std::endl;
     }
 
     // Only unload when user explicitly disables FG. Keep feature loaded across
@@ -360,6 +366,7 @@ void FrameGenManager::afterSwapchainRecreate() {
             Renderer::options.frameGenEnabled = false;
             Renderer::options.frameGenMode = 0;
             deferredActivation_ = false;
+            recreateInProgress_ = false;
             fgCerr() << "feature load failed; disabling Frame Generation" << std::endl;
             return;
         }
@@ -372,12 +379,14 @@ void FrameGenManager::afterSwapchainRecreate() {
             Renderer::options.frameGenEnabled = false;
             Renderer::options.frameGenMode = 0;
             deferredActivation_ = false;
+            recreateInProgress_ = false;
             fgCerr() << "initial eOff failed; disabling Frame Generation" << std::endl;
             return;
         }
         Renderer::options.needRecreate = true;
         deferredActivation_ = true;
-        fgCout() << "feature loaded + initialized, triggering second recreate" << std::endl;
+        fgCout() << "feature loaded + initialized, triggering second recreate (gen="
+                 << recreateGeneration_ << ")" << std::endl;
         return;
     }
 
@@ -392,7 +401,8 @@ void FrameGenManager::afterSwapchainRecreate() {
             if (StreamlineContext::setDlssGOptions(slMode, multiplier)) {
                 active_ = true;
                 currentMode_ = Renderer::options.frameGenMode;
-                fgCout() << "activated after swapchain recreate" << std::endl;
+                fgCout() << "activated after swapchain recreate (gen="
+                         << recreateGeneration_ << ")" << std::endl;
             } else {
                 Renderer::options.frameGenEnabled = false;
                 Renderer::options.frameGenMode = 0;
@@ -402,8 +412,11 @@ void FrameGenManager::afterSwapchainRecreate() {
             }
         } else {
             deferredActivation_ = true;
-            fgCout() << "deferred activation (waiting for shouldRender)" << std::endl;
+            fgCout() << "deferred activation (waiting for shouldRender, gen="
+                     << recreateGeneration_ << ")" << std::endl;
         }
     }
+
+    recreateInProgress_ = false;
 #endif
 }

@@ -432,6 +432,30 @@ void Buffers::setAndUploadMaterialClassMappingBuffer(vk::Data::MaterialClassMapp
                                           VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
     }
 
+    if (Renderer::options.loggingEnabled) {
+        uint32_t inheritCount = 0;
+        uint32_t offCount = 0;
+        uint32_t customCount = 0;
+        uint32_t selfShadowCount = 0;
+        for (const auto& entry : mapping.entries) {
+            uint32_t mode = (entry.pomPacked0 >> 3u) & 0x3u;
+            if (mode == 1u) {
+                offCount++;
+            } else if (mode == 2u) {
+                customCount++;
+            } else {
+                inheritCount++;
+            }
+            if ((entry.pomPacked0 & (1u << 28u)) != 0u) {
+                selfShadowCount++;
+            }
+        }
+        buffersCout() << "Material displacement modes: inherit=" << inheritCount
+                      << " off=" << offCount
+                      << " custom=" << customCount
+                      << " selfShadow=" << selfShadowCount << std::endl;
+    }
+
     materialClassMappingBuffer_[context->frameIndex]->uploadToBuffer(&mapping);
 }
 
@@ -564,7 +588,7 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::materialClassMappingBuffer() {
             dummy.entries[i].transmission = -1.0f; // keep LabPBR
             dummy.entries[i].ior = 1.5f;
             dummy.entries[i].subsurface = 0.0f;
-            dummy.entries[i].pomPacked0 = 0 | (0 << 3) | (0 << 5) | (64 << 8) | (4 << 16);
+            dummy.entries[i].pomPacked0 = 0;
             dummy.entries[i].pomPacked1 = 100 | (10 << 24);  // normalClamp=100, heightContrast=10
             dummy.entries[i].pomPacked2 = (100 << 8) | (100 << 16);  // remapMax=100, offset=100
             dummy.entries[i].pomDepth = 0.0f;

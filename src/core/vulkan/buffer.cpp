@@ -1,6 +1,7 @@
 #include "core/vulkan/buffer.hpp"
 
 #include "core/vulkan/command.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/device.hpp"
 #include "core/vulkan/vma.hpp"
 #include "core/render/renderer.hpp"
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <string>
 
 // ── Buffer diagnostic file ──
 static std::ofstream sBufferDiag;
@@ -83,6 +85,8 @@ vk::HostVisibleBuffer::HostVisibleBuffer(std::shared_ptr<VMA> vma,
 		.buffer = buffer_};
 		bufferAddress_ = vkGetBufferDeviceAddress(device_->vkDevice(), &deviceAddressInfo);
 	}
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, buffer_,
+                                  "HostVisibleBuffer bytes=" + std::to_string(size_));
 }
 vk::HostVisibleBuffer::HostVisibleBuffer(std::shared_ptr<VMA> vma,
                                          std::shared_ptr<Device> device,
@@ -120,6 +124,9 @@ vk::HostVisibleBuffer::HostVisibleBuffer(std::shared_ptr<VMA> vma,
                                                     .buffer = buffer_};
         bufferAddress_ = vkGetBufferDeviceAddress(device_->vkDevice(), &deviceAddressInfo);
     }
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, buffer_,
+                                  "HostVisibleBuffer bytes=" + std::to_string(size_) +
+                                      " aligned");
 }
 
 vk::HostVisibleBuffer::~HostVisibleBuffer() {
@@ -227,6 +234,8 @@ vk::DeviceLocalBuffer::DeviceLocalBuffer(std::shared_ptr<VMA> vma,
 		mappedPtr_ = nullptr;
 	} else {
 		mappedPtr_ = stagingAllocationInfo_.pMappedData;
+        vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, stagingBuffer_,
+                                      "DeviceLocalBuffer staging bytes=" + std::to_string(size_));
 	}
     }
 
@@ -253,6 +262,8 @@ vk::DeviceLocalBuffer::DeviceLocalBuffer(std::shared_ptr<VMA> vma,
 		allocation_ = VK_NULL_HANDLE;
 		return;
 	}
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, buffer_,
+                                  "DeviceLocalBuffer GPU bytes=" + std::to_string(size_));
 
     if (usageExceptTransfer & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
         VkBufferDeviceAddressInfo deviceAddressInfo{.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
@@ -301,6 +312,9 @@ vk::DeviceLocalBuffer::DeviceLocalBuffer(std::shared_ptr<VMA> vma,
 		mappedPtr_ = nullptr;
 	} else {
 		mappedPtr_ = stagingAllocationInfo_.pMappedData;
+        vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, stagingBuffer_,
+                                      "DeviceLocalBuffer staging bytes=" + std::to_string(size_) +
+                                          " aligned");
 	}
     }
 
@@ -327,6 +341,9 @@ vk::DeviceLocalBuffer::DeviceLocalBuffer(std::shared_ptr<VMA> vma,
 		allocation_ = VK_NULL_HANDLE;
 		return;
 	}
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, buffer_,
+                                  "DeviceLocalBuffer GPU bytes=" + std::to_string(size_) +
+                                      " aligned");
 
     if (usageExceptTransfer & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
         VkBufferDeviceAddressInfo deviceAddressInfo{.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,

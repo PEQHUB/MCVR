@@ -6,6 +6,10 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_opacity_micromap : require
 
+#ifndef RARSER_SHADER_DISPLACEMENT
+#define RARSER_SHADER_DISPLACEMENT 1
+#endif
+
 #include "../util/disney.glsl"
 #include "../util/random.glsl"
 #include "../util/blue_noise.glsl"
@@ -22,7 +26,6 @@
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
 #include "../util/sprite_fetch.glsl"
-#include "../util/pom.glsl"
 
 #include "../util/clouds.glsl"
 
@@ -63,6 +66,9 @@ layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
 };
 
 #include "../util/material_properties.glsl"
+#if RARSER_SHADER_DISPLACEMENT
+#include "../util/displacement.glsl"
+#endif
 
 layout(set = 1, binding = 8) readonly buffer AreaLightBuffer {
     AreaLight lights[];
@@ -104,11 +110,11 @@ layout(push_constant) uniform PushConstant {
     int temporalMClamp;
     int wClamp;
     float preExposure;
-    // POM fields (fields 8-11, 16 bytes)
+    // Shader displacement fields (fields 8-11, 16 bytes)
     float pomHeightScale;       // 0 = disabled, else depth scale (0.01-0.50)
     int   pomSteps;             // linear search steps (8-512)
     int   pomRefinement;        // binary refinement iterations (0-8)
-    float pomFadeDistance;      // distance in blocks to fade POM out (8-256)
+    float pomFadeDistance;      // distance in blocks to fade displacement out (8-256)
     float colorExpansion;       // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
     uint blueNoiseFrame;                 // alignment padding (offset 52)
     // SHARC BDA fields (offsets 56-119, 64 bytes)
@@ -173,7 +179,7 @@ float sampleHeightRaw(uint texID, vec2 uv, vec2 uvMin, vec2 uvMax, int heightSou
     vec4 s;
     if (isBlock) {
         // Block geometry: sample from sprite texture array using spriteId
-        SpriteEntry se = spriteEntries[texID];
+        SpriteEntry se = safeSpriteEntry(texID);
         uint layer = spriteAnimLayer(se, worldUbo.animTick);
         s = textureLod(blockAlbedo, vec3(clampedUV, float(layer)), 0);
     } else {
@@ -470,6 +476,8 @@ void main() {
     // This correctly handles per-geometry transforms (mega-BLAS) where vertex buffer positions
     // are in chunk-local space but gl_ObjectToWorldEXT reflects the mega-chunk TLAS transform.
     vec3 worldPos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
+    vec3 planeHitWorldPos = worldPos;
+    float actualHitT = gl_HitTEXT;
 
     // Biome tint: shader-side resolution from per-section SSBO (bits 12-13 of flags)
     // 0=none, 1=grass, 2=foliage, 3=water. Replaces per-vertex colorLayer for biome tints.
@@ -495,7 +503,7 @@ void main() {
     vec4 specularValue;
     vec4 normalValue;
     ivec4 flagValue;
-    vec2 textureUV;
+    vec2 textureUV = vec2(0.0);
     vec2 uvMin = vec2(0.0);
     vec2 uvMax = vec2(1.0);
     vec3 rawAlbedoLinear = vec3(1.0);
@@ -528,7 +536,7 @@ void main() {
             flagValue = ivec4(0); // TODO: flag arrays in Phase 4
 
             // Grass block side overlay: use SpriteRegistry.overlaySprite
-            SpriteEntry se = spriteEntries[spriteId];
+            SpriteEntry se = safeSpriteEntry(spriteId);
             if (se.overlaySprite >= 0 && biomeTintType != 0u) {
                 float overlayAlpha = fetchOverlayAlpha(spriteId, textureUV, worldUbo.animTick);
                 colorLayer = mix(vec3(1.0), colorLayer, smoothstep(0.1, 0.9, overlayAlpha));
@@ -568,6 +576,192 @@ void main() {
         normalValue = vec4(0.0);
         flagValue = ivec4(0);
     }
+
+    uint packedBlockType = v0.emissiveBlockType;
+    uint materialType = (packedBlockType >> 8u) & 0xFFu;
+    uint materialClassIdx = 0u;
+    bool hasMaterialClass = false;
+#if RARSER_SHADER_DISPLACEMENT
+    bool displacementGlobalEligible = mainRay.index == 0u &&
+                                      pc.pomHeightScale > DISPLACEMENT_MIN_DEPTH &&
+                                      actualHitT < pc.pomFadeDistance;
+#else
+    bool displacementGlobalEligible = false;
+#endif
+
+    // Material class resolution is needed before final sampling so shader displacement
+    // can use per-material depth, source, and AutoPBR height controls.
+    if (displacementGlobalEligible) {
+        if (materialType > 0u) {
+            materialClassIdx = materialType - 1u;
+            hasMaterialClass = true;
+        } else if (useTexture && !isBlockGeometry) {
+            int maskTexID = mapping.entries[textureID].maskTexture;
+            if (maskTexID >= 0) {
+                materialClassIdx = uint(texture(textures[nonuniformEXT(maskTexID)], textureUV).r * 255.0 + 0.5);
+                hasMaterialClass = (materialClassIdx < uint(MAX_MATERIAL_CLASSES));
+            }
+        }
+    }
+
+    MaterialClassEntry mc;
+    bool hasMaterialEntry = false;
+    if (hasMaterialClass && pc.materialClassAddr != 0) {
+        MaterialClassBufferRef matBuf = MaterialClassBufferRef(pc.materialClassAddr);
+        mc = matBuf.materialClassMapping.entries[materialClassIdx];
+        hasMaterialEntry = true;
+    }
+
+#if RARSER_SHADER_DISPLACEMENT
+    DisplacementSource displacementSource;
+    displacementInitSource(displacementSource);
+    bool hasDisplacedSurface = false;
+    bool displacementUsesWorldOffset = DISPLACEMENT_WORLD_OFFSET_SCALE > 0.0;
+    bool displacementSelfShadowEnabled = false;
+    float displacedDepth = 0.0;
+    vec2 displacedUV = textureUV;
+    vec3 displacedBaseNormal = vec3(0.0, 1.0, 0.0);
+    vec3 displacedGeometricNormal = vec3(0.0, 1.0, 0.0);
+    vec3 displacedDpu = vec3(0.0);
+    vec3 displacedDpv = vec3(0.0);
+    vec3 displacedPlaneAtUv = planeHitWorldPos;
+
+    uint coordinateMode = (v0.flags & PBR_FLAG_COORD_MASK) >> PBR_FLAG_COORD_SHIFT;
+    bool fluidGeometry = (v0.flags & PBR_FLAG_FLUID_GEOMETRY) != 0u;
+    uint displacementMaterialMode = hasMaterialEntry ? ((mc.pomPacked0 >> 3u) & 0x3u) : 0u; // 0=inherit,1=off,2=custom
+    bool displacementMaterialAllows = displacementMaterialMode != 1u &&
+                                      (displacementMaterialMode != 2u || mc.pomDepth > DISPLACEMENT_MIN_DEPTH);
+    bool canDisplace = displacementGlobalEligible && useTexture &&
+                       coordinateMode == 0u && !prGetIsHand(mainRay) && !fluidGeometry &&
+                       displacementMaterialAllows;
+
+    if (canDisplace) {
+        vec3 wp0 = vec3(gl_ObjectToWorldEXT * vec4(v0.pos, 1.0));
+        vec3 wp1 = vec3(gl_ObjectToWorldEXT * vec4(v1.pos, 1.0));
+        vec3 wp2 = vec3(gl_ObjectToWorldEXT * vec4(v2.pos, 1.0));
+        bool basisValid = displacementBuildBasis(wp0, wp1, wp2, v0.textureUV, v1.textureUV, v2.textureUV,
+                                                 displacedDpu, displacedDpv, displacedBaseNormal);
+        if (dot(displacedBaseNormal, viewDir) < 0.0) {
+            displacedBaseNormal = -displacedBaseNormal;
+        }
+
+        if (basisValid) {
+            displacementSource.isBlock = isBlockGeometry;
+            displacementSource.textureID = textureID;
+            displacementSource.normalTextureID = normalTextureID;
+            displacementSource.animTick = worldUbo.animTick;
+            displacementSource.uvMin = uvMin;
+            displacementSource.uvMax = uvMax;
+
+            float fade = 1.0 - smoothstep(pc.pomFadeDistance * 0.75, pc.pomFadeDistance, actualHitT);
+            float materialDepth = (displacementMaterialMode == 2u && mc.pomDepth > DISPLACEMENT_MIN_DEPTH)
+                ? mc.pomDepth
+                : pc.pomHeightScale;
+            displacementSource.maxDepth = min(max(materialDepth, 0.0), pc.pomHeightScale) * fade;
+
+            if (hasMaterialEntry) {
+                displacementSource.pomPacked0 = mc.pomPacked0;
+                displacementSource.pomPacked1 = mc.pomPacked1;
+                displacementSource.pomPacked2 = mc.pomPacked2;
+                displacementSource.flags = mc.flags;
+                displacementSource.lumMin = mc.lumMin;
+                displacementSource.lumMax = mc.lumMax;
+                displacementSource.autoPBRPacked1 = mc.autoPBRPacked1;
+                displacementSelfShadowEnabled = displacementMaterialMode == 2u &&
+                                                (mc.pomPacked0 & (1u << 28u)) != 0u;
+            }
+
+            if (!isBlockGeometry && normalTextureID >= 0 &&
+                (mapping.entries[textureID].properties & TEX_PROP_HAS_HEIGHT_MAP) != 0) {
+                displacementSource.mode = DISPLACEMENT_SOURCE_NORMAL_ALPHA;
+            } else if (isBlockGeometry) {
+                SpriteEntry se = safeSpriteEntry(textureID);
+                bool rangedHeight = se.maskLayer >= 0;
+                if (se.normalLayer >= 0 && (se.flags & SPRITE_FLAG_HAS_HEIGHT) != 0u &&
+                    rangedHeight) {
+                    displacementSource.mode = DISPLACEMENT_SOURCE_NORMAL_ALPHA;
+                } else if (hasMaterialEntry && (mc.flags & 0x8u) != 0u) {
+                    displacementSource.mode = DISPLACEMENT_SOURCE_AUTOPBR_ALBEDO;
+                }
+            } else if (hasMaterialEntry && (mc.flags & 0x8u) != 0u) {
+                displacementSource.mode = DISPLACEMENT_SOURCE_AUTOPBR_ALBEDO;
+            }
+
+            DisplacementHit displacementHit;
+            int primarySteps = clamp(pc.pomSteps, 1, 512);
+            vec2 planeTextureUV = textureUV;
+            if (displacementTracePrimary(displacementSource, textureUV, planeHitWorldPos, gl_WorldRayDirectionEXT,
+                                         viewDir, displacedDpu, displacedDpv, displacedBaseNormal,
+                                         primarySteps, pc.pomRefinement, displacementHit)) {
+                hasDisplacedSurface = true;
+                textureUV = displacementHit.uv;
+                displacedUV = displacementHit.uv;
+                displacedDepth = displacementHit.depth;
+                vec3 planeAtDisplacedUv = planeHitWorldPos +
+                    displacedDpu * (displacementHit.uv.x - planeTextureUV.x) +
+                    displacedDpv * (displacementHit.uv.y - planeTextureUV.y);
+                worldPos = mix(planeHitWorldPos, displacementHit.worldPos, DISPLACEMENT_WORLD_OFFSET_SCALE);
+                actualHitT = mix(gl_HitTEXT, gl_HitTEXT + displacementHit.rayT, DISPLACEMENT_WORLD_OFFSET_SCALE);
+                displacedGeometricNormal = displacementHit.geometricNormal;
+                displacedPlaneAtUv = planeAtDisplacedUv;
+
+                if (isBlockGeometry) {
+                    float lod = 0.0;
+                    albedoValue = fetchBlockAlbedoLod(textureID, textureUV, worldUbo.animTick, lod);
+                    rawAlbedoLinear = albedoValue.rgb;
+                    specularValue = fetchBlockSpecularLod(textureID, textureUV, lod);
+                    normalValue = fetchBlockNormalLod(textureID, textureUV, lod);
+                    flagValue = ivec4(0);
+                } else {
+                    float lod = 0.0;
+                    albedoValue = textureLod(textures[nonuniformEXT(textureID)], textureUV, lod);
+                    rawAlbedoLinear = albedoValue.rgb;
+                    specularValue = specularTextureID >= 0 ?
+                        textureLod(textures[nonuniformEXT(specularTextureID)], textureUV, lod) : vec4(0.0);
+                    normalValue = normalTextureID >= 0 ?
+                        textureLod(textures[nonuniformEXT(normalTextureID)], textureUV, lod) : vec4(0.0);
+                    if (flagTextureID >= 0) {
+                        vec4 floatFlagValue = textureLod(textures[nonuniformEXT(flagTextureID)], textureUV, ceil(lod));
+                        flagValue = ivec4(round(floatFlagValue * 255.0));
+                    } else {
+                        flagValue = ivec4(0);
+                    }
+
+                    if (materialType == 0u) {
+                        int maskTexID = mapping.entries[textureID].maskTexture;
+                        if (maskTexID >= 0) {
+                            uint displacedClassIdx = uint(texture(textures[nonuniformEXT(maskTexID)], textureUV).r * 255.0 + 0.5);
+                            if (displacedClassIdx < uint(MAX_MATERIAL_CLASSES) && pc.materialClassAddr != 0) {
+                                materialClassIdx = displacedClassIdx;
+                                hasMaterialClass = true;
+                                MaterialClassBufferRef matBuf = MaterialClassBufferRef(pc.materialClassAddr);
+                                mc = matBuf.materialClassMapping.entries[materialClassIdx];
+                                hasMaterialEntry = true;
+                            }
+                        }
+                    }
+                }
+
+                if (displacementUsesWorldOffset && mainRay.index == 0u) {
+                    uint64_t lastIndexBufferAddr = lastIndexBufferAddrs.addrs[blasOffset + geometryID];
+                    uint64_t lastVertexBufferAddr = lastVertexBufferAddrs.addrs[blasOffset + geometryID];
+                    if (lastIndexBufferAddr > 0 && lastVertexBufferAddr > 0) {
+                        vec3 prevLocalPos;
+                        fetchTrianglePositions(vertexFormat, lastVertexBufferAddr, lastIndexBufferAddr,
+                                               gl_PrimitiveID, baryCoords, prevLocalPos);
+                        mat4 lastModelMat = lastObjToWorldMats.mat[instanceID];
+                        vec3 prevBaseNormal = displacementNormalize(mat3(lastModelMat) *
+                            normalize(cross(v1.pos - v0.pos, v2.pos - v0.pos)), displacedBaseNormal);
+                        if (dot(prevBaseNormal, displacedBaseNormal) < 0.0) prevBaseNormal = -prevBaseNormal;
+                        mainRay.prevWorldPos = mat3(lastModelMat) * prevLocalPos + lastModelMat[3].xyz -
+                                               prevBaseNormal * displacedDepth;
+                        mainRay.hasPrevWorldPos = 1u;
+                    }
+                }
+            }
+        }
+    }
+#endif
 
     vec3 glint = vec3(0.0);
     vec4 overlayColor = vec4(0.0);
@@ -625,13 +819,10 @@ void main() {
     float matNoiseContrast = 1.0;
     float matGamutBoost = 1.0;
     int matGamutBoostMode = 1; // default: saturation-based
-    uint packedBlockType = v0.emissiveBlockType;
-    uint materialType = (packedBlockType >> 8u) & 0xFFu;
-
     // Material class resolution: vertex materialType → mask texture → SSBO lookup via BDA
     // Priority: vertex materialType (fast, no texture fetch) > mask texture (per-texel) > skip
-    uint materialClassIdx = 0u;
-    bool hasMaterialClass = false;
+    materialClassIdx = 0u;
+    hasMaterialClass = false;
     if (materialType > 0u) {
         materialClassIdx = materialType - 1u;
         hasMaterialClass = true;
@@ -641,14 +832,16 @@ void main() {
         int maskTexID = mapping.entries[textureID].maskTexture;
         if (maskTexID >= 0) {
             materialClassIdx = uint(texture(textures[nonuniformEXT(maskTexID)], textureUV).r * 255.0 + 0.5);
-            hasMaterialClass = (materialClassIdx < 160u);
+            hasMaterialClass = (materialClassIdx < uint(MAX_MATERIAL_CLASSES));
         }
     }
 
+    hasMaterialEntry = false;
     if (hasMaterialClass && pc.materialClassAddr != 0) {
         uint idx = materialClassIdx;
         MaterialClassBufferRef matBuf = MaterialClassBufferRef(pc.materialClassAddr);
-        MaterialClassEntry mc = matBuf.materialClassMapping.entries[idx];
+        mc = matBuf.materialClassMapping.entries[idx];
+        hasMaterialEntry = true;
         vec4 pack0 = vec4(mc.f0, mc.roughness);
         vec4 pack1 = vec4(mc.metallic, mc.transmission, mc.ior, mc.subsurface);
         vec4 pack2 = vec4(mc.anisotropic, mc.sheenWeight, mc.sheenTint, mc.coatWeight);
@@ -678,7 +871,7 @@ void main() {
             if ((mc.flags & 0x8u) != 0u) {
                 if (!isBlockGeometry) {
                     // Entity path: GPU-side AutoPBR
-                    applyAutoPBR(mat, mc, rawAlbedoLinear, textureID, textureUV, uvMin, uvMax, gl_HitTEXT, false);
+                    applyAutoPBR(mat, mc, rawAlbedoLinear, textureID, textureUV, uvMin, uvMax, actualHitT, false);
                 } else if (pack1.y > 0.001) {
                     // Transmissive AutoPBR blocks (slime, glass, ice):
                     // CPU bake was skipped — use material class roughness slider
@@ -689,10 +882,6 @@ void main() {
             } else {
                 // Non-AutoPBR blocks: material class roughness slider
                 mat.roughness = max(pack0.a * pack0.a, 0.01);
-            }
-
-            // Per-block POM removed — displacement handled by tessellation/DDA
-            if (false) {
             }
 
             mat.metallic = pack1.x;
@@ -806,6 +995,20 @@ void main() {
     vec3 geometricNormal;
     vec3 normal =
         calculateNormal(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, mat.normal, viewDir, geometricNormal, false);
+#if RARSER_SHADER_DISPLACEMENT
+    if (hasDisplacedSurface) {
+        geometricNormal = displacedGeometricNormal;
+        vec3 tangent = displacementNormalize(displacedDpu - geometricNormal * dot(geometricNormal, displacedDpu),
+                                             abs(geometricNormal.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0));
+        vec3 bitangent = displacementNormalize(cross(geometricNormal, tangent), displacedDpv);
+        tangent = displacementNormalize(cross(bitangent, geometricNormal), tangent);
+        vec3 localNormal = mat.normal;
+        localNormal.y = -localNormal.y;
+        normal = displacementNormalize(tangent * localNormal.x + bitangent * localNormal.y +
+                                       geometricNormal * localNormal.z, geometricNormal);
+        if (dot(viewDir, normal) < 0.0) normal = geometricNormal;
+    }
+#endif
 
     // Procedural noise modulation — gated by noiseTarget bits
     // bit 0 = roughness, bit 1 = normal perturbation, bit 2 = metallic, bit 3 = roughness additive only
@@ -814,7 +1017,7 @@ void main() {
     if (matNoiseStrength > 0.001 && matNoiseTarget != 0 && maxThroughput > 0.01) {
         // Noise LOD: reduce octaves with distance, skip normal gradient far away
         int effectiveOctaves = matNoiseOctaves;
-        float hitDist = gl_HitTEXT;
+        float hitDist = actualHitT;
         bool skipNormalGradient = false;
         if (NOISE_LOD_ON) {
             // Reduce 1 octave per 32 blocks distance (high octaves are invisible at distance)
@@ -994,8 +1197,8 @@ void main() {
                 mainRay.albedoEmission = 0.0;
                 mainRay.directLightRadiance = vec3(0.0);
                 mainRay.directLightHitT = INF_DISTANCE;
-                mainRay.hitT = gl_HitTEXT;
-                mainRay.coneWidth += gl_HitTEXT * mainRay.coneSpread;
+                mainRay.hitT = actualHitT;
+                mainRay.coneWidth += actualHitT * mainRay.coneSpread;
                 mainRay.worldPos = worldPos;
                 mainRay.normal = normal;
                 mainRay.instanceIndex = instanceID;
@@ -1112,8 +1315,8 @@ void main() {
     mainRay.radiance += emissionRadiance;
     mainRay.albedoEmission = albedoEmission; // Store abs value for bloom
 
-    mainRay.hitT = gl_HitTEXT;
-    mainRay.coneWidth += gl_HitTEXT * mainRay.coneSpread;
+    mainRay.hitT = actualHitT;
+    mainRay.coneWidth += actualHitT * mainRay.coneSpread;
 
     // Perfect specular surfaces have a Dirac delta BRDF — they redirect light,
     // they don't scatter it. Direct lighting appears through the reflection chain.
@@ -1159,6 +1362,14 @@ void main() {
 
         // Add direct lighting contribution
         vec3 lightContribution = shadowRay.radiance;
+#if RARSER_SHADER_DISPLACEMENT
+        if (hasDisplacedSurface && displacementSelfShadowEnabled) {
+            int secondarySteps = max(8, pc.pomSteps / 2);
+            lightContribution *= displacementSelfShadow(displacementSource, displacedUV, displacedDepth,
+                                                        sampledLightDir, displacedDpu, displacedDpv,
+                                                        displacedBaseNormal, secondarySteps);
+        }
+#endif
 
         // Apply cloud shadowing (procedural volumetric slab).
         // This is evaluated at the shading point so it works for primary and reflected paths.
@@ -1369,6 +1580,14 @@ void main() {
                 }
 
                 float visibility = shadowRay.throughput.x;
+#if RARSER_SHADER_DISPLACEMENT
+                if (hasDisplacedSurface && displacementSelfShadowEnabled) {
+                    int secondarySteps = max(8, pc.pomSteps / 2);
+                    visibility *= displacementSelfShadow(displacementSource, displacedUV, displacedDepth,
+                                                         sDir, displacedDpu, displacedDpv,
+                                                         displacedBaseNormal, secondarySteps);
+                }
+#endif
 
                 vec3 brdf;
                 if (RESTIR_SIMPLIFIED_BRDF) {
@@ -1474,6 +1693,14 @@ void main() {
                 }
 
                 float visibility = shadowRay.throughput.x;
+#if RARSER_SHADER_DISPLACEMENT
+                if (hasDisplacedSurface && displacementSelfShadowEnabled) {
+                    int secondarySteps = max(8, pc.pomSteps / 2);
+                    visibility *= displacementSelfShadow(displacementSource, displacedUV, displacedDepth,
+                                                         sDir, displacedDpu, displacedDpv,
+                                                         displacedBaseNormal, secondarySteps);
+                }
+#endif
                 vec3 brdf;
                 if (RESTIR_SIMPLIFIED_BRDF) {
                     float NdotL = max(dot(normal, bestDir[k]), 0.0);
@@ -1644,6 +1871,14 @@ void main() {
             }
 
             float visibility = shadowRay.throughput.x;
+#if RARSER_SHADER_DISPLACEMENT
+            if (hasDisplacedSurface && displacementSelfShadowEnabled) {
+                int secondarySteps = max(8, pc.pomSteps / 2);
+                visibility *= displacementSelfShadow(displacementSource, displacedUV, displacedDepth,
+                                                     sDir, displacedDpu, displacedDpv,
+                                                     displacedBaseNormal, secondarySteps);
+            }
+#endif
 
             // Simplified Lambertian BRDF for indirect bounces (specular invisible behind denoiser)
             float NdotL = max(dot(normal, currentRes.lightDir), 0.0);
@@ -1742,14 +1977,38 @@ void main() {
                 // Total internal reflection fallback
                 vec3 reflectDir = reflect(gl_WorldRayDirectionEXT, faceNormal);
                 vec3 bounceOffsetN = dot(reflectDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
-                mainRay.origin = offset_ray(worldPos, bounceOffsetN);
+                vec3 bounceWorldPos = worldPos;
+#if RARSER_SHADER_DISPLACEMENT
+                if (hasDisplacedSurface && displacementUsesWorldOffset) {
+                    vec3 exitWorldPos;
+                    float exitDistance;
+                    if (displacementTraceExit(displacementSource, displacedUV, displacedDepth, displacedPlaneAtUv,
+                                              reflectDir, displacedDpu, displacedDpv, displacedBaseNormal,
+                                              max(8, pc.pomSteps / 2), exitWorldPos, exitDistance)) {
+                        bounceWorldPos = exitWorldPos;
+                    }
+                }
+#endif
+                mainRay.origin = offset_ray(bounceWorldPos, bounceOffsetN);
                 mainRay.direction = reflectDir;
                 mainRay.throughput *= mat.f0;
                 prSetLobeType(mainRay, 1u); // specular
             } else {
                 // Refraction path
                 vec3 bounceOffsetN = dot(refractDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
-                mainRay.origin = offset_ray(worldPos, bounceOffsetN);
+                vec3 bounceWorldPos = worldPos;
+#if RARSER_SHADER_DISPLACEMENT
+                if (hasDisplacedSurface && displacementUsesWorldOffset) {
+                    vec3 exitWorldPos;
+                    float exitDistance;
+                    if (displacementTraceExit(displacementSource, displacedUV, displacedDepth, displacedPlaneAtUv,
+                                              refractDir, displacedDpu, displacedDpv, displacedBaseNormal,
+                                              max(8, pc.pomSteps / 2), exitWorldPos, exitDistance)) {
+                        bounceWorldPos = exitWorldPos;
+                    }
+                }
+#endif
+                mainRay.origin = offset_ray(bounceWorldPos, bounceOffsetN);
                 mainRay.direction = refractDir;
                 mainRay.throughput *= (1.0 - fresnelReflect);
                 prSetLobeType(mainRay, 2u); // transmission
@@ -1761,7 +2020,19 @@ void main() {
             // PSR mirror: opaque specular reflection
             vec3 reflectDir = reflect(gl_WorldRayDirectionEXT, normal);
             vec3 bounceOffsetN = dot(reflectDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
-            mainRay.origin = offset_ray(worldPos, bounceOffsetN);
+            vec3 bounceWorldPos = worldPos;
+#if RARSER_SHADER_DISPLACEMENT
+            if (hasDisplacedSurface && displacementUsesWorldOffset) {
+                vec3 exitWorldPos;
+                float exitDistance;
+                if (displacementTraceExit(displacementSource, displacedUV, displacedDepth, displacedPlaneAtUv,
+                                          reflectDir, displacedDpu, displacedDpv, displacedBaseNormal,
+                                          max(8, pc.pomSteps / 2), exitWorldPos, exitDistance)) {
+                    bounceWorldPos = exitWorldPos;
+                }
+            }
+#endif
+            mainRay.origin = offset_ray(bounceWorldPos, bounceOffsetN);
             mainRay.direction = reflectDir;
 
             // Fresnel reflectance (Schlick) — preserves mirror tint for metals
@@ -1803,11 +2074,23 @@ void main() {
 
     mainRay.throughput *= bsdf / max(pdf, 1e-4);
 
-    // AO modulation: darken indirect lighting in occluded areas (LabPBR AO + POM AO)
+    // AO modulation: darken indirect lighting in occluded areas (LabPBR AO + legacy AO)
     mainRay.throughput *= mat.ao;
 
     vec3 bounceOffsetN = dot(sampleDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
-    mainRay.origin = offset_ray(worldPos, bounceOffsetN);
+    vec3 bounceWorldPos = worldPos;
+#if RARSER_SHADER_DISPLACEMENT
+    if (hasDisplacedSurface && displacementUsesWorldOffset) {
+        vec3 exitWorldPos;
+        float exitDistance;
+        if (displacementTraceExit(displacementSource, displacedUV, displacedDepth, displacedPlaneAtUv,
+                                  sampleDir, displacedDpu, displacedDpv, displacedBaseNormal,
+                                  max(8, pc.pomSteps / 2), exitWorldPos, exitDistance)) {
+            bounceWorldPos = exitWorldPos;
+        }
+    }
+#endif
+    mainRay.origin = offset_ray(bounceWorldPos, bounceOffsetN);
 
     mainRay.direction = sampleDir;
     mainRay.flags &= ~PR_STOP_BIT;

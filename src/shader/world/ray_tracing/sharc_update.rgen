@@ -146,6 +146,8 @@ void main() {
     mainRay.index = 0;
     mainRay.flags = (mainRay.flags & (PR_ISHAND_BIT | PR_INSIDEBOAT_BIT)) | (255u << PR_EMBLOCK_SHIFT);
     mainRay.hitT = 0;
+    mainRay.prevWorldPos = vec3(0.0);
+    mainRay.hasPrevWorldPos = 0u;
     mainRay.directLightRadiance = vec3(0.0);
     mainRay.directLightHitT = 0.0;
     mainRay.albedoEmission = 0.0;
@@ -222,6 +224,8 @@ void main() {
         mainRay.index = b + 1;
         mainRay.flags = (mainRay.flags & (PR_ISHAND_BIT | PR_INSIDEBOAT_BIT)) | (255u << PR_EMBLOCK_SHIFT);
         mainRay.hitT = 0;
+        mainRay.prevWorldPos = vec3(0.0);
+        mainRay.hasPrevWorldPos = 0u;
         mainRay.directLightRadiance = vec3(0.0);
         mainRay.directLightHitT = 0.0;
         mainRay.albedoEmission = 0.0;

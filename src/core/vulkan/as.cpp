@@ -1,11 +1,19 @@
 #include "core/vulkan/as.hpp"
 
 #include "core/vulkan/command.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/device.hpp"
 #include "core/vulkan/physical_device.hpp"
 #include "core/vulkan/vma.hpp"
 
+#include <atomic>
 #include <iostream>
+#include <string>
+
+namespace {
+std::atomic_uint64_t gBlasId{0};
+std::atomic_uint64_t gTlasId{0};
+}
 
 vk::BLAS::BLAS(std::shared_ptr<Device> device,
                VkAccelerationStructureKHR blas,
@@ -15,6 +23,8 @@ vk::BLAS::BLAS(std::shared_ptr<Device> device,
     deviceAddressInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
     deviceAddressInfo.accelerationStructure = blas_;
     blasDeviceAddress_ = vkGetAccelerationStructureDeviceAddressKHR(device->vkDevice(), &deviceAddressInfo);
+    auto name = std::string("Radiance BLAS #") + std::to_string(++gBlasId);
+    vk::DebugUtils::setObjectName(device->vkDevice(), VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR, blas_, name);
 }
 
 vk::BLAS::~BLAS() {
@@ -41,6 +51,8 @@ vk::TLAS::TLAS(std::shared_ptr<Device> device,
     deviceAddressInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
     deviceAddressInfo.accelerationStructure = tlas_;
     tlasDeviceAddress_ = vkGetAccelerationStructureDeviceAddressKHR(device->vkDevice(), &deviceAddressInfo);
+    auto name = std::string("Radiance TLAS #") + std::to_string(++gTlasId);
+    vk::DebugUtils::setObjectName(device->vkDevice(), VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR, tlas_, name);
 }
 
 vk::TLAS::~TLAS() {

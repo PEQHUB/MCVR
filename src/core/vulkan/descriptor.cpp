@@ -2,11 +2,13 @@
 
 #include "core/vulkan/as.hpp"
 #include "core/vulkan/buffer.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/device.hpp"
 #include "core/vulkan/image.hpp"
 
 #include <iostream>
 #include <map>
+#include <string>
 
 std::ostream &descriptorTableCout() {
     return std::cout << "[DescriptorTable] ";
@@ -42,6 +44,23 @@ vk::DescriptorTable::DescriptorTable(std::shared_ptr<Device> device,
 #ifdef DEBUG
         descriptorTableCout() << "created pipeline layout" << std::endl;
 #endif
+    }
+
+    if (vk::DebugUtils::enabled()) {
+        vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_DESCRIPTOR_POOL,
+                                  descriptorPool_, "Radiance DescriptorPool");
+        vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_PIPELINE_LAYOUT,
+                                  pipelineLayout_, "Radiance PipelineLayout");
+        for (size_t i = 0; i < tableLayout_.size(); i++) {
+            std::string layoutName = "Radiance DescriptorSetLayout[" + std::to_string(i) + "]";
+            vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT,
+                                      tableLayout_[i], layoutName);
+        }
+        for (size_t i = 0; i < table_.size(); i++) {
+            std::string setName = "Radiance DescriptorSet[" + std::to_string(i) + "]";
+            vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_DESCRIPTOR_SET,
+                                      table_[i], setName);
+        }
     }
 }
 

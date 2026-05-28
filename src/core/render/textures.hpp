@@ -50,6 +50,12 @@ class Textures : public SharedObject<Textures> {
                      uint32_t height,
                      uint32_t level);
     void performQueuedUpload();
+    // Per-frame upload diagnostics (reset each frame by resetFrame)
+    size_t uploadBytes_ = 0;
+    uint32_t uploadRegions_ = 0;
+    uint32_t uploadCacheResizes_ = 0;
+    size_t uploadBytes() const { return uploadBytes_; }
+    uint32_t uploadRegions() const { return uploadRegions_; }
     void bindAllTextures();
     void destroyTexture(uint32_t id);
 

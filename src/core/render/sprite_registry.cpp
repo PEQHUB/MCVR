@@ -58,18 +58,29 @@ const vk::Data::SpriteEntry* SpriteRegistry::getEntry(uint16_t spriteId) const {
 void SpriteRegistry::uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    if (entries_.empty()) {
-        std::cout << "[SpriteRegistry] No sprites to upload" << std::endl;
-        return;
+    vk::Data::SpriteEntry defaultEntry{};
+    defaultEntry.baseLayer = 0;
+    defaultEntry.frameCount = 1;
+    defaultEntry.tickRate = 1;
+    defaultEntry.flags = 0;
+    defaultEntry.specularLayer = -1;
+    defaultEntry.normalLayer = -1;
+    defaultEntry.overlaySprite = -1;
+    defaultEntry.maskLayer = -1;
+
+    std::vector<vk::Data::SpriteEntry> uploadEntries(vk::Data::SPRITE_MAX_ENTRIES, defaultEntry);
+    const size_t copyCount = std::min(entries_.size(), uploadEntries.size());
+    if (copyCount > 0) {
+        std::copy(entries_.begin(), entries_.begin() + copyCount, uploadEntries.begin());
     }
 
-    VkDeviceSize dataSize = entries_.size() * sizeof(vk::Data::SpriteEntry);
+    VkDeviceSize dataSize = uploadEntries.size() * sizeof(vk::Data::SpriteEntry);
 
     ssbo_ = vk::DeviceLocalBuffer::create(
         vma, device, true, dataSize,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-    ssbo_->uploadToStagingBuffer(const_cast<vk::Data::SpriteEntry*>(entries_.data()));
+    ssbo_->uploadToStagingBuffer(uploadEntries.data(), static_cast<size_t>(dataSize), 0);
 
     // One-shot staging → device-local transfer. Without this, the shader reads
     // uninitialized VRAM from the device-local buffer (staging is a separate VkBuffer).
@@ -83,7 +94,7 @@ void SpriteRegistry::uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk
     vkWaitForFences(device->vkDevice(), 1, &fence->vkFence(), VK_TRUE, UINT64_MAX);
 
     std::cout << "[SpriteRegistry] Uploaded " << spriteCount_ << " sprites ("
-              << dataSize << " bytes) to GPU SSBO" << std::endl;
+              << dataSize << " bytes padded) to GPU SSBO" << std::endl;
 }
 
 void SpriteRegistry::reset() {

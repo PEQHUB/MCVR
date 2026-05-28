@@ -150,6 +150,7 @@ endif()
 option(MCVR_ENABLE_SHARC "Enable SHARC hash grid radiance cache (requires working nvgpucomp64 — broken on 595.97)" OFF)
 
 option(MCVR_ENABLE_OMM "Enable Opacity Micro-Map SDK for AHS elimination" ON)
+option(MCVR_SHADER_DEBUG_INFO "Emit NonSemantic Vulkan debug info with source (-gVS) for Nsight Graphics profiling. Off by default: 3x SPIR-V size, may regress RT pipeline performance." OFF)
 
 if (MCVR_ENABLE_OMM)
     message(STATUS "OMM SDK Enabled")

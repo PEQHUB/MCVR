@@ -11,6 +11,7 @@
 #include "core/render/modules/world/frame_gen/frame_gen_manager.hpp"
 #include "core/render/textures.hpp"
 #include "core/render/world.hpp"
+#include "core/vulkan/debug_utils.hpp"
 
 #include <algorithm>
 
@@ -482,7 +483,11 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeRebuildChunks(
     JNIEnv *, jclass) {
-    Renderer::instance().world()->chunks()->resetScheduler();
+    auto *renderer = Renderer::try_instance();
+    if (!renderer) return;
+    auto world = renderer->world();
+    if (!world || !world->chunks()) return;
+    world->chunks()->resetScheduler(true);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeResetExposureAdaptation(
@@ -646,11 +651,15 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.restirBounceEnabled = enabled;
 }
 
-// --- Parallax Occlusion Mapping ---
+// --- Material-owned shader displacement ---
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMEnabled(
-    JNIEnv *, jclass, jboolean v, jboolean) {
-    Renderer::options.pomEnabled = (v == JNI_TRUE);
+    JNIEnv *, jclass, jboolean v, jboolean write) {
+    bool enabled = (v == JNI_TRUE);
+    if (Renderer::options.pomEnabled != enabled && write) {
+        Renderer::options.needRecreate = true;
+    }
+    Renderer::options.pomEnabled = enabled;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMHeightScale(
@@ -675,38 +684,40 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDisplacementQuality(
     JNIEnv *, jclass, jint v, jboolean) {
-    Renderer::options.displacementQuality = std::clamp(v, 0, 4);
-    Renderer::options.needRecreate = true;
+    Renderer::options.displacementQuality = static_cast<uint32_t>(std::clamp(v, 0, 4));
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTessMaxLevel(
     JNIEnv *, jclass, jint v, jboolean) {
     Renderer::options.tessMaxLevel = std::clamp(static_cast<uint32_t>(v), 2u, 32u);
-    Renderer::options.needRecreate = true;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTessNearDist(
     JNIEnv *, jclass, jint v, jboolean) {
     Renderer::options.tessNearDist = std::clamp(static_cast<float>(v), 8.0f, 256.0f);
-    Renderer::options.needRecreate = true;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTessMidDist(
     JNIEnv *, jclass, jint v, jboolean) {
     Renderer::options.tessMidDist = std::clamp(static_cast<float>(v), 16.0f, 384.0f);
-    Renderer::options.needRecreate = true;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTessFarDist(
     JNIEnv *, jclass, jint v, jboolean) {
     Renderer::options.tessFarDist = std::clamp(static_cast<float>(v), 32.0f, 512.0f);
-    Renderer::options.needRecreate = true;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetLoggingEnabled(
     JNIEnv *, jclass, jboolean enabled, jboolean) {
     Renderer::options.loggingEnabled = enabled;
+    vk::DebugUtils::setEnabled(Renderer::options.gpuDebugLabels || Renderer::options.loggingEnabled);
     RadianceLogger::setEnabled(enabled, Renderer::folderPath);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGpuDebugLabels(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    Renderer::options.gpuDebugLabels = enabled;
+    vk::DebugUtils::setEnabled(Renderer::options.gpuDebugLabels || Renderer::options.loggingEnabled);
 }
 
 // --- Offline Accumulation ---

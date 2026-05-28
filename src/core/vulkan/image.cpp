@@ -3,12 +3,14 @@
 
 #include "core/vulkan/buffer.hpp"
 #include "core/vulkan/command.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/device.hpp"
 #include "core/vulkan/vma.hpp"
 
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <string>
 
 std::ostream &imageCout() {
     return std::cout << "[Image] ";
@@ -251,6 +253,9 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
             exit(EXIT_FAILURE);
         }
         mappedPtr_ = stagingAllocationInfo_.pMappedData;
+        vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, stagingBuffer_,
+                                      "Image staging buffer " + std::to_string(width_) + "x" +
+                                          std::to_string(height_) + "x" + std::to_string(layer_));
     }
 
     // image
@@ -275,6 +280,9 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
         imageCerr() << "failed to create image" << std::endl;
         exit(EXIT_FAILURE);
     }
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_IMAGE, image_,
+                                  "DeviceLocalImage " + std::to_string(width_) + "x" +
+                                      std::to_string(height_) + "x" + std::to_string(layer_));
 
     VkImageViewCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -307,6 +315,9 @@ vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
         imageCerr() << "failed to create image view for image" << std::endl;
         exit(EXIT_FAILURE);
     }
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_IMAGE_VIEW, imageViews_[0],
+                                  "DeviceLocalImageView " + std::to_string(width_) + "x" +
+                                      std::to_string(height_) + "x" + std::to_string(layer_));
 }
 
 std::shared_ptr<vk::DeviceLocalImage> vk::DeviceLocalImage::create3D(
@@ -353,6 +364,9 @@ void vk::DeviceLocalImage::uploadToStagingBuffer(void *src) {
             exit(EXIT_FAILURE);
         }
         mappedPtr_ = stagingAllocationInfo_.pMappedData;
+        vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, stagingBuffer_,
+                                      "Image transient staging buffer " + std::to_string(width_) + "x" +
+                                          std::to_string(height_) + "x" + std::to_string(layer_));
     }
 
     size_t size = width_ * height_ * layer_ * vk::formatToByte(format_);
@@ -439,6 +453,8 @@ void vk::DeviceLocalImage::addImageView(VkImageViewCreateInfo info) {
         imageCerr() << "failed to create image view for image" << std::endl;
         exit(EXIT_FAILURE);
     }
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_IMAGE_VIEW, vkImageView,
+                                  "DeviceLocalImageView extra #" + std::to_string(imageViews_.size()));
     imageViews_.push_back(vkImageView);
 }
 
@@ -471,6 +487,7 @@ vk::Sampler::Sampler(std::shared_ptr<Device> device,
     if (vkCreateSampler(device->vkDevice(), &samplerInfo, nullptr, &samper_) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create sampler!");
     }
+    vk::DebugUtils::setObjectName(device->vkDevice(), VK_OBJECT_TYPE_SAMPLER, samper_, "Radiance Sampler");
 }
 
 vk::Sampler::~Sampler() {

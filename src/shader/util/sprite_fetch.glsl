@@ -25,6 +25,10 @@ layout(set = 0, binding = 5) uniform sampler2DArray blockNormal;
 
 // --- Helpers ---
 
+SpriteEntry safeSpriteEntry(uint spriteId) {
+    return spriteEntries[min(spriteId, SPRITE_MAX_ENTRIES - 1u)];
+}
+
 // Compute the current animation layer for a sprite.
 uint spriteAnimLayer(SpriteEntry se, uint animTick) {
     return se.baseLayer + ((animTick / se.tickRate) % se.frameCount);
@@ -32,40 +36,40 @@ uint spriteAnimLayer(SpriteEntry se, uint animTick) {
 
 // Sample block albedo texture from the sprite array.
 vec4 fetchBlockAlbedoTex(uint spriteId, vec2 uv, uint animTick) {
-    SpriteEntry se = spriteEntries[spriteId];
+    SpriteEntry se = safeSpriteEntry(spriteId);
     uint layer = spriteAnimLayer(se, animTick);
     return texture(blockAlbedo, vec3(uv, float(layer)));
 }
 
 // Sample block albedo with explicit LOD.
 vec4 fetchBlockAlbedoLod(uint spriteId, vec2 uv, uint animTick, float lod) {
-    SpriteEntry se = spriteEntries[spriteId];
+    SpriteEntry se = safeSpriteEntry(spriteId);
     uint layer = spriteAnimLayer(se, animTick);
     return textureLod(blockAlbedo, vec3(uv, float(layer)), lod);
 }
 
 // Sample block specular from the specular array (static, not animated).
 vec4 fetchBlockSpecularTex(uint spriteId, vec2 uv) {
-    SpriteEntry se = spriteEntries[spriteId];
+    SpriteEntry se = safeSpriteEntry(spriteId);
     if (se.specularLayer < 0) return vec4(0.0);
     return texture(blockSpecular, vec3(uv, float(se.specularLayer)));
 }
 
 vec4 fetchBlockSpecularLod(uint spriteId, vec2 uv, float lod) {
-    SpriteEntry se = spriteEntries[spriteId];
+    SpriteEntry se = safeSpriteEntry(spriteId);
     if (se.specularLayer < 0) return vec4(0.0);
     return textureLod(blockSpecular, vec3(uv, float(se.specularLayer)), lod);
 }
 
 // Sample block normal from the normal array (static, not animated).
 vec4 fetchBlockNormalTex(uint spriteId, vec2 uv) {
-    SpriteEntry se = spriteEntries[spriteId];
+    SpriteEntry se = safeSpriteEntry(spriteId);
     if (se.normalLayer < 0) return vec4(0.5, 0.5, 1.0, 1.0); // flat normal
     return texture(blockNormal, vec3(uv, float(se.normalLayer)));
 }
 
 vec4 fetchBlockNormalLod(uint spriteId, vec2 uv, float lod) {
-    SpriteEntry se = spriteEntries[spriteId];
+    SpriteEntry se = safeSpriteEntry(spriteId);
     if (se.normalLayer < 0) return vec4(0.5, 0.5, 1.0, 1.0);
     return textureLod(blockNormal, vec3(uv, float(se.normalLayer)), lod);
 }
@@ -73,10 +77,10 @@ vec4 fetchBlockNormalLod(uint spriteId, vec2 uv, float lod) {
 // Fetch overlay alpha for grass block sides.
 // Returns overlay alpha (0 = no overlay, >0 = tinted region).
 float fetchOverlayAlpha(uint spriteId, vec2 uv, uint animTick) {
-    SpriteEntry se = spriteEntries[spriteId];
+    SpriteEntry se = safeSpriteEntry(spriteId);
     if (se.overlaySprite < 0) return 0.0;
 
-    SpriteEntry overlaySe = spriteEntries[se.overlaySprite];
+    SpriteEntry overlaySe = safeSpriteEntry(uint(se.overlaySprite));
     uint layer = spriteAnimLayer(overlaySe, animTick);
     return texture(blockAlbedo, vec3(uv, float(layer))).a;
 }

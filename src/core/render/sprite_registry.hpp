@@ -33,10 +33,16 @@ class SpriteRegistry {
     void uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device);
 
     /// Get the GPU buffer for descriptor binding. Returns nullptr if not uploaded.
-    std::shared_ptr<vk::DeviceLocalBuffer> getBuffer() const { return ssbo_; }
+    std::shared_ptr<vk::DeviceLocalBuffer> getBuffer() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ssbo_;
+    }
 
     /// Number of registered sprites.
-    uint32_t count() const { return spriteCount_; }
+    uint32_t count() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return spriteCount_;
+    }
 
     /// Reset all entries (resource reload).
     void reset();

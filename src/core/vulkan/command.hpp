@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/all_extern.hpp"
+#include "core/vulkan/debug_utils.hpp"
 
 #include <cstdlib>
 #include <utility>
@@ -118,27 +119,14 @@ class CommandBuffer : public SharedObject<CommandBuffer> {
 
     // Debug label helpers for Nsight profiling
     static bool debugLabelsEnabled() {
-        static bool enabled = [] {
-            const char* env = std::getenv("RADIANCE_VK_LABELS");
-            if (env == nullptr || env[0] == '\0') return false;
-            return env[0] == '1' || env[0] == 't' || env[0] == 'T' ||
-                   env[0] == 'y' || env[0] == 'Y' || env[0] == 'o' || env[0] == 'O';
-        }();
-        return enabled;
+        return DebugUtils::enabled();
     }
 
     void beginLabel(const char* name, float r = 0.2f, float g = 0.8f, float b = 0.2f) {
-        if (debugLabelsEnabled() && vkCmdBeginDebugUtilsLabelEXT) {
-            VkDebugUtilsLabelEXT label{VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};
-            label.pLabelName = name;
-            label.color[0] = r; label.color[1] = g; label.color[2] = b; label.color[3] = 1.0f;
-            vkCmdBeginDebugUtilsLabelEXT(commandBuffer_, &label);
-        }
+        DebugUtils::beginCommandLabel(commandBuffer_, name, r, g, b);
     }
     void endLabel() {
-        if (debugLabelsEnabled() && vkCmdEndDebugUtilsLabelEXT) {
-            vkCmdEndDebugUtilsLabelEXT(commandBuffer_);
-        }
+        DebugUtils::endCommandLabel(commandBuffer_);
     }
 
     void submitMainQueueIndividual(std::shared_ptr<Device> device);

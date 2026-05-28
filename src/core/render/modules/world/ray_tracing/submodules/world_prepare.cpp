@@ -1,5 +1,6 @@
 #include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
 #include "core/render/buffers.hpp"
+#include "core/render/crash_ring_buffer.hpp"
 #include "core/render/gpu_diagnostics.hpp"
 #include "core/render/chunks.hpp"
 #include "core/render/entities.hpp"
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 #include <unordered_map>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -154,28 +156,53 @@ void WorldPrepareContext::render() {
     auto cameraPos = Renderer::instance().world()->getCameraPos();
 
     GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::WORLD_PREPARE_BEGIN);
+    g_crashRing.record("WP:enter");
 
     // CPU profiling: accumulate sub-phase timing (logged every 120 frames with TLAS stats)
     using Clock = std::chrono::steady_clock;
     static float cpuAccCheck = 0, cpuAccSchedule = 0, cpuAccImportant = 0;
     static float cpuAccEntity = 0, cpuAccInstances = 0, cpuAccTlas = 0, cpuAccTotal = 0;
     static uint32_t cpuFrameCount = 0;
+    // Per-frame CSV accumulators (reset each frame when perFrameTiming is on)
+    static float pfCheck = 0, pfImportant = 0, pfEntity = 0;
+    static float pfInstances = 0, pfTlas = 0;
     auto cpuT0 = Clock::now();
     auto cpuMsSince = [](Clock::time_point t0) {
         return std::chrono::duration<float, std::milli>(Clock::now() - t0).count();
     };
 
-    std::unique_lock<std::recursive_mutex> lock(chunks->mutex());
+    g_crashRing.record("WP:lock");
+    auto lockStart = Clock::now();
+    std::unique_lock<std::recursive_mutex> lock(chunks->mutex(), std::defer_lock);
+    while (!lock.try_lock()) {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - lockStart).count() >= 250) {
+            renderDiag("WP chunk mutex wait timed out after %.3f ms; skipping RT frame",
+                       cpuMsSince(lockStart));
+            g_crashRing.record("WP:lockTimeout");
+            tlas = nullptr;
+            prevBlasSnapshot_ = {};
+            prevTlasInstanceCount_ = 0;
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    float lockWaitMs = cpuMsSince(lockStart);
+    if (lockWaitMs > 2.0f) {
+        renderDiag("WP chunk mutex waited %.3f ms", lockWaitMs);
+    }
+    g_crashRing.record("WP:lockOk");
 
     auto cpuT1 = Clock::now();
     if (chunks->chunkBuildScheduler() != nullptr) {
         chunks->chunkBuildScheduler()->updateCameraPos(cameraPos);
         chunks->chunkBuildScheduler()->integrateCompleted();
         cpuAccCheck += cpuMsSince(cpuT1);
+        pfCheck += cpuMsSince(cpuT1);
     }
 
     auto cpuT3 = Clock::now();
     GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::CHUNK_SCHEDULE_DONE);
+    g_crashRing.record("WP:schedulerDone");
 
     // Barrier: ensure vertex/index buffer TRANSFER writes from uploadCommandBuffer
     // are visible before BLAS builds read them. Without this, the GPU may speculatively
@@ -206,6 +233,7 @@ void WorldPrepareContext::render() {
         }
     }
     cpuAccImportant += cpuMsSince(cpuT4);
+    pfImportant += cpuMsSince(cpuT4);
 
     auto cpuT5 = Clock::now();
     if (entities->blasBatchBuilder() != nullptr) {
@@ -213,6 +241,7 @@ void WorldPrepareContext::render() {
         entities->blasBatchBuilder()->submit(worldCommandBuffer);
     }
     cpuAccEntity += cpuMsSince(cpuT5);
+    pfEntity += cpuMsSince(cpuT5);
 
     worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
         .srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
@@ -395,77 +424,91 @@ void WorldPrepareContext::render() {
             tlas = nullptr;
         }
 
-        // Parallel pass 1: update cache + distance cull → collect visible chunk indices
-        // Each thread fills a local list of visible chunk indices
+        // Deterministic render-thread pass: update cache + distance cull.
+        // This used to use Renderer::threadPool.parallelFor(), but crash logs proved
+        // a hang at WP:chunkPass1. Keep WorldPrepare render-critical work local.
         uint32_t numChunks = static_cast<uint32_t>(chunk1s.size());
-        uint32_t numThreads = std::max(1u, Renderer::threadPool.threadCount());
-        struct LocalResult {
-            std::vector<int> visibleNear;
-            std::vector<std::pair<int64_t, int>> visibleFar; // megaKey, chunkIndex
-        };
-        std::vector<LocalResult> locals(numThreads);
-
-        Renderer::threadPool.parallelFor(numThreads, [&](uint32_t t) {
-            uint32_t start = t * numChunks / numThreads;
-            uint32_t end = (t + 1) * numChunks / numThreads;
-            auto &local = locals[t];
-            uint64_t textureGeneration = Renderer::textureSystem.generation();
-
-            for (uint32_t i = start; i < end; i++) {
-                auto &chunk1 = chunk1s[i];
-                if (chunk1->blas == nullptr) continue;
-                if (chunk1->textureGeneration != textureGeneration) continue;
-
-                // Update cache if generation changed
-                auto &cc = cachedChunks_[i];
-                if (cc.blasGeneration != chunk1->blasGeneration) {
-                    cc.blasGeneration = chunk1->blasGeneration;
-                    cc.blas = chunk1->blas;
-                    cc.x = chunk1->x; cc.y = chunk1->y; cc.z = chunk1->z;
-                    cc.biomeGrassColor = chunk1->biomeGrassColor;
-                    cc.biomeFoliageColor = chunk1->biomeFoliageColor;
-                    cc.biomeWaterColor = chunk1->biomeWaterColor;
-                    cc.geometryCount = chunk1->geometryCount;
-                    cc.geoTypes.clear();
-                    cc.geoTypes.push_back(World::GeometryTypes::SHADOW);
-                    cc.geoTypes.insert(cc.geoTypes.end(), chunk1->geometryTypes->begin(), chunk1->geometryTypes->end());
-                    cc.vertBufAddrs.clear();
-                    cc.idxBufAddrs.clear();
-                    for (uint32_t j = 0; j < chunk1->geometryCount; j++) {
-                        cc.vertBufAddrs.push_back((*chunk1->vertexBuffers)[j]->bufferAddress());
-                        cc.idxBufAddrs.push_back((*chunk1->indexBuffers)[j]->bufferAddress());
-                    }
-                    cc.vertexBuffers = chunk1->vertexBuffers;
-                    cc.indexBuffers = chunk1->indexBuffers;
-                    cc.displacedBlas = chunk1->displacedBlas;
-                    cc.displacedFaceDataBuffer = chunk1->displacedFaceDataBuffer;
-                    cc.hasDisplaced = chunk1->displacedBlas && chunk1->displacedFaceDataBuffer;
-                    cc.vertexFormat = chunk1->vertexFormat;
-                }
-
-                // Distance cull
-                float cx = static_cast<float>(static_cast<double>(cc.x) + 8.0 - cameraPos.x);
-                float cy = static_cast<float>(static_cast<double>(cc.y) + 8.0 - cameraPos.y);
-                float cz = static_cast<float>(static_cast<double>(cc.z) + 8.0 - cameraPos.z);
-                float dist2 = cx * cx + cy * cy + cz * cz;
-                if (dist2 > cullDist2) continue;
-
-                if (megaEnabled && dist2 >= mergeDist2) {
-                    local.visibleFar.push_back({megaKey(cc.x, cc.y, cc.z), static_cast<int>(i)});
-                } else {
-                    local.visibleNear.push_back(static_cast<int>(i));
-                }
-            }
-        });
-
-        // Flatten visible chunks + collect far chunks for mega-BLAS
         std::vector<int> allVisible;
-        for (auto &local : locals) {
-            allVisible.insert(allVisible.end(), local.visibleNear.begin(), local.visibleNear.end());
-            for (auto &[mk, chunkIdx] : local.visibleFar) {
-                farChunksByMega[mk].push_back(chunkIdx);
+        allVisible.reserve(numChunks);
+        uint64_t textureGeneration = Renderer::textureSystem.generation();
+        uint32_t staleTextureChunks = 0;
+        bool scan25Recorded = numChunks < 4;
+        bool scan50Recorded = numChunks < 4;
+        bool scan75Recorded = numChunks < 4;
+
+        g_crashRing.record("WP:chunkPass1");
+        for (uint32_t i = 0; i < numChunks; i++) {
+            if (!scan25Recorded && i >= numChunks / 4) {
+                g_crashRing.record("WP:scan25");
+                scan25Recorded = true;
+            }
+            if (!scan50Recorded && i >= numChunks / 2) {
+                g_crashRing.record("WP:scan50");
+                scan50Recorded = true;
+            }
+            if (!scan75Recorded && i >= (numChunks * 3) / 4) {
+                g_crashRing.record("WP:scan75");
+                scan75Recorded = true;
+            }
+            auto &chunk1 = chunk1s[i];
+            if (!chunk1 || chunk1->blas == nullptr) continue;
+            if (!chunk1->geometryTypes || !chunk1->vertexBuffers || !chunk1->indexBuffers) continue;
+            if (chunk1->geometryCount > chunk1->geometryTypes->size() ||
+                chunk1->geometryCount > chunk1->vertexBuffers->size() ||
+                chunk1->geometryCount > chunk1->indexBuffers->size()) {
+                continue;
+            }
+            if (textureGeneration != 0 && chunk1->textureGeneration != textureGeneration) {
+                staleTextureChunks++;
+            }
+
+            // Update cache if generation changed.
+            auto &cc = cachedChunks_[i];
+            if (cc.blasGeneration != chunk1->blasGeneration) {
+                cc.blasGeneration = chunk1->blasGeneration;
+                cc.blas = chunk1->blas;
+                cc.x = chunk1->x; cc.y = chunk1->y; cc.z = chunk1->z;
+                cc.biomeGrassColor = chunk1->biomeGrassColor;
+                cc.biomeFoliageColor = chunk1->biomeFoliageColor;
+                cc.biomeWaterColor = chunk1->biomeWaterColor;
+                cc.geometryCount = chunk1->geometryCount;
+                cc.geoTypes.clear();
+                cc.geoTypes.push_back(World::GeometryTypes::SHADOW);
+                cc.geoTypes.insert(cc.geoTypes.end(), chunk1->geometryTypes->begin(), chunk1->geometryTypes->end());
+                cc.vertBufAddrs.clear();
+                cc.idxBufAddrs.clear();
+                for (uint32_t j = 0; j < chunk1->geometryCount; j++) {
+                    cc.vertBufAddrs.push_back((*chunk1->vertexBuffers)[j]->bufferAddress());
+                    cc.idxBufAddrs.push_back((*chunk1->indexBuffers)[j]->bufferAddress());
+                }
+                cc.vertexBuffers = chunk1->vertexBuffers;
+                cc.indexBuffers = chunk1->indexBuffers;
+                cc.vertexFormat = chunk1->vertexFormat;
+            }
+
+            // Distance cull
+            float cx = static_cast<float>(static_cast<double>(cc.x) + 8.0 - cameraPos.x);
+            float cy = static_cast<float>(static_cast<double>(cc.y) + 8.0 - cameraPos.y);
+            float cz = static_cast<float>(static_cast<double>(cc.z) + 8.0 - cameraPos.z);
+            float dist2 = cx * cx + cy * cy + cz * cz;
+            if (dist2 > cullDist2) continue;
+
+            if (megaEnabled && dist2 >= mergeDist2) {
+                farChunksByMega[megaKey(cc.x, cc.y, cc.z)].push_back(static_cast<int>(i));
+            } else {
+                allVisible.push_back(static_cast<int>(i));
             }
         }
+        if (staleTextureChunks > 0) {
+            static uint32_t staleTextureLogCounter = 0;
+            staleTextureLogCounter++;
+            if (staleTextureLogCounter <= 5 || staleTextureLogCounter % 120 == 0) {
+                renderDiag("WP accepted stale-texture chunks count=%u currentGen=%llu",
+                           staleTextureChunks,
+                           static_cast<unsigned long long>(textureGeneration));
+            }
+        }
+        g_crashRing.record("WP:chunkPass1Done");
 
         // Prefix sums: compute exact offsets for every visible chunk (sequential, ~50µs)
         uint32_t chunkVisCount = static_cast<uint32_t>(allVisible.size());
@@ -479,9 +522,9 @@ void WorldPrepareContext::render() {
             prefixInst[vi] = totalChunkInst;
             prefixGeo[vi] = totalChunkGeo;
             prefixSbt[vi] = totalChunkSbt;
-            uint32_t instForChunk = 1 + (cc.hasDisplaced ? 1 : 0);
+            uint32_t instForChunk = 1;
             totalChunkInst += instForChunk;
-            totalChunkGeo += cc.geometryCount + (cc.hasDisplaced ? 1 : 0); // +1 for displaced geo
+            totalChunkGeo += cc.geometryCount;
             totalChunkSbt += cc.geometryCount + instForChunk; // +instForChunk for SHADOW entries
         }
 
@@ -505,78 +548,56 @@ void WorldPrepareContext::render() {
         blasOffset.resize(chunkInstBase + totalChunkInst);
         biomeColors.resize(chunkInstBase + totalChunkInst);
 
-        // Parallel fill: each thread writes to pre-computed offsets (zero contention)
-        Renderer::threadPool.parallelFor(numThreads, [&](uint32_t t) {
-            uint32_t start = t * chunkVisCount / numThreads;
-            uint32_t end = (t + 1) * chunkVisCount / numThreads;
+        // Sequential fill: avoids render-thread dependency on the global worker pool.
+        g_crashRing.record("WP:chunkFill");
+        for (uint32_t vi = 0; vi < chunkVisCount; vi++) {
+            auto &cc = cachedChunks_[allVisible[vi]];
+            uint32_t instIdx = chunkInstBase + prefixInst[vi];
+            uint32_t geoIdx = chunkGeoBase + prefixGeo[vi];
+            uint32_t sbtIdx = chunkSbtBase + prefixSbt[vi];
+            // blasAccu for this chunk = chunkBlasBase + prefixGeo[vi] (geometry data is 1:1 with blasAccu)
+            uint32_t myBlasAccu = chunkBlasBase + prefixGeo[vi];
 
-            for (uint32_t vi = start; vi < end; vi++) {
-                auto &cc = cachedChunks_[allVisible[vi]];
-                uint32_t instIdx = chunkInstBase + prefixInst[vi];
-                uint32_t geoIdx = chunkGeoBase + prefixGeo[vi];
-                uint32_t sbtIdx = chunkSbtBase + prefixSbt[vi];
-                // blasAccu for this chunk = chunkBlasBase + prefixGeo[vi] (geometry data is 1:1 with blasAccu)
-                uint32_t myBlasAccu = chunkBlasBase + prefixGeo[vi];
+            VkTransformMatrixKHR transform = {
+                1, 0, 0, static_cast<float>(static_cast<double>(cc.x) - cameraPos.x),
+                0, 1, 0, static_cast<float>(static_cast<double>(cc.y) - cameraPos.y),
+                0, 0, 1, static_cast<float>(static_cast<double>(cc.z) - cameraPos.z),
+            };
 
-                VkTransformMatrixKHR transform = {
-                    1, 0, 0, static_cast<float>(static_cast<double>(cc.x) - cameraPos.x),
-                    0, 1, 0, static_cast<float>(static_cast<double>(cc.y) - cameraPos.y),
-                    0, 0, 1, static_cast<float>(static_cast<double>(cc.z) - cameraPos.z),
-                };
+            // Instance
+            instanceBuilder.instances[instIdx] = std::make_tuple(
+                transform, instIdx, uint32_t(0x01), sbtIdx,
+                VkGeometryInstanceFlagsKHR(0), cc.blas);
+            currBlasSnapshot.blases[instIdx] = cc.blas;
+            currBlasSnapshot.generations[instIdx] = cc.blasGeneration;
+            currBlasSnapshot.vertexBuffers[instIdx] = cc.vertexBuffers;
+            currBlasSnapshot.indexBuffers[instIdx] = cc.indexBuffers;
 
-                // Instance
-                instanceBuilder.instances[instIdx] = std::make_tuple(
-                    transform, instIdx, uint32_t(0x01), sbtIdx,
-                    VkGeometryInstanceFlagsKHR(0), cc.blas);
-                currBlasSnapshot.blases[instIdx] = cc.blas;
-                currBlasSnapshot.generations[instIdx] = cc.blasGeneration;
-                currBlasSnapshot.vertexBuffers[instIdx] = cc.vertexBuffers;
-                currBlasSnapshot.indexBuffers[instIdx] = cc.indexBuffers;
-
-                // SBT geometry types: SHADOW + chunk types
-                geometryTypes[sbtIdx] = World::GeometryTypes::SHADOW;
-                for (uint32_t g = 0; g < cc.geometryCount; g++) {
-                    geometryTypes[sbtIdx + 1 + g] = cc.geoTypes[g + 1]; // skip cached SHADOW
-                }
-
-                // Buffer addresses
-                for (uint32_t g = 0; g < cc.geometryCount; g++) {
-                    vertexBufferAddrs[geoIdx + g] = cc.vertBufAddrs[g];
-                    indexBufferAddrs[geoIdx + g] = cc.idxBufAddrs[g];
-                }
-
-                // Per-instance metadata
-                glm::mat4 mat = glm::transpose(glm::mat4(
-                    glm::vec4(1, 0, 0, static_cast<float>(static_cast<double>(cc.x) - cameraPos.x)),
-                    glm::vec4(0, 1, 0, static_cast<float>(static_cast<double>(cc.y) - cameraPos.y)),
-                    glm::vec4(0, 0, 1, static_cast<float>(static_cast<double>(cc.z) - cameraPos.z)),
-                    glm::vec4(0, 0, 0, 1)));
-                lastObjToWorldMats[instIdx] = mat;
-                // Encode vertex format in upper 2 bits of blasOffset (shader extracts via >> 30)
-                blasOffset[instIdx] = myBlasAccu | (static_cast<uint32_t>(cc.vertexFormat) << 30);
-                biomeColors[instIdx] = glm::uvec4(cc.biomeGrassColor, cc.biomeFoliageColor, cc.biomeWaterColor, 0);
-
-                // DDA displacement instance
-                if (cc.hasDisplaced) {
-                    uint32_t dInstIdx = instIdx + 1;
-                    uint32_t dGeoIdx = geoIdx + cc.geometryCount;
-                    uint32_t dSbtIdx = sbtIdx + cc.geometryCount + 1;
-                    uint32_t dBlasAccu = myBlasAccu + cc.geometryCount;
-
-                    instanceBuilder.instances[dInstIdx] = std::make_tuple(
-                        transform, dInstIdx, uint32_t(0x01), dSbtIdx,
-                        VkGeometryInstanceFlagsKHR(0), cc.displacedBlas);
-                    currBlasSnapshot.blases[dInstIdx] = cc.displacedBlas;
-                    currBlasSnapshot.generations[dInstIdx] = cc.blasGeneration;
-                    geometryTypes[dSbtIdx] = World::GeometryTypes::WORLD_DISPLACED;
-                    vertexBufferAddrs[dGeoIdx] = cc.displacedFaceDataBuffer->bufferAddress();
-                    indexBufferAddrs[dGeoIdx] = 0;
-                    lastObjToWorldMats[dInstIdx] = mat;
-                    blasOffset[dInstIdx] = dBlasAccu;
-                    biomeColors[dInstIdx] = glm::uvec4(cc.biomeGrassColor, cc.biomeFoliageColor, cc.biomeWaterColor, 0);
-                }
+            // SBT geometry types: SHADOW + chunk types
+            geometryTypes[sbtIdx] = World::GeometryTypes::SHADOW;
+            for (uint32_t g = 0; g < cc.geometryCount; g++) {
+                geometryTypes[sbtIdx + 1 + g] = cc.geoTypes[g + 1]; // skip cached SHADOW
             }
-        });
+
+            // Buffer addresses
+            for (uint32_t g = 0; g < cc.geometryCount; g++) {
+                vertexBufferAddrs[geoIdx + g] = cc.vertBufAddrs[g];
+                indexBufferAddrs[geoIdx + g] = cc.idxBufAddrs[g];
+            }
+
+            // Per-instance metadata
+            glm::mat4 mat = glm::transpose(glm::mat4(
+                glm::vec4(1, 0, 0, static_cast<float>(static_cast<double>(cc.x) - cameraPos.x)),
+                glm::vec4(0, 1, 0, static_cast<float>(static_cast<double>(cc.y) - cameraPos.y)),
+                glm::vec4(0, 0, 1, static_cast<float>(static_cast<double>(cc.z) - cameraPos.z)),
+                glm::vec4(0, 0, 0, 1)));
+            lastObjToWorldMats[instIdx] = mat;
+            // Encode vertex format in upper 2 bits of blasOffset (shader extracts via >> 30)
+            blasOffset[instIdx] = myBlasAccu | (static_cast<uint32_t>(cc.vertexFormat) << 30);
+            biomeColors[instIdx] = glm::uvec4(cc.biomeGrassColor, cc.biomeFoliageColor, cc.biomeWaterColor, 0);
+
+        }
+        g_crashRing.record("WP:chunkFillDone");
 
         // Update accumulators for mega-BLAS pass that follows
         blasIndex += totalChunkInst;
@@ -682,7 +703,15 @@ void WorldPrepareContext::render() {
                     si.commandBufferCount = 1;
                     si.pCommandBuffers = &megaCmdBuffer_->vkCommandBuffer();
                     vkQueueSubmit(device->secondaryQueue(), 1, &si, megaFence_->vkFence());
-                    vkWaitForFences(device->vkDevice(), 1, &megaFence_->vkFence(), true, UINT64_MAX);
+                    // 10-second timeout: prevents infinite hang on GPU TDR.
+            // Mega-BLAS builds typically complete in <1s; 10s is very generous.
+            constexpr uint64_t kMegaBlasTimeoutNs = 10000000000ULL;
+            VkResult megaFenceResult = vkWaitForFences(device->vkDevice(), 1, &megaFence_->vkFence(), true, kMegaBlasTimeoutNs);
+            if (megaFenceResult == VK_TIMEOUT) {
+                std::cerr << "[MegaBLAS] vkWaitForFences timed out (10s) — GPU may be hung" << std::endl;
+                vkDeviceWaitIdle(device->vkDevice());
+                // Continue with potentially incomplete BLAS — the next frame will rebuild
+            }
                     vkResetFences(device->vkDevice(), 1, &megaFence_->vkFence());
 
                     mega->blas = megaBuilt;
@@ -775,6 +804,7 @@ void WorldPrepareContext::render() {
     // illumination and removing them causes visible pop-in when rotating the camera.
     // Vertical culling is safe because deep underground lights are behind solid rock.
     {
+        g_crashRing.record("WP:lights");
         constexpr int MAX_AREA_LIGHTS = 512;
         constexpr float VERTICAL_CULL_BELOW = 48.0f; // skip lights more than N blocks below camera
         struct LightWithDist {
@@ -897,11 +927,14 @@ void WorldPrepareContext::render() {
             vk::Data::AreaLight dummy{};
             areaLightBuffer->uploadToStagingBuffer(&dummy, sizeof(vk::Data::AreaLight), 0);
         }
+        g_crashRing.record("WP:lightsDone");
     }
 
     cpuAccInstances += cpuMsSince(cpuT6);
+    pfInstances += cpuMsSince(cpuT6);
 
     if (instanceBuilder.instances.empty()) {
+        g_crashRing.record("WP:noInstances");
         tlas = nullptr;
         prevTlasInstanceCount_ = 0;
         return;
@@ -928,12 +961,14 @@ void WorldPrepareContext::render() {
         VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
         VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
 
+    g_crashRing.record("WP:tlas");
     if (canUpdate) {
         // UPDATE path: reuse existing TLAS, only transforms changed
         // Upload new instance data (endInstanceBuilder writes to a new host-visible buffer)
         instanceBuilder.endInstanceBuilder(device, vma);
         tlasBuilder->defineBuildProperty(tlasFlags);  // sets flags_ for the geometry info
 
+        g_crashRing.record("WP:tlasUpdate");
         GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::TLAS_UPDATE);
         tlasBuilder->updateAndSubmit(tlas, tlasScratchBuffer_, worldCommandBuffer);
         tlasUpdateCount++;
@@ -943,6 +978,7 @@ void WorldPrepareContext::render() {
         tlasBuilder->defineBuildProperty(tlasFlags);
         tlasBuilder->querySizeInfo(device);
         tlasBuilder->allocateBuffers(physicalDevice, device, vma);
+        g_crashRing.record("WP:tlasBuild");
         GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::TLAS_BUILD);
         tlas = tlasBuilder->buildAndSubmit(device, worldCommandBuffer);
 
@@ -980,10 +1016,36 @@ void WorldPrepareContext::render() {
         }
         tlasBuildCount++;
     }
+    g_crashRing.record("WP:tlasDone");
 
     cpuAccTlas += cpuMsSince(cpuT7);
+    pfTlas += cpuMsSince(cpuT7);
     cpuAccTotal += cpuMsSince(cpuT0);
     cpuFrameCount++;
+
+    // Per-frame CSV logging (when Renderer::options.perFrameTiming is on)
+    {
+        static uint64_t wpFrameIndex = 0;
+        static bool wpHeaderWritten = false;
+        std::ofstream wpLog("C:/RadSER/results/per_frame_world_prepare.log", std::ios::app);
+        if (wpLog.is_open()) {
+            if (!wpHeaderWritten) {
+                wpLog << "frame,instances,check,important,entity,instances_pop,tlas,total\n";
+                wpHeaderWritten = true;
+            }
+            wpLog << wpFrameIndex << ","
+                << currentInstanceCount << ","
+                << pfCheck << ","
+                << pfImportant << ","
+                << pfEntity << ","
+                << pfInstances << ","
+                << pfTlas << ","
+                << cpuMsSince(cpuT0) << "\n";
+            wpFrameIndex++;
+        }
+        pfCheck = pfImportant = pfEntity = 0;
+        pfInstances = pfTlas = 0;
+    }
 
     // Save BLAS snapshot: keeps shared_ptrs alive until this context is reused,
     // preventing GC from freeing BLASes while the GPU still references their addresses.
@@ -1036,11 +1098,14 @@ void WorldPrepareContext::render() {
 
     auto rtModuleCtx = rayTracingModuleContext.lock();
     if (!rtModuleCtx) return;
+    g_crashRing.record("WP:sbt");
     rtModuleCtx->sbt->setupHitSBT(geometryTypes);
     if (rtModuleCtx->sharcUpdateSbt) {
         rtModuleCtx->sharcUpdateSbt->setupHitSBT(geometryTypes);
     }
 
+    g_crashRing.record("WP:upload");
     uploadBuffer(blasOffset, vertexBufferAddrs, indexBufferAddrs, lastVertexBufferAddrs, lastIndexBufferAddrs,
                  lastObjToWorldMats, biomeColors);
+    g_crashRing.record("WP:done");
 }

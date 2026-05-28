@@ -1,6 +1,7 @@
 #include "core/vulkan/swapchain.hpp"
 
 #include "core/vulkan/device.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/image.hpp"
 #include "core/vulkan/physical_device.hpp"
 #include "core/vulkan/window.hpp"
@@ -10,6 +11,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <string>
 #include <vector>
 
 std::ostream &swapchainCout() {
@@ -157,17 +159,6 @@ void vk::Swapchain::reconstruct() {
     maxExtent_ = surfaceCapabilities.maxImageExtent;
     minExtent_ = surfaceCapabilities.minImageExtent;
 
-    // Determine number of images for swap chain
-    imageCount_ = surfaceCapabilities.minImageCount + 1;
-    imageCount_ = std::clamp(imageCount_, (uint32_t)2, (uint32_t)3);
-    if (surfaceCapabilities.maxImageCount != 0 && imageCount_ > surfaceCapabilities.maxImageCount) {
-        imageCount_ = surfaceCapabilities.maxImageCount;
-    }
-
-#ifdef DEBUG
-    swapchainCout() << "using " << imageCount_ << " images for swap chain" << std::endl;
-#endif
-
     // Find supported surface formats
     uint32_t formatCount;
     if (vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice_->vkPhysicalDevice(), window_->vkSurface(), &formatCount,
@@ -230,6 +221,22 @@ void vk::Swapchain::reconstruct() {
 
     // Choose presentation mode (preferring MAILBOX ~= triple buffering)
     presentMode_ = choosePresentMode(presentModes);
+
+    // Determine number of images for swap chain.
+    // Default: 3 images (minImageCount+1, clamped to 3).
+    // 4 images can help MAILBOX pacing on some GPUs but introduces extra latency
+    // and is not needed when a native FPS limiter provides frame pacing.
+    // Keep 4-image mode behind an explicit override for testing only.
+    imageCount_ = surfaceCapabilities.minImageCount + 1;
+    uint32_t maxImages = 3;  // Default to 3 - native limiter handles pacing
+    imageCount_ = std::clamp(imageCount_, (uint32_t)2, maxImages);
+    if (surfaceCapabilities.maxImageCount != 0 && imageCount_ > surfaceCapabilities.maxImageCount) {
+        imageCount_ = surfaceCapabilities.maxImageCount;
+    }
+
+    swapchainCout() << "using " << imageCount_ << " images for swap chain (present mode "
+                    << (presentMode_ == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" :
+                        presentMode_ == VK_PRESENT_MODE_FIFO_KHR ? "FIFO" : "other") << ")" << std::endl;
 
     // Select swap chain size
     extent_ = chooseSwapExtent(surfaceCapabilities, window_->width(), window_->height());
@@ -305,6 +312,9 @@ void vk::Swapchain::reconstruct() {
 
     if (oldSwapchain != VK_NULL_HANDLE) { vkDestroySwapchainKHR(device_->vkDevice(), oldSwapchain, nullptr); }
 
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_SWAPCHAIN_KHR,
+                                  swapchain_, "Radiance Swapchain");
+
     // Set HDR metadata when HDR10 is active (SMPTE ST.2086 mastering display + CTA 861.3 content light)
     if (hdrActive_ && vkSetHdrMetadataEXT) {
         VkHdrMetadataEXT hdrMetadata = {};
@@ -347,6 +357,11 @@ void vk::Swapchain::reconstruct() {
     for (int i = 0; i < actualImageCount; i++) {
         swapchainImages_.push_back(
             SwapchainImage::create(device_, images[i], extent_.width, extent_.height, surfaceFormat_.format));
+        vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_IMAGE,
+                                      images[i], "Radiance SwapchainImage[" + std::to_string(i) + "]");
+        vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_IMAGE_VIEW,
+                                      swapchainImages_.back()->vkImageView(),
+                                      "Radiance SwapchainImageView[" + std::to_string(i) + "]");
     }
 
 #ifdef DEBUG
@@ -443,4 +458,3 @@ bool vk::Swapchain::isScRGBSupported() const {
     }
     return false;
 }
-

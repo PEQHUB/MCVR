@@ -1,6 +1,7 @@
 #include "core/render/extended_chunk_manager.hpp"
 #include "core/render/chunks.hpp"
 #include "core/render/renderer.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #include <algorithm>
 #include <chrono>
 #include <iostream>
@@ -51,6 +52,7 @@ void ExtendedChunkManager::updateCamera(glm::dvec3 cameraPos) {
 }
 
 void ExtendedChunkManager::workerLoop() {
+    vk::DebugUtils::setCurrentThreadName("Radiance ExtendedRD");
     auto& registry = Renderer::blockStateRegistry;
     if (!registry.isLoaded()) {
         extCout() << "[ExtendedRD] BlockStateRegistry not loaded — aborting" << std::endl;

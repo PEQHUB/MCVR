@@ -1,6 +1,7 @@
 #include "core/vulkan/sbt.hpp"
 
 #include "core/vulkan/buffer.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/device.hpp"
 #include "core/vulkan/physical_device.hpp"
 #include "core/vulkan/pipeline.hpp"
@@ -44,6 +45,8 @@ vk::SBT::SBT(std::shared_ptr<PhysicalDevice> physicalDevice,
     rmissSBT_ = HostVisibleBuffer::create(
         vma, device, alignedHandleSize_ * missCount,
         VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, baseAlignment_);
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, rgenSBT_->vkBuffer(), "SBT RayGen");
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, rmissSBT_->vkBuffer(), "SBT Miss");
 
     rgenSBT_->uploadToBuffer(&shaderHandleStorage_[0]);
     rgenSBT_->flush();
@@ -85,6 +88,7 @@ void vk::SBT::setupHitSBT(std::vector<uint32_t> &hitGroupIndices) {
     rhitSBT_ = HostVisibleBuffer::create(
         vma_, device_, rhitSBTSize,
         VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, baseAlignment_);
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, rhitSBT_->vkBuffer(), "SBT Hit");
 
     rhitSBT_->uploadToBuffer(cachedRhitSBT.data());
     rhitSBT_->flush();

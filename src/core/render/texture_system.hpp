@@ -2,7 +2,6 @@
 
 #include "core/render/sprite_registry.hpp"
 #include "core/render/texture_arrays.hpp"
-#include "core/render/height_sampler.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
 #include <atomic>
@@ -88,7 +87,7 @@ class TextureSystem {
     void finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device);
 
     /// Whether finalize() has been called and textures are ready.
-    bool isFinalized() const { return finalized_; }
+    bool isFinalized() const { return finalized_.load(std::memory_order_acquire); }
 
     // ---- Per-frame operations (called on render thread) ----
 
@@ -116,9 +115,6 @@ class TextureSystem {
     void setGeneration(uint64_t generation) { generation_.store(generation, std::memory_order_release); }
     uint64_t generation() const { return generation_.load(std::memory_order_acquire); }
 
-    HeightLayerView getAlbedoHeightLayer(uint16_t spriteId) const;
-    HeightLayerView getNormalHeightLayer(uint16_t spriteId) const;
-
     std::string statusString() const;
     bool dumpDebug(const std::string& path, uint32_t limit) const;
 
@@ -127,9 +123,9 @@ class TextureSystem {
     SpriteRegistry& registry() { return registry_; }
 
     /// Get texture array IDs (for descriptor binding).
-    uint32_t blockAlbedoArrayId() const { return blockAlbedoArrayId_; }
-    uint32_t blockSpecularArrayId() const { return blockSpecularArrayId_; }
-    uint32_t blockNormalArrayId() const { return blockNormalArrayId_; }
+    uint32_t blockAlbedoArrayId() const { return blockAlbedoArrayId_.load(std::memory_order_acquire); }
+    uint32_t blockSpecularArrayId() const { return blockSpecularArrayId_.load(std::memory_order_acquire); }
+    uint32_t blockNormalArrayId() const { return blockNormalArrayId_.load(std::memory_order_acquire); }
 
     /// Reset on resource reload.
     void reset();
@@ -152,9 +148,6 @@ class TextureSystem {
     std::vector<uint64_t> albedoChecksums_;
     std::vector<uint64_t> specularChecksums_;
     std::vector<uint64_t> normalChecksums_;
-    std::vector<HeightLayerView> albedoHeightLayers_;
-    std::vector<HeightLayerView> normalHeightLayers_;
-
     // Animation: per-sprite frame data (RGBA pixels per frame)
     struct AnimEntry {
         uint16_t spriteId;
@@ -167,14 +160,14 @@ class TextureSystem {
     // GPU resources (owned)
     TextureArrayManager arrayManager_;
     SpriteRegistry registry_;
-    uint32_t blockAlbedoArrayId_ = UINT32_MAX;
-    uint32_t blockSpecularArrayId_ = UINT32_MAX;
-    uint32_t blockNormalArrayId_ = UINT32_MAX;
+    std::atomic<uint32_t> blockAlbedoArrayId_{UINT32_MAX};
+    std::atomic<uint32_t> blockSpecularArrayId_{UINT32_MAX};
+    std::atomic<uint32_t> blockNormalArrayId_{UINT32_MAX};
     bool albedoMipsInitialized_ = false;
     bool specMipsInitialized_ = false;
     bool normMipsInitialized_ = false;
 
-    bool finalized_ = false;
+    std::atomic<bool> finalized_{false};
     std::atomic<uint64_t> generation_{0};
     mutable std::mutex mutex_;
 };

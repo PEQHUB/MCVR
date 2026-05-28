@@ -35,6 +35,8 @@ void Textures::resetFrame() {
         auto &cache = entry.second;
         cache->reset();
     }
+    uploadBytes_ = 0;
+    uploadRegions_ = 0;
 }
 
 uint32_t Textures::allocateTexture() {
@@ -205,6 +207,8 @@ void Textures::queueUpload(uint8_t *srcPointer,
         dstTextureUploadQueueIter = uploadQueue_->emplace(dstId, std::vector<VkBufferImageCopy>{}).first;
     }
     dstTextureUploadQueueIter->second.emplace_back(region);
+    uploadBytes_ += width * height * bytePerPixel;
+    uploadRegions_++;
 
 #ifdef MCVR_ENABLE_OMM
     // Extract alpha channel for OMM baking (mip 0 only, RGBA formats = 4 bpp)
@@ -240,7 +244,7 @@ void Textures::queueUpload(uint8_t *srcPointer,
     }
 #endif
 
-    // Cache full RGBA data for displacement tessellation height sampling (mip 0, RGBA formats)
+    // Cache full RGBA data for shader-side material height sampling (mip 0, RGBA formats)
     if (level == 0 && bytePerPixel == 4) {
         uint32_t texW = dstTexture->width();
         uint32_t texH = dstTexture->height();

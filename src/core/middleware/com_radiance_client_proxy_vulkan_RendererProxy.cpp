@@ -2,6 +2,7 @@
 
 #include "core/all_extern.hpp"
 #include "core/render/buffers.hpp"
+#include "core/render/chunks.hpp"
 #include "core/render/modules/ui_module.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/overlay_compositor.hpp"
@@ -12,7 +13,9 @@
 #include "core/vulkan/vma.hpp"
 
 #include <atomic>
+#include <map>
 #include <mutex>
+#include <sstream>
 
 #if defined(_WIN32)
 #    include <windows.h>
@@ -362,6 +365,75 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Rende
              stats.allocationCount,
              stats.blockCount);
     return env->NewStringUTF(buf);
+}
+
+/**
+ * Returns texture reload diagnostics as a flat CSV string.
+ */
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetTextureReloadDiagnostics(
+    JNIEnv *env, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable() || !Renderer::is_initialized()) {
+        return env->NewStringUTF("rendererUsable:0");
+    }
+
+    auto* renderer = Renderer::try_instance();
+    if (!renderer) return env->NewStringUTF("rendererUsable:0");
+
+    const uint64_t textureGeneration = Renderer::textureSystem.generation();
+    const bool textureDebugDumped =
+        Renderer::textureSystem.dumpDebug("C:/RadSER/texture_system_full.csv", 0);
+    std::ostringstream out;
+    out << Renderer::textureSystem.statusString()
+        << ",textureDebugDumped:" << (textureDebugDumped ? 1 : 0)
+        << ",blockModelTableLoaded:" << (Renderer::blockModelTable.isLoaded() ? 1 : 0)
+        << ",blockModelTableGeneration:" << Renderer::blockModelTable.generation()
+        << ",blockModelStateCount:" << Renderer::blockModelTable.stateCount()
+        << ",blockModelMaxStateId:" << Renderer::blockModelTable.maxStateId();
+
+    uint32_t chunkTotal = 0;
+    uint32_t chunksWithBlas = 0;
+    uint32_t chunksMatchingGeneration = 0;
+    uint32_t chunksStaleGeneration = 0;
+    uint32_t chunksWithoutBlas = 0;
+    uint32_t chunkInputQueue = 0;
+    std::map<uint64_t, uint32_t> generationHistogram;
+
+    auto world = renderer->world();
+    auto chunks = world ? world->chunks() : nullptr;
+    if (chunks) {
+        std::unique_lock<std::recursive_mutex> chunkLock(chunks->mutex());
+        auto& chunk1s = chunks->chunks();
+        chunkTotal = static_cast<uint32_t>(chunk1s.size());
+        for (const auto& chunk : chunk1s) {
+            if (!chunk) continue;
+            generationHistogram[chunk->textureGeneration]++;
+            if (!chunk->blas) {
+                chunksWithoutBlas++;
+                continue;
+            }
+            chunksWithBlas++;
+            if (textureGeneration == 0 || chunk->textureGeneration == textureGeneration) {
+                chunksMatchingGeneration++;
+            } else {
+                chunksStaleGeneration++;
+            }
+        }
+        chunkInputQueue = chunks->getInputQueueSize();
+    }
+
+    out << ",chunkTotal:" << chunkTotal
+        << ",chunksWithBlas:" << chunksWithBlas
+        << ",chunksMatchingGeneration:" << chunksMatchingGeneration
+        << ",chunksStaleGeneration:" << chunksStaleGeneration
+        << ",chunksWithoutBlas:" << chunksWithoutBlas
+        << ",chunkInputQueue:" << chunkInputQueue;
+
+    for (const auto& [generation, count] : generationHistogram) {
+        out << ",chunkGen_" << generation << ':' << count;
+    }
+
+    return env->NewStringUTF(out.str().c_str());
 }
 
 /**

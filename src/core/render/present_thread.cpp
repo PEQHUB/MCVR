@@ -3,6 +3,7 @@
 #include "core/render/overlay_compositor.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
+#include "core/vulkan/debug_utils.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -165,6 +166,7 @@ void PresentThread::setOverlayMode(bool enabled, OverlayCompositor *compositor) 
 }
 
 void PresentThread::threadFunc() {
+    vk::DebugUtils::setCurrentThreadName("Radiance PresentThread");
     while (running_) {
         // Check pause -- signal acknowledgment then block until resumed
         if (paused_.load()) {
@@ -280,6 +282,8 @@ void PresentThread::threadFunc() {
         VkResult submitResult;
         {
             std::lock_guard<std::mutex> qLock(device_->queueMutex());
+            vk::DebugUtils::ScopedQueueLabel queueLabel(
+                device_->secondaryQueue(), "Radiance QueueSubmit: Present Composite", 0.2f, 0.7f, 1.0f);
             submitResult = vkQueueSubmit(
                 device_->secondaryQueue(), 1, &submitInfo, compositeFence_);
         }
@@ -297,7 +301,11 @@ void PresentThread::threadFunc() {
         presentInfo.pSwapchains = &swapchain->vkSwapchain();
         presentInfo.pImageIndices = &imageIndex;
 
-        result = vkQueuePresentKHR(device_->secondaryQueue(), &presentInfo);
+        {
+            vk::DebugUtils::ScopedQueueLabel queueLabel(
+                device_->secondaryQueue(), "Radiance PresentThread Present", 0.2f, 0.6f, 1.0f);
+            result = vkQueuePresentKHR(device_->secondaryQueue(), &presentInfo);
+        }
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
             Renderer::options.needRecreate = true;
         }

@@ -38,6 +38,12 @@ class FrameGenManager {
     /// Whether the DLSS-G Streamline feature is currently loaded (hooks active).
     static bool isFeatureLoaded() { return featureLoaded_; }
 
+    /// Current recreate generation counter, incremented before each swapchain recreate.
+    static uint32_t recreateGeneration() { return recreateGeneration_; }
+
+    /// Whether a swapchain recreation is currently in progress.
+    static bool isRecreateInProgress() { return recreateInProgress_; }
+
   private:
     static bool initialized_;
     static bool active_;
@@ -45,4 +51,6 @@ class FrameGenManager {
     static uint32_t currentMode_;
     static bool deferredActivation_;  // eOn deferred until shouldRender() becomes true
     static bool featureLoaded_;       // Whether sl::kFeatureDLSS_G has been loaded
+    static bool recreateInProgress_;  // Blocks tagFrame activation during Framework::recreate()
+    static uint32_t recreateGeneration_;
 };

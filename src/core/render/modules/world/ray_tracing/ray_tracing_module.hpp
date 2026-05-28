@@ -31,11 +31,11 @@ struct RayTracingPushConstant {
     int temporalMClamp;  // temporal reservoir M clamp (used as float in shader)
     int wClamp;          // importance weight W clamp (used as float in shader)
     float preExposure;   // pre-exposure multiplier for DLSS-RR normalization
-    // POM fields (fields 8-11, 16 bytes)
+    // Shader displacement fields (fields 8-11, 16 bytes)
     float pomHeightScale;        // 0 = disabled, else depth scale (0.01-0.50)
     int   pomSteps;              // linear search steps (8-512)
     int   pomRefinement;         // binary refinement iterations (0-8)
-    float pomFadeDistance;       // distance in blocks to fade POM out (8-256)
+    float pomFadeDistance;       // distance in blocks to fade displacement out (8-256)
     // Color expansion (offset 48)
     float colorExpansion;        // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
     uint32_t blueNoiseFrame;     // monotonic frame counter for blue noise temporal offset
@@ -60,10 +60,6 @@ struct RayTracingPushConstant {
     float focalDistance;           // focal distance in blocks
     // Material SSBO BDA — avoids descriptor lookup for material reads
     uint64_t materialClassAddr;    // BDA of MaterialClassMapping buffer
-    // DDA displacement BDA
-    uint64_t displacedFaceDataAddr; // BDA of merged DisplacedFaceData buffer (0 = no displaced faces)
-    T_INT displacedFaceCount;       // Total displaced faces across all chunks
-    T_INT displacementQuality;      // 0=Off, 1=DDA, 2=Tess, 3=Hybrid, 4=CLAS
 };
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {
@@ -125,6 +121,7 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::shared_ptr<vk::Shader> shadowAnyHitShader_;
 
     std::shared_ptr<vk::Shader> worldSolidTransparentClosestHitShader_;
+    std::shared_ptr<vk::Shader> worldSolidTransparentNoDisplacementClosestHitShader_;
     std::shared_ptr<vk::Shader> worldTransparentAnyHitShader_;
 
     std::shared_ptr<vk::Shader> worldNoReflectClosestHitShader_;
@@ -142,11 +139,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::shared_ptr<vk::Shader> endGatewayClosestHitShader_;
     std::shared_ptr<vk::Shader> endGatewayAnyHitShader_;
 
-    // DDA displacement procedural hit group
-    std::shared_ptr<vk::Shader> displacedIntersectionShader_;  // .rint
-    std::shared_ptr<vk::Shader> displacedClosestHitShader_;    // .rchit
-    std::shared_ptr<vk::Shader> displacedShadowClosestHitShader_; // .rchit (shadow)
-
     std::shared_ptr<vk::Shader> worldPostColorToDepthVertShader_;
     std::shared_ptr<vk::Shader> worldPostColorToDepthFragShader_;
     std::shared_ptr<vk::Shader> worldPostVertShader_;
@@ -160,6 +152,10 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DescriptorTable>> rayTracingDescriptorTables_;
     std::shared_ptr<vk::RayTracingPipeline> rayTracingPipeline_;
     std::vector<std::shared_ptr<vk::SBT>> sbts_;
+    uint64_t lastTextureDescriptorRefreshGeneration_ = UINT64_MAX;
+    VkImageView lastAlbedoTextureView_ = VK_NULL_HANDLE;
+    VkImageView lastSpecularTextureView_ = VK_NULL_HANDLE;
+    VkImageView lastNormalTextureView_ = VK_NULL_HANDLE;
 
     uint32_t numRayBounces_ = 4;
     bool useJitter_ = true;

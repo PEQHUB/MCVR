@@ -7,10 +7,10 @@
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
-#include "core/render/tessellator.hpp"
 #include "core/render/textures.hpp"
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #ifdef MCVR_ENABLE_OMM
 #include "core/render/omm_baker.hpp"
 #endif
@@ -286,541 +286,6 @@ void ChunkBuildData::prepareCPU(bool allowMicromapBake, bool skipOMM, glm::vec3 
         }
     }
 
-    // Geometric displacement: per-block method dispatch (DDA collects AABBs, Tessellation generates triangles)
-    bool useDisplacement = Renderer::options.displacementQuality >= 1;
-    vk::Data::TextureMapping *texMappingPtr = nullptr;
-    vk::Data::MaterialClassMapping *matClassPtr = nullptr;
-    auto tessTextures = textures; // reuse existing textures ptr from line 57
-    if (useDisplacement) {
-        auto buffers = Renderer::instance().buffers();
-        auto texMappingBuf = buffers ? buffers->textureMappingBuffer() : nullptr;
-        texMappingPtr = texMappingBuf ? static_cast<vk::Data::TextureMapping *>(texMappingBuf->mappedPtr()) : nullptr;
-        auto matClassBuf = buffers ? buffers->materialClassMappingBuffer() : nullptr;
-        matClassPtr = matClassBuf ? static_cast<vk::Data::MaterialClassMapping *>(matClassBuf->mappedPtr()) : nullptr;
-    }
-
-    if (useDisplacement && texMappingPtr) {
-        uint32_t maxTessLevel = Renderer::options.tessMaxLevel;
-        // Chunk center distance to camera for LOD tessellation level
-        glm::vec3 chunkCenter(x * 16.0f + 8.0f, y * 16.0f + 8.0f, z * 16.0f + 8.0f);
-        float distToCamera = glm::length(chunkCenter - cameraPos);
-
-        for (int i = 0; i < geometryCount; i++) {
-            if (geometryTypes[i] != World::WORLD_SOLID) continue;
-
-            auto &idx = indices[i];
-            auto &verts = vertices[i];
-
-            // Collect tessellated geometry to append after the loop
-            std::vector<vk::VertexFormat::PBRTriangle> newVerts;
-            std::vector<uint32_t> newIndices;
-            std::vector<uint32_t> keptIndices;
-            keptIndices.reserve(idx.size());
-            bool anyTessellated = false;
-
-            // Pre-scan: collect block positions of all faces that will be displaced,
-            // so we can detect coplanar neighbors and skip edge fade between them.
-            struct FaceKey {
-                int16_t x, y, z;
-                uint8_t axis;
-                bool operator<(const FaceKey &o) const {
-                    if (x != o.x) return x < o.x;
-                    if (y != o.y) return y < o.y;
-                    if (z != o.z) return z < o.z;
-                    return axis < o.axis;
-                }
-            };
-            std::set<FaceKey> displacedFaceSet;
-            struct SeamEdgeInfo {
-                std::vector<float> u0, u1, v0, v1;
-                glm::ivec3 uDir, vDir;
-                uint32_t faceAxis;
-                glm::vec3 norm;
-                Tessellator::Input tessInput; // for interpVertex in seam wall generation
-            };
-            std::map<FaceKey, SeamEdgeInfo> seamEdgeData;
-            for (size_t t = 0; t + 5 < idx.size(); t += 6) {
-                auto &sv0 = verts[idx[t]];
-                uint32_t stID = sv0.textureID;
-                if (stID >= 4096) continue;
-                auto &se = texMappingPtr->entries[stID];
-                uint32_t sMT = (sv0.emissiveBlockType >> 8u) & 0xFFu;
-                if (sMT == 0 || !matClassPtr) continue;
-                uint32_t sMCI = sMT - 1;
-                if (sMCI >= vk::Data::MAX_MATERIAL_CLASSES) continue;
-                auto &smc = matClassPtr->entries[sMCI];
-                float sPD = smc.pomDepth;
-                bool sAP = (smc.flags & 0x8u) != 0;
-                bool sLH = (se.properties & vk::Data::TEX_PROP_HAS_HEIGHT_MAP) && se.normal >= 0;
-                bool sHH = sLH || (sAP && sPD > 0.0f);
-                int sM = (smc.pomPacked0 >> 3) & 0x7;
-                if (sM == 0 && sHH && sPD > 0.0f) sM = (Renderer::options.displacementQuality >= 1) ? 2 : 0;
-                if (sM == 1) sM = 2;
-                if (!sHH || (sM != 2 && sM != 3)) continue;
-                glm::vec3 sn = sv0.norm;
-                float sax = std::abs(sn.x), say = std::abs(sn.y), saz = std::abs(sn.z);
-                if (sax <= 0.9f && say <= 0.9f && saz <= 0.9f) continue;
-                uint8_t sFA;
-                if (sax > 0.9f) sFA = (sn.x > 0) ? 0 : 1;
-                else if (say > 0.9f) sFA = (sn.y > 0) ? 2 : 3;
-                else sFA = (sn.z > 0) ? 4 : 5;
-                // Block position = floor(face_center - 0.5 * normal)
-                glm::vec3 sc = 0.25f * (verts[idx[t]].pos + verts[idx[t+1]].pos + verts[idx[t+2]].pos + verts[idx[t+4]].pos);
-                glm::ivec3 sbp = glm::ivec3(glm::floor(sc - sn * 0.5f));
-                displacedFaceSet.insert({(int16_t)sbp.x, (int16_t)sbp.y, (int16_t)sbp.z, sFA});
-            }
-
-            // Process quads (6 indices = 2 triangles per quad)
-            for (size_t t = 0; t + 5 < idx.size(); t += 6) {
-                uint32_t i0 = idx[t], i1 = idx[t + 1], i2 = idx[t + 2];
-                uint32_t i3 = idx[t + 3], i4 = idx[t + 4], i5 = idx[t + 5];
-
-                auto &v0 = verts[i0];
-                uint32_t texID = v0.textureID;
-                bool tessellated = false;
-
-                if (texID < 4096) {
-                    auto &entry = texMappingPtr->entries[texID];
-
-                    // Check for LabPBR height map
-                    bool hasLabPBRHeight = (entry.properties & vk::Data::TEX_PROP_HAS_HEIGHT_MAP) && entry.normal >= 0;
-
-                    // Read material class for displacement method dispatch
-                    bool isAutoPBR = false;
-                    float pomDepth = 0.0f;
-                    const vk::Data::MaterialClassEntry *matEntry = nullptr;
-                    uint32_t materialType = (v0.emissiveBlockType >> 8u) & 0xFFu;
-                    int dispMethod = 0; // 0=Off, 1=DDA, 2=Tessellation, 3=Hybrid, 4=CLAS
-                    if (materialType > 0 && matClassPtr) {
-                        uint32_t mcIdx = materialType - 1;
-                        if (mcIdx < vk::Data::MAX_MATERIAL_CLASSES) {
-                            matEntry = &matClassPtr->entries[mcIdx];
-                            pomDepth = matEntry->pomDepth;
-                            isAutoPBR = (matEntry->flags & 0x8u) != 0;
-                            dispMethod = (matEntry->pomPacked0 >> 3) & 0x7; // bits 3-5
-                        }
-                    }
-
-                    // Resolve method: if Off (0) but block has height data + depth, use global default
-                    bool hasHeight = hasLabPBRHeight || (isAutoPBR && pomDepth > 0.0f);
-                    if (dispMethod == 0 && hasHeight && pomDepth > 0.0f) {
-                        // Global default maps to tessellation (DDA disabled pending VRAM budgeting)
-                        dispMethod = (Renderer::options.displacementQuality >= 1) ? 2 : 0;
-                    }
-                    // Force DDA→Tessellation until VRAM budget + distance culling are implemented
-                    if (dispMethod == 1) dispMethod = 2;
-
-                    // Displace when method is Tessellation(2) or Hybrid(3)
-                    bool shouldDisplace = hasHeight && (dispMethod == 2 || dispMethod == 3);
-
-                    if (shouldDisplace) {
-                        // Common setup: face axis, UV bounds, texture data
-                        glm::vec3 norm = v0.norm;
-                        float ax = std::abs(norm.x), ay = std::abs(norm.y), az = std::abs(norm.z);
-                        if (ax > 0.9f || ay > 0.9f || az > 0.9f) {
-                            uint32_t faceAxis;
-                            if (ax > 0.9f) faceAxis = (norm.x > 0) ? 0 : 1;
-                            else if (ay > 0.9f) faceAxis = (norm.y > 0) ? 2 : 3;
-                            else faceAxis = (norm.z > 0) ? 4 : 5;
-
-                            glm::vec2 uvMin(1e9f), uvMax(-1e9f);
-                            std::array<uint32_t, 6> quadIdx = {i0, i1, i2, i3, i4, i5};
-                            for (int q = 0; q < 6; q++) {
-                                uvMin = glm::min(uvMin, verts[quadIdx[q]].textureUV);
-                                uvMax = glm::max(uvMax, verts[quadIdx[q]].textureUV);
-                            }
-
-                            // texRes = tile width in texels, NOT atlas width
-                            auto *albedoRGBA = tessTextures ? tessTextures->getTextureRGBAData(texID) : nullptr;
-                            uint32_t texRes = 16;
-                            if (albedoRGBA && albedoRGBA->width > 0) {
-                                // Compute tile width from UV span * atlas width
-                                float uvSpanX = uvMax.x - uvMin.x;
-                                texRes = std::max(2u, static_cast<uint32_t>(uvSpanX * albedoRGBA->width + 0.5f));
-                            }
-
-                            const Textures::TextureRGBAData *normalRGBA = nullptr;
-                            if (hasLabPBRHeight && entry.normal >= 0 && tessTextures) {
-                                normalRGBA = tessTextures->getTextureRGBAData(static_cast<uint32_t>(entry.normal));
-                            }
-
-                            float heightScale = std::clamp(
-                                (pomDepth > 0.0f) ? pomDepth : Renderer::options.pomHeightScale,
-                                0.0f, 0.5f); // Cap at 0.5 blocks
-                            uint32_t i4v = idx[t + 4]; // 4th unique vertex
-
-                            // Compute per-edge fade mask: check 4 in-plane neighbors
-                            // for coplanar displaced faces. If a neighbor exists, skip
-                            // fading that edge so adjacent blocks blend seamlessly.
-                            // Shared by both tessellation and DDA paths.
-                            uint32_t fadeEdgeMask = 0xF; // default: fade all
-                            {
-                                glm::vec3 fc = 0.25f * (verts[i0].pos + verts[i1].pos + verts[i2].pos + verts[i4v].pos);
-                                glm::ivec3 bp = glm::ivec3(glm::floor(fc - norm * 0.5f));
-
-                                const vk::VertexFormat::PBRTriangle *qv[4] = {&verts[i0], &verts[i1], &verts[i2], &verts[i4v]};
-                                int mi = 0;
-                                for (int qi = 1; qi < 4; qi++) {
-                                    if (qv[qi]->textureUV.x < qv[mi]->textureUV.x - 0.0001f ||
-                                        (std::abs(qv[qi]->textureUV.x - qv[mi]->textureUV.x) < 0.0001f &&
-                                         qv[qi]->textureUV.y < qv[mi]->textureUV.y))
-                                        mi = qi;
-                                }
-                                glm::vec3 cPos = qv[mi]->pos;
-                                glm::vec2 cUV = qv[mi]->textureUV;
-                                glm::vec3 dirU(0), dirV(0);
-                                for (int qi = 0; qi < 4; qi++) {
-                                    if (qi == mi) continue;
-                                    glm::vec2 dUV = qv[qi]->textureUV - cUV;
-                                    if (std::abs(dUV.x) > 0.0001f && std::abs(dUV.y) < 0.0001f && glm::length(dirU) < 0.001f)
-                                        dirU = glm::normalize(qv[qi]->pos - cPos);
-                                    else if (std::abs(dUV.y) > 0.0001f && std::abs(dUV.x) < 0.0001f && glm::length(dirV) < 0.001f)
-                                        dirV = glm::normalize(qv[qi]->pos - cPos);
-                                }
-
-                                auto roundDir = [](glm::vec3 d) -> glm::ivec3 {
-                                    glm::ivec3 r(0);
-                                    float ax = std::abs(d.x), ay = std::abs(d.y), az = std::abs(d.z);
-                                    if (ax >= ay && ax >= az) r.x = (d.x > 0) ? 1 : -1;
-                                    else if (ay >= ax && ay >= az) r.y = (d.y > 0) ? 1 : -1;
-                                    else r.z = (d.z > 0) ? 1 : -1;
-                                    return r;
-                                };
-                                glm::ivec3 uDir = roundDir(dirU);
-                                glm::ivec3 vDir = roundDir(dirV);
-
-                                glm::ivec3 nU0 = bp - uDir, nU1 = bp + uDir;
-                                glm::ivec3 nV0 = bp - vDir, nV1 = bp + vDir;
-                                if (displacedFaceSet.count({(int16_t)nU0.x, (int16_t)nU0.y, (int16_t)nU0.z, (uint8_t)faceAxis}))
-                                    fadeEdgeMask &= ~0x1u;
-                                if (displacedFaceSet.count({(int16_t)nU1.x, (int16_t)nU1.y, (int16_t)nU1.z, (uint8_t)faceAxis}))
-                                    fadeEdgeMask &= ~0x2u;
-                                if (displacedFaceSet.count({(int16_t)nV0.x, (int16_t)nV0.y, (int16_t)nV0.z, (uint8_t)faceAxis}))
-                                    fadeEdgeMask &= ~0x4u;
-                                if (displacedFaceSet.count({(int16_t)nV1.x, (int16_t)nV1.y, (int16_t)nV1.z, (uint8_t)faceAxis}))
-                                    fadeEdgeMask &= ~0x8u;
-                            }
-
-                            // --- Tessellation path (method 2 or 3) ---
-                            if (dispMethod == 2 || dispMethod == 3) {
-                                // Use chunk-local camera distance: if global cameraPos is unset (0,0,0 default),
-                                // distToCamera is wildly wrong. Fall back to max level until camera is valid.
-                                uint32_t tessLevel;
-                                if (distToCamera > 500.0f) {
-                                    // Camera position likely uninitialized — use max tessellation
-                                    tessLevel = std::clamp(std::min(texRes, maxTessLevel), 2u, 32u);
-                                } else {
-                                    tessLevel = Tessellator::computeTessLevel(
-                                        distToCamera, texRes, maxTessLevel,
-                                        Renderer::options.tessNearDist, Renderer::options.tessMidDist, Renderer::options.tessFarDist);
-                                }
-
-                                // If lumMin/lumMax are uninitialized defaults (0/1), compute
-                                // the tile's actual luminance range for proper height normalization
-                                vk::Data::MaterialClassEntry correctedMat{};
-                                const vk::Data::MaterialClassEntry *effectiveMat = matEntry;
-                                if (matEntry && albedoRGBA && isAutoPBR &&
-                                    matEntry->lumMin < 0.001f && matEntry->lumMax > 0.99f) {
-                                    correctedMat = *matEntry;
-                                    float tileMin = 1.0f, tileMax = 0.0f;
-                                    uint32_t tw = albedoRGBA->width, th = albedoRGBA->height;
-                                    int x0 = static_cast<int>(uvMin.x * tw);
-                                    int x1 = static_cast<int>(uvMax.x * tw);
-                                    int y0 = static_cast<int>(uvMin.y * th);
-                                    int y1 = static_cast<int>(uvMax.y * th);
-                                    for (int py = y0; py < y1 && py < static_cast<int>(th); py++) {
-                                        for (int px = x0; px < x1 && px < static_cast<int>(tw); px++) {
-                                            size_t pi = (py * tw + px) * 4;
-                                            float r = albedoRGBA->rgba[pi] / 255.0f;
-                                            float g = albedoRGBA->rgba[pi+1] / 255.0f;
-                                            float b = albedoRGBA->rgba[pi+2] / 255.0f;
-                                            float lum = r * 0.2627f + g * 0.6780f + b * 0.0593f;
-                                            tileMin = std::min(tileMin, lum);
-                                            tileMax = std::max(tileMax, lum);
-                                        }
-                                    }
-                                    if (tileMax > tileMin + 1e-4f) {
-                                        correctedMat.lumMin = tileMin;
-                                        correctedMat.lumMax = tileMax;
-                                    }
-                                    effectiveMat = &correctedMat;
-                                }
-
-                                Tessellator::Input tessInput{};
-                                tessInput.v0 = &verts[i0];
-                                tessInput.v1 = &verts[i1];
-                                tessInput.v2 = &verts[i2];
-                                tessInput.v3 = &verts[i4v];
-                                tessInput.faceAxis = faceAxis;
-                                tessInput.normalRGBA = normalRGBA;
-                                tessInput.albedoRGBA = albedoRGBA;
-                                tessInput.material = effectiveMat;
-                                tessInput.hasLabPBRHeight = hasLabPBRHeight;
-                                tessInput.isAutoPBR = isAutoPBR;
-                                tessInput.uvMinX = uvMin.x;
-                                tessInput.uvMinY = uvMin.y;
-                                tessInput.uvMaxX = uvMax.x;
-                                tessInput.uvMaxY = uvMax.y;
-                                tessInput.tessLevel = tessLevel;
-                                tessInput.heightScale = heightScale;
-                                tessInput.fadeEdgeMask = fadeEdgeMask;
-
-                                auto tessOutput = Tessellator::tessellate(tessInput);
-                                if (!tessOutput.vertices.empty()) {
-                                    uint32_t baseVertex = static_cast<uint32_t>(verts.size()) + static_cast<uint32_t>(newVerts.size());
-                                    for (uint32_t ti : tessOutput.indices) {
-                                        newIndices.push_back(baseVertex + ti);
-                                    }
-                                    newVerts.insert(newVerts.end(), tessOutput.vertices.begin(), tessOutput.vertices.end());
-                                    tessellated = true;
-                                    anyTessellated = true;
-
-                                    // Store edge data for seam stitching post-pass
-                                    glm::vec3 fc2 = 0.25f * (verts[i0].pos + verts[i1].pos + verts[i2].pos + verts[i4v].pos);
-                                    glm::ivec3 bp2 = glm::ivec3(glm::floor(fc2 - norm * 0.5f));
-                                    // Recompute UV directions for seam wall generation
-                                    const vk::VertexFormat::PBRTriangle *qv2[4] = {&verts[i0], &verts[i1], &verts[i2], &verts[i4v]};
-                                    int mi2 = 0;
-                                    for (int qi = 1; qi < 4; qi++)
-                                        if (qv2[qi]->textureUV.x < qv2[mi2]->textureUV.x - 0.0001f ||
-                                            (std::abs(qv2[qi]->textureUV.x - qv2[mi2]->textureUV.x) < 0.0001f &&
-                                             qv2[qi]->textureUV.y < qv2[mi2]->textureUV.y))
-                                            mi2 = qi;
-                                    glm::vec3 dirU2(0), dirV2(0);
-                                    for (int qi = 0; qi < 4; qi++) {
-                                        if (qi == mi2) continue;
-                                        glm::vec2 dUV2 = qv2[qi]->textureUV - qv2[mi2]->textureUV;
-                                        if (std::abs(dUV2.x) > 0.0001f && std::abs(dUV2.y) < 0.0001f && glm::length(dirU2) < 0.001f)
-                                            dirU2 = glm::normalize(qv2[qi]->pos - qv2[mi2]->pos);
-                                        else if (std::abs(dUV2.y) > 0.0001f && std::abs(dUV2.x) < 0.0001f && glm::length(dirV2) < 0.001f)
-                                            dirV2 = glm::normalize(qv2[qi]->pos - qv2[mi2]->pos);
-                                    }
-                                    auto roundDir2 = [](glm::vec3 d) -> glm::ivec3 {
-                                        glm::ivec3 r(0);
-                                        float ax = std::abs(d.x), ay = std::abs(d.y), az = std::abs(d.z);
-                                        if (ax >= ay && ax >= az) r.x = (d.x > 0) ? 1 : -1;
-                                        else if (ay >= ax && ay >= az) r.y = (d.y > 0) ? 1 : -1;
-                                        else r.z = (d.z > 0) ? 1 : -1;
-                                        return r;
-                                    };
-                                    FaceKey fk{(int16_t)bp2.x, (int16_t)bp2.y, (int16_t)bp2.z, (uint8_t)faceAxis};
-                                    seamEdgeData[fk] = {std::move(tessOutput.edgeDispU0), std::move(tessOutput.edgeDispU1),
-                                                        std::move(tessOutput.edgeDispV0), std::move(tessOutput.edgeDispV1),
-                                                        roundDir2(dirU2), roundDir2(dirV2), faceAxis, norm, tessInput};
-                                }
-                            }
-
-                            // --- DDA path (method 1) ---
-                            if (dispMethod == 1) {
-                                // Map quad corners by UV: find min-UV corner, U-neighbor, V-neighbor
-                                const auto *qVerts = &verts[0];
-                                uint32_t qIdx[4] = {i0, i1, i2, i4v};
-                                // Find min-UV corner
-                                int minI = 0;
-                                for (int qi = 1; qi < 4; qi++) {
-                                    auto &a = qVerts[qIdx[qi]].textureUV, &b = qVerts[qIdx[minI]].textureUV;
-                                    if (a.x < b.x - 0.0001f || (std::abs(a.x - b.x) < 0.0001f && a.y < b.y))
-                                        minI = qi;
-                                }
-                                glm::vec3 cornerPos = qVerts[qIdx[minI]].pos;
-                                glm::vec3 edgeU(0), edgeV(0);
-                                glm::vec2 cornerUV = qVerts[qIdx[minI]].textureUV;
-                                for (int qi = 0; qi < 4; qi++) {
-                                    if (qi == minI) continue;
-                                    glm::vec2 dUV = qVerts[qIdx[qi]].textureUV - cornerUV;
-                                    if (std::abs(dUV.x) > 0.0001f && std::abs(dUV.y) < 0.0001f && glm::length(edgeU) < 0.001f)
-                                        edgeU = qVerts[qIdx[qi]].pos - cornerPos;
-                                    else if (std::abs(dUV.y) > 0.0001f && std::abs(dUV.x) < 0.0001f && glm::length(edgeV) < 0.001f)
-                                        edgeV = qVerts[qIdx[qi]].pos - cornerPos;
-                                }
-                                // Fallback: if UV mapping failed, assign remaining edges
-                                if (glm::length(edgeU) < 0.001f || glm::length(edgeV) < 0.001f) {
-                                    for (int qi = 0; qi < 4; qi++) {
-                                        if (qi == minI) continue;
-                                        glm::vec3 e = qVerts[qIdx[qi]].pos - cornerPos;
-                                        if (glm::length(edgeU) < 0.001f) edgeU = e;
-                                        else if (glm::length(edgeV) < 0.001f) edgeV = e;
-                                    }
-                                }
-
-                                // Compute AABB: expand along negative face normal by heightScale
-                                static const glm::vec3 FACE_NORMALS[6] = {
-                                    {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-                                glm::vec3 fn = FACE_NORMALS[faceAxis];
-                                glm::vec3 p[4];
-                                for (int qi = 0; qi < 4; qi++) p[qi] = qVerts[qIdx[qi]].pos;
-                                glm::vec3 bmin(1e9f), bmax(-1e9f);
-                                for (int qi = 0; qi < 4; qi++) {
-                                    bmin = glm::min(bmin, p[qi]);
-                                    bmax = glm::max(bmax, p[qi]);
-                                    glm::vec3 displaced = p[qi] - fn * heightScale;
-                                    bmin = glm::min(bmin, displaced);
-                                    bmax = glm::max(bmax, displaced);
-                                }
-                                // Small epsilon expansion to avoid precision issues
-                                bmin -= glm::vec3(0.001f);
-                                bmax += glm::vec3(0.001f);
-
-                                VkAabbPositionsKHR aabb{bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z};
-                                displacedAABBs.push_back(aabb);
-
-                                // Build DisplacedFaceData
-                                vk::Data::DisplacedFaceData fd{};
-                                fd.corner = cornerPos;
-                                fd.faceAxis = faceAxis;
-                                fd.edgeU = edgeU;
-                                fd.heightScale = heightScale;
-                                fd.edgeV = edgeV;
-                                fd.textureID = texID;
-                                fd.normalTexID = entry.normal;
-                                fd.specularTexID = entry.specular;
-                                fd.uvMin = uvMin;
-                                fd.uvMax = uvMax;
-                                fd.pomPacked0 = matEntry ? matEntry->pomPacked0 : 0;
-                                uint32_t mcIdx = (materialType > 0) ? (materialType - 1) : 0;
-                                fd.materialClassIdx = mcIdx;
-                                fd.emissiveBlockType = v0.emissiveBlockType;
-                                fd.properties = entry.properties;
-                                fd.lumMin = matEntry ? matEntry->lumMin : 0.0f;
-                                fd.lumMax = matEntry ? matEntry->lumMax : 1.0f;
-                                fd.colorLayer = v0.colorLayer;
-                                fd.pomPacked1 = matEntry ? matEntry->pomPacked1 : 0;
-                                fd.pomPacked2 = matEntry ? matEntry->pomPacked2 : 0;
-                                fd.flags = matEntry ? matEntry->flags : 0;
-                                fd.fadeEdgeMask = fadeEdgeMask;
-                                displacedFaceData.push_back(fd);
-
-                                tessellated = true; // consumed — don't keep original quad
-                                anyTessellated = true;
-                            }
-                        }
-                    }
-                }
-
-                if (!tessellated) {
-                    keptIndices.push_back(i0);
-                    keptIndices.push_back(i1);
-                    keptIndices.push_back(i2);
-                    keptIndices.push_back(i3);
-                    keptIndices.push_back(i4);
-                    keptIndices.push_back(i5);
-                }
-            }
-
-            // Handle remaining triangles (not part of a full quad)
-            size_t remainder = idx.size() % 6;
-            if (remainder > 0) {
-                for (size_t t = idx.size() - remainder; t < idx.size(); t++) {
-                    keptIndices.push_back(idx[t]);
-                }
-            }
-
-            // Post-pass: generate seam walls between adjacent displaced faces
-            // For each face with a coplanar neighbor (fadeEdgeMask bit cleared),
-            // compare edge displacements and add wall quads where they differ.
-            if (!seamEdgeData.empty()) {
-                for (auto &[fk, info] : seamEdgeData) {
-                    uint32_t N = static_cast<uint32_t>(info.u0.size());
-                    if (N == 0) continue;
-                    float invN = 1.0f / static_cast<float>(N);
-                    glm::vec3 fN3 = -info.norm; // displacement direction
-
-                    // UV-ordered corners for correct bilinear interpolation
-                    auto q = Tessellator::mapCornersPublic(info.tessInput);
-                    if (!q.c00 || !q.c10 || !q.c01 || !q.c11) continue;
-
-                    // Check each edge direction for coplanar neighbor
-                    auto checkEdge = [&](const std::vector<float> &myEdge, glm::ivec3 neighborDir,
-                                         bool isU, bool isMax) {
-                        glm::ivec3 nPos = glm::ivec3(fk.x, fk.y, fk.z) + neighborDir;
-                        FaceKey nk{(int16_t)nPos.x, (int16_t)nPos.y, (int16_t)nPos.z, fk.axis};
-                        auto nit = seamEdgeData.find(nk);
-                        if (nit == seamEdgeData.end()) return;
-
-                        // Get the neighbor's OPPOSITE edge
-                        const std::vector<float> &theirEdge = isU
-                            ? (isMax ? nit->second.u0 : nit->second.u1)
-                            : (isMax ? nit->second.v0 : nit->second.v1);
-
-                        uint32_t nN = static_cast<uint32_t>(theirEdge.size());
-                        uint32_t minN = std::min(N, nN);
-
-                        for (uint32_t k = 0; k < minN; k++) {
-                            float dA = myEdge[k], dB = theirEdge[k];
-                            if (std::abs(dA - dB) < 1e-5f) continue;
-
-                            // Generate seam wall at the shared boundary
-                            float dNear = std::min(dA, dB), dFar = std::max(dA, dB);
-                            float p0 = k * invN, p1 = (k + 1) * invN;
-                            float edgeParam = isMax ? 1.0f : 0.0f;
-
-                            // Create 4 wall vertices (double-sided = 8 verts, 4 tris)
-                            for (int side = 0; side < 2; side++) {
-                                uint32_t base = static_cast<uint32_t>(verts.size()) + static_cast<uint32_t>(newVerts.size());
-                                vk::VertexFormat::PBRTriangle wv[4];
-
-                                float eu0, ev0, eu1, ev1;
-                                if (isU) {
-                                    eu0 = edgeParam; ev0 = p0;
-                                    eu1 = edgeParam; ev1 = p1;
-                                } else {
-                                    eu0 = p0; ev0 = edgeParam;
-                                    eu1 = p1; ev1 = edgeParam;
-                                }
-
-                                // Use UV-ordered corners (mapCorners) for correct interpolation
-                                Tessellator::interpVertexPublic(wv[0], q, eu0, ev0);
-                                Tessellator::interpVertexPublic(wv[1], q, eu1, ev1);
-                                wv[2] = wv[1]; wv[3] = wv[0];
-
-                                // Offset top pair by dNear, bottom pair by dFar
-                                wv[0].pos += fN3 * dNear; wv[0].postBase += fN3 * dNear;
-                                wv[1].pos += fN3 * dNear; wv[1].postBase += fN3 * dNear;
-                                wv[2].pos += fN3 * dFar;  wv[2].postBase += fN3 * dFar;
-                                wv[3].pos += fN3 * dFar;  wv[3].postBase += fN3 * dFar;
-
-                                glm::vec3 wallNorm = glm::normalize(glm::cross(
-                                    wv[1].pos - wv[0].pos, fN3));
-                                if (side == 1) wallNorm = -wallNorm;
-                                for (int vi = 0; vi < 4; vi++) wv[vi].norm = wallNorm;
-
-                                newVerts.push_back(wv[0]); newVerts.push_back(wv[1]);
-                                newVerts.push_back(wv[2]); newVerts.push_back(wv[3]);
-
-                                if (side == 0) {
-                                    newIndices.push_back(base); newIndices.push_back(base+1); newIndices.push_back(base+2);
-                                    newIndices.push_back(base); newIndices.push_back(base+2); newIndices.push_back(base+3);
-                                } else {
-                                    newIndices.push_back(base); newIndices.push_back(base+2); newIndices.push_back(base+1);
-                                    newIndices.push_back(base); newIndices.push_back(base+3); newIndices.push_back(base+2);
-                                }
-                            }
-                        }
-                    };
-
-                    // Only generate seam walls for edges where fade was DISABLED (coplanar neighbor)
-                    if (!(info.tessInput.fadeEdgeMask & 0x1)) checkEdge(info.u0, -info.uDir, true, false);
-                    if (!(info.tessInput.fadeEdgeMask & 0x2)) checkEdge(info.u1, info.uDir, true, true);
-                    if (!(info.tessInput.fadeEdgeMask & 0x4)) checkEdge(info.v0, -info.vDir, false, false);
-                    if (!(info.tessInput.fadeEdgeMask & 0x8)) checkEdge(info.v1, info.vDir, false, true);
-                }
-                anyTessellated = true; // seam walls add geometry
-            }
-
-            if (anyTessellated) {
-                // Append new tessellated vertices to the geometry's vertex array
-                verts.insert(verts.end(), newVerts.begin(), newVerts.end());
-
-                // Combine kept + tessellated indices
-                keptIndices.insert(keptIndices.end(), newIndices.begin(), newIndices.end());
-                idx = std::move(keptIndices);
-                // Buffer creation deferred to uploadGPU()
-            }
-        }
-    }
-
-    // Cache the face count before any potential releaseHostGeometry()
-    displacedFaceCount = static_cast<uint32_t>(displacedFaceData.size());
 }
 
 // ---- GPU PHASE: VMA allocation, staging uploads, BLAS builder setup ----
@@ -1023,30 +488,6 @@ void ChunkBuildData::uploadGPU() {
                ->allocateBuffers(physicalDevice, device, vma)
                ->build(device);
 
-    // Build separate AABB BLAS for DDA displaced faces
-    if (!displacedAABBs.empty()) {
-        displacedAABBBuffer = vk::DeviceLocalBuffer::create(
-            vma, device, true, displacedAABBs.size() * sizeof(VkAabbPositionsKHR),
-            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-        displacedAABBBuffer->uploadToStagingBuffer(displacedAABBs.data());
-
-        displacedFaceDataBuffer = vk::DeviceLocalBuffer::create(
-            vma, device, true, displacedFaceData.size() * sizeof(vk::Data::DisplacedFaceData),
-            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        displacedFaceDataBuffer->uploadToStagingBuffer(displacedFaceData.data());
-
-        displacedBlasBuilder = vk::BLASBuilder::create();
-        auto displacedGeomBuilder = displacedBlasBuilder->beginGeometries();
-        displacedGeomBuilder->defineAABBGeometry(
-            displacedAABBBuffer, static_cast<uint32_t>(displacedAABBs.size()), true);
-        displacedGeomBuilder->endGeometries();
-        displacedBlas = displacedBlasBuilder
-                            ->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR)
-                            ->querySizeInfo(device)
-                            ->allocateBuffers(physicalDevice, device, vma)
-                            ->build(device);
-    }
 }
 
 void ChunkBuildData::releaseHostGeometry() {
@@ -1064,12 +505,6 @@ void ChunkBuildData::releaseHostGeometry() {
     indices.clear();
     indices.shrink_to_fit();
 
-    // Also release CPU-side displacement data (GPU buffers are already uploaded)
-    displacedAABBs.clear();
-    displacedAABBs.shrink_to_fit();
-    displacedFaceCount = static_cast<uint32_t>(displacedFaceData.size());
-    displacedFaceData.clear();
-    displacedFaceData.shrink_to_fit();
 }
 
 void ChunkBuildData::releaseStagingBuffers() {
@@ -1080,8 +515,6 @@ void ChunkBuildData::releaseStagingBuffers() {
         if (gd.arrayBuffer) gd.arrayBuffer->releaseStagingBuffer();
         if (gd.descBuffer) gd.descBuffer->releaseStagingBuffer();
     }
-    if (displacedAABBBuffer) displacedAABBBuffer->releaseStagingBuffer();
-    if (displacedFaceDataBuffer) displacedFaceDataBuffer->releaseStagingBuffer();
 }
 
 ChunkBuildDataBatch::ChunkBuildDataBatch(uint32_t maxBatchSize,
@@ -1136,6 +569,7 @@ ChunkBuildScheduler::ChunkBuildScheduler(std::vector<std::shared_ptr<Chunk1>> &c
       mutex_(mutex),
       chunkPackedData_(chunkPackedData),
       chunkBuildingBatchSize_(chunkBuildingBatchSize) {
+    blasThreadExited_.store(false, std::memory_order_release);
     blasThread_ = std::thread(&ChunkBuildScheduler::blasThreadLoop, this);
 }
 
@@ -1155,6 +589,7 @@ void ChunkBuildScheduler::enqueue(std::shared_ptr<ChunkBuildData> data, glm::vec
         std::lock_guard<std::mutex> lock(inputMtx_);
         inputQueue_.push_back({std::move(data), priority});
     }
+    totalEnqueued_.fetch_add(1, std::memory_order_relaxed);
     inputCv_.notify_one();
 }
 
@@ -1174,6 +609,7 @@ void ChunkBuildScheduler::integrateCompleted() {
     }
 
     if (completed.empty()) return;
+    totalCompleted_.fetch_add(static_cast<uint64_t>(completed.size()), std::memory_order_relaxed);
 
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     for (auto &cbd : completed) {
@@ -1192,13 +628,29 @@ void ChunkBuildScheduler::integrateCompleted() {
             chunkBuildDatas_[cbd->id] = nullptr;
         }
     }
+    totalIntegrated_.fetch_add(static_cast<uint64_t>(completed.size()), std::memory_order_relaxed);
 }
 
 void ChunkBuildScheduler::waitAllFinish() {
     // Signal stop, join, then integrate remaining
     stop_.store(true);
     inputCv_.notify_one();
-    if (blasThread_.joinable()) blasThread_.join();
+    if (blasThread_.joinable()) {
+        // Never detach this owner thread. A detached BLAS worker can keep using
+        // scheduler-owned queues, command pools, and buffers after reset frees them.
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!blasThreadExited_.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!blasThreadExited_.load(std::memory_order_acquire)) {
+            std::cerr << "[Chunks] WARNING: BLAS thread did not finish in 5s; joining to preserve resource lifetime"
+                      << std::endl;
+            g_crashRing.record("BLAS:joinWait");
+            g_crashRing.dumpToFile(Renderer::folderPath / "logs");
+        }
+        blasThread_.join();
+    }
     integrateCompleted();
 }
 
@@ -1206,6 +658,7 @@ void ChunkBuildScheduler::waitAllFinish() {
 // Runs the complete chunk pipeline synchronously: CPU → GPU → fence wait → compaction.
 // Blocking waits are free because this is a dedicated thread.
 void ChunkBuildScheduler::blasThreadLoop() {
+    vk::DebugUtils::setCurrentThreadName("Radiance BLAS Builder");
     auto framework = Renderer::instance().framework();
     auto vma = framework->vma();
     auto device = framework->device();
@@ -1252,13 +705,24 @@ void ChunkBuildScheduler::blasThreadLoop() {
     ensureDiagOpen();
 
     while (!stop_.load()) {
+        if (diagLog.is_open() && diagIter % 2000 == 0) { diagLog << diagTs() << " HEARTBEAT iter=" << diagIter << " inFlight=" << inFlight_.size() << " cmdPool=" << cmdPool_.size() << std::endl; diagLog.flush(); }
         // Pause gate: render thread requests pause during swapchain recreate
         if (paused_.load(std::memory_order_acquire)) {
             pausedAck_.store(true, std::memory_order_release);
+            if (diagLog.is_open()) {
+                diagLog << diagTs() << " PAUSE_ACK iter=" << diagIter
+                        << " inFlight=" << inFlight_.size() << std::endl;
+                diagLog.flush();
+            }
             while (paused_.load(std::memory_order_acquire) && !stop_.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             pausedAck_.store(false, std::memory_order_release);
+            if (diagLog.is_open()) {
+                diagLog << diagTs() << " PAUSE_RESUME iter=" << diagIter
+                        << " stop=" << stop_.load() << std::endl;
+                diagLog.flush();
+            }
             if (stop_.load()) break;
         }
 
@@ -1349,6 +813,8 @@ void ChunkBuildScheduler::blasThreadLoop() {
                     VkResult cr;
                     {
                         std::lock_guard<std::mutex> qLock(device->queueMutex());
+                        vk::DebugUtils::ScopedQueueLabel queueLabel(
+                            device->secondaryQueue(), "Radiance QueueSubmit: BLAS Compact", 0.9f, 0.55f, 0.2f);
                         cr = vkQueueSubmit(device->secondaryQueue(), 1, &csi, VK_NULL_HANDLE);
                     }
                     if (diagLog.is_open()) {
@@ -1408,6 +874,16 @@ void ChunkBuildScheduler::blasThreadLoop() {
         }
 
         // ---- SUBMIT: prepare + submit new batch if we have work AND capacity ----
+        if (diagLog.is_open() && diagIter % 100 == 0) {
+            std::lock_guard<std::mutex> ilock(inputMtx_);
+            diagLog << diagTs() << " POLL iter=" << diagIter
+                    << " inputQ=" << inputQueue_.size()
+                    << " inFlight=" << inFlight_.size()
+                    << " cmdPool=" << cmdPool_.size()
+                    << " paused=" << paused_.load()
+                    << " stop=" << stop_.load() << std::endl;
+            diagLog.flush();
+        }
         bool hasWork = false;
         {
             std::lock_guard<std::mutex> lock(inputMtx_);
@@ -1434,11 +910,18 @@ void ChunkBuildScheduler::blasThreadLoop() {
                                     cameraPosZ_.load(std::memory_order_relaxed));
 
                 // CPU phase (parallel)
-                Renderer::threadPool.parallelFor(static_cast<uint32_t>(batch.size()), [&](uint32_t i) {
-                    batch[i]->prepareCPU(true, false, cameraPos);
-                });
+                            if (diagLog.is_open()) { diagLog << diagTs() << " PREPARE_CPU_BEGIN iter=" << diagIter << " batch=" << batch.size() << std::endl; diagLog.flush(); }
+// DIAGNOSTIC: sequential prepareCPU to avoid parallelFor deadlock
+            for (uint32_t i = 0; i < static_cast<uint32_t>(batch.size()); i++) {
+                if (diagLog.is_open()) { diagLog << diagTs() << " prepareCPU_item iter=" << diagIter << " i=" << i << " id=" << batch[i]->id << " geo=" << batch[i]->geometryCount << std::endl; diagLog.flush(); }
+                batch[i]->prepareCPU(true, false, cameraPos);
+                if (diagLog.is_open()) { diagLog << diagTs() << " prepareCPU_item_done iter=" << diagIter << " i=" << i << std::endl; diagLog.flush(); }
+            }
+            if (diagLog.is_open()) { diagLog << diagTs() << " PREPARE_CPU_END iter=" << diagIter << std::endl; diagLog.flush(); }
                 // GPU upload (sequential — VMA alloc + staging)
-                for (auto &cbd : batch) cbd->uploadGPU();
+                            if (diagLog.is_open()) { diagLog << diagTs() << " UPLOAD_GPU_BEGIN iter=" << diagIter << std::endl; diagLog.flush(); }
+for (auto &cbd : batch) cbd->uploadGPU();
+            if (diagLog.is_open()) { diagLog << diagTs() << " UPLOAD_GPU_END iter=" << diagIter << std::endl; diagLog.flush(); }
 
                 // Release CPU-side geometry data — staging buffers hold the copy for GPU transfer.
                 // This frees ~200KB/chunk of system RAM (PBRTriangle arrays + index arrays).
@@ -1457,8 +940,6 @@ void ChunkBuildScheduler::blasThreadLoop() {
                         auto &gd = cbd->ommGeometryData[i];
                         if (gd.hasMicromap) { gd.arrayBuffer->uploadToBuffer(cmd); gd.descBuffer->uploadToBuffer(cmd); }
                     }
-                    if (cbd->displacedAABBBuffer) cbd->displacedAABBBuffer->uploadToBuffer(cmd);
-                    if (cbd->displacedFaceDataBuffer) cbd->displacedFaceDataBuffer->uploadToBuffer(cmd);
                 }
 
                 // Barriers
@@ -1484,11 +965,6 @@ void ChunkBuildScheduler::blasThreadLoop() {
                                 mm, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
                                 secondaryQueueIndex, secondaryQueueIndex, cbd->ommGeometryData[i].descBuffer});
                         }
-                    }
-                    if (cbd->displacedAABBBuffer) {
-                        barriers.push_back({VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
-                            VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
-                            secondaryQueueIndex, secondaryQueueIndex, cbd->displacedAABBBuffer});
                     }
                 }
                 cmd->barriersBufferImage(barriers, {});
@@ -1524,7 +1000,6 @@ void ChunkBuildScheduler::blasThreadLoop() {
                 std::vector<std::shared_ptr<vk::BLASBuilder>> builders;
                 for (auto &cbd : batch) {
                     builders.push_back(cbd->blasBuilder);
-                    if (cbd->displacedBlasBuilder) builders.push_back(cbd->displacedBlasBuilder);
                 }
                 vk::BLASBuilder::batchSubmit(builders, cmd);
 
@@ -1547,6 +1022,8 @@ void ChunkBuildScheduler::blasThreadLoop() {
                 VkResult r;
                 {
                     std::lock_guard<std::mutex> qLock(device->queueMutex());
+                    vk::DebugUtils::ScopedQueueLabel queueLabel(
+                        device->secondaryQueue(), "Radiance QueueSubmit: BLAS Build", 0.9f, 0.35f, 0.25f);
                     r = vkQueueSubmit(device->secondaryQueue(), 1, &si, VK_NULL_HANDLE);
                 }
                 if (diagLog.is_open()) {
@@ -1570,15 +1047,27 @@ void ChunkBuildScheduler::blasThreadLoop() {
 
                 // Track in-flight — store timeline AFTER confirmed success
                 lastSubmittedTimeline_.store(batchValue, std::memory_order_release);
+                totalSubmitted_.fetch_add(static_cast<uint64_t>(batch.size()), std::memory_order_relaxed);
                 inFlight_.push_back({batchValue, std::move(cmd), std::move(batch), qp, qpCount});
             }
         } else if (!hasWork && inFlight_.empty()) {
+            if (diagLog.is_open() && diagIter % 500 == 0) {
+                diagLog << diagTs() << " WAIT_INPUT iter=" << diagIter << std::endl;
+                diagLog.flush();
+            }
             // Nothing to do — wait for input
             std::unique_lock<std::mutex> lock(inputMtx_);
             inputCv_.wait_for(lock, std::chrono::milliseconds(5), [this] {
                 return stop_.load() || !inputQueue_.empty();
             });
         } else {
+            if (diagLog.is_open() && diagIter % 500 == 0) {
+                diagLog << diagTs() << " YIELD iter=" << diagIter
+                        << " hasWork=" << hasWork
+                        << " inFlight=" << inFlight_.size()
+                        << " cmdPool=" << cmdPool_.size() << std::endl;
+                diagLog.flush();
+            }
             // In-flight batches but no new work or no capacity — brief yield
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
@@ -1607,18 +1096,45 @@ void ChunkBuildScheduler::blasThreadLoop() {
         std::lock_guard<std::mutex> lock(completedMtx_);
         for (auto &cbd : f.chunks) completedQueue_.push_back(std::move(cbd));
     }
+    blasThreadExited_.store(true, std::memory_order_release);
 }
 
 uint32_t ChunkBuildScheduler::chunkBuildingBatchSize() {
     return chunkBuildingBatchSize_;
 }
 
-void ChunkBuildScheduler::pause() {
+ChunkBuildSchedulerStats ChunkBuildScheduler::stats() {
+    ChunkBuildSchedulerStats s;
+    { std::lock_guard<std::mutex> lock(inputMtx_); s.inputQueue = static_cast<uint32_t>(inputQueue_.size()); }
+    { std::lock_guard<std::mutex> lock(completedMtx_); s.completedQueue = static_cast<uint32_t>(completedQueue_.size()); }
+    s.inFlight = static_cast<uint32_t>(inFlight_.size());
+    s.enqueued = totalEnqueued_.load(std::memory_order_relaxed);
+    s.submitted = totalSubmitted_.load(std::memory_order_relaxed);
+    s.completed = totalCompleted_.load(std::memory_order_relaxed);
+    s.integrated = totalIntegrated_.load(std::memory_order_relaxed);
+    s.lastSubmittedTimeline = lastSubmittedTimeline_.load(std::memory_order_acquire);
+    auto blasSem = Renderer::instance().framework()->device()->blasSemaphore();
+    s.currentTimeline = blasSem ? blasSem->getValue() : 0;
+    return s;
+}
+
+bool ChunkBuildScheduler::pause(std::chrono::milliseconds timeout) {
+    if (stop_.load(std::memory_order_acquire)) return true;
+    pausedAck_.store(false, std::memory_order_release);
     paused_.store(true, std::memory_order_release);
+    inputCv_.notify_one();
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
     // Spin until BLAS thread acknowledges — guarantees no submit is in progress
     while (!pausedAck_.load(std::memory_order_acquire)) {
+        if (stop_.load(std::memory_order_acquire)) return true;
+        if (std::chrono::steady_clock::now() >= deadline) {
+            paused_.store(false, std::memory_order_release);
+            inputCv_.notify_one();
+            return false;
+        }
         std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
+    return true;
 }
 
 void ChunkBuildScheduler::resume() {
@@ -1666,8 +1182,6 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
     } else {
         gc.collect(chunkBuildData->blas);
         if (chunkBuildData->preCompactionBlas) gc.collect(chunkBuildData->preCompactionBlas);
-        if (chunkBuildData->displacedBlas) gc.collect(chunkBuildData->displacedBlas);
-        if (chunkBuildData->displacedFaceDataBuffer) gc.collect(chunkBuildData->displacedFaceDataBuffer);
 
         gc.collect(std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
             std::move(chunkBuildData->vertexBuffers)));
@@ -1683,12 +1197,7 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
     biomeGrassColor = chunkBuildData->biomeGrassColor;
     biomeFoliageColor = chunkBuildData->biomeFoliageColor;
     biomeWaterColor = chunkBuildData->biomeWaterColor;
-    // Defer destruction of old displaced resources (GPU may still reference from in-flight frames)
-    if (displacedBlas) gc.collect(displacedBlas);
-    if (displacedFaceDataBuffer) gc.collect(displacedFaceDataBuffer);
-    displacedFaceDataBuffer = chunkBuildData->displacedFaceDataBuffer;
-    displacedBlas = chunkBuildData->displacedBlas;
-    displacedFaceCount = chunkBuildData->displacedFaceCount;
+    textureGeneration = chunkBuildData->textureGeneration;
     // CPU vertex/index data kept alive in ChunkBuildData (releaseHostGeometry disabled)
 }
 
@@ -1779,12 +1288,24 @@ void Chunks::reset(uint32_t numChunks) {
                                     chunkBuildingBatchSize);
 }
 
-void Chunks::resetScheduler() {
+void Chunks::resetScheduler(bool invalidateExisting) {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
 
     if (chunkBuildScheduler_ == nullptr) return;
 
     chunkBuildScheduler_->waitAllFinish();
+    queuedIndex_.clear();
+
+    if (invalidateExisting) {
+        for (size_t i = 0; i < chunks_.size(); ++i) {
+            if (chunks_[i]) {
+                chunks_[i]->invalidate();
+            }
+            if (i < chunkBuildDatas_.size()) {
+                chunkBuildDatas_[i] = nullptr;
+            }
+        }
+    }
 
     uint32_t chunkBuildingBatchSize = Renderer::instance().options.chunkBuildingBatchSize;
     chunkBuildScheduler_ =
@@ -1820,6 +1341,18 @@ void Chunks::invalidateChunk(int id) {
 
 // maybe called async
 void Chunks::queueChunkBuild(ChunkBuildTask task) {
+    uint64_t currentTextureGeneration = Renderer::textureSystem.generation();
+    if (currentTextureGeneration != 0 && task.textureGeneration != currentTextureGeneration) {
+        static int sStaleCount = 0;
+        sStaleCount++;
+        if (sStaleCount <= 5 || sStaleCount % 1000 == 0) {
+            std::cerr << "[Chunks] Accepting stale Java-meshed chunk build (stale texture): taskGen="
+                      << task.textureGeneration << " currentGen=" << currentTextureGeneration
+                      << " chunk=" << task.id << " staleCount=" << sStaleCount << std::endl;
+        }
+        // Do NOT reject -- geometry must stay visible even with stale material data.
+    }
+
     uint32_t allVertexCount = 0, allIndexCount = 0;
     std::vector<World::GeometryTypes> geometryTypes;
     std::vector<std::vector<vk::VertexFormat::PBRTriangle>> vertices;
@@ -1864,6 +1397,7 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
     std::shared_ptr<ChunkBuildData> chunkBuildData = ChunkBuildData::create(
         task.id, task.x, task.y, task.z, chunks_[task.id]->latestVersion++, allVertexCount, allIndexCount,
         task.geometryCount, std::move(geometryTypes), std::move(vertices), std::move(indices));
+    chunkBuildData->textureGeneration = task.textureGeneration;
 
     // ALL chunks go to the BLAS thread — render thread does zero chunk building.
     // Important chunks get higher priority (2x) but are still async.
@@ -1876,6 +1410,20 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
 }
 
 void Chunks::queueBlockStateBuild(ChunkBuildTaskV2 task) {
+    uint64_t currentTextureGeneration = Renderer::textureSystem.generation();
+    if (currentTextureGeneration != 0 && task.textureGeneration != currentTextureGeneration) {
+        static int sStaleCount = 0;
+        sStaleCount++;
+        if (sStaleCount <= 5 || sStaleCount % 1000 == 0) {
+            std::cerr << "[Chunks] Accepting stale block-state chunk build (stale texture): taskGen="
+                      << task.textureGeneration << " currentGen=" << currentTextureGeneration
+                      << " modelGen=" << Renderer::blockModelTable.generation()
+                      << " chunk=(" << task.x << "," << task.y << "," << task.z << ")"
+                      << " staleCount=" << sStaleCount << std::endl;
+        }
+        // Do NOT reject -- geometry must stay visible even with stale material data.
+    }
+
     if (!Renderer::blockModelTable.isLoaded()) {
         // Model table not ready — can't mesh in C++
         return;
@@ -1938,6 +1486,7 @@ void Chunks::queueBlockStateBuild(ChunkBuildTaskV2 task) {
         task.id, task.x, task.y, task.z, chunks_[task.id]->latestVersion++,
         allVertexCount, allIndexCount, geomCount,
         std::move(geometryTypes), std::move(vertices), std::move(indices));
+    chunkBuildData->textureGeneration = task.textureGeneration;
     chunkBuildData->biomeGrassColor = task.biomeGrassColor;
     chunkBuildData->biomeFoliageColor = task.biomeFoliageColor;
     chunkBuildData->biomeWaterColor = task.biomeWaterColor;

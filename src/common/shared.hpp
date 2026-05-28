@@ -460,7 +460,7 @@ namespace Data {
         T_INT   specularLayer;   // Layer in specular array (-1 = no specular)
         T_INT   normalLayer;     // Layer in normal array (-1 = no normal)
         T_INT   overlaySprite;   // spriteId of overlay texture (-1 = none) [grass block sides]
-        T_INT   maskLayer;       // Material class mask layer (-1 = none)
+        T_INT   maskLayer;       // Block height range pack: minAlpha | (maxAlpha << 8), -1 = none
     };
 
 #ifdef __cplusplus
@@ -476,7 +476,7 @@ namespace Data {
     static constexpr uint32_t SPRITE_SOURCE_PACK_AUTHORED = 1u;
     static constexpr uint32_t SPRITE_SOURCE_USER_CUSTOM = 2u;
     static constexpr uint32_t SPRITE_SOURCE_FLAT = 3u;
-    static constexpr uint32_t SPRITE_MAX_ENTRIES        = 2048u;
+    static constexpr uint32_t SPRITE_MAX_ENTRIES        = 4096u;
     static_assert(sizeof(SpriteEntry) == 32, "SpriteEntry must be exactly 32 bytes");
 #else
     #define SPRITE_FLAG_HAS_SPECULAR (1u << 0)
@@ -491,11 +491,11 @@ namespace Data {
     #define SPRITE_SOURCE_PACK_AUTHORED 1u
     #define SPRITE_SOURCE_USER_CUSTOM 2u
     #define SPRITE_SOURCE_FLAT 3u
-    #define SPRITE_MAX_ENTRIES       2048u
+    #define SPRITE_MAX_ENTRIES       4096u
 #endif
 
     struct SpriteRegistry {
-        SpriteEntry entries[2048];
+        SpriteEntry entries[SPRITE_MAX_ENTRIES];
     };
 
     // Unified material class: full Disney BRDF parameters for a material category.
@@ -525,8 +525,8 @@ namespace Data {
         T_UINT  noisePacked;    // Bit-packed: octaves(0-3), type(4-8), seed(9-17), target(20-23)
 
         // Pack 4: displacement + height field + normal controls (16 bytes)
-        T_UINT  pomPacked0;   // heightFilter(3) | dispMethod(3) | heightSource(3) | ddaSteps(7) | ddaRefinement(4) | filterRadius(4) | mipBias(4) | selfShadow(1) | clipSilhouette(1) | mvs(1) | areaLightOff(1)
-        T_UINT  pomPacked1;   // normalClamp(8) | geometricBlend(8) | pomAOStrength(8) | heightContrast(8)
+        T_UINT  pomPacked0;   // heightFilter(3) | displacementMode(2) | heightSource(3) | filterRadius(4) | mipBias(4) | selfShadow(1)
+        T_UINT  pomPacked1;   // normalClamp(8) | geometricBlend(8) | legacyAO(8) | heightContrast(8)
         T_UINT  pomPacked2;   // heightRemapMin(8) | heightRemapMax(8) | heightOffset(8) | normalDistanceFade(8)
         T_FLOAT pomDepth;     // [0.00-2.00] per-block displacement depth in blocks (0 = disabled)
 
@@ -566,47 +566,6 @@ namespace Data {
     struct MaterialClassMapping {
         MaterialClassEntry entries[MAX_MATERIAL_CLASSES];
     }; // 72 KB (512 × 144 bytes)
-
-    // DDA displacement: per-face data for intersection shader ray marching.
-    // Stored in SSBO, indexed by gl_PrimitiveID. 128 bytes per face, std430.
-    struct DisplacedFaceData {
-        // 0-15: face geometry
-        T_VEC3 corner;           // World-space corner of the quad (parametric 0,0)
-        T_UINT faceAxis;         // 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
-
-        // 16-31: face edges + displacement scale
-        T_VEC3 edgeU;            // Edge along U axis (corner → u-neighbor)
-        T_FLOAT heightScale;     // Displacement depth in world units
-
-        // 32-47: face edges + texture
-        T_VEC3 edgeV;            // Edge along V axis (corner → v-neighbor)
-        T_UINT textureID;        // Albedo texture ID
-
-        // 48-63: texture refs + UV bounds
-        T_INT normalTexID;       // Normal texture ID (-1 = none)
-        T_INT specularTexID;     // Specular texture ID (-1 = none)
-        T_VEC2 uvMin;            // Texture UV min bounds
-
-        // 64-79: UV bounds + material
-        T_VEC2 uvMax;            // Texture UV max bounds
-        T_UINT pomPacked0;       // Per-block displacement params (same layout as MaterialClassEntry)
-        T_UINT materialClassIdx; // Material class index into SSBO
-
-        // 80-95: emissive + luminance
-        T_UINT emissiveBlockType;// emissiveBlockType from vertex (emission type + material class)
-        T_UINT properties;       // TextureMapEntry properties bitfield
-        T_FLOAT lumMin;          // AutoPBR luminance min
-        T_FLOAT lumMax;          // AutoPBR luminance max
-
-        // 96-111: color layer
-        T_VEC4 colorLayer;       // Vertex color tint
-
-        // 112-127: packed params + flags
-        T_UINT pomPacked1;       // normalClamp, geometricBlend, pomAOStrength, heightContrast
-        T_UINT pomPacked2;       // heightRemapMin/Max, heightOffset, normalDistanceFade
-        T_UINT flags;            // Material flags (bit 3=AutoPBR, bit 6=invertHeight, etc.)
-        T_UINT fadeEdgeMask;     // Per-edge fade mask (bit 0=U0, 1=U1, 2=V0, 3=V1; 0xF=fade all)
-    }; // 128 bytes (8 x vec4), std430 aligned
 
     struct ExposureData {
         T_INT width;

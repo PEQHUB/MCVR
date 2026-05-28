@@ -36,6 +36,7 @@ struct Options {
     bool reflexBoost = false;       // Reflex Boost — raise GPU clocks during latency-sensitive work
     bool vrrMode = false;           // VRR frame cap: 3600*Hz/(Hz+3600) via Reflex frameLimitUs
     bool needRecreate = false;
+    bool textureArrayAnimationUpdatesEnabled = false;  // Java-controlled: freeze block atlas animation by default
     bool reflexDirty = false;       // Deferred Reflex settings apply (avoids slider spam)
 
     uint32_t chunkBuildingBatchSize = 6;
@@ -167,19 +168,19 @@ struct Options {
     int sharcUpdateBounces = 4;              // Max bounces in update pass (2-8)
     int sharcCapacityExponent = 21;          // Cache capacity = 2^N entries (20-24)
 
-    // Parallax Occlusion Mapping
+    // Material-owned shader displacement (old field names retained as compatibility shims)
     bool  pomEnabled      = false;
     float pomHeightScale  = 0.05f;  // Tile-local depth scale (0.01–0.50)
-    int   pomSteps        = 64;     // Linear search steps (8–512)
+    int   pomSteps        = 32;     // Primary trace steps (8–512)
     int   pomRefinement   = 4;      // Binary refinement iterations (0–8)
-    float pomFadeDistance = 64.0f;  // Distance in blocks to fade POM out (8–256)
+    float pomFadeDistance = 64.0f;  // Distance in blocks to fade displacement out (8–256)
 
-    // Geometric displacement tessellation (replaces DDA intersection system)
-    uint32_t displacementQuality = 0;  // 0=Off, 1+=Tessellation enabled
-    uint32_t tessMaxLevel = 16;        // Max tessellation grid resolution (2–32)
-    float tessNearDist  = 32.0f;       // Full tessellation distance (blocks)
-    float tessMidDist   = 96.0f;       // Half tessellation distance
-    float tessFarDist   = 192.0f;      // Quarter tessellation distance
+    // Ignored legacy compatibility knobs from the removed geometry displacement path.
+    uint32_t displacementQuality = 2;  // UI preset: 1=Low,2=Balanced,3=High,4=Ultra
+    uint32_t tessMaxLevel = 16;
+    float tessNearDist  = 32.0f;
+    float tessMidDist   = 96.0f;
+    float tessFarDist   = 192.0f;
 
     // Offline accumulation mode
     uint32_t offlineState = 0;       // 0=NORMAL, 1=FREE, 2=ACCUMULATING
@@ -231,11 +232,12 @@ struct Options {
     float wetSurfaceStrength = 1.0f;  // Wet surface effect strength [0.0 - 2.0]
 
     // Diagnostics
-    bool loggingEnabled = false;
-    bool gpuDiagnostics = false;   // GPU checkpoints for DEVICE_LOST debugging (zero cost when false)
-    bool validationLayers = false;
+ // Diagnostics
+ bool loggingEnabled = false;
+ bool gpuDiagnostics = false; // GPU checkpoints for DEVICE_LOST debugging (zero cost when false)
+ bool gpuDebugLabels = false; // Vulkan debug labels on GPU commands
+ bool validationLayers = false;
 };
-
 class Renderer : public Singleton<Renderer> {
     friend class Singleton<Renderer>;
 

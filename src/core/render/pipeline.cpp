@@ -1,6 +1,7 @@
 #include "core/render/pipeline.hpp"
 
 #include "core/render/gpu_diagnostics.hpp"
+#include "core/render/crash_ring_buffer.hpp"
 #include "core/render/hdr_composite_pass.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
@@ -277,7 +278,13 @@ void WorldPipelineContext::render() {
             profilerOpen = true;
         }
 
+        std::string crashTag = "wm:" + name;
+        renderDiag("world module begin i=%d name=%s", i, name.c_str());
+        g_crashRing.record(crashTag.c_str());
+
         worldModuleContexts[i]->render();
+
+        renderDiag("world module end i=%d name=%s", i, name.c_str());
 
         if (profilerOpen) {
             profiler.endModule(rawCmd);

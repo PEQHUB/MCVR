@@ -1,4 +1,5 @@
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
+#include <chrono>
 
 #include "core/render/buffers.hpp"
 #include "core/render/gpu_diagnostics.hpp"
@@ -11,9 +12,11 @@
 #include "core/render/radiance_logger.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/modules/world/svgf/blue_noise.hpp"
+#include "core/vulkan/debug_utils.hpp"
 
 #include <cmath>
 #include <cstring>
+#include <string>
 
 RayTracingModule::RayTracingModule() {}
 
@@ -525,12 +528,6 @@ void RayTracingModule::initDescriptorTables() {
                     .descriptorCount = 1,
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 12, // binding 12: Displaced face data SSBO (intersection shader DDA)
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
                 })
                 .defineDescriptorLayoutSetBinding({
                     .binding = 13, // binding 13: SpriteRegistry SSBO (texture array metadata)
@@ -1138,6 +1135,22 @@ void RayTracingModule::initPipeline() {
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/shadow_rchit.spv").string());
     worldSolidTransparentClosestHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_solid_transparent_rchit.spv").string());
+    worldSolidTransparentNoDisplacementClosestHitShader_ =
+        vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_solid_transparent_no_displacement_rchit.spv").string());
+    auto activeWorldSolidTransparentClosestHitShader =
+        Renderer::options.pomEnabled && worldSolidTransparentClosestHitShader_
+            ? worldSolidTransparentClosestHitShader_
+            : worldSolidTransparentNoDisplacementClosestHitShader_;
+    if (!activeWorldSolidTransparentClosestHitShader) {
+        activeWorldSolidTransparentClosestHitShader = worldSolidTransparentClosestHitShader_;
+    }
+    RadianceLogger::log("RayTracing", "INFO",
+                        "World closest-hit variant: %s (displacementEnabled=%d noDisplacementShader=%d)",
+                        (Renderer::options.pomEnabled && worldSolidTransparentClosestHitShader_)
+                            ? "displacement"
+                            : "no_displacement",
+                        Renderer::options.pomEnabled ? 1 : 0,
+                        worldSolidTransparentNoDisplacementClosestHitShader_ ? 1 : 0);
     worldNoReflectClosestHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_no_reflect_rchit.spv").string());
     worldCloudClosestHitShader_ =
@@ -1165,14 +1178,6 @@ void RayTracingModule::initPipeline() {
     endGatewayAnyHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/end_gateway_rahit.spv").string());
 
-    // DDA displacement shaders
-    displacedIntersectionShader_ =
-        vk::Shader::create(device, (shaderPath / "world/ray_tracing/displaced_block_rint.spv").string());
-    displacedClosestHitShader_ =
-        vk::Shader::create(device, (shaderPath / "world/ray_tracing/displaced_block_rchit.spv").string());
-    displacedShadowClosestHitShader_ =
-        vk::Shader::create(device, (shaderPath / "world/ray_tracing/displaced_shadow_rchit.spv").string());
-
     rayTracingPipeline_ =
         vk::RayTracingPipelineBuilder{}
             .beginShaderStage()
@@ -1180,7 +1185,7 @@ void RayTracingModule::initPipeline() {
             .defineShaderStage(worldRayMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                           // 1
             .defineShaderStage(handRayMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                            // 2
             .defineShaderStage(shadowRayMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                          // 3
-            .defineShaderStage(worldSolidTransparentClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR) // 4
+            .defineShaderStage(activeWorldSolidTransparentClosestHitShader, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR) // 4
             .defineShaderStage(worldNoReflectClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)        // 5
             .defineShaderStage(worldCloudClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)            // 6
             .defineShaderStage(worldTransparentAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)              // 7
@@ -1195,9 +1200,6 @@ void RayTracingModule::initPipeline() {
             .defineShaderStage(endGatewayClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)            // 16
             .defineShaderStage(endGatewayAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                    // 17
             .defineShaderStage(pointLightShadowMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                   // 18
-            .defineShaderStage(displacedIntersectionShader_, VK_SHADER_STAGE_INTERSECTION_BIT_KHR)      // 19
-            .defineShaderStage(displacedClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)         // 20
-            .defineShaderStage(displacedShadowClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)   // 21
             .endShaderStage()
             .beginShaderGroup()
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 0, VK_SHADER_UNUSED_KHR,
@@ -1228,9 +1230,6 @@ void RayTracingModule::initPipeline() {
                                VK_SHADER_UNUSED_KHR) // end portal
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 16, 17,
                                VK_SHADER_UNUSED_KHR) // end gateway
-            // Hit group 8: DDA displacement (procedural — rint + rchit)
-            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 20,
-                               VK_SHADER_UNUSED_KHR, 19) // displaced block (CHS=20, rint=19)
             .endShaderGroup()
             .definePipelineLayout(rayTracingDescriptorTables_[0])
             .build(device);
@@ -1240,11 +1239,11 @@ void RayTracingModule::initSBT() {
     auto framework = framework_.lock();
     if (!framework) return;
 
-    // 4 miss groups, 9 hit groups (8 triangle + 1 procedural for DDA displacement)
+    // 4 miss groups, 8 triangle hit groups.
     sbts_.resize(framework->swapchain()->imageCount());
     for (int i = 0; i < framework->swapchain()->imageCount(); i++) {
         sbts_[i] = vk::SBT::create(framework->physicalDevice(), framework->device(), framework->vma(),
-                                   rayTracingPipeline_, 4, 9);
+                                   rayTracingPipeline_, 4, 8);
     }
 }
 
@@ -1413,6 +1412,20 @@ void RayTracingModule::initSharcUpdatePipeline() {
         std::cerr << "[SHARC] Failed to load sharc_update_rgen.spv" << std::endl;
         return;
     }
+    auto activeWorldSolidTransparentClosestHitShader =
+        Renderer::options.pomEnabled && worldSolidTransparentClosestHitShader_
+            ? worldSolidTransparentClosestHitShader_
+            : worldSolidTransparentNoDisplacementClosestHitShader_;
+    if (!activeWorldSolidTransparentClosestHitShader) {
+        activeWorldSolidTransparentClosestHitShader = worldSolidTransparentClosestHitShader_;
+    }
+    RadianceLogger::log("RayTracing", "INFO",
+                        "SHARC closest-hit variant: %s (displacementEnabled=%d noDisplacementShader=%d)",
+                        (Renderer::options.pomEnabled && worldSolidTransparentClosestHitShader_)
+                            ? "displacement"
+                            : "no_displacement",
+                        Renderer::options.pomEnabled ? 1 : 0,
+                        worldSolidTransparentNoDisplacementClosestHitShader_ ? 1 : 0);
 
     // Build update RT pipeline with same CHS/AHS/miss shaders as main pipeline
     sharcUpdatePipeline_ =
@@ -1422,7 +1435,7 @@ void RayTracingModule::initSharcUpdatePipeline() {
             .defineShaderStage(worldRayMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                            // 1
             .defineShaderStage(handRayMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                             // 2
             .defineShaderStage(shadowRayMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                           // 3
-            .defineShaderStage(worldSolidTransparentClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)  // 4
+            .defineShaderStage(activeWorldSolidTransparentClosestHitShader, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)  // 4
             .defineShaderStage(worldNoReflectClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)         // 5
             .defineShaderStage(worldCloudClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)             // 6
             .defineShaderStage(worldTransparentAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)               // 7
@@ -1437,9 +1450,6 @@ void RayTracingModule::initSharcUpdatePipeline() {
             .defineShaderStage(endGatewayClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)             // 16
             .defineShaderStage(endGatewayAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                     // 17
             .defineShaderStage(pointLightShadowMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                    // 18
-            .defineShaderStage(displacedIntersectionShader_, VK_SHADER_STAGE_INTERSECTION_BIT_KHR)       // 19
-            .defineShaderStage(displacedClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)          // 20
-            .defineShaderStage(displacedShadowClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)    // 21
             .endShaderStage()
             .beginShaderGroup()
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 0, VK_SHADER_UNUSED_KHR,
@@ -1469,9 +1479,6 @@ void RayTracingModule::initSharcUpdatePipeline() {
                                VK_SHADER_UNUSED_KHR) // end portal
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 16, 17,
                                VK_SHADER_UNUSED_KHR) // end gateway
-            // Hit group 8: DDA displacement (procedural)
-            .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 20,
-                               VK_SHADER_UNUSED_KHR, 19) // displaced block (CHS=20, rint=19)
             .endShaderGroup()
             .definePipelineLayout(rayTracingDescriptorTables_[0])
             .build(device);
@@ -1481,11 +1488,11 @@ void RayTracingModule::initSharcUpdatePipeline() {
         return;
     }
 
-    // Create SBTs for the update pipeline (same structure as main: 4 miss, 9 hit groups)
+    // Create SBTs for the update pipeline (same structure as main: 4 miss, 8 hit groups)
     sharcUpdateSbts_.resize(framework->swapchain()->imageCount());
     for (int i = 0; i < framework->swapchain()->imageCount(); i++) {
         sharcUpdateSbts_[i] = vk::SBT::create(framework->physicalDevice(), framework->device(), framework->vma(),
-                                               sharcUpdatePipeline_, 4, 9);
+                                               sharcUpdatePipeline_, 4, 8);
     }
 }
 
@@ -1565,15 +1572,26 @@ RayTracingModuleContext::RayTracingModuleContext(std::shared_ptr<FrameworkContex
       worldPrepareContext(rayTracingModule->worldPrepare_->contexts_[frameworkContext->frameIndex]) {}
 
 void RayTracingModuleContext::render() {
+    renderDiag("RT begin");
+    g_crashRing.record("RT:begin");
     auto ctx0 = frameworkContext.lock();
     if (ctx0) {
         ctx0->worldCommandBuffer->beginLabel("RT:Atmosphere", 0.3f, 0.3f, 0.9f);
     }
+    renderDiag("RT atmosphere begin");
+    g_crashRing.record("RT:atmosphere");
     atmosphereContext->render();
+    renderDiag("RT atmosphere end");
     if (ctx0) ctx0->worldCommandBuffer->endLabel();
 
     if (ctx0) ctx0->worldCommandBuffer->beginLabel("RT:BLAS/TLAS Build", 0.9f, 0.3f, 0.3f);
+    renderDiag("RT worldPrepare begin");
+    g_crashRing.record("RT:worldPrepare");
     worldPrepareContext->render();
+    renderDiag("RT worldPrepare end tlas=%d instances=%u lights=%d",
+               (int)(worldPrepareContext->tlas != nullptr),
+               worldPrepareContext->prevTlasInstanceCount_,
+               worldPrepareContext->areaLightCount);
     if (ctx0) ctx0->worldCommandBuffer->endLabel();
 
     if (worldPrepareContext->tlas == nullptr) {
@@ -1591,6 +1609,8 @@ void RayTracingModuleContext::render() {
     auto module = rayTracingModule.lock();
     if (!module) return;
 
+    renderDiag("RT descriptors begin");
+    g_crashRing.record("RT:descriptors");
     rayTracingDescriptorTable->bindAS(worldPrepareContext->tlas, 1, 0);
 
     auto buffers = Renderer::instance().buffers();
@@ -1670,32 +1690,89 @@ void RayTracingModuleContext::render() {
 
     // Bind block sprite texture arrays (set 0, bindings 3-5)
     auto& texSystem = Renderer::textureSystem;
+    const uint64_t textureGeneration = texSystem.generation();
+    std::string textureDescriptorLabel = "RT:TexturePublishAndDescriptors gen=" +
+        std::to_string(textureGeneration) + " frame=" + std::to_string(context->frameIndex);
+    worldCommandBuffer->beginLabel(textureDescriptorLabel.c_str(), 0.95f, 0.35f, 0.1f);
     // Flush any pending texture array uploads (staged by animation tick, executed here on render thread)
     if (texSystem.isFinalized()) {
+        renderDiag("RT textureFlush begin");
         auto vma = framework->vma();
         auto device = framework->device();
-        texSystem.flushPendingUploads(vma, device, worldCommandBuffer, framework->gc());
+        {
+            auto _ft0 = std::chrono::steady_clock::now();
+            texSystem.flushPendingUploads(vma, device, worldCommandBuffer, framework->gc());
+            FrameTiming_addTexFlush(std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - _ft0).count());
+        }
+        renderDiag("RT textureFlush end");
     }
     // Block albedo array
     auto& texArrayMgr = texSystem.arrayManager();
-    auto* albedoArray = texArrayMgr.getArray(texSystem.blockAlbedoArrayId());
-    if (albedoArray && albedoArray->image) {
-        rayTracingDescriptorTable->bindSamplerImage(
-            albedoArray->sampler, albedoArray->image,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 3, 0);
+    const auto* albedoInfo = texArrayMgr.getArray(texSystem.blockAlbedoArrayId());
+    const bool hasAlbedo = albedoInfo && albedoInfo->image && albedoInfo->sampler;
+    const auto* specInfo = texArrayMgr.getArray(texSystem.blockSpecularArrayId());
+    const bool hasSpec = specInfo && specInfo->image && specInfo->sampler;
+    const auto* normInfo = texArrayMgr.getArray(texSystem.blockNormalArrayId());
+    const bool hasNorm = normInfo && normInfo->image && normInfo->sampler;
+
+    const VkImageView albedoView = hasAlbedo ? albedoInfo->image->vkImageView() : VK_NULL_HANDLE;
+    const VkImageView specView = hasSpec ? specInfo->image->vkImageView() : VK_NULL_HANDLE;
+    const VkImageView normView = hasNorm ? normInfo->image->vkImageView() : VK_NULL_HANDLE;
+
+    auto bindBlockTextureArrays = [&](const std::shared_ptr<vk::DescriptorTable>& table) {
+        if (!table) return;
+        if (hasAlbedo) {
+            table->bindSamplerImage(albedoInfo->sampler, albedoInfo->image,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 3, 0);
+        }
+        if (hasSpec) {
+            table->bindSamplerImage(specInfo->sampler, specInfo->image,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 4, 0);
+        }
+        if (hasNorm) {
+            table->bindSamplerImage(normInfo->sampler, normInfo->image,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 5, 0);
+        }
+    };
+
+    const bool textureDescriptorGenerationChanged =
+        textureGeneration != module->lastTextureDescriptorRefreshGeneration_ ||
+        albedoView != module->lastAlbedoTextureView_ ||
+        specView != module->lastSpecularTextureView_ ||
+        normView != module->lastNormalTextureView_;
+
+    if (textureDescriptorGenerationChanged) {
+        for (auto& table : module->rayTracingDescriptorTables_) {
+            bindBlockTextureArrays(table);
+        }
+        RadianceLogger::log(
+            "TextureDescriptors", "INFO",
+            "refresh-all gen=%llu frame=%u tables=%zu albedoId=%u image=0x%llx view=0x%llx sampler=0x%llx "
+            "specId=%u image=0x%llx view=0x%llx sampler=0x%llx normId=%u image=0x%llx view=0x%llx sampler=0x%llx",
+            static_cast<unsigned long long>(textureGeneration),
+            context->frameIndex,
+            module->rayTracingDescriptorTables_.size(),
+            texSystem.blockAlbedoArrayId(),
+            hasAlbedo ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(albedoInfo->image->vkImage())) : 0ull,
+            static_cast<unsigned long long>(vk::DebugUtils::objectHandle(albedoView)),
+            hasAlbedo ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(albedoInfo->sampler->vkSamper())) : 0ull,
+            texSystem.blockSpecularArrayId(),
+            hasSpec ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(specInfo->image->vkImage())) : 0ull,
+            static_cast<unsigned long long>(vk::DebugUtils::objectHandle(specView)),
+            hasSpec ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(specInfo->sampler->vkSamper())) : 0ull,
+            texSystem.blockNormalArrayId(),
+            hasNorm ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(normInfo->image->vkImage())) : 0ull,
+            static_cast<unsigned long long>(vk::DebugUtils::objectHandle(normView)),
+            hasNorm ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(normInfo->sampler->vkSamper())) : 0ull);
+        module->lastTextureDescriptorRefreshGeneration_ = textureGeneration;
+        module->lastAlbedoTextureView_ = albedoView;
+        module->lastSpecularTextureView_ = specView;
+        module->lastNormalTextureView_ = normView;
+    } else {
+        bindBlockTextureArrays(rayTracingDescriptorTable);
     }
-    auto* specArray = texArrayMgr.getArray(texSystem.blockSpecularArrayId());
-    if (specArray && specArray->image) {
-        rayTracingDescriptorTable->bindSamplerImage(
-            specArray->sampler, specArray->image,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 4, 0);
-    }
-    auto* normArray = texArrayMgr.getArray(texSystem.blockNormalArrayId());
-    if (normArray && normArray->image) {
-        rayTracingDescriptorTable->bindSamplerImage(
-            normArray->sampler, normArray->image,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 5, 0);
-    }
+    worldCommandBuffer->endLabel();
+    renderDiag("RT descriptors end");
 
     bool accumulating = Renderer::options.offlineState == 2;
 
@@ -1753,7 +1830,7 @@ void RayTracingModuleContext::render() {
     // Only apply when DLSS-RR is active (denoiserMode == 1).
     pushConstant.preExposure = (Renderer::options.denoiserMode == 1) ? 0.1f : 1.0f;
 
-    // POM
+    // Shader displacement
     pushConstant.pomHeightScale  = Renderer::options.pomEnabled ? Renderer::options.pomHeightScale : 0.0f;
     pushConstant.pomSteps        = Renderer::options.pomSteps;
     pushConstant.pomRefinement   = Renderer::options.pomRefinement;
@@ -1770,10 +1847,11 @@ void RayTracingModuleContext::render() {
         if (curFrame - lastPCLog >= 60) {
             lastPCLog = curFrame;
             RadianceLogger::log("RayTracing", "INFO",
-                "pushConst: bounces=%d flags=0x%x lights=%d shadowSoft=%.2f pomH=%.4f pomSteps=%d pomFade=%.0f",
+                "pushConst: bounces=%d flags=0x%x lights=%d shadowSoft=%.2f displacementEnabled=%d displacementQuality=%u displacementDepth=%.4f displacementSteps=%d displacementRefinement=%d displacementFade=%.0f",
                 pushConstant.numRayBounces, pushConstant.flags, pushConstant.areaLightCount,
-                pushConstant.shadowSoftness, pushConstant.pomHeightScale,
-                pushConstant.pomSteps, pushConstant.pomFadeDistance);
+                pushConstant.shadowSoftness, Renderer::options.pomEnabled ? 1 : 0,
+                Renderer::options.displacementQuality, pushConstant.pomHeightScale,
+                pushConstant.pomSteps, pushConstant.pomRefinement, pushConstant.pomFadeDistance);
         }
     }
 
@@ -1889,7 +1967,12 @@ void RayTracingModuleContext::render() {
     }
     addBarrier(atmosphereContext->atmCubeMapImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-    if (!barriers.empty()) { worldCommandBuffer->barriersBufferImage({}, barriers); }
+    if (!barriers.empty()) {
+        renderDiag("RT imageBarriers begin count=%u", static_cast<unsigned>(barriers.size()));
+        g_crashRing.record("RT:imageBarriers");
+        worldCommandBuffer->barriersBufferImage({}, barriers);
+        renderDiag("RT imageBarriers end");
+    }
 
     // Light clustering compute pass — DISABLED: contribution-sorted global list replaces tile clustering.
     // Tile buffer stays allocated (descriptor layout unchanged); CHS reads tileCount=0 → global fallback.
@@ -2127,9 +2210,12 @@ void RayTracingModuleContext::render() {
     // Pass 3: Main Render (existing RT dispatch — now queries SHARC cache on bounces >= 1)
     worldCommandBuffer->beginLabel("RT:MainTrace", 1.0f, 0.2f, 0.2f);
     GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::RT_DISPATCH_MAIN);
+    renderDiag("RT mainTrace begin w=%u h=%u", hdrNoisyOutputImage->width(), hdrNoisyOutputImage->height());
+    g_crashRing.record("RT:mainTrace");
     worldCommandBuffer->bindDescriptorTable(rayTracingDescriptorTable, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
         ->bindRTPipeline(module->rayTracingPipeline_)
         ->raytracing(sbt, hdrNoisyOutputImage->width(), hdrNoisyOutputImage->height(), 1);
+    renderDiag("RT mainTrace end");
     worldCommandBuffer->endLabel(); // end MainTrace
 
     // Spatial reuse compute pass (when ReSTIR and spatial reuse are both enabled)
@@ -2274,6 +2360,9 @@ void RayTracingModuleContext::render() {
         Renderer::accumFrameCount++;
         Renderer::accumOutputImage = hdrNoisyOutputImage;  // expose for denoiser/upscaler bypass
     }
+
+    renderDiag("RT end");
+    g_crashRing.record("RT:end");
 
     // (P4 removed — DLSS temporal mode replaced by DLSS-D Converge with per-frame reset)
 }

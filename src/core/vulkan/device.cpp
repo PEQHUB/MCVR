@@ -4,6 +4,7 @@
 #include "core/render/aftermath_integration.hpp"
 #include "core/render/modules/world/dlss/dlss_wrapper.hpp"
 #include "core/render/streamline_context.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/instance.hpp"
 #include "core/vulkan/physical_device.hpp"
 #include "core/vulkan/sync.hpp"
@@ -54,6 +55,8 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                                                    VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME,
                                                    VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME,
                                                    VK_EXT_DEVICE_FAULT_EXTENSION_NAME,
+    // Nsight Graphics: NonSemantic Vulkan debug info for source-level shader profiling
+    VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME,
 #ifdef _WIN32
                                                    // External memory: Vulkan-D3D11 texture sharing for DComp overlay
                                                    VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
@@ -445,6 +448,10 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     vkGetDeviceQueue(device_, physicalDevice_->secondaryQueueIndex(),
                      physicalDevice_->mainQueueIndex() == physicalDevice_->secondaryQueueIndex() ? 1 : 0,
                      &secondaryQueue_);
+
+    vk::DebugUtils::setObjectName(device_, VK_OBJECT_TYPE_DEVICE, device_, "Radiance VkDevice");
+    vk::DebugUtils::setObjectName(device_, VK_OBJECT_TYPE_QUEUE, mainQueue_, "Radiance Main Queue");
+    vk::DebugUtils::setObjectName(device_, VK_OBJECT_TYPE_QUEUE, secondaryQueue_, "Radiance Secondary BLAS Queue");
 
     loadPipelineCache();
 

@@ -19,6 +19,9 @@ class OverlayCompositor;
 
 void renderDiag(const char *fmt, ...);
 
+// Per-frame texture flush timing (called from ray_tracing_module, accumulated in FrameTiming)
+void FrameTiming_addTexFlush(float ms);
+
 class GarbageCollector : public SharedObject<GarbageCollector> {
   public:
     GarbageCollector(std::shared_ptr<Framework> framework);

@@ -1,7 +1,9 @@
 #include "core/vulkan/shader.hpp"
 
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/device.hpp"
 
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -34,6 +36,8 @@ vk::Shader::Shader(std::shared_ptr<Device> device, std::string filePath) : devic
         shaderCerr() << "failed to create shader module for " << filePath << std::endl;
         exit(EXIT_FAILURE);
     }
+    auto shaderName = std::string("Shader ") + std::filesystem::path(filePath_).filename().string();
+    vk::DebugUtils::setObjectName(device->vkDevice(), VK_OBJECT_TYPE_SHADER_MODULE, shader_, shaderName);
 
 #ifdef DEBUG
     shaderCout() << "created shader module for " << filePath << std::endl;

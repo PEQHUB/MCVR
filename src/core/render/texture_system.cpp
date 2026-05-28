@@ -21,37 +21,6 @@ uint64_t fnv1a64(const uint8_t* data, size_t size) {
     return hash;
 }
 
-HeightLayerView makeHeightLayerFromRGBA(const uint8_t* rgba, uint32_t size, int channel) {
-    HeightLayerView view;
-    if (!rgba || size == 0 || channel < 0 || channel > 3) return view;
-
-    auto values = std::make_shared<std::vector<uint8_t>>();
-    values->resize(static_cast<size_t>(size) * size);
-    for (uint32_t i = 0; i < size * size; i++) {
-        (*values)[i] = rgba[static_cast<size_t>(i) * 4 + channel];
-    }
-    view.width = size;
-    view.height = size;
-    view.values = std::move(values);
-    return view;
-}
-
-HeightLayerView makeLumaLayerFromRGBA(const uint8_t* rgba, uint32_t size) {
-    HeightLayerView view;
-    if (!rgba || size == 0) return view;
-
-    auto values = std::make_shared<std::vector<uint8_t>>();
-    values->resize(static_cast<size_t>(size) * size);
-    for (uint32_t i = 0; i < size * size; i++) {
-        const uint8_t* p = rgba + static_cast<size_t>(i) * 4;
-        float luma = p[0] * 0.2627f + p[1] * 0.6780f + p[2] * 0.0593f;
-        (*values)[i] = static_cast<uint8_t>(std::clamp(luma, 0.0f, 255.0f));
-    }
-    view.width = size;
-    view.height = size;
-    view.values = std::move(values);
-    return view;
-}
 }
 
 void TextureSystem::receiveSpriteTable(const SpriteMetadata* table, uint32_t count,
@@ -272,8 +241,6 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     albedoChecksums_.assign(count, 0);
     specularChecksums_.assign(count, 0);
     normalChecksums_.assign(count, 0);
-    albedoHeightLayers_.assign(count, {});
-    normalHeightLayers_.assign(count, {});
     for (uint32_t i = 0; i < count; i++) {
         // For animated sprites, prefer frame 0 from animation data (more reliable)
         const uint8_t* frameData = nullptr;
@@ -294,7 +261,6 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
             arrayManager_.stageLayerPixels(blockAlbedoArrayId_, i, 0,
                                            frameData, bytesPerSprite);
             albedoChecksums_[i] = fnv1a64(frameData, bytesPerSprite);
-            albedoHeightLayers_[i] = makeLumaLayerFromRGBA(frameData, spriteSize);
         } else {
             std::cerr << "[TextureSystem] Missing pixel data for sprite " << i << std::endl;
         }
@@ -331,7 +297,6 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
                 arrayManager_.stageLayerPixels(blockNormalArrayId_, i, 0,
                     layer, bytesPerSprite);
                 normalChecksums_[i] = fnv1a64(layer, bytesPerSprite);
-                normalHeightLayers_[i] = makeHeightLayerFromRGBA(layer, spriteSize, 3);
             }
         }
         std::cout << "[TextureSystem] Staged " << count << " normal layers" << std::endl;
@@ -369,6 +334,33 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         // All sprites get a layer in aux arrays (defaults for missing)
         int32_t specLayer = (blockSpecularArrayId_ != UINT32_MAX) ? static_cast<int32_t>(i) : -1;
         int32_t normLayer = (blockNormalArrayId_ != UINT32_MAX) ? static_cast<int32_t>(i) : -1;
+        int32_t heightRangePacked = -1;
+        if ((flags & vk::Data::SPRITE_FLAG_HAS_HEIGHT) != 0 && normLayer >= 0) {
+            size_t pixelOffset = static_cast<size_t>(i) * bytesPerSprite;
+            if (pixelOffset + bytesPerSprite <= normalPixels_.size()) {
+                const uint8_t* layer = normalPixels_.data() + pixelOffset;
+                const uint8_t* albedoLayer =
+                    pixelOffset + bytesPerSprite <= spritePixels_.size()
+                        ? spritePixels_.data() + pixelOffset
+                        : nullptr;
+                uint8_t minAlpha = 255;
+                uint8_t maxAlpha = 0;
+                bool foundOpaquePixel = false;
+                for (size_t px = 0; px < bytesPerSprite; px += 4) {
+                    if (albedoLayer && albedoLayer[px + 3] == 0) {
+                        continue;
+                    }
+                    uint8_t alpha = layer[px + 3];
+                    minAlpha = std::min(minAlpha, alpha);
+                    maxAlpha = std::max(maxAlpha, alpha);
+                    foundOpaquePixel = true;
+                }
+                if (foundOpaquePixel && maxAlpha > minAlpha) {
+                    heightRangePacked = static_cast<int32_t>(minAlpha) |
+                                        (static_cast<int32_t>(maxAlpha) << 8);
+                }
+            }
+        }
 
         registry_.registerSprite(
             static_cast<uint16_t>(i),
@@ -379,7 +371,7 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
             specLayer,                                  // specularLayer
             normLayer,                                  // normalLayer
             overlaySprite,                              // overlaySprite
-            -1);                                        // maskLayer
+            heightRangePacked);                         // packed height range
     }
 
     registry_.uploadSSBO(vma, device);
@@ -417,6 +409,7 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
                  << " flags=" << (se ? se->flags : 0)
                  << " spec=" << (se ? se->specularLayer : -2)
                  << " norm=" << (se ? se->normalLayer : -2)
+                 << " heightRange=0x" << std::hex << (se ? se->maskLayer : -1) << std::dec
                  << " UV=[" << b.minU << "," << b.maxU << "]x[" << b.minV << "," << b.maxV << "]"
                  << " overlay=" << (se ? se->overlaySprite : -2)
                  << std::endl;
@@ -424,12 +417,35 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         diag.close();
     }
 
+    // Free animation pixel data when animation updates are disabled (default).
+    // The animation frames are only needed for tickAnimation() which is gated
+    // behind textureArrayAnimationUpdatesEnabled. Keeping 51 animated sprite
+    // frames (potentially MB of pixel data) in CPU memory is wasteful when
+    // animation is frozen. If animation is later enabled, a resource reload
+    // (F3+T) will repopulate the data.
+    if (!Renderer::options.textureArrayAnimationUpdatesEnabled) {
+        for (auto& ae : animEntries_) {
+            for (auto& frame : ae.frames) {
+                frame.clear();
+                frame.shrink_to_fit();
+            }
+        }
+        std::cout << "[TextureSystem] Freed animation pixel data (animation updates disabled)" << std::endl;
+    }
+
     std::cout << "[TextureSystem] Finalized. " << count << " sprites ready, "
-              << animEntries_.size() << " animated." << std::endl;
+        << animEntries_.size() << " animated." << std::endl;
 }
 
 bool TextureSystem::tickAnimation(uint32_t gameTick) {
     if (!finalized_ || animEntries_.empty()) return false;
+
+    // Per-frame animation upload budget: limit total bytes staged per tick
+    // to prevent 51 animated sprites from causing a single-frame upload spike.
+    // At 64x64 sprites (16KB each), 8 sprites = 128KB — reasonable per frame.
+    // Sprites that exceed the budget are deferred to the next tick.
+    constexpr size_t kAnimBudgetBytes = 128 * 1024;  // 128 KB per frame
+    size_t budgetUsed = 0;
 
     bool anyUpdated = false;
 
@@ -442,6 +458,12 @@ bool TextureSystem::tickAnimation(uint32_t gameTick) {
 
         if (currentFrame != ae.lastFrame && currentFrame < ae.frames.size()
             && !ae.frames[currentFrame].empty()) {
+            size_t frameBytes = ae.frames[currentFrame].size();
+            if (budgetUsed + frameBytes > kAnimBudgetBytes) {
+                // Budget exceeded — defer this sprite to next tick.
+                // Don't update lastFrame so it will be re-evaluated next tick.
+                continue;
+            }
 
             arrayManager_.stageLayerPixels(
                 blockAlbedoArrayId_, ae.spriteId, 0,
@@ -449,6 +471,7 @@ bool TextureSystem::tickAnimation(uint32_t gameTick) {
                 ae.frames[currentFrame].size());
 
             ae.lastFrame = currentFrame;
+            budgetUsed += frameBytes;
             anyUpdated = true;
         }
     }
@@ -457,19 +480,16 @@ bool TextureSystem::tickAnimation(uint32_t gameTick) {
 }
 
 void TextureSystem::flushPendingUploads(std::shared_ptr<vk::VMA> vma,
-                                         std::shared_ptr<vk::Device> device,
-                                         std::shared_ptr<vk::CommandBuffer> cmdBuffer,
-                                         GarbageCollector& gc) {
-    if (!finalized_) return;
-    if (!arrayManager_.hasPendingUploads()) return;
+	std::shared_ptr<vk::Device> device,
+	std::shared_ptr<vk::CommandBuffer> cmdBuffer,
+	GarbageCollector& gc) {
+	if (!finalized_) return;
+	if (!arrayManager_.hasPendingUploads()) return;
 
-    // Single mutex lock: collect dirty layers for all arrays at once
-    auto dirty = arrayManager_.collectAllDirtyLayers(
-        blockAlbedoArrayId_, blockSpecularArrayId_, blockNormalArrayId_);
-
-    // Flush all staged uploads
-    arrayManager_.flushUploads(vma, device, cmdBuffer);
-
+	// Flush all staged uploads (snapshot-and-process: mutex held only ~1us)
+	auto dirty = arrayManager_.flushUploads(
+		vma, device, cmdBuffer,
+		blockAlbedoArrayId_, blockSpecularArrayId_, blockNormalArrayId_);
     // Route staging buffers through GarbageCollector for proper lifetime management.
     // GC keeps resources alive for imageCount*3 frames (matching all other GPU resources).
     for (auto& buf : arrayManager_.takeStagingBuffers()) {
@@ -483,16 +503,14 @@ void TextureSystem::flushPendingUploads(std::shared_ptr<vk::VMA> vma,
     constexpr size_t BULK_MIPGEN_THRESHOLD = 64;
 
     auto mipgen = [&](uint32_t arrayId, const std::vector<uint32_t>& layers, bool& initialized) {
-        if (layers.empty() || arrayId == UINT32_MAX) return;
-        if (!initialized || layers.size() > BULK_MIPGEN_THRESHOLD) {
-            arrayManager_.generateMipmaps(arrayId, cmdBuffer);
-            initialized = true;
-        } else {
-            for (uint32_t layer : layers)
-                arrayManager_.generateMipmapsForLayer(arrayId, layer, cmdBuffer);
-        }
-    };
-
+		if (layers.empty() || arrayId == UINT32_MAX) return;
+		if (!initialized || layers.size() > BULK_MIPGEN_THRESHOLD) {
+			arrayManager_.generateMipmaps(arrayId, cmdBuffer);
+			initialized = true;
+		} else {
+			arrayManager_.generateMipmapsForLayers(arrayId, layers, cmdBuffer);
+		}
+	};
     mipgen(blockAlbedoArrayId_, dirty.albedo, albedoMipsInitialized_);
     mipgen(blockSpecularArrayId_, dirty.specular, specMipsInitialized_);
     mipgen(blockNormalArrayId_, dirty.normal, normMipsInitialized_);
@@ -503,18 +521,6 @@ const TextureSystem::SpriteBounds& TextureSystem::getSpriteBounds(uint16_t sprit
         return spriteBounds_[spriteId];
     }
     return DEFAULT_BOUNDS;
-}
-
-HeightLayerView TextureSystem::getAlbedoHeightLayer(uint16_t spriteId) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (spriteId < albedoHeightLayers_.size()) return albedoHeightLayers_[spriteId];
-    return {};
-}
-
-HeightLayerView TextureSystem::getNormalHeightLayer(uint16_t spriteId) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (spriteId < normalHeightLayers_.size()) return normalHeightLayers_[spriteId];
-    return {};
 }
 
 std::string TextureSystem::statusString() const {
@@ -530,8 +536,7 @@ std::string TextureSystem::statusString() const {
         << ",animated:" << animEntries_.size()
         << ",albedoArray:" << blockAlbedoArrayId_
         << ",specularArray:" << blockSpecularArrayId_
-        << ",normalArray:" << blockNormalArrayId_
-        << ",heightLayers:" << normalHeightLayers_.size();
+        << ",normalArray:" << blockNormalArrayId_;
     return out.str();
 }
 
@@ -551,7 +556,7 @@ bool TextureSystem::dumpDebug(const std::string& path, uint32_t limit) const {
     out << "arrays albedo=" << blockAlbedoArrayId_
         << " specular=" << blockSpecularArrayId_
         << " normal=" << blockNormalArrayId_ << "\n";
-    out << "spriteId,atlasX,atlasY,width,height,frames,flags,specLayer,normalLayer,albedoHash,specHash,normalHash\n";
+    out << "spriteId,atlasX,atlasY,width,height,frames,flags,specLayer,normalLayer,overlaySprite,heightRange,albedoHash,specHash,normalHash\n";
 
     for (uint32_t i = 0; i < n; i++) {
         const auto& m = sprites_[i];
@@ -565,6 +570,8 @@ bool TextureSystem::dumpDebug(const std::string& path, uint32_t limit) const {
             << (se ? se->flags : 0) << ','
             << (se ? se->specularLayer : -1) << ','
             << (se ? se->normalLayer : -1) << ','
+            << (se ? se->overlaySprite : -1) << ','
+            << (se ? se->maskLayer : -1) << ','
             << (i < albedoChecksums_.size() ? albedoChecksums_[i] : 0) << ','
             << (i < specularChecksums_.size() ? specularChecksums_[i] : 0) << ','
             << (i < normalChecksums_.size() ? normalChecksums_[i] : 0)
@@ -584,8 +591,6 @@ void TextureSystem::reset() {
     albedoChecksums_.clear();
     specularChecksums_.clear();
     normalChecksums_.clear();
-    albedoHeightLayers_.clear();
-    normalHeightLayers_.clear();
     atlasWidth_ = 0;
     atlasHeight_ = 0;
     layerSize_ = 0;
