@@ -106,6 +106,7 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",sharcUpdateCompiled:" << (sharcUpdateCompiled ? 1 : 0)
         << ",sharcResolveCompiled:" << (sharcResolveCompiled ? 1 : 0)
         << ",sharcMainTraceCompiled:" << (sharcMainTraceCompiled ? 1 : 0)
+        << ",sharcMainTraceQueryMode:" << MCVR_SHARC_MAIN_TRACE_QUERY_MODE
         << ",sharcBuffersAllocated:" << (buffersAllocated ? 1 : 0)
 #ifdef MCVR_ENABLE_SHARC
         << ",sharcBuffersInitialized:" << (sharcBuffersInitialized_ ? 1 : 0)
