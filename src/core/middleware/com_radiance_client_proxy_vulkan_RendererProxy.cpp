@@ -4,6 +4,7 @@
 #include "core/render/buffers.hpp"
 #include "core/render/chunks.hpp"
 #include "core/render/modules/ui_module.hpp"
+#include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/overlay_compositor.hpp"
 #include "core/render/render_framework.hpp"
@@ -340,6 +341,63 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Rende
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeSetGpuProfileEnabled(
     JNIEnv *, jclass, jboolean enabled) {
     Renderer::gpuProfiler.setEnabled(enabled);
+}
+
+/**
+ * Returns renderer feature truth as a flat string. This reports compiled/native reality,
+ * not just Java option intent.
+ */
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetFeatureTruth(
+    JNIEnv *env, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable() || !Renderer::is_initialized()) {
+        return env->NewStringUTF("rendererUsable:0");
+    }
+
+    auto* renderer = Renderer::try_instance();
+    if (!renderer) return env->NewStringUTF("rendererUsable:0");
+
+    auto framework = renderer->framework();
+    auto device = framework ? framework->device() : nullptr;
+    const bool serDevice = device && device->hasSER();
+    const bool serActive = serDevice && Renderer::options.serEnabled;
+
+    std::ostringstream out;
+    out << "rendererUsable:1"
+        << ",gpuProfilerEnabled:" << (Renderer::gpuProfiler.isEnabled() ? 1 : 0)
+        << ",rayBounces:" << Renderer::options.rayBounces
+        << ",areaLightsOption:" << (Renderer::options.areaLightsEnabled ? 1 : 0)
+        << ",restirOption:" << (Renderer::options.restirEnabled ? 1 : 0)
+        << ",restirSpatialOption:" << (Renderer::options.restirSpatialEnabled ? 1 : 0)
+        << ",restirBounceOption:" << (Renderer::options.restirBounceEnabled ? 1 : 0)
+        << ",simplifiedIndirectOption:" << (Renderer::options.simplifiedIndirect ? 1 : 0)
+        << ",serDevice:" << (serDevice ? 1 : 0)
+        << ",serOption:" << (Renderer::options.serEnabled ? 1 : 0)
+        << ",serHintsOption:" << (Renderer::options.serHintsEnabled ? 1 : 0)
+        << ",serActive:" << (serActive ? 1 : 0);
+
+    bool rayTracingModuleFound = false;
+    auto pipeline = framework ? framework->pipeline() : nullptr;
+    auto worldPipeline = pipeline ? pipeline->worldPipeline() : nullptr;
+    if (worldPipeline) {
+        for (const auto& module : worldPipeline->worldModules()) {
+            auto rayTracingModule = std::dynamic_pointer_cast<RayTracingModule>(module);
+            if (!rayTracingModule) continue;
+            rayTracingModuleFound = true;
+            out << ",rayTracingModule:1," << rayTracingModule->diagnosticFeatureTruth();
+            break;
+        }
+    }
+    if (!rayTracingModuleFound) {
+        out << ",rayTracingModule:0"
+#ifdef MCVR_ENABLE_SHARC
+            << ",sharcCompiled:1";
+#else
+            << ",sharcCompiled:0";
+#endif
+    }
+
+    return env->NewStringUTF(out.str().c_str());
 }
 
 /**

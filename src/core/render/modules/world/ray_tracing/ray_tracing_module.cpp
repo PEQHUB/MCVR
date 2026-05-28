@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <sstream>
 #include <string>
 
 namespace {
@@ -46,6 +47,61 @@ private:
 }
 
 RayTracingModule::RayTracingModule() {}
+
+std::string RayTracingModule::diagnosticFeatureTruth() const {
+    std::ostringstream out;
+    const bool accumulating = Renderer::options.offlineState == 2;
+    out << "sharcOption:" << (Renderer::options.sharcEnabled ? 1 : 0)
+        << ",offlineAccumulating:" << (accumulating ? 1 : 0);
+
+#ifdef MCVR_ENABLE_SHARC
+    constexpr bool sharcCompiled = true;
+    const bool buffersAllocated = sharcHashEntries_ && sharcAccumulation_ && sharcResolved_;
+    size_t sharcSbtReady = 0;
+    for (const auto& sbt : sharcUpdateSbts_) {
+        if (sbt) sharcSbtReady++;
+    }
+    const bool updatePipelineReady = sharcUpdatePipeline_ != nullptr && sharcSbtReady > 0;
+    const bool resolvePipelineReady = sharcResolvePipeline_ != VK_NULL_HANDLE;
+    const bool mainTraceQueryPossible = Renderer::options.sharcEnabled && !accumulating && buffersAllocated;
+    const bool updateResolvePossible = mainTraceQueryPossible && updatePipelineReady && resolvePipelineReady;
+#else
+    constexpr bool sharcCompiled = false;
+    constexpr bool buffersAllocated = false;
+    constexpr size_t sharcSbtReady = 0;
+    constexpr bool updatePipelineReady = false;
+    constexpr bool resolvePipelineReady = false;
+    constexpr bool mainTraceQueryPossible = false;
+    constexpr bool updateResolvePossible = false;
+#endif
+
+    out << ",sharcCompiled:" << (sharcCompiled ? 1 : 0)
+        << ",sharcBuffersAllocated:" << (buffersAllocated ? 1 : 0)
+#ifdef MCVR_ENABLE_SHARC
+        << ",sharcBuffersInitialized:" << (sharcBuffersInitialized_ ? 1 : 0)
+        << ",sharcResizePending:" << (sharcResizePending_ ? 1 : 0)
+#else
+        << ",sharcBuffersInitialized:0"
+        << ",sharcResizePending:0"
+#endif
+        << ",sharcUpdatePipeline:" << (updatePipelineReady ? 1 : 0)
+        << ",sharcResolvePipeline:" << (resolvePipelineReady ? 1 : 0)
+        << ",sharcMainTraceQueryPossible:" << (mainTraceQueryPossible ? 1 : 0)
+        << ",sharcUpdateResolvePossible:" << (updateResolvePossible ? 1 : 0)
+#ifdef MCVR_ENABLE_SHARC
+        << ",sharcUpdateSbtReady:" << sharcSbtReady
+        << ",sharcUpdateSbtTotal:" << sharcUpdateSbts_.size()
+        << ",sharcCapacity:" << sharcCapacity_
+        << ",sharcFrameIndex:" << sharcFrameIndex_;
+#else
+        << ",sharcUpdateSbtReady:0"
+        << ",sharcUpdateSbtTotal:0"
+        << ",sharcCapacity:0"
+        << ",sharcFrameIndex:0";
+#endif
+
+    return out.str();
+}
 
 void RayTracingModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
     WorldModule::init(framework, worldPipeline);

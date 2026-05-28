@@ -92,6 +92,8 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     void
     bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index) override;
 
+    std::string diagnosticFeatureTruth() const;
+
     void preClose() override;
 
   private:

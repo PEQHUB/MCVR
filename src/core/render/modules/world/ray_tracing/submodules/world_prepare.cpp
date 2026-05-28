@@ -21,6 +21,33 @@
 #include <unordered_map>
 #include <glm/gtc/type_ptr.hpp>
 
+namespace {
+class ScopedGpuProfile {
+public:
+    ScopedGpuProfile(VkCommandBuffer cmd, const char* name) : cmd_(cmd) {
+        if (cmd_ != VK_NULL_HANDLE && Renderer::gpuProfiler.isEnabled()) {
+            Renderer::gpuProfiler.beginModule(cmd_, name);
+            open_ = true;
+        }
+    }
+
+    ~ScopedGpuProfile() {
+        close();
+    }
+
+    void close() {
+        if (open_) {
+            Renderer::gpuProfiler.endModule(cmd_);
+            open_ = false;
+        }
+    }
+
+private:
+    VkCommandBuffer cmd_ = VK_NULL_HANDLE;
+    bool open_ = false;
+};
+} // namespace
+
 WorldPrepare::WorldPrepare() {}
 
 void WorldPrepare::init(std::shared_ptr<Framework> framework, std::shared_ptr<RayTracingModule> rayTracingModule) {
@@ -150,6 +177,9 @@ void WorldPrepareContext::render() {
     std::shared_ptr<vk::Device> device = framework->device();
     std::shared_ptr<vk::PhysicalDevice> physicalDevice = framework->physicalDevice();
     std::shared_ptr<vk::CommandBuffer> worldCommandBuffer = context->worldCommandBuffer;
+    VkCommandBuffer profileCmd = (Renderer::gpuProfiler.isEnabled() && worldCommandBuffer)
+        ? worldCommandBuffer->vkCommandBuffer()
+        : VK_NULL_HANDLE;
 
     auto chunks = Renderer::instance().world()->chunks();
     auto entities = Renderer::instance().world()->entities();
@@ -207,16 +237,20 @@ void WorldPrepareContext::render() {
     // Barrier: ensure vertex/index buffer TRANSFER writes from uploadCommandBuffer
     // are visible before BLAS builds read them. Without this, the GPU may speculatively
     // start BLAS builds while staging→device copies are still in flight.
-    worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
-        .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
-                         VK_ACCESS_2_SHADER_READ_BIT,
-    }});
+    {
+        ScopedGpuProfile profile(profileCmd, "RT.WP.InputBarrier");
+        worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
+            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                             VK_ACCESS_2_SHADER_READ_BIT,
+        }});
+    }
 
     auto cpuT4 = Clock::now();
     if (chunks->importantBLASBuilders().size() > 0) {
+        ScopedGpuProfile profile(profileCmd, "RT.WP.ImportantBLAS");
         GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::BLAS_BUILD_IMPORTANT);
         auto &builders = chunks->importantBLASBuilders();
         // Cap important BLAS builds per frame to prevent GPU TDR on teleport/world load.
@@ -237,19 +271,23 @@ void WorldPrepareContext::render() {
 
     auto cpuT5 = Clock::now();
     if (entities->blasBatchBuilder() != nullptr) {
+        ScopedGpuProfile profile(profileCmd, "RT.WP.EntityBLAS");
         GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::BLAS_BUILD_ENTITY);
         entities->blasBatchBuilder()->submit(worldCommandBuffer);
     }
     cpuAccEntity += cpuMsSince(cpuT5);
     pfEntity += cpuMsSince(cpuT5);
 
-    worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
-        .srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        .srcAccessMask =
-            VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-        .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
-    }});
+    {
+        ScopedGpuProfile profile(profileCmd, "RT.WP.BLASBuildBarrier");
+        worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
+            .srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            .srcAccessMask =
+                VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+            .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
+        }});
+    }
 
     auto cpuT6 = Clock::now();
     uint32_t blasAccu = 0, blasGroupAccu = 0;
@@ -963,6 +1001,7 @@ void WorldPrepareContext::render() {
 
     g_crashRing.record("WP:tlas");
     if (canUpdate) {
+        ScopedGpuProfile profile(profileCmd, "RT.WP.TLASUpdate");
         // UPDATE path: reuse existing TLAS, only transforms changed
         // Upload new instance data (endInstanceBuilder writes to a new host-visible buffer)
         instanceBuilder.endInstanceBuilder(device, vma);
@@ -973,6 +1012,7 @@ void WorldPrepareContext::render() {
         tlasBuilder->updateAndSubmit(tlas, tlasScratchBuffer_, worldCommandBuffer);
         tlasUpdateCount++;
     } else {
+        ScopedGpuProfile profile(profileCmd, "RT.WP.TLASBuild");
         // Full BUILD path: instance count or BLAS composition changed
         instanceBuilder.endInstanceBuilder(device, vma);
         tlasBuilder->defineBuildProperty(tlasFlags);
@@ -1089,23 +1129,32 @@ void WorldPrepareContext::render() {
         cpuFrameCount = 0;
     }
 
-    worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
-        .srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        .srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-        .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-        .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
-    }});
+    {
+        ScopedGpuProfile profile(profileCmd, "RT.WP.ASReadBarrier");
+        worldCommandBuffer->barriersMemory({vk::CommandBuffer::MemoryBarrier{
+            .srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            .srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+            .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+            .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
+        }});
+    }
 
     auto rtModuleCtx = rayTracingModuleContext.lock();
     if (!rtModuleCtx) return;
     g_crashRing.record("WP:sbt");
-    rtModuleCtx->sbt->setupHitSBT(geometryTypes);
-    if (rtModuleCtx->sharcUpdateSbt) {
-        rtModuleCtx->sharcUpdateSbt->setupHitSBT(geometryTypes);
+    {
+        ScopedGpuProfile profile(profileCmd, "RT.WP.SBTSetup");
+        rtModuleCtx->sbt->setupHitSBT(geometryTypes);
+        if (rtModuleCtx->sharcUpdateSbt) {
+            rtModuleCtx->sharcUpdateSbt->setupHitSBT(geometryTypes);
+        }
     }
 
     g_crashRing.record("WP:upload");
-    uploadBuffer(blasOffset, vertexBufferAddrs, indexBufferAddrs, lastVertexBufferAddrs, lastIndexBufferAddrs,
-                 lastObjToWorldMats, biomeColors);
+    {
+        ScopedGpuProfile profile(profileCmd, "RT.WP.MetadataUpload");
+        uploadBuffer(blasOffset, vertexBufferAddrs, indexBufferAddrs, lastVertexBufferAddrs, lastIndexBufferAddrs,
+                     lastObjToWorldMats, biomeColors);
+    }
     g_crashRing.record("WP:done");
 }
