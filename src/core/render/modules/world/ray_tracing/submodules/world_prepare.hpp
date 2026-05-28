@@ -6,6 +6,7 @@
 #include "core/vulkan/all_core_vulkan.hpp"
 #include "core/render/world.hpp"
 
+#include <array>
 #include <unordered_map>
 
 class Framework;
@@ -53,6 +54,13 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         std::vector<std::shared_ptr<vk::BLAS>> blases;
         std::vector<uint64_t> generations;  // Chunk1::blasGeneration per instance
         uint32_t instanceCount = 0;
+        uint32_t entitySourceCount = 0;
+        uint32_t entityInstanceCount = 0;
+        uint32_t entitySkippedNoBlas = 0;
+        uint32_t entitySkippedPrebuilt = 0;
+        uint32_t chunkInstanceCount = 0;
+        uint32_t megaInstanceCount = 0;
+        std::array<uint32_t, 9> entityRtFlagCounts{};
         // Keep vertex/index buffers alive — RT shader reads them via BDA from SSBO
         std::vector<std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>> vertexBuffers;
         std::vector<std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>> indexBuffers;

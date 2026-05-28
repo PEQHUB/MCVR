@@ -12,6 +12,7 @@
 #include "core/render/renderer.hpp"
 #include "core/render/world.hpp"
 
+#include <array>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -47,6 +48,32 @@ private:
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
     bool open_ = false;
 };
+
+enum TlasEntityFlagIndex {
+    TLAS_FLAG_WORLD = 0,
+    TLAS_FLAG_PLAYER,
+    TLAS_FLAG_PLAYER_HEAD,
+    TLAS_FLAG_HAND,
+    TLAS_FLAG_WEATHER,
+    TLAS_FLAG_PARTICLE,
+    TLAS_FLAG_CLOUD,
+    TLAS_FLAG_BOAT_WATER_MASK,
+    TLAS_FLAG_OTHER,
+};
+
+void countTlasEntityFlag(std::array<uint32_t, 9> &counts, int flag) {
+    switch (flag) {
+        case 1: counts[TLAS_FLAG_WORLD]++; break;
+        case 2: counts[TLAS_FLAG_PLAYER]++; break;
+        case 4: counts[TLAS_FLAG_PLAYER_HEAD]++; break;
+        case 8: counts[TLAS_FLAG_HAND]++; break;
+        case 16: counts[TLAS_FLAG_WEATHER]++; break;
+        case 32: counts[TLAS_FLAG_PARTICLE]++; break;
+        case 64: counts[TLAS_FLAG_CLOUD]++; break;
+        case 128: counts[TLAS_FLAG_BOAT_WATER_MASK]++; break;
+        default: counts[TLAS_FLAG_OTHER]++; break;
+    }
+}
 } // namespace
 
 WorldPrepare::WorldPrepare() {}
@@ -303,6 +330,10 @@ void WorldPrepareContext::render() {
     auto &instanceBuilder = tlasBuilder->beginInstanceBuilder();
     int blasIndex = 0;
 
+    // Declared before entity/chunk population so TLAS diagnostics can compare
+    // per-frame composition with the previous use of this swapchain context.
+    TlasBlasSnapshot currBlasSnapshot;
+
     // Entity
     {
         auto entityBatch = entities->entityBatch();
@@ -323,6 +354,7 @@ void WorldPrepareContext::render() {
             auto ubo = static_cast<vk::Data::WorldUBO *>(worldUniformBuffer->mappedPtr());
 
             auto &entities1 = entityBatch->entities;
+            currBlasSnapshot.entitySourceCount = static_cast<uint32_t>(entities1.size());
             for (int i = 0; i < entities1.size(); i++) {
                 VkGeometryInstanceFlagsKHR flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
                 // VkGeometryInstanceFlagsKHR flags = 0;
@@ -352,11 +384,17 @@ void WorldPrepareContext::render() {
                         };
                     }
 
-                    if (!entities1[i]->blas) continue; // entity BLAS not yet built
+                    if (!entities1[i]->blas) {
+                        currBlasSnapshot.entitySkippedNoBlas++;
+                        continue; // entity BLAS not yet built
+                    }
                     instanceBuilder.defineInstance(transform, blasIndex, entities1[i]->rtFlag, blasGroupAccu, flags,
                                                    entities1[i]->blas);
+                    currBlasSnapshot.entityInstanceCount++;
+                    countTlasEntityFlag(currBlasSnapshot.entityRtFlagCounts, entities1[i]->rtFlag);
 		} else {
 			// Prebuilt BLAS not implemented — skip this entity
+            currBlasSnapshot.entitySkippedPrebuilt++;
 			RadianceLogger::log("world_prepare", "WARN", "Skipping entity with prebuiltBLAS=%d", entities1[i]->prebuiltBLAS);
 			continue;
 			}
@@ -427,11 +465,6 @@ void WorldPrepareContext::render() {
             }
         }
     }
-
-    // BLAS lifetime snapshot: keep shared_ptrs alive while GPU references the TLAS.
-    // prevBlasSnapshot_ from the last use of this swapchain context is safe to release
-    // (GPU finished with it before we re-acquired this context).
-    TlasBlasSnapshot currBlasSnapshot;
 
     // Chunk — cached + parallel instance population
     {
@@ -566,6 +599,7 @@ void WorldPrepareContext::render() {
             totalChunkGeo += cc.geometryCount;
             totalChunkSbt += cc.geometryCount + instForChunk; // +instForChunk for SHADOW entries
         }
+        currBlasSnapshot.chunkInstanceCount = totalChunkInst;
 
         // Pre-allocate all arrays to exact sizes (entity prefix already accumulated)
         uint32_t chunkInstBase = blasIndex;
@@ -775,6 +809,7 @@ void WorldPrepareContext::render() {
                 };
 
                 instanceBuilder.defineInstance(megaTransform, blasIndex, 0x01, blasGroupAccu, 0, mega->blas);
+                currBlasSnapshot.megaInstanceCount++;
                 currBlasSnapshot.blases.push_back(mega->blas);
                 currBlasSnapshot.generations.push_back(mega->contentHash);
 
@@ -1104,6 +1139,27 @@ void WorldPrepareContext::render() {
                    firstGenDiffLog,
                    blasDiffCount,
                    firstBlasDiffLog);
+        if (tlasBuildReasonInstance) {
+            renderDiag("WP TLAS composition prevEntity=%u currEntity=%u prevChunk=%u currChunk=%u prevMega=%u currMega=%u sourceEntity=%u skippedNoBlas=%u skippedPrebuilt=%u flags world=%u player=%u playerHead=%u hand=%u weather=%u particle=%u cloud=%u boatWater=%u other=%u",
+                       prevBlasSnapshot_.entityInstanceCount,
+                       currBlasSnapshot.entityInstanceCount,
+                       prevBlasSnapshot_.chunkInstanceCount,
+                       currBlasSnapshot.chunkInstanceCount,
+                       prevBlasSnapshot_.megaInstanceCount,
+                       currBlasSnapshot.megaInstanceCount,
+                       currBlasSnapshot.entitySourceCount,
+                       currBlasSnapshot.entitySkippedNoBlas,
+                       currBlasSnapshot.entitySkippedPrebuilt,
+                       currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_WORLD],
+                       currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_PLAYER],
+                       currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_PLAYER_HEAD],
+                       currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_HAND],
+                       currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_WEATHER],
+                       currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_PARTICLE],
+                       currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_CLOUD],
+                       currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_BOAT_WATER_MASK],
+                       currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_OTHER]);
+        }
 
         // Persist scratch buffer sized for max(build, update) for future UPDATE calls.
         // Query both BUILD and UPDATE scratch sizes to ensure the buffer is large enough.
@@ -1209,6 +1265,21 @@ void WorldPrepareContext::render() {
                        << " tlasReasonInstance=" << tlasBuildInstanceCount
                        << " tlasReasonGeneration=" << tlasBuildGenerationCount
                        << " tlasReasonBlasHandle=" << tlasBuildBlasHandleCount
+                       << " entityInst=" << currBlasSnapshot.entityInstanceCount
+                       << " chunkInst=" << currBlasSnapshot.chunkInstanceCount
+                       << " megaInst=" << currBlasSnapshot.megaInstanceCount
+                       << " entitySource=" << currBlasSnapshot.entitySourceCount
+                       << " entitySkipNoBlas=" << currBlasSnapshot.entitySkippedNoBlas
+                       << " entitySkipPrebuilt=" << currBlasSnapshot.entitySkippedPrebuilt
+                       << " entityFlagWorld=" << currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_WORLD]
+                       << " entityFlagPlayer=" << currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_PLAYER]
+                       << " entityFlagPlayerHead=" << currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_PLAYER_HEAD]
+                       << " entityFlagHand=" << currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_HAND]
+                       << " entityFlagWeather=" << currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_WEATHER]
+                       << " entityFlagParticle=" << currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_PARTICLE]
+                       << " entityFlagCloud=" << currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_CLOUD]
+                       << " entityFlagBoatWater=" << currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_BOAT_WATER_MASK]
+                       << " entityFlagOther=" << currBlasSnapshot.entityRtFlagCounts[TLAS_FLAG_OTHER]
                        << " threads=" << Renderer::threadPool.threadCount()
                        << "\n";
             }
