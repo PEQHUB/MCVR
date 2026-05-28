@@ -74,6 +74,37 @@ void countTlasEntityFlag(std::array<uint32_t, 9> &counts, int flag) {
         default: counts[TLAS_FLAG_OTHER]++; break;
     }
 }
+
+constexpr uint32_t kInitialEntityTlasSlotCapacity = 32;
+constexpr uint32_t kSoftMaxEntityTlasSlotCapacity = 128;
+constexpr VkTransformMatrixKHR kInactiveEntityTransform = {
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+};
+
+uint32_t nextPowerOfTwo(uint32_t value) {
+    if (value <= 1) return 1;
+    value--;
+    value |= value >> 1;
+    value |= value >> 2;
+    value |= value >> 4;
+    value |= value >> 8;
+    value |= value >> 16;
+    return value + 1;
+}
+
+uint32_t chooseEntityTlasSlotCapacity(uint32_t current, uint32_t activeCount) {
+    const uint32_t desired = std::max(kInitialEntityTlasSlotCapacity, activeCount);
+    if (current >= desired) {
+        return current;
+    }
+    uint32_t expanded = nextPowerOfTwo(desired);
+    if (expanded > kSoftMaxEntityTlasSlotCapacity && activeCount <= kSoftMaxEntityTlasSlotCapacity) {
+        expanded = kSoftMaxEntityTlasSlotCapacity;
+    }
+    return expanded;
+}
 } // namespace
 
 WorldPrepare::WorldPrepare() {}
@@ -303,6 +334,18 @@ void WorldPrepareContext::render() {
         GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::BLAS_BUILD_ENTITY);
         entities->blasBatchBuilder()->submit(worldCommandBuffer);
     }
+    if (!inactiveEntityBlas_) {
+        ScopedGpuProfile profile(profileCmd, "RT.WP.EntityDummyBLAS");
+        auto dummyBuilder = vk::BLASBuilder::create();
+        auto dummyGeometries = dummyBuilder->beginGeometries();
+        dummyGeometries->definePlaceholderGeometry();
+        dummyGeometries->endGeometries();
+        inactiveEntityBlas_ = dummyBuilder
+            ->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR)
+            ->querySizeInfo(device)
+            ->allocateBuffers(physicalDevice, device, vma)
+            ->buildAndSubmit(device, worldCommandBuffer);
+    }
     cpuAccEntity += cpuMsSince(cpuT5);
     pfEntity += cpuMsSince(cpuT5);
 
@@ -337,6 +380,47 @@ void WorldPrepareContext::render() {
     // Entity
     {
         auto entityBatch = entities->entityBatch();
+        uint32_t activeEntityCount = 0;
+        if (entityBatch != nullptr) {
+            auto &entities1 = entityBatch->entities;
+            for (int i = 0; i < entities1.size(); i++) {
+                if (entities1[i]->prebuiltBLAS < 0 && entities1[i]->blas) {
+                    activeEntityCount++;
+                }
+            }
+            currBlasSnapshot.entitySourceCount = static_cast<uint32_t>(entities1.size());
+        }
+
+        const uint32_t previousSlotCapacity = entityTlasSlotCapacity_;
+        entityTlasSlotCapacity_ = chooseEntityTlasSlotCapacity(entityTlasSlotCapacity_, activeEntityCount);
+        if (entityTlasSlotCapacity_ != previousSlotCapacity) {
+            if (previousSlotCapacity != 0) {
+                renderDiag("WP entity TLAS slot capacity grew prev=%u curr=%u active=%u softCap=%u",
+                           previousSlotCapacity,
+                           entityTlasSlotCapacity_,
+                           activeEntityCount,
+                           kSoftMaxEntityTlasSlotCapacity);
+            }
+            tlas = nullptr;
+            prevBlasSnapshot_ = {};
+            prevTlasInstanceCount_ = 0;
+        }
+        currBlasSnapshot.entitySlotCapacity = entityTlasSlotCapacity_;
+        currBlasSnapshot.entityBlasesForLifetime.reserve(activeEntityCount);
+
+        instanceBuilder.instances.resize(entityTlasSlotCapacity_);
+        currBlasSnapshot.blases.resize(entityTlasSlotCapacity_);
+        currBlasSnapshot.generations.resize(entityTlasSlotCapacity_);
+        currBlasSnapshot.vertexBuffers.resize(entityTlasSlotCapacity_);
+        currBlasSnapshot.indexBuffers.resize(entityTlasSlotCapacity_);
+        lastObjToWorldMats.resize(entityTlasSlotCapacity_, glm::mat4(1));
+        blasOffset.resize(entityTlasSlotCapacity_, 0);
+        biomeColors.resize(entityTlasSlotCapacity_, glm::uvec4(0));
+        for (uint32_t slot = 0; slot < entityTlasSlotCapacity_; slot++) {
+            instanceBuilder.instances[slot] = std::make_tuple(
+                kInactiveEntityTransform, slot, 0u, 0u,
+                VkGeometryInstanceFlagsKHR(0), inactiveEntityBlas_);
+        }
 
         if (entityBatch != nullptr) {
             static std::queue<std::unordered_map<int, std::pair<std::shared_ptr<Entity>, VkTransformMatrixKHR>>>
@@ -354,11 +438,12 @@ void WorldPrepareContext::render() {
             auto ubo = static_cast<vk::Data::WorldUBO *>(worldUniformBuffer->mappedPtr());
 
             auto &entities1 = entityBatch->entities;
-            currBlasSnapshot.entitySourceCount = static_cast<uint32_t>(entities1.size());
+            uint32_t entitySlot = 0;
             for (int i = 0; i < entities1.size(); i++) {
                 VkGeometryInstanceFlagsKHR flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
                 // VkGeometryInstanceFlagsKHR flags = 0;
-                VkTransformMatrixKHR transform;
+                VkTransformMatrixKHR transform = kInactiveEntityTransform;
+                uint32_t slot = 0;
 
                 if (entities1[i]->prebuiltBLAS < 0) {
                     if (entities1[i]->coordinate == World::Coordinates::WORLD || !ubo) {
@@ -388,9 +473,17 @@ void WorldPrepareContext::render() {
                         currBlasSnapshot.entitySkippedNoBlas++;
                         continue; // entity BLAS not yet built
                     }
-                    instanceBuilder.defineInstance(transform, blasIndex, entities1[i]->rtFlag, blasGroupAccu, flags,
-                                                   entities1[i]->blas);
+                    if (entitySlot >= entityTlasSlotCapacity_) {
+                        renderDiag("WP entity TLAS overflow activeSlot=%u capacity=%u; skipping unsafe write",
+                                   entitySlot, entityTlasSlotCapacity_);
+                        continue;
+                    }
+                    slot = entitySlot++;
+                    instanceBuilder.instances[slot] = std::make_tuple(
+                        transform, slot, entities1[i]->rtFlag, blasGroupAccu, flags,
+                        entities1[i]->blas);
                     currBlasSnapshot.entityInstanceCount++;
+                    currBlasSnapshot.entityBlasesForLifetime.push_back(entities1[i]->blas);
                     countTlasEntityFlag(currBlasSnapshot.entityRtFlagCounts, entities1[i]->rtFlag);
 		} else {
 			// Prebuilt BLAS not implemented — skip this entity
@@ -454,16 +547,16 @@ void WorldPrepareContext::render() {
                             lastIndexBufferAddrs.push_back(0);
                         }
                     }
-                    lastObjToWorldMats.push_back(lastObjToWorldMat);
+                    lastObjToWorldMats[slot] = lastObjToWorldMat;
                 }
 
-                blasOffset.push_back(blasAccu);
+                blasOffset[slot] = blasAccu;
                 blasAccu += entities1[i]->geometryCount;
                 blasGroupAccu += entities1[i]->geometryCount + 1; // shadow
 
-                blasIndex++;
             }
         }
+        blasIndex = static_cast<int>(entityTlasSlotCapacity_);
     }
 
     // Chunk — cached + parallel instance population
@@ -1140,9 +1233,11 @@ void WorldPrepareContext::render() {
                    blasDiffCount,
                    firstBlasDiffLog);
         if (tlasBuildReasonInstance) {
-            renderDiag("WP TLAS composition prevEntity=%u currEntity=%u prevChunk=%u currChunk=%u prevMega=%u currMega=%u sourceEntity=%u skippedNoBlas=%u skippedPrebuilt=%u flags world=%u player=%u playerHead=%u hand=%u weather=%u particle=%u cloud=%u boatWater=%u other=%u",
+            renderDiag("WP TLAS composition prevEntity=%u currEntity=%u prevEntitySlots=%u currEntitySlots=%u prevChunk=%u currChunk=%u prevMega=%u currMega=%u sourceEntity=%u skippedNoBlas=%u skippedPrebuilt=%u flags world=%u player=%u playerHead=%u hand=%u weather=%u particle=%u cloud=%u boatWater=%u other=%u",
                        prevBlasSnapshot_.entityInstanceCount,
                        currBlasSnapshot.entityInstanceCount,
+                       prevBlasSnapshot_.entitySlotCapacity,
+                       currBlasSnapshot.entitySlotCapacity,
                        prevBlasSnapshot_.chunkInstanceCount,
                        currBlasSnapshot.chunkInstanceCount,
                        prevBlasSnapshot_.megaInstanceCount,
@@ -1266,6 +1361,7 @@ void WorldPrepareContext::render() {
                        << " tlasReasonGeneration=" << tlasBuildGenerationCount
                        << " tlasReasonBlasHandle=" << tlasBuildBlasHandleCount
                        << " entityInst=" << currBlasSnapshot.entityInstanceCount
+                       << " entitySlots=" << currBlasSnapshot.entitySlotCapacity
                        << " chunkInst=" << currBlasSnapshot.chunkInstanceCount
                        << " megaInst=" << currBlasSnapshot.megaInstanceCount
                        << " entitySource=" << currBlasSnapshot.entitySourceCount

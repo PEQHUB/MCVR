@@ -56,16 +56,25 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         uint32_t instanceCount = 0;
         uint32_t entitySourceCount = 0;
         uint32_t entityInstanceCount = 0;
+        uint32_t entitySlotCapacity = 0;
         uint32_t entitySkippedNoBlas = 0;
         uint32_t entitySkippedPrebuilt = 0;
         uint32_t chunkInstanceCount = 0;
         uint32_t megaInstanceCount = 0;
         std::array<uint32_t, 9> entityRtFlagCounts{};
+        // Entity BLAS handles can change for animated entities. Keep them alive
+        // for this TLAS window without using them in chunk-stability equality.
+        std::vector<std::shared_ptr<vk::BLAS>> entityBlasesForLifetime;
         // Keep vertex/index buffers alive — RT shader reads them via BDA from SSBO
         std::vector<std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>> vertexBuffers;
         std::vector<std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>> indexBuffers;
     };
     TlasBlasSnapshot prevBlasSnapshot_;
+
+    // Fixed entity prefix keeps chunk TLAS indices stable when mobs/entities
+    // appear or disappear. Inactive slots use inactiveEntityBlas_ with mask=0.
+    uint32_t entityTlasSlotCapacity_ = 0;
+    std::shared_ptr<vk::BLAS> inactiveEntityBlas_;
 
     // Mega-chunk system: groups distant chunks into single BLASes
     struct MegaChunk {
@@ -142,6 +151,8 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         prevTlasInstanceCount_ = 0;
         tlasScratchBuffer_ = nullptr;
         tlasScratchSize_ = 0;
+        entityTlasSlotCapacity_ = 0;
+        inactiveEntityBlas_ = nullptr;
         megaChunkCache_.clear();
         cachedChunks_.clear();
         blasOffsetsBuffer = nullptr; blasOffsetsCapacity_ = 0;
