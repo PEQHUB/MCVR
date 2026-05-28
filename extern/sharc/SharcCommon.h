@@ -171,6 +171,7 @@ struct SharcResolveParameters
     uint frameIndex;
 };
 
+#ifndef SHARC_QUERY_ONLY
 SharcPackedData SharcPackVoxelData(float3 radiance, float sampleNum, uint accumulatedFrameNum, uint staleFrameNum, uint sampleDataExt)
 {
     const float float16Max = 65504.0f;
@@ -185,6 +186,7 @@ SharcPackedData SharcPackVoxelData(float3 radiance, float sampleNum, uint accumu
 
     return packedData;
 }
+#endif // !SHARC_QUERY_ONLY
 
 SharcVoxelData SharcUnpackVoxelData(SharcPackedData packedData)
 {
@@ -216,6 +218,7 @@ SharcVoxelData SharcGetVoxelData(RW_STRUCTURED_BUFFER(voxelDataBuffer, SharcPack
     return SharcUnpackVoxelData(packedData);
 }
 
+#ifndef SHARC_QUERY_ONLY
 float SharcLuma(float3 color)
 {
     const float3 luma = float3(0.213f, 0.715f, 0.072f);
@@ -335,6 +338,7 @@ void SharcSetThroughput(inout SharcState sharcState, float3 throughput)
         sharcState.sampleWeights[i] *= SharcSampleWeight(throughput);
 #endif // SHARC_UPDATE
 }
+#endif // !SHARC_QUERY_ONLY
 
 bool SharcGetCachedRadiance(in SharcParameters sharcParameters, in SharcHitData sharcHitData, out float3 radiance, bool debug)
 {
@@ -362,6 +366,7 @@ bool SharcGetCachedRadiance(in SharcParameters sharcParameters, in SharcHitData 
     return false;
 }
 
+#ifndef SHARC_QUERY_ONLY
 int SharcGetGridDistance2(int3 position)
 {
     return position.x * position.x + position.y * position.y + position.z * position.z;
@@ -549,3 +554,4 @@ void SharcResolveEntry(uint entryIndex, SharcParameters sharcParameters, SharcRe
     zeroAccumulationData.data = uint4(0, 0, 0, 0);
     BUFFER_AT_OFFSET(sharcParameters.accumulationBuffer, entryIndex) = zeroAccumulationData;
 }
+#endif // !SHARC_QUERY_ONLY

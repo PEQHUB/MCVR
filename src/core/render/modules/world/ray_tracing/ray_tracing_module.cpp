@@ -1261,6 +1261,7 @@ void RayTracingModule::initPipeline() {
     endGatewayAnyHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/end_gateway_rahit.spv").string());
 
+    RadianceLogger::log("RayTracing", "INFO", "World RT pipeline create start");
     rayTracingPipeline_ =
         vk::RayTracingPipelineBuilder{}
             .beginShaderStage()
@@ -1316,6 +1317,8 @@ void RayTracingModule::initPipeline() {
             .endShaderGroup()
             .definePipelineLayout(rayTracingDescriptorTables_[0])
             .build(device);
+    RadianceLogger::log("RayTracing", "INFO", "World RT pipeline create done (ok=%d)",
+                        rayTracingPipeline_ ? 1 : 0);
 }
 
 void RayTracingModule::initSBT() {
