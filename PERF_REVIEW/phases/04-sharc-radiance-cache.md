@@ -12,6 +12,8 @@ MCVR_ENABLE_SHARC:BOOL=OFF
 
 The Java option reported `sharcEnabled=true`, but the shader path requires `SHARC_COMPILE_ENABLE=1`, which only happens when native CMake enables SHARC.
 
+Update from the 2026-05-28 build probe: SHARC-enabled shader and core builds succeed on RTX 5090 driver `596.49`, including the full NRD-on build when `SHADERMAKE_FXC_PATH` points at the Windows SDK `fxc.exe`. See [../evidence/2026-05-28-sharc-build-probe.md](../evidence/2026-05-28-sharc-build-probe.md).
+
 ## First Fix
 
 Expose these states separately:
@@ -39,6 +41,16 @@ Measure before tuning:
 - update rays selected
 - resolve entries processed
 
+Do not deploy the first SHARC runtime test with persisted custom settings. The local options file currently requests `capacityExponent=26`, full-rate/downscale `1`, update block `2`, and update bounces `16`; that can turn the first test into a huge allocation/update stress test instead of a useful SHARC evaluation.
+
+Use a safe validation profile first:
+
+- startup SHARC off; enable only for an explicit sweep
+- capacity exponent `18` or `19`
+- downscale `2`
+- update block size `5+`
+- update bounces `4`
+
 ## Optimization Leads
 
 - SHARC resolve is O(capacity). Replace full-capacity resolve with touched/active-entry resolve or a budgeted resolve.
@@ -63,4 +75,3 @@ Measure before tuning:
 
 - Debug UI states are truthful.
 - SHARC either has measured benefit and stays behind a quality setting, or remains compiled off with a clear reason and no misleading runtime state.
-
