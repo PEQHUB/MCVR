@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <thread>
 #include <unordered_map>
 #include <glm/gtc/type_ptr.hpp>
@@ -982,6 +983,10 @@ void WorldPrepareContext::render() {
     static uint32_t tlasLogCounter = 0;
     static uint32_t tlasUpdateCount = 0;
     static uint32_t tlasBuildCount = 0;
+    static uint32_t tlasBuildFirstCount = 0;
+    static uint32_t tlasBuildInstanceCount = 0;
+    static uint32_t tlasBuildGenerationCount = 0;
+    static uint32_t tlasBuildBlasHandleCount = 0;
 
     auto cpuT7 = Clock::now();
     // Determine if TLAS UPDATE is possible by comparing per-instance BLAS generations.
@@ -994,6 +999,66 @@ void WorldPrepareContext::render() {
         && currBlasSnapshot.instanceCount == prevBlasSnapshot_.instanceCount
         && currBlasSnapshot.generations == prevBlasSnapshot_.generations
         && currBlasSnapshot.blases == prevBlasSnapshot_.blases;
+
+    auto countDiffs = [](const auto &prev, const auto &curr, size_t &firstDiff) {
+        size_t diffCount = 0;
+        firstDiff = std::numeric_limits<size_t>::max();
+        const size_t common = std::min(prev.size(), curr.size());
+        for (size_t i = 0; i < common; ++i) {
+            if (!(prev[i] == curr[i])) {
+                if (firstDiff == std::numeric_limits<size_t>::max()) {
+                    firstDiff = i;
+                }
+                ++diffCount;
+            }
+        }
+        if (prev.size() != curr.size()) {
+            if (firstDiff == std::numeric_limits<size_t>::max()) {
+                firstDiff = common;
+            }
+            diffCount += prev.size() > curr.size() ? prev.size() - curr.size() : curr.size() - prev.size();
+        }
+        return diffCount;
+    };
+
+    size_t firstGenDiff = std::numeric_limits<size_t>::max();
+    size_t firstBlasDiff = std::numeric_limits<size_t>::max();
+    size_t genDiffCount = 0;
+    size_t blasDiffCount = 0;
+    const bool tlasFirstBuild = tlas == nullptr;
+    const bool tlasInstanceCountChanged =
+        currBlasSnapshot.instanceCount != prevBlasSnapshot_.instanceCount;
+    bool tlasGenerationChanged = false;
+    bool tlasBlasHandleChanged = false;
+    const char *tlasBuildReason = "none";
+    if (!canUpdate) {
+        genDiffCount = countDiffs(prevBlasSnapshot_.generations,
+                                  currBlasSnapshot.generations,
+                                  firstGenDiff);
+        blasDiffCount = countDiffs(prevBlasSnapshot_.blases,
+                                   currBlasSnapshot.blases,
+                                   firstBlasDiff);
+        tlasGenerationChanged = genDiffCount != 0;
+        tlasBlasHandleChanged = blasDiffCount != 0;
+        if (tlasFirstBuild) {
+            tlasBuildReason = "firstBuild";
+        } else if (tlasInstanceCountChanged) {
+            tlasBuildReason = "instanceCountChanged";
+        } else if (tlasGenerationChanged) {
+            tlasBuildReason = "generationChanged";
+        } else if (tlasBlasHandleChanged) {
+            tlasBuildReason = "blasHandleChanged";
+        } else {
+            tlasBuildReason = "unknown";
+        }
+    }
+    const bool tlasBuildReasonFirst = !canUpdate && tlasFirstBuild;
+    const bool tlasBuildReasonInstance = !canUpdate && !tlasBuildReasonFirst
+        && tlasInstanceCountChanged;
+    const bool tlasBuildReasonGeneration = !canUpdate && !tlasBuildReasonFirst
+        && !tlasBuildReasonInstance && tlasGenerationChanged;
+    const bool tlasBuildReasonBlasHandle = !canUpdate && !tlasBuildReasonFirst
+        && !tlasBuildReasonInstance && !tlasBuildReasonGeneration && tlasBlasHandleChanged;
 
     constexpr VkBuildAccelerationStructureFlagsKHR tlasFlags =
         VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
@@ -1021,6 +1086,24 @@ void WorldPrepareContext::render() {
         g_crashRing.record("WP:tlasBuild");
         GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::TLAS_BUILD);
         tlas = tlasBuilder->buildAndSubmit(device, worldCommandBuffer);
+        if (tlasBuildReasonFirst) ++tlasBuildFirstCount;
+        if (tlasBuildReasonInstance) ++tlasBuildInstanceCount;
+        if (tlasBuildReasonGeneration) ++tlasBuildGenerationCount;
+        if (tlasBuildReasonBlasHandle) ++tlasBuildBlasHandleCount;
+        const long long firstGenDiffLog = firstGenDiff == std::numeric_limits<size_t>::max()
+            ? -1LL
+            : static_cast<long long>(firstGenDiff);
+        const long long firstBlasDiffLog = firstBlasDiff == std::numeric_limits<size_t>::max()
+            ? -1LL
+            : static_cast<long long>(firstBlasDiff);
+        renderDiag("WP TLAS full build reason=%s prevInstances=%u currInstances=%u genDiffs=%zu firstGenDiff=%lld blasDiffs=%zu firstBlasDiff=%lld",
+                   tlasBuildReason,
+                   prevBlasSnapshot_.instanceCount,
+                   currBlasSnapshot.instanceCount,
+                   genDiffCount,
+                   firstGenDiffLog,
+                   blasDiffCount,
+                   firstBlasDiffLog);
 
         // Persist scratch buffer sized for max(build, update) for future UPDATE calls.
         // Query both BUILD and UPDATE scratch sizes to ensure the buffer is large enough.
@@ -1095,7 +1178,12 @@ void WorldPrepareContext::render() {
     if (++tlasLogCounter >= 120) {
         float n = static_cast<float>(cpuFrameCount);
         std::cout << "[Profiler] TLAS instances: " << currentInstanceCount
-                  << "  builds: " << tlasBuildCount << "  updates: " << tlasUpdateCount << std::endl;
+                  << "  builds: " << tlasBuildCount << "  updates: " << tlasUpdateCount
+                  << "  reasons[first=" << tlasBuildFirstCount
+                  << ", instance=" << tlasBuildInstanceCount
+                  << ", generation=" << tlasBuildGenerationCount
+                  << ", blasHandle=" << tlasBuildBlasHandleCount
+                  << "]" << std::endl;
         if (cpuFrameCount > 0) {
             std::cout << "[CPU] WorldPrepare avg(ms): check=" << (cpuAccCheck / n)
                       << " schedule=" << (cpuAccSchedule / n)
@@ -1117,6 +1205,10 @@ void WorldPrepareContext::render() {
                        << " TOTAL=" << (cpuAccTotal / n)
                        << " builds=" << tlasBuildCount
                        << " updates=" << tlasUpdateCount
+                       << " tlasReasonFirst=" << tlasBuildFirstCount
+                       << " tlasReasonInstance=" << tlasBuildInstanceCount
+                       << " tlasReasonGeneration=" << tlasBuildGenerationCount
+                       << " tlasReasonBlasHandle=" << tlasBuildBlasHandleCount
                        << " threads=" << Renderer::threadPool.threadCount()
                        << "\n";
             }
@@ -1124,6 +1216,10 @@ void WorldPrepareContext::render() {
         tlasLogCounter = 0;
         tlasUpdateCount = 0;
         tlasBuildCount = 0;
+        tlasBuildFirstCount = 0;
+        tlasBuildInstanceCount = 0;
+        tlasBuildGenerationCount = 0;
+        tlasBuildBlasHandleCount = 0;
         cpuAccCheck = cpuAccSchedule = cpuAccImportant = 0;
         cpuAccEntity = cpuAccInstances = cpuAccTlas = cpuAccTotal = 0;
         cpuFrameCount = 0;
