@@ -3,6 +3,7 @@
 #include "core/all_extern.hpp"
 #include "core/render/buffers.hpp"
 #include "core/render/chunks.hpp"
+#include "core/render/entities.hpp"
 #include "core/render/modules/ui_module.hpp"
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/pipeline.hpp"
@@ -395,6 +396,13 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Rende
 #else
             << ",sharcCompiled:0";
 #endif
+    }
+
+    auto world = renderer->world();
+    auto entities = world ? world->entities() : nullptr;
+    if (entities) {
+        std::string entityDiag = entities->diagnosticsString();
+        if (!entityDiag.empty()) out << "," << entityDiag;
     }
 
     return env->NewStringUTF(out.str().c_str());

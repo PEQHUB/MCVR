@@ -15,6 +15,7 @@
 #include <mutex>
 #include <queue>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -152,6 +153,7 @@ class Entities : public SharedObject<Entities> {
     std::shared_ptr<EntityBatch> entityBatch();
     std::shared_ptr<EntityPostBatch> entityPostBatch();
     std::shared_ptr<vk::BLASBatchBuilder> blasBatchBuilder();
+    std::string diagnosticsString() const;
 
   private:
     std::shared_ptr<EntityBatch> entityBatch_;
@@ -166,4 +168,7 @@ class Entities : public SharedObject<Entities> {
     // waits on the fence for the context being reused, guaranteeing the previous GPU work is done.
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> pooledVertexBuffers_;
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> pooledIndexBuffers_;
+
+    mutable std::mutex diagnosticsMutex_;
+    std::string latestDiagnostics_;
 };

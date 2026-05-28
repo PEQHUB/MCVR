@@ -5,9 +5,11 @@
 #include "core/render/renderer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <sstream>
 #include <unordered_map>
 
 using Vertex = glm::vec3;
@@ -26,6 +28,70 @@ struct TriangleHash {
         return seed;
     }
 };
+
+namespace {
+struct RtFlagStats {
+    int flag = 0;
+    const char* name = "unknown";
+    uint32_t entities = 0;
+    uint32_t nonPrebuilt = 0;
+    uint32_t geometries = 0;
+    uint32_t vertices = 0;
+    uint32_t indices = 0;
+};
+
+std::array<RtFlagStats, 8> makeFlagStats() {
+    return {{
+        {1, "world"},
+        {2, "player"},
+        {4, "playerHead"},
+        {8, "hand"},
+        {16, "weather"},
+        {32, "particle"},
+        {64, "cloud"},
+        {128, "boatWaterMask"},
+    }};
+}
+
+RtFlagStats& statsForFlag(std::array<RtFlagStats, 8>& stats, int flag) {
+    for (auto& entry : stats) {
+        if (entry.flag == flag) return entry;
+    }
+    return stats[0];
+}
+
+void accumulateEntityStats(std::array<RtFlagStats, 8>& byFlag,
+                           const std::shared_ptr<EntityBuildData>& data,
+                           uint32_t& totalGeometries,
+                           uint32_t& totalVertices,
+                           uint32_t& totalIndices,
+                           uint32_t& nonPrebuilt,
+                           uint32_t& prebuilt) {
+    if (!data) return;
+    uint32_t vertices = 0;
+    uint32_t indices = 0;
+    for (uint32_t i = 0; i < data->geometryCount; i++) {
+        if (i < data->vertices.size()) vertices += static_cast<uint32_t>(data->vertices[i].size());
+        if (i < data->indices.size()) indices += static_cast<uint32_t>(data->indices[i].size());
+    }
+
+    totalGeometries += data->geometryCount;
+    totalVertices += vertices;
+    totalIndices += indices;
+    if (data->prebuiltBLAS < 0) {
+        nonPrebuilt++;
+    } else {
+        prebuilt++;
+    }
+
+    auto& stats = statsForFlag(byFlag, data->rtFlag);
+    stats.entities++;
+    if (data->prebuiltBLAS < 0) stats.nonPrebuilt++;
+    stats.geometries += data->geometryCount;
+    stats.vertices += vertices;
+    stats.indices += indices;
+}
+} // namespace
 
 
 EntityBuildData::EntityBuildData(int hashCode,
@@ -911,6 +977,27 @@ void Entities::build() {
     }
 
     uint32_t fi = context->frameIndex;
+    auto byFlag = makeFlagStats();
+    uint32_t totalGeometries = 0;
+    uint32_t totalVertices = 0;
+    uint32_t totalIndices = 0;
+    uint32_t nonPrebuilt = 0;
+    uint32_t prebuilt = 0;
+    uint32_t postEntities = entityPostBuildDataBatch_
+        ? static_cast<uint32_t>(entityPostBuildDataBatch_->datas.size())
+        : 0;
+
+    if (entityBuildDataBatch_) {
+        for (const auto& data : entityBuildDataBatch_->datas) {
+            accumulateEntityStats(byFlag, data, totalGeometries, totalVertices, totalIndices, nonPrebuilt, prebuilt);
+        }
+    }
+    if (entityPostBuildDataBatch_) {
+        for (const auto& data : entityPostBuildDataBatch_->datas) {
+            accumulateEntityStats(byFlag, data, totalGeometries, totalVertices, totalIndices, nonPrebuilt, prebuilt);
+        }
+    }
+
     entityBuildDataBatch_->build(pooledVertexBuffers_[fi], pooledIndexBuffers_[fi]);
 
     Renderer::instance().buffers()->queueImportantWorldUpload(entityBuildDataBatch_->vertexBuffer,
@@ -925,6 +1012,27 @@ void Entities::build() {
             Renderer::instance().buffers()->queueImportantWorldUpload(entity->vertexBuffers[i],
                                                                       entity->indexBuffers[i]);
         }
+    }
+
+    std::ostringstream diag;
+    diag << "entityBatch:" << (entityBuildDataBatch_ ? entityBuildDataBatch_->datas.size() : 0)
+         << ",entityPostBatch:" << postEntities
+         << ",entityNonPrebuilt:" << nonPrebuilt
+         << ",entityPrebuilt:" << prebuilt
+         << ",entityGeometries:" << totalGeometries
+         << ",entityVertices:" << totalVertices
+         << ",entityIndices:" << totalIndices;
+    for (const auto& stats : byFlag) {
+        if (stats.entities == 0) continue;
+        diag << ",entityFlag_" << stats.name << "_count:" << stats.entities
+             << ",entityFlag_" << stats.name << "_nonPrebuilt:" << stats.nonPrebuilt
+             << ",entityFlag_" << stats.name << "_geometries:" << stats.geometries
+             << ",entityFlag_" << stats.name << "_vertices:" << stats.vertices
+             << ",entityFlag_" << stats.name << "_indices:" << stats.indices;
+    }
+    {
+        std::lock_guard<std::mutex> lock(diagnosticsMutex_);
+        latestDiagnostics_ = diag.str();
     }
 }
 
@@ -948,4 +1056,9 @@ std::shared_ptr<EntityPostBatch> Entities::entityPostBatch() {
 
 std::shared_ptr<vk::BLASBatchBuilder> Entities::blasBatchBuilder() {
     return blasBatchBuilder_;
+}
+
+std::string Entities::diagnosticsString() const {
+    std::lock_guard<std::mutex> lock(diagnosticsMutex_);
+    return latestDiagnostics_;
 }
