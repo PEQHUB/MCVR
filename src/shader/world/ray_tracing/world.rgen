@@ -16,8 +16,11 @@
 #ifndef SHARC_COMPILE_ENABLE
 #define SHARC_COMPILE_ENABLE 0
 #endif
+#ifndef SHARC_MAIN_TRACE_ENABLE
+#define SHARC_MAIN_TRACE_ENABLE 0
+#endif
 
-#if SHARC_COMPILE_ENABLE
+#if SHARC_COMPILE_ENABLE && SHARC_MAIN_TRACE_ENABLE
 #define SHARC_ENABLE_GLSL 1
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
 #define SHARC_QUERY_ONLY 1
@@ -33,7 +36,7 @@
 #include "common/shared.hpp"
 #include "../util/colorspace.glsl"
 
-#if SHARC_COMPILE_ENABLE
+#if SHARC_COMPILE_ENABLE && SHARC_MAIN_TRACE_ENABLE
 #include "SharcGlsl.h"
 #include "SharcCommon.h"
 #endif
@@ -892,7 +895,7 @@ void main() {
             // AND current surface roughness (don't cache view-dependent specular outgoing).
             // On cache hit, REPLACE the CHS contribution with the cached total outgoing
             // radiance to avoid double-counting direct light at this surface.
-#if SHARC_COMPILE_ENABLE
+#if SHARC_COMPILE_ENABLE && SHARC_MAIN_TRACE_ENABLE
             if (SHARC_ENABLED && b >= 1 && !prGetStop(mainRay) && mainRay.hitT != INF_DISTANCE
                 && minPathRoughness >= pc.sharcRoughnessThreshold
                 && mainRay.roughness >= pc.sharcRoughnessThreshold) {

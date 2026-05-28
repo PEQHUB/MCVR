@@ -56,6 +56,11 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
 
 #ifdef MCVR_ENABLE_SHARC
     constexpr bool sharcCompiled = true;
+#ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
+    constexpr bool sharcMainTraceCompiled = true;
+#else
+    constexpr bool sharcMainTraceCompiled = false;
+#endif
     const bool buffersAllocated = sharcHashEntries_ && sharcAccumulation_ && sharcResolved_;
     size_t sharcSbtReady = 0;
     for (const auto& sbt : sharcUpdateSbts_) {
@@ -63,10 +68,11 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
     }
     const bool updatePipelineReady = sharcUpdatePipeline_ != nullptr && sharcSbtReady > 0;
     const bool resolvePipelineReady = sharcResolvePipeline_ != VK_NULL_HANDLE;
-    const bool mainTraceQueryPossible = Renderer::options.sharcEnabled && !accumulating && buffersAllocated;
+    const bool mainTraceQueryPossible = sharcMainTraceCompiled && Renderer::options.sharcEnabled && !accumulating && buffersAllocated;
     const bool updateResolvePossible = mainTraceQueryPossible && updatePipelineReady && resolvePipelineReady;
 #else
     constexpr bool sharcCompiled = false;
+    constexpr bool sharcMainTraceCompiled = false;
     constexpr bool buffersAllocated = false;
     constexpr size_t sharcSbtReady = 0;
     constexpr bool updatePipelineReady = false;
@@ -76,6 +82,7 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
 #endif
 
     out << ",sharcCompiled:" << (sharcCompiled ? 1 : 0)
+        << ",sharcMainTraceCompiled:" << (sharcMainTraceCompiled ? 1 : 0)
         << ",sharcBuffersAllocated:" << (buffersAllocated ? 1 : 0)
 #ifdef MCVR_ENABLE_SHARC
         << ",sharcBuffersInitialized:" << (sharcBuffersInitialized_ ? 1 : 0)
@@ -275,7 +282,7 @@ void RayTracingModule::build() {
     initSBT();
     initSpatialPipeline();
     initClusterPipeline();
-#ifdef MCVR_ENABLE_SHARC
+#if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY)
     sharcCapacity_ = 1u << static_cast<uint32_t>(Renderer::options.sharcCapacityExponent);
     if (Renderer::options.sharcEnabled) {
         initSharcBuffers();
@@ -1876,6 +1883,7 @@ void RayTracingModuleContext::render() {
 #ifdef MCVR_ENABLE_SHARC
     // Lazy SHARC init: create buffers + pipelines if enabled at runtime but not yet allocated.
     // Must happen BEFORE push constant population so SHARC BDAs are available on the same frame.
+#ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
     if (Renderer::options.sharcEnabled && !module->sharcHashEntries_) {
         module->sharcCapacity_ = 1u << static_cast<uint32_t>(Renderer::options.sharcCapacityExponent);
         module->initSharcBuffers();
@@ -1890,6 +1898,7 @@ void RayTracingModuleContext::render() {
         }
     }
 #endif
+#endif
 
     RayTracingPushConstant pushConstant{};
     pushConstant.numRayBounces = accumulating
@@ -1900,7 +1909,7 @@ void RayTracingModuleContext::render() {
                        | (Renderer::options.restirEnabled ? 4 : 0)
                        | (Renderer::options.restirSimplifiedBRDF ? 8 : 0)
                        | (Renderer::options.restirBounceEnabled ? 16 : 0)
-#ifdef MCVR_ENABLE_SHARC
+#if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY)
                        | ((Renderer::options.sharcEnabled && !accumulating && module->sharcHashEntries_) ? 32 : 0)
 #endif
                        | (Renderer::options.noiseLOD ? 64 : 0)
@@ -1957,6 +1966,7 @@ void RayTracingModuleContext::render() {
 
 #ifdef MCVR_ENABLE_SHARC
     // SHARC radiance cache
+#ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
     if (Renderer::options.sharcEnabled && module->sharcHashEntries_) {
         auto worldUBO = static_cast<vk::Data::WorldUBO *>(buffers->worldUniformBuffer()->mappedPtr());
         pushConstant.sharcHashEntries = module->sharcHashEntries_->bufferAddress();
@@ -1973,6 +1983,7 @@ void RayTracingModuleContext::render() {
         pushConstant.sharcUpdateBlockSize = Renderer::options.sharcUpdateBlockSize;
         pushConstant.sharcUpdateBounces = Renderer::options.sharcUpdateBounces;
     }
+#endif
 #endif
 
     // Offline accumulation
@@ -2144,6 +2155,7 @@ void RayTracingModuleContext::render() {
     }
 
 #ifdef MCVR_ENABLE_SHARC
+#ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
     // Reset SHARC buffers when disabled so re-enable starts fresh (prevents stale cache artifacts)
     if (!Renderer::options.sharcEnabled && module->sharcBuffersInitialized_) {
         module->sharcBuffersInitialized_ = false;
@@ -2303,6 +2315,7 @@ void RayTracingModuleContext::render() {
         sharcResolveProfile.close();
         worldCommandBuffer->endLabel(); // end SHARC Resolve
     }
+#endif
 #endif // MCVR_ENABLE_SHARC
 
     // Re-push RT push constants (may have been invalidated by compute pipeline bind above)
