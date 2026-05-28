@@ -13,7 +13,9 @@
  * Usage:
  *   profiler.beginFrame(cmdBuffer)   — reset queries, write frame-start timestamp
  *   profiler.beginModule(cmdBuffer, "RayTracing")
+ *   profiler.beginModule(cmdBuffer, "RT:MainTrace") // nested scopes are supported
  *   ... module render ...
+ *   profiler.endModule(cmdBuffer)
  *   profiler.endModule(cmdBuffer)
  *   profiler.endFrame(cmdBuffer)     — write frame-end timestamp
  *   // After fence wait (next frame):
@@ -51,13 +53,19 @@ public:
     void setEnabled(bool enabled) { enabled_.store(enabled); }
 
 private:
-    static constexpr uint32_t MAX_TIMESTAMPS = 64; // pairs per frame
+    static constexpr uint32_t MAX_TIMESTAMPS = 128; // frame bounds + nested module pairs
 
     struct PerFrame {
+        struct Event {
+            std::string name;
+            uint32_t beginQuery = UINT32_MAX;
+            uint32_t endQuery = UINT32_MAX;
+        };
+
         VkQueryPool queryPool = VK_NULL_HANDLE;
         uint32_t queryCount = 0;
-        std::vector<std::string> moduleNames;
-        uint32_t currentModule = 0;
+        std::vector<Event> events;
+        std::vector<uint32_t> moduleStack;
     };
 
     VkDevice device_ = VK_NULL_HANDLE;

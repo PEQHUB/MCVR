@@ -18,6 +18,33 @@
 #include <cstring>
 #include <string>
 
+namespace {
+class ScopedGpuProfile {
+public:
+    ScopedGpuProfile(VkCommandBuffer cmd, const char* name) : cmd_(cmd) {
+        if (cmd_ != VK_NULL_HANDLE && Renderer::gpuProfiler.isEnabled()) {
+            Renderer::gpuProfiler.beginModule(cmd_, name);
+            open_ = true;
+        }
+    }
+
+    ~ScopedGpuProfile() {
+        close();
+    }
+
+    void close() {
+        if (open_) {
+            Renderer::gpuProfiler.endModule(cmd_);
+            open_ = false;
+        }
+    }
+
+private:
+    VkCommandBuffer cmd_ = VK_NULL_HANDLE;
+    bool open_ = false;
+};
+}
+
 RayTracingModule::RayTracingModule() {}
 
 void RayTracingModule::init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
@@ -1575,23 +1602,32 @@ void RayTracingModuleContext::render() {
     renderDiag("RT begin");
     g_crashRing.record("RT:begin");
     auto ctx0 = frameworkContext.lock();
+    VkCommandBuffer profileCmd = (ctx0 && Renderer::gpuProfiler.isEnabled())
+        ? ctx0->worldCommandBuffer->vkCommandBuffer()
+        : VK_NULL_HANDLE;
     if (ctx0) {
         ctx0->worldCommandBuffer->beginLabel("RT:Atmosphere", 0.3f, 0.3f, 0.9f);
     }
-    renderDiag("RT atmosphere begin");
-    g_crashRing.record("RT:atmosphere");
-    atmosphereContext->render();
-    renderDiag("RT atmosphere end");
+    {
+        ScopedGpuProfile profile(profileCmd, "RT.Atmosphere");
+        renderDiag("RT atmosphere begin");
+        g_crashRing.record("RT:atmosphere");
+        atmosphereContext->render();
+        renderDiag("RT atmosphere end");
+    }
     if (ctx0) ctx0->worldCommandBuffer->endLabel();
 
     if (ctx0) ctx0->worldCommandBuffer->beginLabel("RT:BLAS/TLAS Build", 0.9f, 0.3f, 0.3f);
-    renderDiag("RT worldPrepare begin");
-    g_crashRing.record("RT:worldPrepare");
-    worldPrepareContext->render();
-    renderDiag("RT worldPrepare end tlas=%d instances=%u lights=%d",
-               (int)(worldPrepareContext->tlas != nullptr),
-               worldPrepareContext->prevTlasInstanceCount_,
-               worldPrepareContext->areaLightCount);
+    {
+        ScopedGpuProfile profile(profileCmd, "RT.BLAS_TLAS");
+        renderDiag("RT worldPrepare begin");
+        g_crashRing.record("RT:worldPrepare");
+        worldPrepareContext->render();
+        renderDiag("RT worldPrepare end tlas=%d instances=%u lights=%d",
+                   (int)(worldPrepareContext->tlas != nullptr),
+                   worldPrepareContext->prevTlasInstanceCount_,
+                   worldPrepareContext->areaLightCount);
+    }
     if (ctx0) ctx0->worldCommandBuffer->endLabel();
 
     if (worldPrepareContext->tlas == nullptr) {
@@ -1694,6 +1730,7 @@ void RayTracingModuleContext::render() {
     std::string textureDescriptorLabel = "RT:TexturePublishAndDescriptors gen=" +
         std::to_string(textureGeneration) + " frame=" + std::to_string(context->frameIndex);
     worldCommandBuffer->beginLabel(textureDescriptorLabel.c_str(), 0.95f, 0.35f, 0.1f);
+    ScopedGpuProfile textureProfile(profileCmd, "RT.TexturePublish");
     // Flush any pending texture array uploads (staged by animation tick, executed here on render thread)
     if (texSystem.isFinalized()) {
         renderDiag("RT textureFlush begin");
@@ -1771,6 +1808,7 @@ void RayTracingModuleContext::render() {
     } else {
         bindBlockTextureArrays(rayTracingDescriptorTable);
     }
+    textureProfile.close();
     worldCommandBuffer->endLabel();
     renderDiag("RT descriptors end");
 
@@ -1970,6 +2008,7 @@ void RayTracingModuleContext::render() {
     if (!barriers.empty()) {
         renderDiag("RT imageBarriers begin count=%u", static_cast<unsigned>(barriers.size()));
         g_crashRing.record("RT:imageBarriers");
+        ScopedGpuProfile profile(profileCmd, "RT.ImageBarriers");
         worldCommandBuffer->barriersBufferImage({}, barriers);
         renderDiag("RT imageBarriers end");
     }
@@ -2096,6 +2135,7 @@ void RayTracingModuleContext::render() {
         && module->sharcUpdatePipeline_ && module->sharcResolvePipeline_ != VK_NULL_HANDLE
         && module->sharcHashEntries_ && sharcUpdateSbt) {
         worldCommandBuffer->beginLabel("RT:SHARC Update", 0.9f, 0.6f, 0.1f);
+        ScopedGpuProfile sharcUpdateProfile(profileCmd, "RT.SHARCUpdate");
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
         GpuDiag::checkpoint(cmd, GpuDiag::SHARC_UPDATE_RT);
 
@@ -2141,8 +2181,10 @@ void RayTracingModuleContext::render() {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 1, &updateBarrier, 0, nullptr, 0, nullptr);
 
+        sharcUpdateProfile.close();
         worldCommandBuffer->endLabel(); // end SHARC Update
         worldCommandBuffer->beginLabel("RT:SHARC Resolve", 0.9f, 0.7f, 0.2f);
+        ScopedGpuProfile sharcResolveProfile(profileCmd, "RT.SHARCResolve");
         GpuDiag::checkpoint(cmd, GpuDiag::SHARC_RESOLVE);
         // Pass 2: SHARC Resolve (compute — temporal blend + stale eviction)
         struct SharcResolvePushConstant {
@@ -2196,6 +2238,7 @@ void RayTracingModuleContext::render() {
         module->sharcPrevCameraY_ = pushConstant.sharcCameraY;
         module->sharcPrevCameraZ_ = pushConstant.sharcCameraZ;
         module->sharcFrameIndex_++;
+        sharcResolveProfile.close();
         worldCommandBuffer->endLabel(); // end SHARC Resolve
     }
 #endif // MCVR_ENABLE_SHARC
@@ -2209,6 +2252,7 @@ void RayTracingModuleContext::render() {
 
     // Pass 3: Main Render (existing RT dispatch — now queries SHARC cache on bounces >= 1)
     worldCommandBuffer->beginLabel("RT:MainTrace", 1.0f, 0.2f, 0.2f);
+    ScopedGpuProfile mainTraceProfile(profileCmd, "RT.MainTrace");
     GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::RT_DISPATCH_MAIN);
     renderDiag("RT mainTrace begin w=%u h=%u", hdrNoisyOutputImage->width(), hdrNoisyOutputImage->height());
     g_crashRing.record("RT:mainTrace");
@@ -2216,12 +2260,14 @@ void RayTracingModuleContext::render() {
         ->bindRTPipeline(module->rayTracingPipeline_)
         ->raytracing(sbt, hdrNoisyOutputImage->width(), hdrNoisyOutputImage->height(), 1);
     renderDiag("RT mainTrace end");
+    mainTraceProfile.close();
     worldCommandBuffer->endLabel(); // end MainTrace
 
     // Spatial reuse compute pass (when ReSTIR and spatial reuse are both enabled)
     if (Renderer::options.restirEnabled && Renderer::options.restirSpatialEnabled && module->spatialPipeline_ != VK_NULL_HANDLE
         && module->reservoirImages_[0] && module->reservoirImages_[1]) {
         worldCommandBuffer->beginLabel("RT:ReSTIR Spatial", 0.2f, 0.8f, 0.8f);
+        ScopedGpuProfile restirSpatialProfile(profileCmd, "RT.ReSTIRSpatial");
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
         GpuDiag::checkpoint(cmd, GpuDiag::RESTIR_SPATIAL);
 
@@ -2289,6 +2335,7 @@ void RayTracingModuleContext::render() {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
             0, 1, &postSpatialBarrier, 0, nullptr, 0, nullptr);
+        restirSpatialProfile.close();
         worldCommandBuffer->endLabel(); // end ReSTIR Spatial
     }
 
@@ -2297,6 +2344,7 @@ void RayTracingModuleContext::render() {
     if (accumulating && Renderer::accumPipelineReady && Renderer::options.offlineDenoised != 2) {
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
         uint32_t frameIdx = context->frameIndex;
+        ScopedGpuProfile offlineAccumProfile(profileCmd, "RT.OfflineAccum");
 
         // Barrier: RT output → compute read
         VkMemoryBarrier accumBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -2359,6 +2407,7 @@ void RayTracingModuleContext::render() {
 
         Renderer::accumFrameCount++;
         Renderer::accumOutputImage = hdrNoisyOutputImage;  // expose for denoiser/upscaler bypass
+        offlineAccumProfile.close();
     }
 
     renderDiag("RT end");
