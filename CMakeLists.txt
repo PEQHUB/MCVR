@@ -147,8 +147,11 @@ endif()
 # OMM SDK (Opacity Micro-Map) - CPU baker only
 # We bypass the OMM top-level CMake and add only the library + its deps,
 # providing glm/stb from our existing project to avoid target conflicts.
-option(MCVR_ENABLE_SHARC "Enable SHARC hash grid radiance cache update/resolve passes" OFF)
-option(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY "Compile SHARC cache query into the main world RT raygen. Off by default because current NVIDIA drivers crash in nvgpucomp64 during main RT pipeline creation." OFF)
+option(MCVR_ENABLE_SHARC "Enable SHARC hash grid radiance cache build support" ON)
+option(MCVR_ENABLE_SHARC_BUFFERS "Enable SHARC hash grid buffer allocation/init probes" OFF)
+option(MCVR_ENABLE_SHARC_UPDATE_PASS "Enable SHARC sparse update RT pipeline creation/dispatch probes" OFF)
+option(MCVR_ENABLE_SHARC_RESOLVE_PASS "Enable SHARC resolve compute pipeline creation/dispatch probes" OFF)
+option(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY "Compile the small read-only SHARC cache query into the main world RT raygen. Off by default because current NVIDIA drivers crash when the full SDK query path is compiled into the main RT pipeline." OFF)
 
 option(MCVR_ENABLE_OMM "Enable Opacity Micro-Map SDK for AHS elimination" ON)
 option(MCVR_SHADER_DEBUG_INFO "Emit NonSemantic Vulkan debug info with source (-gVS) for Nsight Graphics profiling. Off by default: 3x SPIR-V size, may regress RT pipeline performance." OFF)

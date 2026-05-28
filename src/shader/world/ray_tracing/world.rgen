@@ -20,13 +20,6 @@
 #define SHARC_MAIN_TRACE_ENABLE 0
 #endif
 
-#if SHARC_COMPILE_ENABLE && SHARC_MAIN_TRACE_ENABLE
-#define SHARC_ENABLE_GLSL 1
-#define SHARC_ENABLE_64_BIT_ATOMICS 1
-#define SHARC_QUERY_ONLY 1
-#define SHARC_PROPAGATION_DEPTH 4
-#endif
-
 #include "../util/labpbr.glsl"
 #include "../util/random.glsl"
 #include "../util/blue_noise.glsl"
@@ -37,8 +30,7 @@
 #include "../util/colorspace.glsl"
 
 #if SHARC_COMPILE_ENABLE && SHARC_MAIN_TRACE_ENABLE
-#include "SharcGlsl.h"
-#include "SharcCommon.h"
+#include "sharc_query_readonly.glsl"
 #endif
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
@@ -899,39 +891,19 @@ void main() {
             if (SHARC_ENABLED && b >= 1 && !prGetStop(mainRay) && mainRay.hitT != INF_DISTANCE
                 && minPathRoughness >= pc.sharcRoughnessThreshold
                 && mainRay.roughness >= pc.sharcRoughnessThreshold) {
-                SharcParameters sharcParams;
-                sharcParams.gridParameters.cameraPosition = float3(pc.sharcCameraX, pc.sharcCameraY, pc.sharcCameraZ);
-                sharcParams.gridParameters.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
-                sharcParams.gridParameters.sceneScale = pc.sharcSceneScale;
-                sharcParams.gridParameters.levelBias = float(SHARC_GRID_LEVEL_BIAS);
-                sharcParams.hashMapData.capacity = pc.sharcCapacity;
-                sharcParams.hashMapData.hashEntriesBuffer = RWStructuredBuffer_uint64_t(pc.sharcHashEntries);
-                sharcParams.resolvedBuffer = RWStructuredBuffer_SharcPackedData(pc.sharcResolved);
+                vec3 cachedRadiance;
+                float queryVoxelSize;
+                bool sharcHit = sharcQueryCachedRadiance(pc.sharcHashEntries, pc.sharcResolved, pc.sharcCapacity,
+                    vec3(pc.sharcCameraX, pc.sharcCameraY, pc.sharcCameraZ), pc.sharcSceneScale,
+                    mainRay.worldPos + vec3(worldUBO.cameraPos.xyz), mainRay.normal, cachedRadiance, queryVoxelSize);
 
-                // Convert camera-relative hit position to absolute world coords
-                vec3 absoluteHitPos = mainRay.worldPos + vec3(worldUBO.cameraPos.xyz);
-
-                // Voxel size guard: reject queries where hitT is shorter than the voxel.
-                // Without this, short-segment bounces can read cached radiance from the
-                // opposite side of thin walls (light leaking through 1-block walls).
-                uint queryLevel = HashGridGetLevel(absoluteHitPos, sharcParams.gridParameters);
-                float queryVoxelSize = HashGridGetVoxelSize(queryLevel, sharcParams.gridParameters);
-                if (mainRay.hitT < queryVoxelSize) {
-                    // Skip SHARC query — ray segment too short for this voxel resolution
-                } else {
-                    SharcHitData hitData;
-                    hitData.positionWorld = absoluteHitPos;
-                    hitData.normalWorld = mainRay.normal;
-
-                    vec3 cachedRadiance;
-                    if (SharcGetCachedRadiance(sharcParams, hitData, cachedRadiance, false)) {
-                        // Discard the CHS contribution at this hit and use cached total instead.
-                        // radianceBeforeBounce = accumulated radiance from all previous bounces.
-                        // throughputBeforeBounce = path throughput BEFORE CHS modified it.
-                        // cachedRadiance = total outgoing radiance at this surface (direct + all indirect).
-                        mainRay.radiance = radianceBeforeBounce + throughputBeforeBounce * cachedRadiance;
-                        break; // Early path termination — cache hit
-                    }
+                if (sharcHit && mainRay.hitT >= queryVoxelSize) {
+                    // Discard the CHS contribution at this hit and use cached total instead.
+                    // radianceBeforeBounce = accumulated radiance from all previous bounces.
+                    // throughputBeforeBounce = path throughput BEFORE CHS modified it.
+                    // cachedRadiance = total outgoing radiance at this surface (direct + all indirect).
+                    mainRay.radiance = radianceBeforeBounce + throughputBeforeBounce * cachedRadiance;
+                    break; // Early path termination - cache hit
                 }
             }
 #endif

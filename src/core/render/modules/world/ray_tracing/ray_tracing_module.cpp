@@ -56,6 +56,21 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
 
 #ifdef MCVR_ENABLE_SHARC
     constexpr bool sharcCompiled = true;
+#ifdef MCVR_ENABLE_SHARC_BUFFERS
+    constexpr bool sharcBuffersCompiled = true;
+#else
+    constexpr bool sharcBuffersCompiled = false;
+#endif
+#ifdef MCVR_ENABLE_SHARC_UPDATE_PASS
+    constexpr bool sharcUpdateCompiled = true;
+#else
+    constexpr bool sharcUpdateCompiled = false;
+#endif
+#ifdef MCVR_ENABLE_SHARC_RESOLVE_PASS
+    constexpr bool sharcResolveCompiled = true;
+#else
+    constexpr bool sharcResolveCompiled = false;
+#endif
 #ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
     constexpr bool sharcMainTraceCompiled = true;
 #else
@@ -69,9 +84,14 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
     const bool updatePipelineReady = sharcUpdatePipeline_ != nullptr && sharcSbtReady > 0;
     const bool resolvePipelineReady = sharcResolvePipeline_ != VK_NULL_HANDLE;
     const bool mainTraceQueryPossible = sharcMainTraceCompiled && Renderer::options.sharcEnabled && !accumulating && buffersAllocated;
-    const bool updateResolvePossible = mainTraceQueryPossible && updatePipelineReady && resolvePipelineReady;
+    const bool updateResolvePossible = Renderer::options.sharcEnabled && !accumulating && buffersAllocated
+        && (sharcUpdateCompiled ? updatePipelineReady : true)
+        && (sharcResolveCompiled ? resolvePipelineReady : true);
 #else
     constexpr bool sharcCompiled = false;
+    constexpr bool sharcBuffersCompiled = false;
+    constexpr bool sharcUpdateCompiled = false;
+    constexpr bool sharcResolveCompiled = false;
     constexpr bool sharcMainTraceCompiled = false;
     constexpr bool buffersAllocated = false;
     constexpr size_t sharcSbtReady = 0;
@@ -82,6 +102,9 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
 #endif
 
     out << ",sharcCompiled:" << (sharcCompiled ? 1 : 0)
+        << ",sharcBuffersCompiled:" << (sharcBuffersCompiled ? 1 : 0)
+        << ",sharcUpdateCompiled:" << (sharcUpdateCompiled ? 1 : 0)
+        << ",sharcResolveCompiled:" << (sharcResolveCompiled ? 1 : 0)
         << ",sharcMainTraceCompiled:" << (sharcMainTraceCompiled ? 1 : 0)
         << ",sharcBuffersAllocated:" << (buffersAllocated ? 1 : 0)
 #ifdef MCVR_ENABLE_SHARC
@@ -282,12 +305,16 @@ void RayTracingModule::build() {
     initSBT();
     initSpatialPipeline();
     initClusterPipeline();
-#if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY)
+#if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_BUFFERS)
     sharcCapacity_ = 1u << static_cast<uint32_t>(Renderer::options.sharcCapacityExponent);
     if (Renderer::options.sharcEnabled) {
         initSharcBuffers();
+#ifdef MCVR_ENABLE_SHARC_UPDATE_PASS
         initSharcUpdatePipeline();
+#endif
+#ifdef MCVR_ENABLE_SHARC_RESOLVE_PASS
         initSharcResolvePipeline();
+#endif
     }
 #endif
     initAccumulationPipeline();
@@ -1480,6 +1507,8 @@ void RayTracingModule::initSharcBuffers() {
     auto framework = framework_.lock();
     if (!framework) return;
 
+    RadianceLogger::log("RayTracing", "INFO", "SHARC buffers create start capacity=%u", sharcCapacity_);
+    g_crashRing.record("SHARC:buffers:create:start");
     VkBufferUsageFlags sharcUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
         | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -1492,6 +1521,10 @@ void RayTracingModule::initSharcBuffers() {
         framework->vma(), framework->device(), sharcCapacity_ * 16, sharcUsage);
 
     sharcBuffersInitialized_ = false; // Will zero-fill on first use
+    RadianceLogger::log("RayTracing", "INFO", "SHARC buffers create done ok=%d bytes=%llu",
+                        (sharcHashEntries_ && sharcAccumulation_ && sharcResolved_) ? 1 : 0,
+                        static_cast<unsigned long long>(sharcCapacity_) * 40ull);
+    g_crashRing.record("SHARC:buffers:create:done");
 }
 
 void RayTracingModule::initSharcUpdatePipeline() {
@@ -1499,6 +1532,8 @@ void RayTracingModule::initSharcUpdatePipeline() {
     if (!framework) return;
     auto device = framework->device();
 
+    RadianceLogger::log("RayTracing", "INFO", "SHARC update pipeline create start");
+    g_crashRing.record("SHARC:updatePipeline:create:start");
     std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
     sharcUpdateRayGenShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/sharc_update_rgen.spv").string());
     if (!sharcUpdateRayGenShader_) {
@@ -1578,6 +1613,8 @@ void RayTracingModule::initSharcUpdatePipeline() {
 
     if (!sharcUpdatePipeline_) {
         std::cerr << "[SHARC] Failed to create update RT pipeline" << std::endl;
+        RadianceLogger::log("RayTracing", "ERROR", "SHARC update pipeline create done ok=0");
+        g_crashRing.record("SHARC:updatePipeline:create:failed");
         return;
     }
 
@@ -1587,6 +1624,9 @@ void RayTracingModule::initSharcUpdatePipeline() {
         sharcUpdateSbts_[i] = vk::SBT::create(framework->physicalDevice(), framework->device(), framework->vma(),
                                                sharcUpdatePipeline_, 4, 8);
     }
+    RadianceLogger::log("RayTracing", "INFO", "SHARC update pipeline create done ok=1 sbts=%llu",
+                        static_cast<unsigned long long>(sharcUpdateSbts_.size()));
+    g_crashRing.record("SHARC:updatePipeline:create:done");
 }
 
 void RayTracingModule::initSharcResolvePipeline() {
@@ -1596,6 +1636,8 @@ void RayTracingModule::initSharcResolvePipeline() {
     VkDevice dev = device->vkDevice();
 
     // Destroy existing handles before recreating (prevents resource leak on rebuild)
+    RadianceLogger::log("RayTracing", "INFO", "SHARC resolve pipeline create start");
+    g_crashRing.record("SHARC:resolvePipeline:create:start");
     if (sharcResolvePipeline_ != VK_NULL_HANDLE) {
         vkDestroyPipeline(dev, sharcResolvePipeline_, nullptr);
         sharcResolvePipeline_ = VK_NULL_HANDLE;
@@ -1632,6 +1674,10 @@ void RayTracingModule::initSharcResolvePipeline() {
         std::cerr << "[SHARC] Failed to create resolve compute pipeline: " << result << std::endl;
         sharcResolvePipeline_ = VK_NULL_HANDLE;
     }
+    RadianceLogger::log("RayTracing", result == VK_SUCCESS ? "INFO" : "ERROR",
+                        "SHARC resolve pipeline create done ok=%d result=%d",
+                        result == VK_SUCCESS ? 1 : 0, static_cast<int>(result));
+    g_crashRing.record(result == VK_SUCCESS ? "SHARC:resolvePipeline:create:done" : "SHARC:resolvePipeline:create:failed");
 }
 
 RayTracingModuleContext::RayTracingModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
@@ -1883,12 +1929,16 @@ void RayTracingModuleContext::render() {
 #ifdef MCVR_ENABLE_SHARC
     // Lazy SHARC init: create buffers + pipelines if enabled at runtime but not yet allocated.
     // Must happen BEFORE push constant population so SHARC BDAs are available on the same frame.
-#ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
+#ifdef MCVR_ENABLE_SHARC_BUFFERS
     if (Renderer::options.sharcEnabled && !module->sharcHashEntries_) {
         module->sharcCapacity_ = 1u << static_cast<uint32_t>(Renderer::options.sharcCapacityExponent);
         module->initSharcBuffers();
+#ifdef MCVR_ENABLE_SHARC_UPDATE_PASS
         module->initSharcUpdatePipeline();
+#endif
+#ifdef MCVR_ENABLE_SHARC_RESOLVE_PASS
         module->initSharcResolvePipeline();
+#endif
         // Refresh ALL contexts' stale SBT pointers — were nullptr at construction time
         for (size_t ci = 0; ci < module->contexts_.size(); ci++) {
             auto rtCtx = std::static_pointer_cast<RayTracingModuleContext>(module->contexts_[ci]);
@@ -1966,7 +2016,7 @@ void RayTracingModuleContext::render() {
 
 #ifdef MCVR_ENABLE_SHARC
     // SHARC radiance cache
-#ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
+#ifdef MCVR_ENABLE_SHARC_BUFFERS
     if (Renderer::options.sharcEnabled && module->sharcHashEntries_) {
         auto worldUBO = static_cast<vk::Data::WorldUBO *>(buffers->worldUniformBuffer()->mappedPtr());
         pushConstant.sharcHashEntries = module->sharcHashEntries_->bufferAddress();
@@ -2155,7 +2205,7 @@ void RayTracingModuleContext::render() {
     }
 
 #ifdef MCVR_ENABLE_SHARC
-#ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
+#ifdef MCVR_ENABLE_SHARC_BUFFERS
     // Reset SHARC buffers when disabled so re-enable starts fresh (prevents stale cache artifacts)
     if (!Renderer::options.sharcEnabled && module->sharcBuffersInitialized_) {
         module->sharcBuffersInitialized_ = false;
@@ -2163,14 +2213,14 @@ void RayTracingModuleContext::render() {
     }
 
     // Deferred SHARC resize: process pending capacity change at frame boundary.
-    // Previous frame's SHARC dispatch used old buffers via BDA — drain GPU before freeing them.
-    // This is still vkDeviceWaitIdle, but deferred to the next frame boundary instead of inline,
-    // so it doesn't stall mid-render and the wait is shorter (one frame of latency absorbed).
+    // Previous frame's SHARC dispatch used old buffers via BDA - drain GPU before freeing them.
     if (module->sharcResizePending_ && module->sharcHashEntries_) {
         uint32_t desiredCapacity = 1u << static_cast<uint32_t>(
             std::max(18, std::min(26, Renderer::options.sharcCapacityExponent)));
         auto fw = module->framework_.lock();
         if (fw) {
+            RadianceLogger::log("RayTracing", "INFO", "SHARC resize start capacity=%u", desiredCapacity);
+            g_crashRing.record("SHARC:resize:start");
             vkDeviceWaitIdle(fw->device()->vkDevice());
 
             VkBufferUsageFlags sharcUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
@@ -2185,16 +2235,17 @@ void RayTracingModuleContext::render() {
                 fw->vma(), fw->device(), desiredCapacity * 16, sharcUsage);
             module->sharcBuffersInitialized_ = false;
             module->sharcFrameIndex_ = 0;
-            // Update push constant BDAs for this frame
             pushConstant.sharcHashEntries = module->sharcHashEntries_->bufferAddress();
             pushConstant.sharcAccumulation = module->sharcAccumulation_->bufferAddress();
             pushConstant.sharcResolved = module->sharcResolved_->bufferAddress();
             pushConstant.sharcCapacity = desiredCapacity;
+            RadianceLogger::log("RayTracing", "INFO", "SHARC resize done ok=%d", module->sharcHashEntries_ ? 1 : 0);
+            g_crashRing.record("SHARC:resize:done");
         }
         module->sharcResizePending_ = false;
     }
 
-    // Check if SHARC capacity exponent changed — mark for deferred resize at next frame boundary
+    // Check if SHARC capacity exponent changed - mark for deferred resize at next frame boundary.
     {
         uint32_t desiredCapacity = 1u << static_cast<uint32_t>(
             std::max(18, std::min(26, Renderer::options.sharcCapacityExponent)));
@@ -2203,38 +2254,44 @@ void RayTracingModuleContext::render() {
         }
     }
 
-    // SHARC 3-pass dispatch: update → resolve → main render (with cache query)
-    // Skip entirely during offline accumulation — SHARC temporal cache conflicts with independent samples
-    if (Renderer::options.sharcEnabled && !accumulating
-        && module->sharcUpdatePipeline_ && module->sharcResolvePipeline_ != VK_NULL_HANDLE
-        && module->sharcHashEntries_ && sharcUpdateSbt) {
+    const bool sharcBuffersReady = Renderer::options.sharcEnabled && !accumulating
+        && module->sharcHashEntries_ && module->sharcAccumulation_ && module->sharcResolved_;
+    if (sharcBuffersReady && !module->sharcBuffersInitialized_) {
+        worldCommandBuffer->beginLabel("RT:SHARC Init", 0.8f, 0.5f, 0.1f);
+        ScopedGpuProfile sharcInitProfile(profileCmd, "RT.SHARCInit");
+        VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
+        renderDiag("SHARC init fill begin capacity=%u", module->sharcCapacity_);
+        g_crashRing.record("SHARC:initFill:start");
+        vkCmdFillBuffer(cmd, module->sharcHashEntries_->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(cmd, module->sharcAccumulation_->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(cmd, module->sharcResolved_->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
+
+        VkMemoryBarrier fillBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        fillBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        fillBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &fillBarrier, 0, nullptr, 0, nullptr);
+        module->sharcBuffersInitialized_ = true;
+        renderDiag("SHARC init fill end");
+        g_crashRing.record("SHARC:initFill:done");
+        sharcInitProfile.close();
+        worldCommandBuffer->endLabel();
+    }
+
+#ifdef MCVR_ENABLE_SHARC_UPDATE_PASS
+    if (sharcBuffersReady && module->sharcUpdatePipeline_ && sharcUpdateSbt) {
         worldCommandBuffer->beginLabel("RT:SHARC Update", 0.9f, 0.6f, 0.1f);
         ScopedGpuProfile sharcUpdateProfile(profileCmd, "RT.SHARCUpdate");
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
         GpuDiag::checkpoint(cmd, GpuDiag::SHARC_UPDATE_RT);
+        renderDiag("SHARC update begin downscale=%d block=%d bounces=%d", Renderer::options.sharcDownscale,
+                   Renderer::options.sharcUpdateBlockSize, Renderer::options.sharcUpdateBounces);
+        g_crashRing.record("SHARC:updateDispatch:start");
 
-        // Zero-fill SHARC buffers on first use
-        if (!module->sharcBuffersInitialized_) {
-            vkCmdFillBuffer(cmd, module->sharcHashEntries_->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
-            vkCmdFillBuffer(cmd, module->sharcAccumulation_->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
-            vkCmdFillBuffer(cmd, module->sharcResolved_->vkBuffer(), 0, VK_WHOLE_SIZE, 0);
-
-            VkMemoryBarrier fillBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            fillBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            fillBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                0, 1, &fillBarrier, 0, nullptr, 0, nullptr);
-            module->sharcBuffersInitialized_ = true;
-        }
-
-        // Pass 1: SHARC Update (sparse RT — populates cache with bounce radiance)
-        // Disable ReSTIR in update pass to prevent CHS reservoir writes.
-        // Area lights (bit 1) stay ENABLED — CHS fallback paths (deterministic top-2 shadowed
-        // for primary, unshadowed 8-light accumulation for bounce) do NOT write reservoirs.
         RayTracingPushConstant updatePC = pushConstant;
-        updatePC.flags &= ~(4 | 16); // Clear restir (4), restir bounce (16) — keep area lights
+        updatePC.flags &= ~(4 | 16); // Clear ReSTIR and ReSTIR bounce; keep area lights.
         vkCmdPushConstants(cmd, rayTracingDescriptorTable->vkPipelineLayout(),
                            VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
@@ -2246,21 +2303,34 @@ void RayTracingModuleContext::render() {
             ->bindRTPipeline(module->sharcUpdatePipeline_)
             ->raytracing(sharcUpdateSbt, hdrNoisyOutputImage->width() / ds, hdrNoisyOutputImage->height() / ds, 1);
 
-        // Barrier: update RT writes → resolve compute reads
         VkMemoryBarrier updateBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         updateBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         updateBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         vkCmdPipelineBarrier(cmd,
             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+#ifdef MCVR_ENABLE_SHARC_RESOLVE_PASS
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+#else
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+#endif
             0, 1, &updateBarrier, 0, nullptr, 0, nullptr);
 
+        renderDiag("SHARC update end");
+        g_crashRing.record("SHARC:updateDispatch:done");
         sharcUpdateProfile.close();
-        worldCommandBuffer->endLabel(); // end SHARC Update
+        worldCommandBuffer->endLabel();
+    }
+#endif
+
+#ifdef MCVR_ENABLE_SHARC_RESOLVE_PASS
+    if (sharcBuffersReady && module->sharcResolvePipeline_ != VK_NULL_HANDLE) {
         worldCommandBuffer->beginLabel("RT:SHARC Resolve", 0.9f, 0.7f, 0.2f);
         ScopedGpuProfile sharcResolveProfile(profileCmd, "RT.SHARCResolve");
+        VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
         GpuDiag::checkpoint(cmd, GpuDiag::SHARC_RESOLVE);
-        // Pass 2: SHARC Resolve (compute — temporal blend + stale eviction)
+        renderDiag("SHARC resolve begin capacity=%u frame=%u", module->sharcCapacity_, module->sharcFrameIndex_);
+        g_crashRing.record("SHARC:resolveDispatch:start");
+
         struct SharcResolvePushConstant {
             float cameraPositionPrevX, cameraPositionPrevY, cameraPositionPrevZ;
             uint32_t accumulationFrameNum;
@@ -2298,7 +2368,6 @@ void RayTracingModuleContext::render() {
             0, 76, &resolvePC);
         vkCmdDispatch(cmd, (module->sharcCapacity_ + 63) / 64, 1, 1);
 
-        // Barrier: resolve compute writes → main RT reads
         VkMemoryBarrier resolveBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         resolveBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         resolveBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -2307,14 +2376,16 @@ void RayTracingModuleContext::render() {
             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
             0, 1, &resolveBarrier, 0, nullptr, 0, nullptr);
 
-        // Update tracking for next frame
         module->sharcPrevCameraX_ = pushConstant.sharcCameraX;
         module->sharcPrevCameraY_ = pushConstant.sharcCameraY;
         module->sharcPrevCameraZ_ = pushConstant.sharcCameraZ;
         module->sharcFrameIndex_++;
+        renderDiag("SHARC resolve end");
+        g_crashRing.record("SHARC:resolveDispatch:done");
         sharcResolveProfile.close();
-        worldCommandBuffer->endLabel(); // end SHARC Resolve
+        worldCommandBuffer->endLabel();
     }
+#endif
 #endif
 #endif // MCVR_ENABLE_SHARC
 

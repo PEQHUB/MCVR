@@ -1,0 +1,134 @@
+// Tiny read-only SHARC query helper for world.rgen.
+// This intentionally avoids SHARC update/resolve SDK includes and 64-bit atomics.
+
+#ifndef RADIANCE_SHARC_QUERY_READONLY_GLSL
+#define RADIANCE_SHARC_QUERY_READONLY_GLSL
+
+#define RADIANCE_SHARC_POSITION_BIT_NUM 17
+#define RADIANCE_SHARC_POSITION_BIT_MASK ((1u << RADIANCE_SHARC_POSITION_BIT_NUM) - 1)
+#define RADIANCE_SHARC_LEVEL_BIT_NUM 10
+#define RADIANCE_SHARC_LEVEL_BIT_MASK ((1u << RADIANCE_SHARC_LEVEL_BIT_NUM) - 1)
+#define RADIANCE_SHARC_BUCKET_SIZE 16
+#define RADIANCE_SHARC_POSITION_BIAS 1e-4
+#define RADIANCE_SHARC_NORMAL_BIAS 1e-3
+#define RADIANCE_SHARC_GRID_LOGARITHM_BASE 2.0
+#define RADIANCE_SHARC_GRID_LEVEL_BIAS 0.0
+#define RADIANCE_SHARC_SAMPLE_NUM_THRESHOLD 0.0
+
+layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer SharcReadonlyHashEntries {
+    uint64_t data[];
+};
+
+struct SharcReadonlyPackedData {
+    f16vec4 radianceData;
+    uint sampleData;
+    uint sampleDataExt;
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer SharcReadonlyPackedBuffer {
+    SharcReadonlyPackedData data[];
+};
+
+uint sharcQueryHashJenkins32(uint a) {
+    a = (a + 0x7ed55d16u) + (a << 12u);
+    a = (a ^ 0xc761c23cu) ^ (a >> 19u);
+    a = (a + 0x165667b1u) + (a << 5u);
+    a = (a + 0xd3a2646cu) ^ (a << 9u);
+    a = (a + 0xfd7046c5u) + (a << 3u);
+    a = (a ^ 0xb55a4f09u) ^ (a >> 16u);
+    return a;
+}
+
+uint sharcQueryHash32(uint64_t hashKey) {
+    return sharcQueryHashJenkins32(uint((hashKey >> 0) & uint64_t(0xFFFFFFFFu)))
+        ^ sharcQueryHashJenkins32(uint((hashKey >> 32) & uint64_t(0xFFFFFFFFu)));
+}
+
+float sharcQueryLogBase(float x, float base) {
+    return log(x) / log(base);
+}
+
+uint sharcQueryGetLevel(vec3 samplePosition, vec3 cameraPosition) {
+    float distance2 = dot(cameraPosition - samplePosition, cameraPosition - samplePosition);
+    return uint(clamp(0.5 * sharcQueryLogBase(distance2, RADIANCE_SHARC_GRID_LOGARITHM_BASE)
+        + RADIANCE_SHARC_GRID_LEVEL_BIAS, 1.0, float(RADIANCE_SHARC_LEVEL_BIT_MASK)));
+}
+
+float sharcQueryGetVoxelSize(uint gridLevel, float sceneScale) {
+    return pow(RADIANCE_SHARC_GRID_LOGARITHM_BASE, float(gridLevel))
+        / (sceneScale * pow(RADIANCE_SHARC_GRID_LOGARITHM_BASE, RADIANCE_SHARC_GRID_LEVEL_BIAS));
+}
+
+ivec4 sharcQueryCalculatePositionLog(vec3 samplePosition, vec3 cameraPosition, float sceneScale) {
+    samplePosition += vec3(RADIANCE_SHARC_POSITION_BIAS);
+    uint gridLevel = sharcQueryGetLevel(samplePosition, cameraPosition);
+    float voxelSize = sharcQueryGetVoxelSize(gridLevel, sceneScale);
+    ivec3 gridPosition = ivec3(floor(samplePosition / voxelSize));
+    return ivec4(gridPosition.xyz, int(gridLevel));
+}
+
+uint64_t sharcQueryComputeSpatialHash(vec3 samplePosition, vec3 sampleNormal, vec3 cameraPosition, float sceneScale) {
+    uvec4 gridPosition = uvec4(sharcQueryCalculatePositionLog(samplePosition, cameraPosition, sceneScale));
+    uint64_t hashKey =
+        ((uint64_t(gridPosition.x) & uint64_t(RADIANCE_SHARC_POSITION_BIT_MASK)) << (RADIANCE_SHARC_POSITION_BIT_NUM * 0)) |
+        ((uint64_t(gridPosition.y) & uint64_t(RADIANCE_SHARC_POSITION_BIT_MASK)) << (RADIANCE_SHARC_POSITION_BIT_NUM * 1)) |
+        ((uint64_t(gridPosition.z) & uint64_t(RADIANCE_SHARC_POSITION_BIT_MASK)) << (RADIANCE_SHARC_POSITION_BIT_NUM * 2)) |
+        ((uint64_t(gridPosition.w) & uint64_t(RADIANCE_SHARC_LEVEL_BIT_MASK)) << (RADIANCE_SHARC_POSITION_BIT_NUM * 3));
+
+    uint normalBits =
+        (sampleNormal.x + RADIANCE_SHARC_NORMAL_BIAS >= 0.0 ? 0u : 1u) +
+        (sampleNormal.y + RADIANCE_SHARC_NORMAL_BIAS >= 0.0 ? 0u : 2u) +
+        (sampleNormal.z + RADIANCE_SHARC_NORMAL_BIAS >= 0.0 ? 0u : 4u);
+    hashKey |= (uint64_t(normalBits) << (RADIANCE_SHARC_POSITION_BIT_NUM * 3 + RADIANCE_SHARC_LEVEL_BIT_NUM));
+
+    return hashKey;
+}
+
+bool sharcQueryFind(uint64_t hashEntriesBDA, uint capacity, uint64_t hashKey, out uint cacheIndex) {
+    SharcReadonlyHashEntries hashEntries = SharcReadonlyHashEntries(hashEntriesBDA);
+    uint baseSlot = sharcQueryHash32(hashKey) % capacity;
+    [[dont_unroll]]
+    for (uint bucketOffset = 0u; bucketOffset < RADIANCE_SHARC_BUCKET_SIZE; ++bucketOffset) {
+        uint slotIndex = (baseSlot + bucketOffset) % capacity;
+        uint64_t storedHashKey = hashEntries.data[slotIndex];
+        if (storedHashKey == hashKey) {
+            cacheIndex = slotIndex;
+            return true;
+        }
+    }
+    cacheIndex = 0xFFFFFFFFu;
+    return false;
+}
+
+bool sharcQueryCachedRadiance(
+    uint64_t hashEntriesBDA,
+    uint64_t resolvedBDA,
+    uint capacity,
+    vec3 cameraPosition,
+    float sceneScale,
+    vec3 positionWorld,
+    vec3 normalWorld,
+    out vec3 radiance,
+    out float voxelSize) {
+    radiance = vec3(0.0);
+    uint level = sharcQueryGetLevel(positionWorld, cameraPosition);
+    voxelSize = sharcQueryGetVoxelSize(level, sceneScale);
+
+    uint64_t hashKey = sharcQueryComputeSpatialHash(positionWorld, normalWorld, cameraPosition, sceneScale);
+    uint cacheIndex;
+    if (!sharcQueryFind(hashEntriesBDA, capacity, hashKey, cacheIndex)) {
+        return false;
+    }
+
+    SharcReadonlyPackedBuffer resolved = SharcReadonlyPackedBuffer(resolvedBDA);
+    SharcReadonlyPackedData packedData = resolved.data[cacheIndex];
+    float sampleNum = float(packedData.radianceData.w);
+    if (sampleNum <= RADIANCE_SHARC_SAMPLE_NUM_THRESHOLD) {
+        return false;
+    }
+
+    radiance = vec3(packedData.radianceData.xyz);
+    return !any(isnan(radiance)) && !any(isinf(radiance));
+}
+
+#endif
