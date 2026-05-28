@@ -116,8 +116,9 @@ layout(push_constant) uniform PushConstant {
     int   pomRefinement;        // binary refinement iterations (0-8)
     float pomFadeDistance;      // distance in blocks to fade displacement out (8-256)
     float colorExpansion;       // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
-    uint blueNoiseFrame;                 // alignment padding (offset 52)
-    // SHARC BDA fields (offsets 56-119, 64 bytes)
+    uint blueNoiseFrame;
+    uint rtDebugFlags;
+    // SHARC BDA fields
     uint64_t _sharcBDA0;
     uint64_t _sharcBDA1;
     uint64_t _sharcBDA2;
@@ -147,6 +148,8 @@ layout(push_constant) uniform PushConstant {
 #define PHYSICAL_SUN_DISK  ((pc.flags & 2048) != 0)
 #define NO_HAND_AMBIENT    ((pc.flags & 4096) != 0)
 #define ENTITY_NORMALS_ON  ((pc.flags & 32768) != 0)
+#define RT_DEBUG_DISABLE_SECONDARY_SUN_SHADOW   ((pc.rtDebugFlags & 4u) != 0u)
+#define RT_DEBUG_DISABLE_SECONDARY_CLOUD_SHADOW ((pc.rtDebugFlags & 8u) != 0u)
 
 layout(set = 3, binding = 3, rgba32f) uniform readonly image2D normalRoughnessImage;
 layout(set = 3, binding = 4, rg32f) uniform readonly image2D motionVectorImage;
@@ -1335,7 +1338,8 @@ void main() {
     vec3 shadowBiasN = dot(sampledLightDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
     vec3 shadowRayOrigin = offset_ray(worldPos, shadowBiasN);
 
-    if (worldUbo.skyType == 1) {
+    bool skipSecondarySunShadow = RT_DEBUG_DISABLE_SECONDARY_SUN_SHADOW && mainRay.index > 0;
+    if (worldUbo.skyType == 1 && !skipSecondarySunShadow) {
         float pdf; // not used
         vec3 lightBRDF = DisneyEval(mat, viewDir, normal, sampledLightDir, pdf, pc.flags);
 
@@ -1373,10 +1377,12 @@ void main() {
 
         // Apply cloud shadowing (procedural volumetric slab).
         // This is evaluated at the shading point so it works for primary and reflected paths.
-        float cloudT = cloudTransmittance(worldPos + sampledLightDir * 0.01, sampledLightDir, 0.0, 1000.0, worldUbo, skyUBO, 0);
-        float shadowStrength = max(skyUBO.cloudLighting.x, 0.0);
-        cloudT = pow(max(cloudT, 1e-6), shadowStrength);
-        lightContribution *= cloudT;
+        if (!(RT_DEBUG_DISABLE_SECONDARY_CLOUD_SHADOW && mainRay.index > 0)) {
+            float cloudT = cloudTransmittance(worldPos + sampledLightDir * 0.01, sampledLightDir, 0.0, 1000.0, worldUbo, skyUBO, 0);
+            float shadowStrength = max(skyUBO.cloudLighting.x, 0.0);
+            cloudT = pow(max(cloudT, 1e-6), shadowStrength);
+            lightContribution *= cloudT;
+        }
 
         float progress = skyUBO.rainGradient;
         vec3 lightRadiance = lightContribution * mainRay.throughput * lightBRDF;

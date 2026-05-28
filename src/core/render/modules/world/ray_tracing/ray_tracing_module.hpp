@@ -39,7 +39,8 @@ struct RayTracingPushConstant {
     // Color expansion (offset 48)
     float colorExpansion;        // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
     uint32_t blueNoiseFrame;     // monotonic frame counter for blue noise temporal offset
-    // SHARC fields (offset 56, 52 bytes) — buffer device addresses + grid params
+    uint32_t rtDebugFlags;       // transient RT.MainTrace floor sweep flags
+    // SHARC fields: buffer device addresses + grid params
     uint64_t sharcHashEntries;   // BDA of hash entry buffer
     uint64_t sharcAccumulation;  // BDA of accumulation buffer
     uint64_t sharcResolved;      // BDA of resolved radiance buffer

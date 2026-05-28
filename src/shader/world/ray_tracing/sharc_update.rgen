@@ -63,6 +63,7 @@ layout(push_constant) uniform PushConstant {
     // Color expansion
     float colorExpansion;
     uint blueNoiseFrame;
+    uint rtDebugFlags;
     // SHARC fields
     uint64_t sharcHashEntries;
     uint64_t sharcAccumulation;

@@ -156,6 +156,7 @@ struct Options {
     // Profiled 2026-03-25: SER ON harms perf vs OFF. Keep option for future re-evaluation.
     bool serEnabled = false;
     bool serHintsEnabled = true;  // explicit geometry-based coherence hints (on top of driver reorder)
+    uint32_t rtDebugFlags = 0;    // transient DebugBridge RT.MainTrace floor sweep flags
 
     // SHARC radiance cache
     bool sharcEnabled = true;

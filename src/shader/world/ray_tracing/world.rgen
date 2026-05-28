@@ -156,6 +156,7 @@ layout(push_constant) uniform PushConstant {
     // Color expansion
     float colorExpansion;
     uint blueNoiseFrame;
+    uint rtDebugFlags;
     // SHARC fields
     uint64_t sharcHashEntries;
     uint64_t sharcAccumulation;
@@ -187,6 +188,8 @@ pc;
 #define OFFLINE_ACCUMULATING  ((pc.offlineFlags & 1) != 0)
 #define OFFLINE_DISABLE_RR    ((pc.offlineFlags & 2) != 0)
 #define OFFLINE_DISABLE_CLAMP ((pc.offlineFlags & 4) != 0)
+#define RT_DEBUG_DISABLE_REFLECTION_PROBE ((pc.rtDebugFlags & 1u) != 0u)
+#define RT_DEBUG_DISABLE_HAND_PASS        ((pc.rtDebugFlags & 2u) != 0u)
 
 layout(location = 0) rayPayloadEXT PrimaryRay mainRay;
 layout(location = 1) rayPayloadEXT ShadowRay reflectionProbe;
@@ -295,6 +298,10 @@ void main() {
 
     mainRay.seed = worldUBO.seed;
     for (int isHand = 0; isHand <= 1; isHand++) {
+        if (RT_DEBUG_DISABLE_HAND_PASS && isHand != 0) {
+            continue;
+        }
+
         // Result of trace
         bool hitSky = false;
         bool isPsr = false;
@@ -759,7 +766,7 @@ void main() {
         // DLSS-RR dense, stable reflection MVs for glossy/metallic pixels (roughness <= 0.24).
         // Uses the shadow hit group (SBT offset 0) which just writes gl_HitTEXT — no
         // shading, no BSDF. OpaqueEXT skips any-hit for minimal traversal cost.
-        if (isFirstHitNoisy && !hitSky && firstHitMat.roughness <= 0.24) {
+        if (!RT_DEBUG_DISABLE_REFLECTION_PROBE && isFirstHitNoisy && !hitSky && firstHitMat.roughness <= 0.24) {
             // Real-space incoming direction at PSR-resolved surface
             vec3 incomingDir = (psrMirror * vec4(orgDirection, 0.0)).xyz;
             // Real-space reflection direction for the probe trace

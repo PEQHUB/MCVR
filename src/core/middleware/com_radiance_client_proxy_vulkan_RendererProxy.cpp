@@ -345,6 +345,22 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
 }
 
 /**
+ * Transient RT.MainTrace diagnostic flags. DebugBridge sweeps these and restores them;
+ * they are intentionally not persisted in Java options.
+ */
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeSetRtDebugFlags(
+    JNIEnv *, jclass, jint flags) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    Renderer::options.rtDebugFlags = flags < 0 ? 0u : static_cast<uint32_t>(flags);
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetRtDebugFlags(
+    JNIEnv *, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    return static_cast<jint>(Renderer::options.rtDebugFlags);
+}
+
+/**
  * Returns renderer feature truth as a flat string. This reports compiled/native reality,
  * not just Java option intent.
  */
@@ -375,7 +391,8 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Rende
         << ",serDevice:" << (serDevice ? 1 : 0)
         << ",serOption:" << (Renderer::options.serEnabled ? 1 : 0)
         << ",serHintsOption:" << (Renderer::options.serHintsEnabled ? 1 : 0)
-        << ",serActive:" << (serActive ? 1 : 0);
+        << ",serActive:" << (serActive ? 1 : 0)
+        << ",rtDebugFlags:" << Renderer::options.rtDebugFlags;
 
     bool rayTracingModuleFound = false;
     auto pipeline = framework ? framework->pipeline() : nullptr;

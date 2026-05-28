@@ -1933,6 +1933,7 @@ void RayTracingModuleContext::render() {
     // Color expansion
     pushConstant.colorExpansion = Renderer::options.colorExpansion;
     pushConstant.blueNoiseFrame = context->frameIndex;
+    pushConstant.rtDebugFlags = Renderer::options.rtDebugFlags;
 
     // Structured logging: push constants (every ~1 second)
     if (RadianceLogger::isEnabled()) {
