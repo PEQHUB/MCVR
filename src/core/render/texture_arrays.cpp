@@ -5,6 +5,162 @@
 #include <cstring>
 #include <iostream>
 
+namespace {
+constexpr VkPipelineStageFlags2 kTextureReadStages =
+    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+    VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+
+size_t subresourceIndex(const TextureArrayManager::ArrayInfo& info, uint32_t layer, uint32_t mip) {
+    return static_cast<size_t>(layer) * info.mipLevels + mip;
+}
+
+VkImageLayout getTrackedLayout(const TextureArrayManager::ArrayInfo& info, uint32_t layer, uint32_t mip) {
+    if (layer >= info.layerCount || mip >= info.mipLevels) return VK_IMAGE_LAYOUT_UNDEFINED;
+    size_t index = subresourceIndex(info, layer, mip);
+    if (index >= info.subresourceLayouts.size()) return VK_IMAGE_LAYOUT_UNDEFINED;
+    return info.subresourceLayouts[index];
+}
+
+void setTrackedLayout(TextureArrayManager::ArrayInfo& info, uint32_t layer, uint32_t mip, VkImageLayout layout) {
+    if (layer >= info.layerCount || mip >= info.mipLevels) return;
+    size_t index = subresourceIndex(info, layer, mip);
+    if (index >= info.subresourceLayouts.size()) return;
+    info.subresourceLayouts[index] = layout;
+}
+
+VkPipelineStageFlags2 sourceStageFor(VkImageLayout layout) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_UNDEFINED:
+            return VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            return VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            return kTextureReadStages;
+        default:
+            return VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    }
+}
+
+VkAccessFlags2 sourceAccessFor(VkImageLayout layout) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_UNDEFINED:
+            return 0;
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            return VK_ACCESS_2_TRANSFER_READ_BIT;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            return VK_ACCESS_2_SHADER_READ_BIT;
+        default:
+            return VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    }
+}
+
+VkPipelineStageFlags2 destinationStageFor(VkImageLayout layout) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            return VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            return kTextureReadStages;
+        default:
+            return VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    }
+}
+
+VkAccessFlags2 destinationAccessFor(VkImageLayout layout) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            return VK_ACCESS_2_TRANSFER_READ_BIT;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            return VK_ACCESS_2_SHADER_READ_BIT;
+        default:
+            return VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    }
+}
+
+void transitionSubresource(TextureArrayManager::ArrayInfo& info,
+                           std::shared_ptr<vk::CommandBuffer> cmdBuffer,
+                           uint32_t layer,
+                           uint32_t mip,
+                           VkImageLayout newLayout) {
+    VkImageLayout oldLayout = getTrackedLayout(info, layer, mip);
+    if (oldLayout == newLayout) return;
+
+    VkImageSubresourceRange range{};
+    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.baseMipLevel = mip;
+    range.levelCount = 1;
+    range.baseArrayLayer = layer;
+    range.layerCount = 1;
+
+    cmdBuffer->barriersBufferImage({}, {{
+        .srcStageMask = sourceStageFor(oldLayout),
+        .srcAccessMask = sourceAccessFor(oldLayout),
+        .dstStageMask = destinationStageFor(newLayout),
+        .dstAccessMask = destinationAccessFor(newLayout),
+        .oldLayout = oldLayout,
+        .newLayout = newLayout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = info.image,
+        .subresourceRange = range,
+    }});
+
+    setTrackedLayout(info, layer, mip, newLayout);
+}
+
+void generateMipChainForLayer(TextureArrayManager::ArrayInfo& info,
+                              std::shared_ptr<vk::CommandBuffer> cmdBuffer,
+                              uint32_t layer) {
+    int32_t mipWidth = static_cast<int32_t>(info.spriteSize);
+    int32_t mipHeight = static_cast<int32_t>(info.spriteSize);
+
+    for (uint32_t mip = 1; mip < info.mipLevels; mip++) {
+        transitionSubresource(info, cmdBuffer, layer, mip - 1,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        transitionSubresource(info, cmdBuffer, layer, mip,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+        int32_t nextWidth = mipWidth > 1 ? mipWidth / 2 : 1;
+        int32_t nextHeight = mipHeight > 1 ? mipHeight / 2 : 1;
+
+        VkImageBlit blit{};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.mipLevel = mip - 1;
+        blit.srcSubresource.baseArrayLayer = layer;
+        blit.srcSubresource.layerCount = 1;
+        blit.srcOffsets[0] = {0, 0, 0};
+        blit.srcOffsets[1] = {mipWidth, mipHeight, 1};
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.mipLevel = mip;
+        blit.dstSubresource.baseArrayLayer = layer;
+        blit.dstSubresource.layerCount = 1;
+        blit.dstOffsets[0] = {0, 0, 0};
+        blit.dstOffsets[1] = {nextWidth, nextHeight, 1};
+
+        vkCmdBlitImage(cmdBuffer->vkCommandBuffer(),
+            info.image->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            info.image->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit, VK_FILTER_LINEAR);
+
+        transitionSubresource(info, cmdBuffer, layer, mip - 1,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        transitionSubresource(info, cmdBuffer, layer, mip,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+        mipWidth = nextWidth;
+        mipHeight = nextHeight;
+    }
+}
+}
+
 uint32_t TextureArrayManager::computeMipLevels(uint32_t spriteSize) {
     return static_cast<uint32_t>(std::floor(std::log2(spriteSize))) + 1;
 }
@@ -133,26 +289,8 @@ TextureArrayManager::DirtyLayers TextureArrayManager::flushUploads(
 		staging->flush();
 		currentFrameStagingBuffers_.push_back(staging);
 
-		// Transition image to TRANSFER_DST
-		VkImageSubresourceRange range{};
-		range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		range.baseMipLevel = upload.mipLevel;
-		range.levelCount = 1;
-		range.baseArrayLayer = upload.layer;
-		range.layerCount = 1;
-
-		cmdBuffer->barriersBufferImage({}, {{
-			.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-			.srcAccessMask = 0,
-			.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-			.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-			.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-			.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.image = image,
-			.subresourceRange = range,
-		}});
+		transitionSubresource(info, cmdBuffer, upload.layer, upload.mipLevel,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
 		// Copy staging buffer to image layer
 		VkBufferImageCopy region{};
@@ -171,20 +309,8 @@ TextureArrayManager::DirtyLayers TextureArrayManager::flushUploads(
 			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			1, &region);
 
-		// Transition to SHADER_READ_ONLY
-		cmdBuffer->barriersBufferImage({}, {{
-			.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-			.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-			.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-				VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-			.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-			.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.image = image,
-			.subresourceRange = range,
-		}});
+		transitionSubresource(info, cmdBuffer, upload.layer, upload.mipLevel,
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
 		// Track dirty layers for mipgen
 		if (upload.arrayId == albedoId) dirty.albedo.push_back(upload.layer);
@@ -206,112 +332,10 @@ void TextureArrayManager::generateMipmaps(uint32_t arrayId,
     if (vk::formatIsBlockCompressed(info.format)) return;
     if (info.mipLevels <= 1) return;
 
-    auto physicalDevice = info.image->vkImage() ? nullptr : nullptr; // unused
-    // We need the queue family for barriers. Use 0 as fallback.
-
     for (uint32_t layer = 0; layer < info.layerCount; layer++) {
-        int32_t mipWidth = static_cast<int32_t>(info.spriteSize);
-        int32_t mipHeight = static_cast<int32_t>(info.spriteSize);
-
-        for (uint32_t mip = 1; mip < info.mipLevels; mip++) {
-            // Transition mip-1 to TRANSFER_SRC
-            VkImageSubresourceRange srcRange{};
-            srcRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            srcRange.baseMipLevel = mip - 1;
-            srcRange.levelCount = 1;
-            srcRange.baseArrayLayer = layer;
-            srcRange.layerCount = 1;
-
-            cmdBuffer->barriersBufferImage({}, {{
-                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
-                .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = info.image,
-                .subresourceRange = srcRange,
-            }});
-
-            // Transition mip to TRANSFER_DST
-            VkImageSubresourceRange dstRange{};
-            dstRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            dstRange.baseMipLevel = mip;
-            dstRange.levelCount = 1;
-            dstRange.baseArrayLayer = layer;
-            dstRange.layerCount = 1;
-
-            cmdBuffer->barriersBufferImage({}, {{
-                .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                .srcAccessMask = 0,
-                .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-                .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = info.image,
-                .subresourceRange = dstRange,
-            }});
-
-            int32_t nextWidth = mipWidth > 1 ? mipWidth / 2 : 1;
-            int32_t nextHeight = mipHeight > 1 ? mipHeight / 2 : 1;
-
-            VkImageBlit blit{};
-            blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            blit.srcSubresource.mipLevel = mip - 1;
-            blit.srcSubresource.baseArrayLayer = layer;
-            blit.srcSubresource.layerCount = 1;
-            blit.srcOffsets[0] = {0, 0, 0};
-            blit.srcOffsets[1] = {mipWidth, mipHeight, 1};
-            blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            blit.dstSubresource.mipLevel = mip;
-            blit.dstSubresource.baseArrayLayer = layer;
-            blit.dstSubresource.layerCount = 1;
-            blit.dstOffsets[0] = {0, 0, 0};
-            blit.dstOffsets[1] = {nextWidth, nextHeight, 1};
-
-            vkCmdBlitImage(cmdBuffer->vkCommandBuffer(),
-                           info.image->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           info.image->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           1, &blit, VK_FILTER_LINEAR);
-
-            // Transition mip-1 back to SHADER_READ_ONLY
-            cmdBuffer->barriersBufferImage({}, {{
-                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                .srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
-                .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-                                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = info.image,
-                .subresourceRange = srcRange,
-            }});
-
-            // Transition current mip to SHADER_READ_ONLY
-            cmdBuffer->barriersBufferImage({}, {{
-                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-                                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-                .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .image = info.image,
-                .subresourceRange = dstRange,
-            }});
-
-            mipWidth = nextWidth;
-            mipHeight = nextHeight;
-        }
+        generateMipChainForLayer(info, cmdBuffer, layer);
     }
+    info.image->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     std::cout << "[TextureArrayManager] Generated mipmaps for array " << arrayId
               << " (" << info.layerCount << " layers, " << info.mipLevels << " mips)" << std::endl;
@@ -327,224 +351,43 @@ void TextureArrayManager::generateMipmapsForLayer(uint32_t arrayId, uint32_t lay
     if (info.mipLevels <= 1) return;
     if (layer >= info.layerCount) return;
 
-    int32_t mipWidth = static_cast<int32_t>(info.spriteSize);
-    int32_t mipHeight = static_cast<int32_t>(info.spriteSize);
-
-    for (uint32_t mip = 1; mip < info.mipLevels; mip++) {
-        VkImageSubresourceRange srcRange{};
-        srcRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        srcRange.baseMipLevel = mip - 1;
-        srcRange.levelCount = 1;
-        srcRange.baseArrayLayer = layer;
-        srcRange.layerCount = 1;
-
-        cmdBuffer->barriersBufferImage({}, {{
-            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = info.image,
-            .subresourceRange = srcRange,
-        }});
-
-        VkImageSubresourceRange dstRange{};
-        dstRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        dstRange.baseMipLevel = mip;
-        dstRange.levelCount = 1;
-        dstRange.baseArrayLayer = layer;
-        dstRange.layerCount = 1;
-
-        cmdBuffer->barriersBufferImage({}, {{
-            .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-            .srcAccessMask = 0,
-            .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = info.image,
-            .subresourceRange = dstRange,
-        }});
-
-        int32_t nextWidth = mipWidth > 1 ? mipWidth / 2 : 1;
-        int32_t nextHeight = mipHeight > 1 ? mipHeight / 2 : 1;
-
-        VkImageBlit blit{};
-        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        blit.srcSubresource.mipLevel = mip - 1;
-        blit.srcSubresource.baseArrayLayer = layer;
-        blit.srcSubresource.layerCount = 1;
-        blit.srcOffsets[0] = {0, 0, 0};
-        blit.srcOffsets[1] = {mipWidth, mipHeight, 1};
-        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        blit.dstSubresource.mipLevel = mip;
-        blit.dstSubresource.baseArrayLayer = layer;
-        blit.dstSubresource.layerCount = 1;
-        blit.dstOffsets[0] = {0, 0, 0};
-        blit.dstOffsets[1] = {nextWidth, nextHeight, 1};
-
-        vkCmdBlitImage(cmdBuffer->vkCommandBuffer(),
-                       info.image->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       info.image->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                       1, &blit, VK_FILTER_LINEAR);
-
-        cmdBuffer->barriersBufferImage({}, {{
-            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-                            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = info.image,
-            .subresourceRange = srcRange,
-        }});
-
-        cmdBuffer->barriersBufferImage({}, {{
-            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-                            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = info.image,
-            .subresourceRange = dstRange,
-        }});
-
-        mipWidth = nextWidth;
- mipHeight = nextHeight;
- }
+    generateMipChainForLayer(info, cmdBuffer, layer);
+    info.image->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 void TextureArrayManager::generateMipmapsForLayers(uint32_t arrayId,
- const std::vector<uint32_t>& layers,
- std::shared_ptr<vk::CommandBuffer> cmdBuffer) {
- if (layers.empty()) return;
+                                                   const std::vector<uint32_t>& layers,
+                                                   std::shared_ptr<vk::CommandBuffer> cmdBuffer) {
+    if (layers.empty()) return;
 
- auto it = arrays_.find(arrayId);
- if (it == arrays_.end()) return;
+    auto it = arrays_.find(arrayId);
+    if (it == arrays_.end()) return;
 
- auto& info = it->second;
- if (vk::formatIsBlockCompressed(info.format)) return;
- if (info.mipLevels <= 1) return;
+    auto& info = it->second;
+    if (vk::formatIsBlockCompressed(info.format)) return;
+    if (info.mipLevels <= 1) return;
 
- for (uint32_t layer : layers) {
- if (layer >= info.layerCount) continue;
+    std::vector<uint32_t> uniqueLayers = layers;
+    std::sort(uniqueLayers.begin(), uniqueLayers.end());
+    uniqueLayers.erase(std::unique(uniqueLayers.begin(), uniqueLayers.end()), uniqueLayers.end());
 
- int32_t mipWidth = static_cast<int32_t>(info.spriteSize);
- int32_t mipHeight = static_cast<int32_t>(info.spriteSize);
-
- for (uint32_t mip = 1; mip < info.mipLevels; mip++) {
- VkImageSubresourceRange srcRange{};
- srcRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
- srcRange.baseMipLevel = mip - 1;
- srcRange.levelCount = 1;
- srcRange.baseArrayLayer = layer;
- srcRange.layerCount = 1;
-
- cmdBuffer->barriersBufferImage({}, {{
- .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
- .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
- .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
- .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
- .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
- .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
- .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
- .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
- .image = info.image,
- .subresourceRange = srcRange,
- }});
-
- VkImageSubresourceRange dstRange{};
- dstRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
- dstRange.baseMipLevel = mip;
- dstRange.levelCount = 1;
- dstRange.baseArrayLayer = layer;
- dstRange.layerCount = 1;
-
- cmdBuffer->barriersBufferImage({}, {{
- .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
- .srcAccessMask = 0,
- .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
- .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
- .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
- .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
- .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
- .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
- .image = info.image,
- .subresourceRange = dstRange,
- }});
-
- int32_t nextWidth = mipWidth > 1 ? mipWidth / 2 : 1;
- int32_t nextHeight = mipHeight > 1 ? mipHeight / 2 : 1;
-
- VkImageBlit blit{};
- blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
- blit.srcSubresource.mipLevel = mip - 1;
- blit.srcSubresource.baseArrayLayer = layer;
- blit.srcSubresource.layerCount = 1;
- blit.srcOffsets[0] = {0, 0, 0};
- blit.srcOffsets[1] = {mipWidth, mipHeight, 1};
- blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
- blit.dstSubresource.mipLevel = mip;
- blit.dstSubresource.baseArrayLayer = layer;
- blit.dstSubresource.layerCount = 1;
- blit.dstOffsets[0] = {0, 0, 0};
- blit.dstOffsets[1] = {nextWidth, nextHeight, 1};
-
- vkCmdBlitImage(cmdBuffer->vkCommandBuffer(),
- info.image->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
- info.image->vkImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
- 1, &blit, VK_FILTER_LINEAR);
-
- cmdBuffer->barriersBufferImage({}, {{
- .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
- .srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
- .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
- VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
- .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
- .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
- .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
- .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
- .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
- .image = info.image,
- .subresourceRange = srcRange,
- }});
-
- cmdBuffer->barriersBufferImage({}, {{
- .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
- .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
- .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
- VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
- .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
- .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
- .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
- .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
- .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
- .image = info.image,
- .subresourceRange = dstRange,
- }});
-
- mipWidth = nextWidth;
- mipHeight = nextHeight;
- }
- }
+    for (uint32_t layer : uniqueLayers) {
+        if (layer < info.layerCount) {
+            generateMipChainForLayer(info, cmdBuffer, layer);
+        }
+    }
+    info.image->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 const TextureArrayManager::ArrayInfo* TextureArrayManager::getArray(uint32_t arrayId) const {
 	auto it = arrays_.find(arrayId);
     if (it == arrays_.end()) return nullptr;
     return &it->second;
+}
+
+bool TextureArrayManager::hasPendingUploads() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !stagedUploads_.empty();
 }
 
 std::vector<uint32_t> TextureArrayManager::collectDirtyLayers(uint32_t arrayId) const {

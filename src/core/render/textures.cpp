@@ -197,8 +197,12 @@ void Textures::queueUpload(uint8_t *srcPointer,
     VkBufferImageCopy region = {};
     region.bufferRowLength = srcRowPixels;
     region.bufferOffset = offset + srcOffsetY * srcRowPixels * bytePerPixel + srcOffsetX * bytePerPixel;
-    region.imageSubresource = vk::wholeColorSubresourceLayers;
-    region.imageSubresource.mipLevel = level;
+    region.imageSubresource = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .mipLevel = level,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
     region.imageExtent = {width, height, 1};
     region.imageOffset = {dstOffsetX, dstOffsetY, 0};
 
@@ -316,8 +320,8 @@ void Textures::performQueuedUpload() {
             .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
             .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
             .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT,
             .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .srcQueueFamilyIndex = mainQueueIndex,
@@ -344,6 +348,7 @@ void Textures::performQueuedUpload() {
         auto cacheIter = caches_.find(textureId);
         if (cacheIter == caches_.end()) { continue; }
         auto cache = cacheIter->second;
+        cache->flush();
 
         vkCmdCopyBufferToImage(cmdBuffer->vkCommandBuffer(), cache->vkBuffer(), texture->vkImage(),
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regions.size(), regions.data());
@@ -352,8 +357,7 @@ void Textures::performQueuedUpload() {
             {}, {{
                     .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                     .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                                    VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                     .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,

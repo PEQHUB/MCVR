@@ -67,7 +67,7 @@ class TextureArrayManager {
     const ArrayInfo* getArray(uint32_t arrayId) const;
 
     /// Check if there are pending uploads that need flushing.
-    bool hasPendingUploads() const { return !stagedUploads_.empty(); }
+    bool hasPendingUploads() const;
 
     /// Reset all arrays (resource reload).
     void reset();
