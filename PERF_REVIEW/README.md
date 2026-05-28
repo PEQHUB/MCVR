@@ -33,6 +33,7 @@ This is not primarily Java, texture upload, image barrier, present, or CPU world
 
 - [evidence/2026-05-28-1128-run.md](evidence/2026-05-28-1128-run.md) - measured facts from the latest run.
 - [evidence/profiler-gaps.md](evidence/profiler-gaps.md) - what the current logs do and do not prove.
+- [evidence/git-history-landmines.md](evidence/git-history-landmines.md) - prior optimization attempts that caused crashes, TDRs, or reversions.
 - [agent-findings-compiled.md](agent-findings-compiled.md) - all completed agent findings folded into one reference.
 - [phases/01-instrumentation.md](phases/01-instrumentation.md) - make future captures precise.
 - [phases/02-main-trace.md](phases/02-main-trace.md) - reduce the 8.7 ms main RT pass.
@@ -52,4 +53,3 @@ This is not primarily Java, texture upload, image barrier, present, or CPU world
 - `RT.BLAS_TLAS` is split enough to know whether TLAS update, TLAS build, chunk BLAS, entity BLAS, SBT setup, or metadata upload is responsible.
 - Every optimization has a before/after capture with normal Release timing, not Graphics Capture timing.
 - Physical accuracy paths remain available; performance wins become settings, quality tiers, or adaptive policies.
-
