@@ -336,9 +336,30 @@ void WorldPrepareContext::render() {
     }
     if (!inactiveEntityBlas_) {
         ScopedGpuProfile profile(profileCmd, "RT.WP.EntityDummyBLAS");
+        std::array<vk::VertexFormat::PBRTriangle, 3> dummyVertices{};
+        dummyVertices[0].pos = glm::vec3(0.0f, 0.0f, 0.0f);
+        dummyVertices[1].pos = glm::vec3(0.001f, 0.0f, 0.0f);
+        dummyVertices[2].pos = glm::vec3(0.0f, 0.001f, 0.0f);
+        std::array<uint32_t, 3> dummyIndices{0, 1, 2};
+        inactiveEntityVertexBuffer_ = vk::HostVisibleBuffer::create(
+            vma, device, sizeof(dummyVertices),
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        inactiveEntityIndexBuffer_ = vk::HostVisibleBuffer::create(
+            vma, device, sizeof(dummyIndices),
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        inactiveEntityVertexBuffer_->uploadToBuffer(dummyVertices.data());
+        inactiveEntityIndexBuffer_->uploadToBuffer(dummyIndices.data());
+
         auto dummyBuilder = vk::BLASBuilder::create();
         auto dummyGeometries = dummyBuilder->beginGeometries();
-        dummyGeometries->definePlaceholderGeometry();
+        dummyGeometries->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangle>(
+            inactiveEntityVertexBuffer_->bufferAddress(),
+            static_cast<uint32_t>(dummyVertices.size()),
+            inactiveEntityIndexBuffer_->bufferAddress(),
+            static_cast<uint32_t>(dummyIndices.size()),
+            true);
         dummyGeometries->endGeometries();
         inactiveEntityBlas_ = dummyBuilder
             ->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR)

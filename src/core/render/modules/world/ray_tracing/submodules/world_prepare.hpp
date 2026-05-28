@@ -75,6 +75,8 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     // appear or disappear. Inactive slots use inactiveEntityBlas_ with mask=0.
     uint32_t entityTlasSlotCapacity_ = 0;
     std::shared_ptr<vk::BLAS> inactiveEntityBlas_;
+    std::shared_ptr<vk::HostVisibleBuffer> inactiveEntityVertexBuffer_;
+    std::shared_ptr<vk::HostVisibleBuffer> inactiveEntityIndexBuffer_;
 
     // Mega-chunk system: groups distant chunks into single BLASes
     struct MegaChunk {
@@ -153,6 +155,8 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         tlasScratchSize_ = 0;
         entityTlasSlotCapacity_ = 0;
         inactiveEntityBlas_ = nullptr;
+        inactiveEntityVertexBuffer_ = nullptr;
+        inactiveEntityIndexBuffer_ = nullptr;
         megaChunkCache_.clear();
         cachedChunks_.clear();
         blasOffsetsBuffer = nullptr; blasOffsetsCapacity_ = 0;
