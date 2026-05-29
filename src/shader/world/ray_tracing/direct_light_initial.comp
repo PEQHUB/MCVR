@@ -1,0 +1,58 @@
+#version 460
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D primarySurfaceImage;
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D firstHitDiffuseDirectLightImage;
+layout(set = 0, binding = 2, r16f) uniform readonly image2D directLightDepthImage;
+layout(set = 0, binding = 3, rgba32f) uniform writeonly image2D reservoirImage;
+layout(set = 0, binding = 4, rgba32f) uniform writeonly image2D directLightOutputImage;
+
+layout(set = 0, binding = 5) buffer DirectLightCounters {
+    uint counters[];
+} directLightCounters;
+
+layout(push_constant) uniform PushConstant {
+    int width;
+    int height;
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+float luminance(vec3 value) {
+    return dot(value, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) {
+        return;
+    }
+
+    vec4 primary = imageLoad(primarySurfaceImage, pixel);
+    vec4 direct = imageLoad(firstHitDiffuseDirectLightImage, pixel);
+    float directHitT = imageLoad(directLightDepthImage, pixel).r;
+
+    bool primaryValid = dot(primary.xyz, primary.xyz) > 0.25;
+    if (!primaryValid) {
+        imageStore(reservoirImage, pixel, vec4(0.0));
+        imageStore(directLightOutputImage, pixel, vec4(0.0));
+        return;
+    }
+
+    vec3 radiance = max(direct.rgb, vec3(0.0));
+    float lum = luminance(radiance);
+    bool hasDirectSample = lum > 0.000001 && direct.a > 0.0;
+
+    // Conservative initial reservoir: mirrors the legacy first-hit direct result.
+    // Later passes can replace the payload with sampled light ids/weights.
+    float confidence = hasDirectSample ? 1.0 : 0.0;
+    imageStore(reservoirImage, pixel, vec4(radiance, confidence));
+    imageStore(directLightOutputImage, pixel, vec4(radiance, confidence));
+
+    atomicAdd(directLightCounters.counters[1], 1u);
+    if (hasDirectSample) {
+        atomicAdd(directLightCounters.counters[4], 1u);
+    }
+    if (directHitT > 0.0 && directHitT < 65500.0 && !isnan(directHitT) && !isinf(directHitT)) {
+        atomicAdd(directLightCounters.counters[5], 1u);
+    }
+}
