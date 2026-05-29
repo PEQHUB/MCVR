@@ -153,6 +153,7 @@ layout(push_constant) uniform PushConstant {
 #define ENTITY_NORMALS_ON  ((pc.flags & 32768) != 0)
 #define RT_DEBUG_DISABLE_SECONDARY_SUN_SHADOW   ((pc.rtDebugFlags & 4u) != 0u)
 #define RT_DEBUG_DISABLE_SECONDARY_CLOUD_SHADOW ((pc.rtDebugFlags & 8u) != 0u)
+#define RT_DEBUG_DISABLE_DIRECT_LIGHTING        ((pc.rtDebugFlags & 16u) != 0u)
 
 layout(set = 3, binding = 3, rgba32f) uniform readonly image2D normalRoughnessImage;
 layout(set = 3, binding = 4, rg32f) uniform readonly image2D motionVectorImage;
@@ -1328,7 +1329,7 @@ void main() {
     // they don't scatter it. Direct lighting appears through the reflection chain.
     bool isPerfectSpecular = (mat.roughness < 0.001);
 
-    if (!isPerfectSpecular) {
+    if (!isPerfectSpecular && !RT_DEBUG_DISABLE_DIRECT_LIGHTING) {
     // shadow ray for direct lighting
     vec3 sunDir = normalize(skyUBO.sunDirection);
     vec3 lightDir = sunDir;
