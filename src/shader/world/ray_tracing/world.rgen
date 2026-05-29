@@ -12,7 +12,7 @@
 #extension GL_NV_shader_invocation_reorder : enable
 
 // SHARC compile-time gate: controlled by CMake MCVR_ENABLE_SHARC option.
-// Main trace uses the tiny read-only query helper, not the full SHARC SDK update path.
+// NVIDIA 595.97 crashes compiling even the tiny read-only cache query in the main RT pipeline.
 #ifndef SHARC_COMPILE_ENABLE
 #define SHARC_COMPILE_ENABLE 0
 #endif
