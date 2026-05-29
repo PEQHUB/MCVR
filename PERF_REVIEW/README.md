@@ -28,6 +28,7 @@ This is not primarily Java, texture upload, image barrier, present, or CPU world
 4. SHARC and radiance-cache decision
 5. Alpha, OMM, SER, geometry, and shader divergence
 6. Settings, validation, deployment, and no-go guardrails
+7. SHARC query refactor
 
 ## Files
 
@@ -42,6 +43,7 @@ This is not primarily Java, texture upload, image barrier, present, or CPU world
 - [phases/04-sharc-radiance-cache.md](phases/04-sharc-radiance-cache.md) - decide how SHARC should be compiled, exposed, and tuned.
 - [phases/05-alpha-ser-geometry.md](phases/05-alpha-ser-geometry.md) - handle any-hit, OMM, SER, vertex formats, and divergence.
 - [phases/06-settings-validation.md](phases/06-settings-validation.md) - quality ladders, test matrix, deployment discipline.
+- [phases/07-sharc-query-refactor.md](phases/07-sharc-query-refactor.md) - recover SHARC query performance without compiling cache traversal into `world.rgen`.
 - [references/external-research.md](references/external-research.md) - Vulkan, NVIDIA, AMD, and research references.
 - [references/code-map.md](references/code-map.md) - relevant code entry points.
 - [no-go-guardrails.md](no-go-guardrails.md) - things that should not be changed casually.
