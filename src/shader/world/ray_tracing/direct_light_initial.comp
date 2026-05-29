@@ -49,9 +49,6 @@ void main() {
     imageStore(directLightOutputImage, pixel, vec4(radiance, confidence));
 
     atomicAdd(directLightCounters.counters[1], 1u);
-    if (hasDirectSample) {
-        atomicAdd(directLightCounters.counters[4], 1u);
-    }
     if (directHitT > 0.0 && directHitT < 65500.0 && !isnan(directHitT) && !isinf(directHitT)) {
         atomicAdd(directLightCounters.counters[5], 1u);
     }

@@ -227,6 +227,12 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     VkDescriptorPool directLightInitialDescPool_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> directLightInitialDescSets_;
     std::shared_ptr<vk::Shader> directLightInitialShader_;
+    VkPipeline directLightUtilityPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout directLightUtilityPipelineLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout directLightUtilityDescSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool directLightUtilityDescPool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> directLightUtilityDescSets_;
+    std::shared_ptr<vk::Shader> directLightUtilityShader_;
 #endif
 
     // ReSTIR DI reservoir images (fixed roles)

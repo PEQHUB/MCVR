@@ -162,6 +162,7 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
 #ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
         << ",directLightPrimaryPipelineReady:" << (directLightPrimaryPipeline_ != VK_NULL_HANDLE ? 1 : 0)
         << ",directLightInitialPipelineReady:" << (directLightInitialPipeline_ != VK_NULL_HANDLE ? 1 : 0)
+        << ",directLightUtilityPipelineReady:" << (directLightUtilityPipeline_ != VK_NULL_HANDLE ? 1 : 0)
         << ",directLightPrimarySurfacePixels:" << directLightLastCounters_[0]
         << ",directLightValidReservoirs:" << directLightLastCounters_[1]
         << ",directLightTemporalReused:" << directLightLastCounters_[2]
@@ -170,6 +171,7 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
 #else
         << ",directLightPrimaryPipelineReady:0"
         << ",directLightInitialPipelineReady:0"
+        << ",directLightUtilityPipelineReady:0"
         << ",directLightPrimarySurfacePixels:0"
         << ",directLightValidReservoirs:0"
         << ",directLightTemporalReused:0"
@@ -705,6 +707,10 @@ void RayTracingModule::preClose() {
         if (directLightInitialPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, directLightInitialPipelineLayout_, nullptr);
         if (directLightInitialDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, directLightInitialDescSetLayout_, nullptr);
         if (directLightInitialDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, directLightInitialDescPool_, nullptr);
+        if (directLightUtilityPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, directLightUtilityPipeline_, nullptr);
+        if (directLightUtilityPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, directLightUtilityPipelineLayout_, nullptr);
+        if (directLightUtilityDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, directLightUtilityDescSetLayout_, nullptr);
+        if (directLightUtilityDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, directLightUtilityDescPool_, nullptr);
 #endif
         if (sharcResolvePipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, sharcResolvePipeline_, nullptr);
         if (sharcResolvePipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, sharcResolvePipelineLayout_, nullptr);
@@ -1815,6 +1821,22 @@ void RayTracingModule::initDirectLightPipeline() {
         vkDestroyDescriptorPool(dev, directLightInitialDescPool_, nullptr);
         directLightInitialDescPool_ = VK_NULL_HANDLE;
     }
+    if (directLightUtilityPipeline_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(dev, directLightUtilityPipeline_, nullptr);
+        directLightUtilityPipeline_ = VK_NULL_HANDLE;
+    }
+    if (directLightUtilityPipelineLayout_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(dev, directLightUtilityPipelineLayout_, nullptr);
+        directLightUtilityPipelineLayout_ = VK_NULL_HANDLE;
+    }
+    if (directLightUtilityDescSetLayout_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(dev, directLightUtilityDescSetLayout_, nullptr);
+        directLightUtilityDescSetLayout_ = VK_NULL_HANDLE;
+    }
+    if (directLightUtilityDescPool_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(dev, directLightUtilityDescPool_, nullptr);
+        directLightUtilityDescPool_ = VK_NULL_HANDLE;
+    }
 
     RadianceLogger::log("RayTracing", "INFO", "Direct-light primary pipeline create start");
     g_crashRing.record("DirectLight:primaryPipeline:create:start");
@@ -2002,6 +2024,101 @@ void RayTracingModule::initDirectLightPipeline() {
 
     RadianceLogger::log("RayTracing", "INFO", "Direct-light initial pipeline create done ok=1 sets=%u", size);
     g_crashRing.record("DirectLight:initialPipeline:create:done");
+
+    RadianceLogger::log("RayTracing", "INFO", "Direct-light utility pipeline create start");
+    g_crashRing.record("DirectLight:utilityPipeline:create:start");
+    directLightUtilityShader_ =
+        vk::Shader::create(device, (shaderPath / "world/ray_tracing/direct_light_reservoir_comp.spv").string());
+    if (!directLightUtilityShader_) {
+        RadianceLogger::log("RayTracing", "ERROR", "Direct-light utility shader load failed");
+        g_crashRing.record("DirectLight:utilityPipeline:create:missingShader");
+        return;
+    }
+
+    std::vector<VkDescriptorSetLayoutBinding> utilityBindings = {
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+    };
+    VkDescriptorSetLayoutCreateInfo utilityLayoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    utilityLayoutInfo.bindingCount = static_cast<uint32_t>(utilityBindings.size());
+    utilityLayoutInfo.pBindings = utilityBindings.data();
+    VkResult utilityLayoutResult =
+        vkCreateDescriptorSetLayout(dev, &utilityLayoutInfo, nullptr, &directLightUtilityDescSetLayout_);
+    if (utilityLayoutResult != VK_SUCCESS) {
+        RadianceLogger::log("RayTracing", "ERROR", "Direct-light utility descriptor layout failed result=%d",
+                            static_cast<int>(utilityLayoutResult));
+        g_crashRing.record("DirectLight:utilityPipeline:create:layoutFailed");
+        return;
+    }
+
+    VkPushConstantRange utilityPushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int32_t) * 4};
+    VkPipelineLayoutCreateInfo utilityPipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    utilityPipelineLayoutInfo.setLayoutCount = 1;
+    utilityPipelineLayoutInfo.pSetLayouts = &directLightUtilityDescSetLayout_;
+    utilityPipelineLayoutInfo.pushConstantRangeCount = 1;
+    utilityPipelineLayoutInfo.pPushConstantRanges = &utilityPushRange;
+    VkResult utilityPipelineLayoutResult =
+        vkCreatePipelineLayout(dev, &utilityPipelineLayoutInfo, nullptr, &directLightUtilityPipelineLayout_);
+    if (utilityPipelineLayoutResult != VK_SUCCESS) {
+        RadianceLogger::log("RayTracing", "ERROR", "Direct-light utility pipeline layout failed result=%d",
+                            static_cast<int>(utilityPipelineLayoutResult));
+        g_crashRing.record("DirectLight:utilityPipeline:create:pipelineLayoutFailed");
+        return;
+    }
+
+    VkComputePipelineCreateInfo utilityPipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    utilityPipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    utilityPipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    utilityPipelineInfo.stage.module = directLightUtilityShader_->vkShaderModule();
+    utilityPipelineInfo.stage.pName = "main";
+    utilityPipelineInfo.layout = directLightUtilityPipelineLayout_;
+    VkResult utilityPipelineResult = vkCreateComputePipelines(dev, device->pipelineCache(), 1, &utilityPipelineInfo,
+                                                              nullptr, &directLightUtilityPipeline_);
+    if (utilityPipelineResult != VK_SUCCESS) {
+        directLightUtilityPipeline_ = VK_NULL_HANDLE;
+        RadianceLogger::log("RayTracing", "ERROR", "Direct-light utility pipeline create done ok=0 result=%d",
+                            static_cast<int>(utilityPipelineResult));
+        g_crashRing.record("DirectLight:utilityPipeline:create:failed");
+        return;
+    }
+
+    constexpr uint32_t kDirectLightUtilityPasses = 4;
+    VkDescriptorPoolSize utilityPoolSizes[] = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3u * size * kDirectLightUtilityPasses},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, size * kDirectLightUtilityPasses},
+    };
+    VkDescriptorPoolCreateInfo utilityPoolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    utilityPoolInfo.maxSets = size * kDirectLightUtilityPasses;
+    utilityPoolInfo.poolSizeCount = 2;
+    utilityPoolInfo.pPoolSizes = utilityPoolSizes;
+    VkResult utilityPoolResult = vkCreateDescriptorPool(dev, &utilityPoolInfo, nullptr, &directLightUtilityDescPool_);
+    if (utilityPoolResult != VK_SUCCESS) {
+        RadianceLogger::log("RayTracing", "ERROR", "Direct-light utility descriptor pool failed result=%d",
+                            static_cast<int>(utilityPoolResult));
+        g_crashRing.record("DirectLight:utilityPipeline:create:poolFailed");
+        return;
+    }
+
+    std::vector<VkDescriptorSetLayout> utilityLayouts(size * kDirectLightUtilityPasses, directLightUtilityDescSetLayout_);
+    VkDescriptorSetAllocateInfo utilityAllocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    utilityAllocInfo.descriptorPool = directLightUtilityDescPool_;
+    utilityAllocInfo.descriptorSetCount = static_cast<uint32_t>(utilityLayouts.size());
+    utilityAllocInfo.pSetLayouts = utilityLayouts.data();
+    directLightUtilityDescSets_.resize(utilityLayouts.size());
+    VkResult utilityAllocResult =
+        vkAllocateDescriptorSets(dev, &utilityAllocInfo, directLightUtilityDescSets_.data());
+    if (utilityAllocResult != VK_SUCCESS) {
+        RadianceLogger::log("RayTracing", "ERROR", "Direct-light utility descriptor alloc failed result=%d",
+                            static_cast<int>(utilityAllocResult));
+        g_crashRing.record("DirectLight:utilityPipeline:create:allocFailed");
+        return;
+    }
+
+    RadianceLogger::log("RayTracing", "INFO", "Direct-light utility pipeline create done ok=1 sets=%u",
+                        static_cast<uint32_t>(utilityLayouts.size()));
+    g_crashRing.record("DirectLight:utilityPipeline:create:done");
 #endif
 }
 
@@ -3446,6 +3563,123 @@ void RayTracingModuleContext::render() {
             worldCommandBuffer->endLabel();
         }
 
+        auto runDirectLightUtilityPass = [&](uint32_t utilityPass, int mode, const char* label, const char* profileName,
+                                             const std::shared_ptr<vk::DeviceLocalImage>& input,
+                                             const std::shared_ptr<vk::DeviceLocalImage>& output,
+                                             float r, float g, float b) -> bool {
+            constexpr uint32_t kDirectLightUtilityPasses = 4;
+            if (module->directLightUtilityPipeline_ == VK_NULL_HANDLE
+                || context->frameIndex >= module->directLightCounterBuffers_.size()
+                || context->frameIndex >= module->directLightUtilityDescSets_.size() / kDirectLightUtilityPasses
+                || context->frameIndex >= module->directLightOutputImages_.size()
+                || !input || !output || !module->directLightOutputImages_[context->frameIndex]
+                || !module->directLightCounterBuffers_[context->frameIndex]) {
+                return false;
+            }
+
+            worldCommandBuffer->beginLabel(label, r, g, b);
+            ScopedGpuProfile utilityProfile(profileCmd, profileName);
+            VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
+            uint32_t frameIdx = context->frameIndex;
+            const std::string crashBase = std::string("DirectLight:") + profileName;
+            const std::string crashStart = crashBase + ":start";
+            g_crashRing.record(crashStart.c_str());
+
+            VkMemoryBarrier preUtilityBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            preUtilityBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            preUtilityBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0, 1, &preUtilityBarrier, 0, nullptr, 0, nullptr);
+
+            VkDescriptorSet utilitySet =
+                module->directLightUtilityDescSets_[frameIdx * kDirectLightUtilityPasses + utilityPass];
+            auto addUtilityImg = [&](uint32_t binding, const std::shared_ptr<vk::DeviceLocalImage>& img,
+                                     std::vector<VkWriteDescriptorSet>& writes,
+                                     std::vector<std::unique_ptr<VkDescriptorImageInfo>>& infos) {
+                auto info = std::make_unique<VkDescriptorImageInfo>();
+                info->imageView = img->vkImageView(0);
+                info->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                info->sampler = VK_NULL_HANDLE;
+                writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, utilitySet, binding, 0, 1,
+                                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info.get(), nullptr, nullptr});
+                infos.push_back(std::move(info));
+            };
+
+            std::vector<VkWriteDescriptorSet> utilityWrites;
+            std::vector<std::unique_ptr<VkDescriptorImageInfo>> utilityInfos;
+            addUtilityImg(0, input, utilityWrites, utilityInfos);
+            addUtilityImg(1, output, utilityWrites, utilityInfos);
+            addUtilityImg(2, module->directLightOutputImages_[frameIdx], utilityWrites, utilityInfos);
+            VkDescriptorBufferInfo utilityCounterInfo{
+                module->directLightCounterBuffers_[frameIdx]->vkBuffer(), 0,
+                module->directLightCounterBuffers_[frameIdx]->size()};
+            utilityWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, utilitySet, 3, 0, 1,
+                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &utilityCounterInfo, nullptr});
+            vkUpdateDescriptorSets(framework->device()->vkDevice(),
+                static_cast<uint32_t>(utilityWrites.size()), utilityWrites.data(), 0, nullptr);
+
+            struct DirectLightUtilityPushConstant {
+                int32_t width;
+                int32_t height;
+                int32_t mode;
+                int32_t pad0;
+            } utilityPC = {
+                static_cast<int32_t>(hdrNoisyOutputImage->width()),
+                static_cast<int32_t>(hdrNoisyOutputImage->height()),
+                mode,
+                0,
+            };
+
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->directLightUtilityPipeline_);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->directLightUtilityPipelineLayout_,
+                0, 1, &utilitySet, 0, nullptr);
+            vkCmdPushConstants(cmd, module->directLightUtilityPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+                0, sizeof(utilityPC), &utilityPC);
+            vkCmdDispatch(cmd,
+                (hdrNoisyOutputImage->width() + 7) / 8,
+                (hdrNoisyOutputImage->height() + 7) / 8,
+                1);
+
+            VkMemoryBarrier postUtilityBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            postUtilityBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            postUtilityBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                0, 1, &postUtilityBarrier, 0, nullptr, 0, nullptr);
+
+            const std::string crashDone = crashBase + ":done";
+            g_crashRing.record(crashDone.c_str());
+            utilityProfile.close();
+            worldCommandBuffer->endLabel();
+            return true;
+        };
+
+        bool directLightUtilityRan = false;
+        if (directLightInitialRan
+            && context->frameIndex < module->directLightReservoirPingImages_.size()
+            && context->frameIndex < module->directLightReservoirPongImages_.size()
+            && module->directLightReservoirPingImages_[context->frameIndex]
+            && module->directLightReservoirPongImages_[context->frameIndex]) {
+            uint32_t frameIdx = context->frameIndex;
+            bool temporalRan = runDirectLightUtilityPass(0, 1, "RT:DirectLight Temporal", "RT.DirectLight.Temporal",
+                module->directLightReservoirPingImages_[frameIdx],
+                module->directLightReservoirPongImages_[frameIdx], 0.1f, 0.75f, 0.55f);
+            bool spatialRan = runDirectLightUtilityPass(1, 2, "RT:DirectLight Spatial", "RT.DirectLight.Spatial",
+                module->directLightReservoirPongImages_[frameIdx],
+                module->directLightReservoirPingImages_[frameIdx], 0.1f, 0.8f, 0.7f);
+            bool visibilityRan = runDirectLightUtilityPass(2, 3, "RT:DirectLight Visibility", "RT.DirectLight.Visibility",
+                module->directLightReservoirPingImages_[frameIdx],
+                module->directLightReservoirPongImages_[frameIdx], 0.9f, 0.75f, 0.25f);
+            bool shadeRan = runDirectLightUtilityPass(3, 4, "RT:DirectLight Shade", "RT.DirectLight.Shade",
+                module->directLightReservoirPongImages_[frameIdx],
+                module->directLightReservoirPingImages_[frameIdx], 0.95f, 0.55f, 0.2f);
+            directLightUtilityRan = temporalRan && spatialRan && visibilityRan && shadeRan;
+        }
+
         auto runDirectLightBoundaryPass = [&](const char* label, const char* profileName,
                                               float r, float g, float b) {
             worldCommandBuffer->beginLabel(label, r, g, b);
@@ -3456,10 +3690,12 @@ void RayTracingModuleContext::render() {
         if (!directLightInitialRan) {
             runDirectLightBoundaryPass("RT:DirectLight Initial Skeleton", "RT.DirectLight.Initial", 0.1f, 0.7f, 0.4f);
         }
-        runDirectLightBoundaryPass("RT:DirectLight Temporal Skeleton", "RT.DirectLight.Temporal", 0.1f, 0.75f, 0.55f);
-        runDirectLightBoundaryPass("RT:DirectLight Spatial Skeleton", "RT.DirectLight.Spatial", 0.1f, 0.8f, 0.7f);
-        runDirectLightBoundaryPass("RT:DirectLight Visibility Skeleton", "RT.DirectLight.Visibility", 0.9f, 0.75f, 0.25f);
-        runDirectLightBoundaryPass("RT:DirectLight Shade Skeleton", "RT.DirectLight.Shade", 0.95f, 0.55f, 0.2f);
+        if (!directLightUtilityRan) {
+            runDirectLightBoundaryPass("RT:DirectLight Temporal Skeleton", "RT.DirectLight.Temporal", 0.1f, 0.75f, 0.55f);
+            runDirectLightBoundaryPass("RT:DirectLight Spatial Skeleton", "RT.DirectLight.Spatial", 0.1f, 0.8f, 0.7f);
+            runDirectLightBoundaryPass("RT:DirectLight Visibility Skeleton", "RT.DirectLight.Visibility", 0.9f, 0.75f, 0.25f);
+            runDirectLightBoundaryPass("RT:DirectLight Shade Skeleton", "RT.DirectLight.Shade", 0.95f, 0.55f, 0.2f);
+        }
     }
 #endif
 
