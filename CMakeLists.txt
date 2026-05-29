@@ -148,9 +148,9 @@ endif()
 # We bypass the OMM top-level CMake and add only the library + its deps,
 # providing glm/stb from our existing project to avoid target conflicts.
 option(MCVR_ENABLE_SHARC "Enable SHARC hash grid radiance cache build support" ON)
-option(MCVR_ENABLE_SHARC_BUFFERS "Enable SHARC hash grid buffer allocation/init" ON)
-option(MCVR_ENABLE_SHARC_UPDATE_PASS "Enable SHARC sparse update RT pipeline creation/dispatch" ON)
-option(MCVR_ENABLE_SHARC_RESOLVE_PASS "Enable SHARC resolve compute pipeline creation/dispatch" ON)
+option(MCVR_ENABLE_SHARC_BUFFERS "Enable SHARC hash grid buffer allocation/init. Off by default until BLAS streaming lifetime is stable." OFF)
+option(MCVR_ENABLE_SHARC_UPDATE_PASS "Enable SHARC sparse update RT pipeline creation/dispatch. Off by default until explicitly profiling SHARC." OFF)
+option(MCVR_ENABLE_SHARC_RESOLVE_PASS "Enable SHARC resolve compute pipeline creation/dispatch. Off by default until explicitly profiling SHARC." OFF)
 option(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY "Compile the small read-only SHARC cache query into the main world RT raygen. Off by default because current NVIDIA drivers crash compiling this path into the main RT pipeline." OFF)
 set(MCVR_SHARC_MAIN_TRACE_QUERY_MODE "off" CACHE STRING "SHARC main trace query compile mode: off, stub, math, hash, or radiance")
 set_property(CACHE MCVR_SHARC_MAIN_TRACE_QUERY_MODE PROPERTY STRINGS off stub math hash radiance)
