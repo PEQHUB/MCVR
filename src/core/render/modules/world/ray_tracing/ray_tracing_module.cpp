@@ -28,6 +28,7 @@ constexpr uint32_t kSharcDispatchStableFrameThreshold = 60;
 constexpr uint32_t kSharcMainTraceMaxWarmupFrames = 8;
 constexpr uint32_t kSharcQueryCounterCount = 8;
 constexpr uint32_t kDirectLightCounterCount = 8;
+constexpr uint32_t kRtDebugDisableDirectLighting = 16;
 constexpr bool kForceDisableShaderDisplacementForGpuFaultIsolation = true;
 
 bool shaderDisplacementRuntimeAllowed() {
@@ -163,6 +164,7 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",directLightPrimaryPipelineReady:" << (directLightPrimaryPipeline_ != VK_NULL_HANDLE ? 1 : 0)
         << ",directLightInitialPipelineReady:" << (directLightInitialPipeline_ != VK_NULL_HANDLE ? 1 : 0)
         << ",directLightUtilityPipelineReady:" << (directLightUtilityPipeline_ != VK_NULL_HANDLE ? 1 : 0)
+        << ",directLightExternalized:" << (directLightBackend == 1 && directLightInitialPipeline_ != VK_NULL_HANDLE ? 1 : 0)
         << ",directLightPrimarySurfacePixels:" << directLightLastCounters_[0]
         << ",directLightValidReservoirs:" << directLightLastCounters_[1]
         << ",directLightTemporalReused:" << directLightLastCounters_[2]
@@ -172,6 +174,7 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",directLightPrimaryPipelineReady:0"
         << ",directLightInitialPipelineReady:0"
         << ",directLightUtilityPipelineReady:0"
+        << ",directLightExternalized:0"
         << ",directLightPrimarySurfacePixels:0"
         << ",directLightValidReservoirs:0"
         << ",directLightTemporalReused:0"
@@ -1948,6 +1951,13 @@ void RayTracingModule::initDirectLightPipeline() {
         {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {8, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {11, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {12, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
     };
     VkDescriptorSetLayoutCreateInfo initialLayoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     initialLayoutInfo.bindingCount = static_cast<uint32_t>(initialBindings.size());
@@ -1992,12 +2002,14 @@ void RayTracingModule::initDirectLightPipeline() {
     }
 
     VkDescriptorPoolSize initialPoolSizes[] = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5u * size},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, size},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 7u * size},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3u * size},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2u * size},
+        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, size},
     };
     VkDescriptorPoolCreateInfo initialPoolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     initialPoolInfo.maxSets = size;
-    initialPoolInfo.poolSizeCount = 2;
+    initialPoolInfo.poolSizeCount = 4;
     initialPoolInfo.pPoolSizes = initialPoolSizes;
     VkResult initialPoolResult = vkCreateDescriptorPool(dev, &initialPoolInfo, nullptr, &directLightInitialDescPool_);
     if (initialPoolResult != VK_SUCCESS) {
@@ -2040,6 +2052,7 @@ void RayTracingModule::initDirectLightPipeline() {
         {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
     };
     VkDescriptorSetLayoutCreateInfo utilityLayoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     utilityLayoutInfo.bindingCount = static_cast<uint32_t>(utilityBindings.size());
@@ -2086,7 +2099,7 @@ void RayTracingModule::initDirectLightPipeline() {
 
     constexpr uint32_t kDirectLightUtilityPasses = 4;
     VkDescriptorPoolSize utilityPoolSizes[] = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3u * size * kDirectLightUtilityPasses},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4u * size * kDirectLightUtilityPasses},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, size * kDirectLightUtilityPasses},
     };
     VkDescriptorPoolCreateInfo utilityPoolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -2518,6 +2531,7 @@ void RayTracingModuleContext::render() {
 
 #ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
     const bool directLightPipelineActive = effectiveDirectLightBackend() != 0;
+    bool directLightExternalActive = false;
     if (directLightPipelineActive) {
         const uint32_t frameIdx = context->frameIndex;
         const uint32_t width = hdrNoisyOutputImage->width();
@@ -2543,7 +2557,28 @@ void RayTracingModuleContext::render() {
                 framework->vma(), framework->device(), kDirectLightCounterCount * sizeof(uint32_t),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         }
+        directLightExternalActive = effectiveDirectLightBackend() == 1
+            && module->directLightInitialPipeline_ != VK_NULL_HANDLE
+            && frameIdx < module->directLightInitialDescSets_.size()
+            && frameIdx < module->directLightPrimarySurfaceImages_.size()
+            && frameIdx < module->directLightReservoirPingImages_.size()
+            && frameIdx < module->directLightOutputImages_.size()
+            && frameIdx < module->directLightCounterBuffers_.size()
+            && module->directLightPrimarySurfaceImages_[frameIdx]
+            && module->directLightReservoirPingImages_[frameIdx]
+            && module->directLightOutputImages_[frameIdx]
+            && module->directLightCounterBuffers_[frameIdx]
+            && firstHitDiffuseDirectLightImage != nullptr
+            && frameIdx < module->positionViewSpaceImages_.size()
+            && module->positionViewSpaceImages_[frameIdx] != nullptr
+            && diffuseAlbedoImage != nullptr
+            && worldPrepareContext->tlas != nullptr
+            && worldPrepareContext->areaLightBuffer != nullptr
+            && module->tileLightBuffer_ != nullptr;
     }
+#else
+    constexpr bool directLightPipelineActive = false;
+    constexpr bool directLightExternalActive = false;
 #endif
 
     renderDiag("RT descriptors begin");
@@ -2883,7 +2918,8 @@ void RayTracingModuleContext::render() {
     // Color expansion
     pushConstant.colorExpansion = Renderer::options.colorExpansion;
     pushConstant.blueNoiseFrame = context->frameIndex;
-    pushConstant.rtDebugFlags = Renderer::options.rtDebugFlags;
+    pushConstant.rtDebugFlags = Renderer::options.rtDebugFlags
+        | (directLightExternalActive ? kRtDebugDisableDirectLighting : 0u);
     pushConstant.handInstanceCount = worldPrepareContext->handInstanceCount;
     pushConstant.sharcQueryMode = sharcQueryPassActive ? sharcQueryMode : 0;
     pushConstant.sharcQueryReserved = 0;
@@ -3477,7 +3513,7 @@ void RayTracingModuleContext::render() {
         runDirectLightBoundaryPass("RT:Primary Surface Unavailable", "RT.Primary", 0.25f, 0.55f, 1.0f);
     }
 
-    if (directLightPipelineActive) {
+    if (directLightExternalActive) {
         if (module->directLightInitialPipeline_ != VK_NULL_HANDLE
             && context->frameIndex < module->directLightInitialDescSets_.size()
             && context->frameIndex < module->directLightPrimarySurfaceImages_.size()
@@ -3522,20 +3558,50 @@ void RayTracingModuleContext::render() {
             addInitialImg(2, directLightDepthImage, initialWrites, initialInfos);
             addInitialImg(3, module->directLightReservoirPingImages_[frameIdx], initialWrites, initialInfos);
             addInitialImg(4, module->directLightOutputImages_[frameIdx], initialWrites, initialInfos);
+            addInitialImg(6, module->positionViewSpaceImages_[frameIdx], initialWrites, initialInfos);
+            addInitialImg(7, diffuseAlbedoImage, initialWrites, initialInfos);
             VkDescriptorBufferInfo initialCounterInfo{
                 module->directLightCounterBuffers_[frameIdx]->vkBuffer(), 0,
                 module->directLightCounterBuffers_[frameIdx]->size()};
             initialWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, initialSet, 5, 0, 1,
                                      VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &initialCounterInfo, nullptr});
+            VkWriteDescriptorSetAccelerationStructureKHR initialAsInfo{
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+            initialAsInfo.accelerationStructureCount = 1;
+            initialAsInfo.pAccelerationStructures = &worldPrepareContext->tlas->tlas();
+            initialWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &initialAsInfo, initialSet, 8, 0, 1,
+                                     VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, nullptr, nullptr, nullptr});
+            VkDescriptorBufferInfo initialAreaLightInfo{
+                worldPrepareContext->areaLightBuffer->vkBuffer(), 0, VK_WHOLE_SIZE};
+            initialWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, initialSet, 9, 0, 1,
+                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &initialAreaLightInfo, nullptr});
+            VkDescriptorBufferInfo initialTileLightInfo{
+                module->tileLightBuffer_->vkBuffer(), 0, VK_WHOLE_SIZE};
+            initialWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, initialSet, 10, 0, 1,
+                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &initialTileLightInfo, nullptr});
+            VkDescriptorBufferInfo initialWorldInfo{worldBuffer->vkBuffer(), 0, VK_WHOLE_SIZE};
+            initialWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, initialSet, 11, 0, 1,
+                                     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &initialWorldInfo, nullptr});
+            VkDescriptorBufferInfo initialSkyInfo{buffers->skyUniformBuffer()->vkBuffer(), 0, VK_WHOLE_SIZE};
+            initialWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, initialSet, 12, 0, 1,
+                                     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &initialSkyInfo, nullptr});
             vkUpdateDescriptorSets(framework->device()->vkDevice(),
                 static_cast<uint32_t>(initialWrites.size()), initialWrites.data(), 0, nullptr);
 
             struct DirectLightInitialPushConstant {
                 int32_t width;
                 int32_t height;
+                int32_t areaLightCount;
+                int32_t maxLightsPerTile;
+                float shadowSoftness;
+                int32_t maxAreaLightSamples;
             } initialPC = {
                 static_cast<int32_t>(hdrNoisyOutputImage->width()),
                 static_cast<int32_t>(hdrNoisyOutputImage->height()),
+                worldPrepareContext->areaLightCount,
+                RayTracingModule::MAX_LIGHTS_PER_TILE,
+                Renderer::options.shadowSoftness,
+                std::min(Renderer::options.restirCandidates, 8),
             };
 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->directLightInitialPipeline_);
@@ -3612,6 +3678,7 @@ void RayTracingModuleContext::render() {
             addUtilityImg(0, input, utilityWrites, utilityInfos);
             addUtilityImg(1, output, utilityWrites, utilityInfos);
             addUtilityImg(2, module->directLightOutputImages_[frameIdx], utilityWrites, utilityInfos);
+            addUtilityImg(4, firstHitDiffuseDirectLightImage, utilityWrites, utilityInfos);
             VkDescriptorBufferInfo utilityCounterInfo{
                 module->directLightCounterBuffers_[frameIdx]->vkBuffer(), 0,
                 module->directLightCounterBuffers_[frameIdx]->size()};

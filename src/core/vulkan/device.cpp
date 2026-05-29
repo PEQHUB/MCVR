@@ -31,6 +31,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     // enabled device extensions
     std::vector<const char *> enabledExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                                    VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+                                                   VK_KHR_RAY_QUERY_EXTENSION_NAME,
                                                    VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
                                                    VK_KHR_SPIRV_1_4_EXTENSION_NAME,
                                                    VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
@@ -157,9 +158,13 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     supportedAccelerationStructureFeatures.pNext = &supportedVulkan12;
 
+    VkPhysicalDeviceRayQueryFeaturesKHR supportedRayQueryFeatures{};
+    supportedRayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    supportedRayQueryFeatures.pNext = &supportedAccelerationStructureFeatures;
+
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR supportedRayTracingFeatures{};
     supportedRayTracingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-    supportedRayTracingFeatures.pNext = &supportedAccelerationStructureFeatures;
+    supportedRayTracingFeatures.pNext = &supportedRayQueryFeatures;
 
     VkPhysicalDeviceFeatures2 supportedFeatures2{};
     supportedFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -323,9 +328,16 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
             supportedAccelerationStructureFeatures.descriptorBindingAccelerationStructureUpdateAfterBind;
     }
 
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    rayQueryFeatures.pNext = &accelerationStructureFeatures;
+    if (hasExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME)) {
+        rayQueryFeatures.rayQuery = supportedRayQueryFeatures.rayQuery;
+    }
+
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures = {};
     rayTracingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-    rayTracingFeatures.pNext = &accelerationStructureFeatures;
+    rayTracingFeatures.pNext = &rayQueryFeatures;
     if (hasExtension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME)) {
         rayTracingFeatures.rayTracingPipeline = supportedRayTracingFeatures.rayTracingPipeline;
     }

@@ -58,3 +58,28 @@ It restores the original `rtDebugFlags` after the probe.
 If the ablation reduces `RT.MainTrace` by less than about `0.4 ms`, do not continue splitting direct lighting right now.
 
 If it saves around `0.5 ms` or more, the next production step is not more scaffolding. It is real compute visibility/shading against the direct-light reservoirs, then final compose integration.
+
+## Externalized Direct-Light Implementation
+
+Follow-up ablation pair:
+
+- `20260529_182951`: normal `UpstreamReSTIR`, `RT.MainTrace=2.135 ms`, total GPU `5.713 ms`
+- `20260529_182944`: direct-light ablation, `RT.MainTrace=1.174 ms`, total GPU `4.815 ms`
+
+This measured about `0.96 ms` of removable main-trace direct-light work in that scene.
+
+Implemented first active path:
+
+- `UpstreamReSTIR` now sets the transient main-trace direct-light disable flag only when external direct-light resources are ready.
+- `direct_light_initial.comp` reconstructs first-hit surface position from the view-space position buffer.
+- It evaluates sun/moon direct lighting with compute `rayQuery` shadows against the TLAS.
+- It adds a tile-limited area-light estimate using the existing clustered light buffer.
+- The utility shade pass writes the final direct-light value back into `firstHitDiffuseDirectLightImage`, so SVGF/compose consume the externalized direct-light result.
+- `Legacy` remains the full old path and fallback.
+
+Known limits for the first active path:
+
+- Directional lighting uses a single hard-ish visibility query instead of the full VMF soft sun sample.
+- Area lights are tile-limited and simplified compared with the closest-hit ReSTIR path.
+- Cloud transmittance and advanced material details are not fully matched yet.
+- This should be treated as a performance/visual candidate, not the final quality answer, until same-scene probes compare cost and artifacts.

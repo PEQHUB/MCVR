@@ -3,6 +3,7 @@
 layout(set = 0, binding = 0, rgba32f) uniform readonly image2D inputReservoirImage;
 layout(set = 0, binding = 1, rgba32f) uniform writeonly image2D outputReservoirImage;
 layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D directLightOutputImage;
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D firstHitDiffuseDirectLightImage;
 
 layout(set = 0, binding = 3) buffer DirectLightCounters {
     uint counters[];
@@ -67,6 +68,7 @@ void main() {
             atomicAdd(directLightCounters.counters[6], 1u);
         }
         imageStore(directLightOutputImage, pixel, result);
+        imageStore(firstHitDiffuseDirectLightImage, pixel, vec4(max(result.rgb, vec3(0.0)), valid ? 1.0 : 0.0));
     }
 
     imageStore(outputReservoirImage, pixel, result);

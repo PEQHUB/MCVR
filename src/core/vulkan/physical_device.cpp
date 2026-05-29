@@ -23,13 +23,15 @@ bool isDeviceSuitable(VkPhysicalDevice device) {
 
     bool hasSwapchain = false;
     bool hasRayTracing = false;
+    bool hasRayQuery = false;
 
     for (const auto &ext : availableExtensions) {
         if (std::string(ext.extensionName) == VK_KHR_SWAPCHAIN_EXTENSION_NAME) { hasSwapchain = true; }
         if (std::string(ext.extensionName) == VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) { hasRayTracing = true; }
+        if (std::string(ext.extensionName) == VK_KHR_RAY_QUERY_EXTENSION_NAME) { hasRayQuery = true; }
     }
 
-    if (!hasSwapchain || !hasRayTracing) return false;
+    if (!hasSwapchain || !hasRayTracing || !hasRayQuery) return false;
 
     // check features
     VkPhysicalDeviceVulkan12Features vulkan12Features{};
@@ -43,16 +45,21 @@ bool isDeviceSuitable(VkPhysicalDevice device) {
     accelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     accelerationStructureFeatures.pNext = &vulkan13Features;
 
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    rayQueryFeatures.pNext = &accelerationStructureFeatures;
+
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures = {};
     rayTracingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-    rayTracingFeatures.pNext = &accelerationStructureFeatures;
+    rayTracingFeatures.pNext = &rayQueryFeatures;
 
     VkPhysicalDeviceFeatures2 features2 = {};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.pNext = &rayTracingFeatures;
 
     vkGetPhysicalDeviceFeatures2(device, &features2);
-    if (!rayTracingFeatures.rayTracingPipeline || !accelerationStructureFeatures.accelerationStructure ||
+    if (!rayTracingFeatures.rayTracingPipeline || !rayQueryFeatures.rayQuery ||
+        !accelerationStructureFeatures.accelerationStructure ||
         !vulkan13Features.synchronization2 || !vulkan12Features.bufferDeviceAddress) {
         return false;
     } else {
