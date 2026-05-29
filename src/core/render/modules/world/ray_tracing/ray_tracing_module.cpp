@@ -27,6 +27,7 @@ constexpr int kSharcMaxCapacityExponent = 24;
 constexpr uint32_t kSharcDispatchStableFrameThreshold = 60;
 constexpr uint32_t kSharcMainTraceMaxWarmupFrames = 8;
 constexpr uint32_t kSharcQueryCounterCount = 8;
+constexpr uint32_t kDirectLightCounterCount = 8;
 constexpr bool kForceDisableShaderDisplacementForGpuFaultIsolation = true;
 
 bool shaderDisplacementRuntimeAllowed() {
@@ -113,16 +114,62 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
 #endif
     const bool directLightPipelinePossible = directLightPipelineCompiled && directLightBackend != 0;
     const bool rtxdiBackendPossible = directLightPipelineCompiled && rtxdiCompiled && directLightBackend == 2;
+#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+    bool directLightResourcesReady = false;
+    uint32_t directLightReservoirWidth = 0;
+    uint32_t directLightReservoirHeight = 0;
+    uint64_t directLightReservoirPixels = 0;
+    if (!directLightReservoirPingImages_.empty()) {
+        for (const auto& image : directLightReservoirPingImages_) {
+            if (image) {
+                directLightResourcesReady = true;
+                directLightReservoirWidth = image->width();
+                directLightReservoirHeight = image->height();
+                directLightReservoirPixels =
+                    static_cast<uint64_t>(directLightReservoirWidth) * directLightReservoirHeight;
+                break;
+            }
+        }
+    }
+    int directLightLightCount = 0;
+    if (worldPrepare_) {
+        for (const auto& ctx : worldPrepare_->contexts_) {
+            if (ctx) {
+                directLightLightCount = std::max(directLightLightCount, ctx->areaLightCount);
+            }
+        }
+    }
+#else
+    constexpr bool directLightResourcesReady = false;
+    constexpr uint32_t directLightReservoirWidth = 0;
+    constexpr uint32_t directLightReservoirHeight = 0;
+    constexpr uint64_t directLightReservoirPixels = 0;
+    constexpr int directLightLightCount = 0;
+#endif
 
     out << "directLightBackend:" << directLightBackend
         << ",directLightPipelineCompiled:" << (directLightPipelineCompiled ? 1 : 0)
         << ",rtxdiCompiled:" << (rtxdiCompiled ? 1 : 0)
         << ",directLightPipelinePossible:" << (directLightPipelinePossible ? 1 : 0)
         << ",rtxdiBackendPossible:" << (rtxdiBackendPossible ? 1 : 0)
-        << ",directLightPipelineActive:0"
-        << ",directLightReservoirPixels:0"
+        << ",directLightPipelineActive:" << (directLightPipelinePossible ? 1 : 0)
+        << ",directLightResourcesReady:" << (directLightResourcesReady ? 1 : 0)
+        << ",directLightReservoirWidth:" << directLightReservoirWidth
+        << ",directLightReservoirHeight:" << directLightReservoirHeight
+        << ",directLightReservoirPixels:" << directLightReservoirPixels
+        << ",directLightLightCount:" << directLightLightCount
+        << ",directLightEmissiveChunks:0"
+#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+        << ",directLightValidReservoirs:" << directLightLastCounters_[0]
+        << ",directLightTemporalReused:" << directLightLastCounters_[1]
+        << ",directLightSpatialTaps:" << directLightLastCounters_[2]
+        << ",directLightVisibilityRays:" << directLightLastCounters_[3]
+#else
         << ",directLightValidReservoirs:0"
+        << ",directLightTemporalReused:0"
+        << ",directLightSpatialTaps:0"
         << ",directLightVisibilityRays:0"
+#endif
         << ",sharcOption:" << (Renderer::options.sharcEnabled ? 1 : 0)
         << ",offlineAccumulating:" << (accumulating ? 1 : 0);
 
@@ -290,6 +337,13 @@ void RayTracingModule::init(std::shared_ptr<Framework> framework, std::shared_pt
     sharcCandidateThroughputImages_.resize(size);
     sharcCandidatePrefixRadianceFlagsImages_.resize(size);
     sharcQueryCounterBuffers_.resize(size);
+#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+    directLightPrimarySurfaceImages_.resize(size);
+    directLightReservoirPingImages_.resize(size);
+    directLightReservoirPongImages_.resize(size);
+    directLightOutputImages_.resize(size);
+    directLightCounterBuffers_.resize(size);
+#endif
 
     atmosphere_ = Atmosphere::create(framework, shared_from_this());
     worldPrepare_ = WorldPrepare::create(framework, shared_from_this());
@@ -2094,6 +2148,37 @@ void RayTracingModuleContext::render() {
     auto module = rayTracingModule.lock();
     if (!module) return;
 
+#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+    const bool directLightPipelineActive = effectiveDirectLightBackend() != 0;
+    if (directLightPipelineActive) {
+        const uint32_t frameIdx = context->frameIndex;
+        const uint32_t width = hdrNoisyOutputImage->width();
+        const uint32_t height = hdrNoisyOutputImage->height();
+        auto ensureDirectLightImage = [&](std::vector<std::shared_ptr<vk::DeviceLocalImage>>& target) {
+            if (frameIdx >= target.size()) return;
+            auto& image = target[frameIdx];
+            if (!image || image->width() != width || image->height() != height) {
+                image = vk::DeviceLocalImage::create(
+                    framework->device(), framework->vma(), false, width, height, 1,
+                    VK_FORMAT_R32G32B32A32_SFLOAT,
+                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+            }
+        };
+
+        ensureDirectLightImage(module->directLightPrimarySurfaceImages_);
+        ensureDirectLightImage(module->directLightReservoirPingImages_);
+        ensureDirectLightImage(module->directLightReservoirPongImages_);
+        ensureDirectLightImage(module->directLightOutputImages_);
+        if (frameIdx < module->directLightCounterBuffers_.size()
+            && !module->directLightCounterBuffers_[frameIdx]) {
+            module->directLightCounterBuffers_[frameIdx] = vk::HostVisibleBuffer::create(
+                framework->vma(), framework->device(), kDirectLightCounterCount * sizeof(uint32_t),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        }
+        std::fill_n(module->directLightLastCounters_, kDirectLightCounterCount, 0);
+    }
+#endif
+
     renderDiag("RT descriptors begin");
     g_crashRing.record("RT:descriptors");
     rayTracingDescriptorTable->bindAS(worldPrepareContext->tlas, 1, 0);
@@ -2573,6 +2658,14 @@ void RayTracingModuleContext::render() {
         addBarrier(module->sharcCandidatePrefixRadianceFlagsImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
     }
 #endif
+#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+    if (directLightPipelineActive && context->frameIndex < module->directLightPrimarySurfaceImages_.size()) {
+        addBarrier(module->directLightPrimarySurfaceImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
+        addBarrier(module->directLightReservoirPingImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
+        addBarrier(module->directLightReservoirPongImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
+        addBarrier(module->directLightOutputImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
+    }
+#endif
     addBarrier(module->reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL);
     addBarrier(module->reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL);
     for (int b = 0; b < 3; b++) {
@@ -2611,6 +2704,29 @@ void RayTracingModuleContext::render() {
 
     // Light clustering compute pass — DISABLED: contribution-sorted global list replaces tile clustering.
     // Tile buffer stays allocated (descriptor layout unchanged); CHS reads tileCount=0 → global fallback.
+#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+    if (directLightPipelineActive) {
+        auto runDirectLightBoundaryPass = [&](const char* label, const char* profileName,
+                                              float r, float g, float b) {
+            worldCommandBuffer->beginLabel(label, r, g, b);
+            ScopedGpuProfile profile(profileCmd, profileName);
+            profile.close();
+            worldCommandBuffer->endLabel();
+        };
+
+        renderDiag("RT directLightSkeleton begin backend=%u", effectiveDirectLightBackend());
+        g_crashRing.record("RT:directLightSkeleton:start");
+        runDirectLightBoundaryPass("RT:Primary Surface Skeleton", "RT.Primary", 0.25f, 0.55f, 1.0f);
+        runDirectLightBoundaryPass("RT:DirectLight Initial Skeleton", "RT.DirectLight.Initial", 0.1f, 0.7f, 0.4f);
+        runDirectLightBoundaryPass("RT:DirectLight Temporal Skeleton", "RT.DirectLight.Temporal", 0.1f, 0.75f, 0.55f);
+        runDirectLightBoundaryPass("RT:DirectLight Spatial Skeleton", "RT.DirectLight.Spatial", 0.1f, 0.8f, 0.7f);
+        runDirectLightBoundaryPass("RT:DirectLight Visibility Skeleton", "RT.DirectLight.Visibility", 0.9f, 0.75f, 0.25f);
+        runDirectLightBoundaryPass("RT:DirectLight Shade Skeleton", "RT.DirectLight.Shade", 0.95f, 0.55f, 0.2f);
+        renderDiag("RT directLightSkeleton end");
+        g_crashRing.record("RT:directLightSkeleton:done");
+    }
+#endif
+
     if (false && Renderer::options.restirEnabled && Renderer::options.areaLightsEnabled
         && module->clusterPipeline_ != VK_NULL_HANDLE && module->tileLightBuffer_
         && worldPrepareContext->areaLightCount > 0) {

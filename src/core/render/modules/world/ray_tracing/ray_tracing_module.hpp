@@ -206,6 +206,16 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidateThroughputImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidatePrefixRadianceFlagsImages_;
 
+#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+    // Private direct-light split skeleton resources. Stage 1 only allocates and profiles the boundary.
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightPrimarySurfaceImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightReservoirPingImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightReservoirPongImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightOutputImages_;
+    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> directLightCounterBuffers_;
+    uint32_t directLightLastCounters_[8] = {};
+#endif
+
     // ReSTIR DI reservoir images (fixed roles)
     // [0] = temporal output (CHS writes), [1] = spatial output (compute writes)
     std::shared_ptr<vk::DeviceLocalImage> reservoirImages_[2];
