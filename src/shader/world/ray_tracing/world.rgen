@@ -12,7 +12,7 @@
 #extension GL_NV_shader_invocation_reorder : enable
 
 // SHARC compile-time gate: controlled by CMake MCVR_ENABLE_SHARC option.
-// NVIDIA 595.97 crashes compiling SHARC SDK Int64-atomics+BDA in nvgpucomp64.dll.
+// Main trace uses the tiny read-only query helper, not the full SHARC SDK update path.
 #ifndef SHARC_COMPILE_ENABLE
 #define SHARC_COMPILE_ENABLE 0
 #endif
