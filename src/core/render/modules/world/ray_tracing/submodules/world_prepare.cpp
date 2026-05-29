@@ -435,6 +435,7 @@ void WorldPrepareContext::render() {
         currBlasSnapshot.generations.resize(entityTlasSlotCapacity_);
         currBlasSnapshot.vertexBuffers.resize(entityTlasSlotCapacity_);
         currBlasSnapshot.indexBuffers.resize(entityTlasSlotCapacity_);
+        currBlasSnapshot.ommResources.resize(entityTlasSlotCapacity_);
         lastObjToWorldMats.resize(entityTlasSlotCapacity_, glm::mat4(1));
         blasOffset.resize(entityTlasSlotCapacity_, 0);
         biomeColors.resize(entityTlasSlotCapacity_, glm::uvec4(0));
@@ -670,6 +671,7 @@ void WorldPrepareContext::render() {
                 }
                 cc.vertexBuffers = chunk1->vertexBuffers;
                 cc.indexBuffers = chunk1->indexBuffers;
+                cc.ommResources = chunk1->ommResources;
                 cc.vertexFormat = chunk1->vertexFormat;
             }
 
@@ -727,6 +729,7 @@ void WorldPrepareContext::render() {
         currBlasSnapshot.generations.resize(chunkInstBase + totalChunkInst);
         currBlasSnapshot.vertexBuffers.resize(chunkInstBase + totalChunkInst);
         currBlasSnapshot.indexBuffers.resize(chunkInstBase + totalChunkInst);
+        currBlasSnapshot.ommResources.resize(chunkInstBase + totalChunkInst);
         geometryTypes.resize(chunkSbtBase + totalChunkSbt);
         vertexBufferAddrs.resize(chunkGeoBase + totalChunkGeo);
         indexBufferAddrs.resize(chunkGeoBase + totalChunkGeo);
@@ -760,6 +763,7 @@ void WorldPrepareContext::render() {
             currBlasSnapshot.generations[instIdx] = cc.blasGeneration;
             currBlasSnapshot.vertexBuffers[instIdx] = cc.vertexBuffers;
             currBlasSnapshot.indexBuffers[instIdx] = cc.indexBuffers;
+            currBlasSnapshot.ommResources[instIdx] = cc.ommResources;
 
             // SBT geometry types: SHADOW + chunk types
             geometryTypes[sbtIdx] = World::GeometryTypes::SHADOW;

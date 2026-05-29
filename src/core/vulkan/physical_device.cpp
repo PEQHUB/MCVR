@@ -146,6 +146,10 @@ uint32_t vk::PhysicalDevice::secondaryQueueIndex() {
     return secondaryQueueIndex_;
 }
 
+uint32_t vk::PhysicalDevice::mainQueueCount() {
+    return mainQueueCount_;
+}
+
 void vk::PhysicalDevice::findQueueFamilies() {
     uint32_t queueFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &queueFamilyCount, nullptr);
@@ -184,35 +188,28 @@ void vk::PhysicalDevice::findQueueFamilies() {
         // Early exit if all needed queue families are found
         if (presentSupport && graphicsSupport && computeSupport && transferSupport) {
             mainQueueIndex_ = i;
-            // TODO: add more condition
             secondaryQueueIndex_ = i;
+            mainQueueCount_ = queueFamilies[i].queueCount;
             break;
         }
     }
 
-    for (uint32_t i = 0; i < queueFamilyCount; i++) {
-        VkBool32 presentSupport = false;
-        vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice_, i, window_->vkSurface(), &presentSupport);
+    if (mainQueueIndex_ != static_cast<uint32_t>(-1) && mainQueueCount_ < 2) {
+        for (uint32_t i = 0; i < queueFamilyCount; i++) {
+            VkBool32 computeSupport = false;
+            if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+                computeSupport = true;
+            }
 
-        VkBool32 graphicsSupport = false;
-        if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
-            graphicsSupport = true;
-        }
+            VkBool32 transferSupport = false;
+            if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
+                transferSupport = true;
+            }
 
-        VkBool32 computeSupport = false;
-        if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
-            computeSupport = true;
-        }
-
-        VkBool32 transferSupport = false;
-        if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
-            transferSupport = true;
-        }
-
-        // Early exit if all needed queue families are found
-        if (computeSupport && transferSupport && i != mainQueueIndex_) {
-            secondaryQueueIndex_ = i;
-            break;
+            if (computeSupport && transferSupport && i != mainQueueIndex_) {
+                secondaryQueueIndex_ = i;
+                break;
+            }
         }
     }
 
@@ -225,6 +222,14 @@ void vk::PhysicalDevice::findQueueFamilies() {
         physicalDeviceCerr() << "No queue family that supports graphics, compute and transfer found." << std::endl;
         exit(EXIT_FAILURE);
     }
+
+    physicalDeviceCout() << "queue families selected main=" << mainQueueIndex_
+                         << " secondary=" << secondaryQueueIndex_
+                         << " mainQueueCount=" << mainQueueCount_
+                         << (mainQueueIndex_ == secondaryQueueIndex_
+                                 ? " (same family; async BLAS avoids ownership transfers)"
+                                 : " (different families; ownership transfers required)")
+                         << std::endl;
 }
 
 VkPhysicalDeviceProperties vk::PhysicalDevice::properties() {

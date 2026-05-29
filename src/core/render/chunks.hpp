@@ -133,6 +133,13 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     void releaseHostGeometry();
 };
 
+struct ChunkOmmResources : public SharedObject<ChunkOmmResources> {
+    std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> ommIndexBuffers;
+    std::vector<ChunkBuildData::OMMGeometryData> ommGeometryData;
+
+    ~ChunkOmmResources();
+};
+
 struct Chunk1;
 
 struct ChunkBuildDataBatch : public SharedObject<ChunkBuildDataBatch> {
@@ -273,6 +280,7 @@ struct ChunkRenderData : public SharedObject<ChunkRenderData> {
     std::shared_ptr<std::vector<World::GeometryTypes>> geometryTypes;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
+    std::shared_ptr<ChunkOmmResources> ommResources;
 };
 
 struct ChunkLightEntry {
@@ -298,6 +306,7 @@ struct Chunk1 : public SharedObject<Chunk1> {
     uint8_t vertexFormat = 0;     // 0=full (96-byte PBRTriangle), 1=compact far, 2=lossless near
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
+    std::shared_ptr<ChunkOmmResources> ommResources;
 
     uint32_t allVertexCount;
     uint32_t allIndexCount;

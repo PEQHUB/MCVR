@@ -379,7 +379,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
         VkDeviceQueueCreateInfo queueCreateInfo = {};
         queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         queueCreateInfo.queueFamilyIndex = physicalDevice_->mainQueueIndex();
-        queueCreateInfo.queueCount = 2;
+        queueCreateInfo.queueCount = physicalDevice_->mainQueueCount() >= 2 ? 2 : 1;
         queueCreateInfo.pQueuePriorities = queuePriorities.data();
 
         deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -446,7 +446,10 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
 
     vkGetDeviceQueue(device_, physicalDevice_->mainQueueIndex(), 0, &mainQueue_);
     vkGetDeviceQueue(device_, physicalDevice_->secondaryQueueIndex(),
-                     physicalDevice_->mainQueueIndex() == physicalDevice_->secondaryQueueIndex() ? 1 : 0,
+                     physicalDevice_->mainQueueIndex() == physicalDevice_->secondaryQueueIndex() &&
+                             physicalDevice_->mainQueueCount() >= 2
+                         ? 1
+                         : 0,
                      &secondaryQueue_);
 
     vk::DebugUtils::setObjectName(device_, VK_OBJECT_TYPE_DEVICE, device_, "Radiance VkDevice");

@@ -26,6 +26,15 @@
 
 #include <glm/gtc/packing.hpp>
 
+static void destroyOmmGeometryData(std::vector<ChunkBuildData::OMMGeometryData> &ommGeometryData) {
+    for (auto &gd : ommGeometryData) {
+        if (gd.micromap != VK_NULL_HANDLE && gd.device) {
+            vkDestroyMicromapEXT(gd.device->vkDevice(), gd.micromap, nullptr);
+            gd.micromap = VK_NULL_HANDLE;
+        }
+    }
+}
+
 // Convert full PBRTriangle vertices to compact 32-byte format.
 // Drops norm, postBase, lightPacked, glintUV/glintTexture, overlayPacked.
 // Compresses colorLayer to RGBA8, albedoEmission to fp16.
@@ -106,12 +115,11 @@ ChunkBuildData::ChunkBuildData(int64_t id,
       blasBuilder(nullptr) {}
 
 ChunkBuildData::~ChunkBuildData() {
-    for (auto &gd : ommGeometryData) {
-        if (gd.micromap != VK_NULL_HANDLE && gd.device) {
-            vkDestroyMicromapEXT(gd.device->vkDevice(), gd.micromap, nullptr);
-            gd.micromap = VK_NULL_HANDLE;
-        }
-    }
+    destroyOmmGeometryData(ommGeometryData);
+}
+
+ChunkOmmResources::~ChunkOmmResources() {
+    destroyOmmGeometryData(ommGeometryData);
 }
 
 void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 cameraPos) {
@@ -1179,6 +1187,13 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
         gc.collect(indexBuffers);
         indexBuffers = std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
             std::move(chunkBuildData->indexBuffers));
+
+        gc.collect(ommResources);
+        ommResources = ChunkOmmResources::create();
+        ommResources->ommIndexBuffers = std::move(chunkBuildData->ommIndexBuffers);
+        ommResources->ommGeometryData = std::move(chunkBuildData->ommGeometryData);
+        chunkBuildData->ommIndexBuffers.clear();
+        chunkBuildData->ommGeometryData.clear();
     } else {
         gc.collect(chunkBuildData->blas);
         if (chunkBuildData->preCompactionBlas) gc.collect(chunkBuildData->preCompactionBlas);
@@ -1188,6 +1203,15 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
 
         gc.collect(std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
             std::move(chunkBuildData->indexBuffers)));
+
+        if (!chunkBuildData->ommIndexBuffers.empty() || !chunkBuildData->ommGeometryData.empty()) {
+            auto discardedOmm = ChunkOmmResources::create();
+            discardedOmm->ommIndexBuffers = std::move(chunkBuildData->ommIndexBuffers);
+            discardedOmm->ommGeometryData = std::move(chunkBuildData->ommGeometryData);
+            chunkBuildData->ommIndexBuffers.clear();
+            chunkBuildData->ommGeometryData.clear();
+            gc.collect(discardedOmm);
+        }
     }
 
     allVertexCount = chunkBuildData->allVertexCount;
@@ -1218,6 +1242,9 @@ void Chunk1::invalidate() {
 
     gc.collect(indexBuffers);
     indexBuffers = nullptr;
+
+    gc.collect(ommResources);
+    ommResources = nullptr;
 }
 
 std::shared_ptr<ChunkRenderData> Chunk1::tryGetValid() {
@@ -1228,6 +1255,7 @@ std::shared_ptr<ChunkRenderData> Chunk1::tryGetValid() {
     ret->blas = blas;
     ret->vertexBuffers = vertexBuffers;
     ret->indexBuffers = indexBuffers;
+    ret->ommResources = ommResources;
     ret->allVertexCount = allVertexCount;
     ret->allIndexCount = allIndexCount;
     ret->geometryCount = geometryCount;
