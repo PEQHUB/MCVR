@@ -160,11 +160,15 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",directLightLightCount:" << directLightLightCount
         << ",directLightEmissiveChunks:0"
 #ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-        << ",directLightValidReservoirs:" << directLightLastCounters_[0]
-        << ",directLightTemporalReused:" << directLightLastCounters_[1]
-        << ",directLightSpatialTaps:" << directLightLastCounters_[2]
-        << ",directLightVisibilityRays:" << directLightLastCounters_[3]
+        << ",directLightPrimaryPipelineReady:" << (directLightPrimaryPipeline_ != VK_NULL_HANDLE ? 1 : 0)
+        << ",directLightPrimarySurfacePixels:" << directLightLastCounters_[0]
+        << ",directLightValidReservoirs:" << directLightLastCounters_[1]
+        << ",directLightTemporalReused:" << directLightLastCounters_[2]
+        << ",directLightSpatialTaps:" << directLightLastCounters_[3]
+        << ",directLightVisibilityRays:" << directLightLastCounters_[4]
 #else
+        << ",directLightPrimaryPipelineReady:0"
+        << ",directLightPrimarySurfacePixels:0"
         << ",directLightValidReservoirs:0"
         << ",directLightTemporalReused:0"
         << ",directLightSpatialTaps:0"
@@ -504,6 +508,9 @@ void RayTracingModule::build() {
     initSBT();
     initSpatialPipeline();
     initClusterPipeline();
+#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+    initDirectLightPipeline();
+#endif
 #if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_BUFFERS)
     sharcCapacity_ = effectiveSharcCapacity();
     if (Renderer::options.sharcEnabled) {
@@ -687,6 +694,12 @@ void RayTracingModule::preClose() {
         if (clusterPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, clusterPipelineLayout_, nullptr);
         if (clusterDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, clusterDescSetLayout_, nullptr);
         if (clusterDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, clusterDescPool_, nullptr);
+#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+        if (directLightPrimaryPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, directLightPrimaryPipeline_, nullptr);
+        if (directLightPrimaryPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, directLightPrimaryPipelineLayout_, nullptr);
+        if (directLightPrimaryDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, directLightPrimaryDescSetLayout_, nullptr);
+        if (directLightPrimaryDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, directLightPrimaryDescPool_, nullptr);
+#endif
         if (sharcResolvePipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, sharcResolvePipeline_, nullptr);
         if (sharcResolvePipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, sharcResolvePipelineLayout_, nullptr);
         if (sharcQueryPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, sharcQueryPipeline_, nullptr);
@@ -1754,6 +1767,128 @@ void RayTracingModule::initClusterPipeline() {
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 }
 
+void RayTracingModule::initDirectLightPipeline() {
+#ifndef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+    return;
+#else
+    auto framework = framework_.lock();
+    if (!framework) return;
+    auto device = framework->device();
+    VkDevice dev = device->vkDevice();
+    uint32_t size = framework->swapchain()->imageCount();
+
+    if (directLightPrimaryPipeline_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(dev, directLightPrimaryPipeline_, nullptr);
+        directLightPrimaryPipeline_ = VK_NULL_HANDLE;
+    }
+    if (directLightPrimaryPipelineLayout_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(dev, directLightPrimaryPipelineLayout_, nullptr);
+        directLightPrimaryPipelineLayout_ = VK_NULL_HANDLE;
+    }
+    if (directLightPrimaryDescSetLayout_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(dev, directLightPrimaryDescSetLayout_, nullptr);
+        directLightPrimaryDescSetLayout_ = VK_NULL_HANDLE;
+    }
+    if (directLightPrimaryDescPool_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(dev, directLightPrimaryDescPool_, nullptr);
+        directLightPrimaryDescPool_ = VK_NULL_HANDLE;
+    }
+
+    RadianceLogger::log("RayTracing", "INFO", "Direct-light primary pipeline create start");
+    g_crashRing.record("DirectLight:primaryPipeline:create:start");
+    std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
+    directLightPrimaryShader_ =
+        vk::Shader::create(device, (shaderPath / "world/ray_tracing/direct_light_primary_comp.spv").string());
+    if (!directLightPrimaryShader_) {
+        RadianceLogger::log("RayTracing", "ERROR", "Direct-light primary shader load failed");
+        g_crashRing.record("DirectLight:primaryPipeline:create:missingShader");
+        return;
+    }
+
+    std::vector<VkDescriptorSetLayoutBinding> bindings = {
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+    };
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+    layoutInfo.pBindings = bindings.data();
+    VkResult layoutResult = vkCreateDescriptorSetLayout(dev, &layoutInfo, nullptr, &directLightPrimaryDescSetLayout_);
+    if (layoutResult != VK_SUCCESS) {
+        RadianceLogger::log("RayTracing", "ERROR", "Direct-light primary descriptor layout failed result=%d",
+                            static_cast<int>(layoutResult));
+        g_crashRing.record("DirectLight:primaryPipeline:create:layoutFailed");
+        return;
+    }
+
+    VkPushConstantRange pushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int32_t) * 2};
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &directLightPrimaryDescSetLayout_;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+    VkResult pipelineLayoutResult =
+        vkCreatePipelineLayout(dev, &pipelineLayoutInfo, nullptr, &directLightPrimaryPipelineLayout_);
+    if (pipelineLayoutResult != VK_SUCCESS) {
+        RadianceLogger::log("RayTracing", "ERROR", "Direct-light primary pipeline layout failed result=%d",
+                            static_cast<int>(pipelineLayoutResult));
+        g_crashRing.record("DirectLight:primaryPipeline:create:pipelineLayoutFailed");
+        return;
+    }
+
+    VkComputePipelineCreateInfo pipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipelineInfo.stage.module = directLightPrimaryShader_->vkShaderModule();
+    pipelineInfo.stage.pName = "main";
+    pipelineInfo.layout = directLightPrimaryPipelineLayout_;
+    VkResult pipelineResult = vkCreateComputePipelines(dev, device->pipelineCache(), 1, &pipelineInfo, nullptr,
+                                                       &directLightPrimaryPipeline_);
+    if (pipelineResult != VK_SUCCESS) {
+        directLightPrimaryPipeline_ = VK_NULL_HANDLE;
+        RadianceLogger::log("RayTracing", "ERROR", "Direct-light primary pipeline create done ok=0 result=%d",
+                            static_cast<int>(pipelineResult));
+        g_crashRing.record("DirectLight:primaryPipeline:create:failed");
+        return;
+    }
+
+    VkDescriptorPoolSize poolSizes[] = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4u * size},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, size},
+    };
+    VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = size;
+    poolInfo.poolSizeCount = 2;
+    poolInfo.pPoolSizes = poolSizes;
+    VkResult poolResult = vkCreateDescriptorPool(dev, &poolInfo, nullptr, &directLightPrimaryDescPool_);
+    if (poolResult != VK_SUCCESS) {
+        RadianceLogger::log("RayTracing", "ERROR", "Direct-light primary descriptor pool failed result=%d",
+                            static_cast<int>(poolResult));
+        g_crashRing.record("DirectLight:primaryPipeline:create:poolFailed");
+        return;
+    }
+
+    std::vector<VkDescriptorSetLayout> layouts(size, directLightPrimaryDescSetLayout_);
+    VkDescriptorSetAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocInfo.descriptorPool = directLightPrimaryDescPool_;
+    allocInfo.descriptorSetCount = size;
+    allocInfo.pSetLayouts = layouts.data();
+    directLightPrimaryDescSets_.resize(size);
+    VkResult allocResult = vkAllocateDescriptorSets(dev, &allocInfo, directLightPrimaryDescSets_.data());
+    if (allocResult != VK_SUCCESS) {
+        RadianceLogger::log("RayTracing", "ERROR", "Direct-light primary descriptor alloc failed result=%d",
+                            static_cast<int>(allocResult));
+        g_crashRing.record("DirectLight:primaryPipeline:create:allocFailed");
+        return;
+    }
+
+    RadianceLogger::log("RayTracing", "INFO", "Direct-light primary pipeline create done ok=1 sets=%u", size);
+    g_crashRing.record("DirectLight:primaryPipeline:create:done");
+#endif
+}
+
 void RayTracingModule::initSharcBuffers() {
     auto framework = framework_.lock();
     if (!framework) return;
@@ -2175,7 +2310,6 @@ void RayTracingModuleContext::render() {
                 framework->vma(), framework->device(), kDirectLightCounterCount * sizeof(uint32_t),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         }
-        std::fill_n(module->directLightLastCounters_, kDirectLightCounterCount, 0);
     }
 #endif
 
@@ -2705,25 +2839,25 @@ void RayTracingModuleContext::render() {
     // Light clustering compute pass — DISABLED: contribution-sorted global list replaces tile clustering.
     // Tile buffer stays allocated (descriptor layout unchanged); CHS reads tileCount=0 → global fallback.
 #ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    if (directLightPipelineActive) {
-        auto runDirectLightBoundaryPass = [&](const char* label, const char* profileName,
-                                              float r, float g, float b) {
-            worldCommandBuffer->beginLabel(label, r, g, b);
-            ScopedGpuProfile profile(profileCmd, profileName);
-            profile.close();
-            worldCommandBuffer->endLabel();
-        };
-
-        renderDiag("RT directLightSkeleton begin backend=%u", effectiveDirectLightBackend());
-        g_crashRing.record("RT:directLightSkeleton:start");
-        runDirectLightBoundaryPass("RT:Primary Surface Skeleton", "RT.Primary", 0.25f, 0.55f, 1.0f);
-        runDirectLightBoundaryPass("RT:DirectLight Initial Skeleton", "RT.DirectLight.Initial", 0.1f, 0.7f, 0.4f);
-        runDirectLightBoundaryPass("RT:DirectLight Temporal Skeleton", "RT.DirectLight.Temporal", 0.1f, 0.75f, 0.55f);
-        runDirectLightBoundaryPass("RT:DirectLight Spatial Skeleton", "RT.DirectLight.Spatial", 0.1f, 0.8f, 0.7f);
-        runDirectLightBoundaryPass("RT:DirectLight Visibility Skeleton", "RT.DirectLight.Visibility", 0.9f, 0.75f, 0.25f);
-        runDirectLightBoundaryPass("RT:DirectLight Shade Skeleton", "RT.DirectLight.Shade", 0.95f, 0.55f, 0.2f);
-        renderDiag("RT directLightSkeleton end");
-        g_crashRing.record("RT:directLightSkeleton:done");
+    if (directLightPipelineActive && context->frameIndex < module->directLightCounterBuffers_.size()
+        && module->directLightCounterBuffers_[context->frameIndex]) {
+        auto counterBuffer = module->directLightCounterBuffers_[context->frameIndex];
+        counterBuffer->downloadFromBuffer();
+        if (counterBuffer->mappedPtr()) {
+            std::memcpy(module->directLightLastCounters_, counterBuffer->mappedPtr(),
+                        kDirectLightCounterCount * sizeof(uint32_t));
+        }
+        vkCmdFillBuffer(worldCommandBuffer->vkCommandBuffer(), counterBuffer->vkBuffer(), 0,
+                        kDirectLightCounterCount * sizeof(uint32_t), 0);
+        VkMemoryBarrier counterClearBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        counterClearBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        counterClearBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(worldCommandBuffer->vkCommandBuffer(),
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &counterClearBarrier, 0, nullptr, 0, nullptr);
+    } else if (!directLightPipelineActive) {
+        std::fill_n(module->directLightLastCounters_, kDirectLightCounterCount, 0);
     }
 #endif
 
@@ -3018,6 +3152,112 @@ void RayTracingModuleContext::render() {
     renderDiag("RT mainTrace end");
     mainTraceProfile.close();
     worldCommandBuffer->endLabel(); // end MainTrace
+
+#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+    if (directLightPipelineActive
+        && module->directLightPrimaryPipeline_ != VK_NULL_HANDLE
+        && context->frameIndex < module->directLightPrimaryDescSets_.size()
+        && context->frameIndex < module->directLightPrimarySurfaceImages_.size()
+        && context->frameIndex < module->directLightCounterBuffers_.size()
+        && module->directLightPrimarySurfaceImages_[context->frameIndex]
+        && module->directLightCounterBuffers_[context->frameIndex]) {
+        worldCommandBuffer->beginLabel("RT:Primary Surface Capture", 0.25f, 0.55f, 1.0f);
+        ScopedGpuProfile primaryProfile(profileCmd, "RT.Primary");
+        VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
+        uint32_t frameIdx = context->frameIndex;
+        g_crashRing.record("DirectLight:primaryDispatch:start");
+
+        VkMemoryBarrier prePrimaryBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        prePrimaryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        prePrimaryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &prePrimaryBarrier, 0, nullptr, 0, nullptr);
+
+        VkDescriptorSet primarySet = module->directLightPrimaryDescSets_[frameIdx];
+        auto addPrimaryImg = [&](uint32_t binding, const std::shared_ptr<vk::DeviceLocalImage>& img,
+                                 std::vector<VkWriteDescriptorSet>& writes,
+                                 std::vector<std::unique_ptr<VkDescriptorImageInfo>>& infos) {
+            auto info = std::make_unique<VkDescriptorImageInfo>();
+            info->imageView = img->vkImageView(0);
+            info->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            info->sampler = VK_NULL_HANDLE;
+            writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, primarySet, binding, 0, 1,
+                             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info.get(), nullptr, nullptr});
+            infos.push_back(std::move(info));
+        };
+
+        std::vector<VkWriteDescriptorSet> primaryWrites;
+        std::vector<std::unique_ptr<VkDescriptorImageInfo>> primaryInfos;
+        addPrimaryImg(0, module->positionViewSpaceImages_[frameIdx], primaryWrites, primaryInfos);
+        addPrimaryImg(1, normalRoughnessImage, primaryWrites, primaryInfos);
+        addPrimaryImg(2, linearDepthImage, primaryWrites, primaryInfos);
+        addPrimaryImg(3, module->directLightPrimarySurfaceImages_[frameIdx], primaryWrites, primaryInfos);
+        VkDescriptorBufferInfo counterInfo{
+            module->directLightCounterBuffers_[frameIdx]->vkBuffer(), 0,
+            module->directLightCounterBuffers_[frameIdx]->size()};
+        primaryWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, primarySet, 4, 0, 1,
+                                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &counterInfo, nullptr});
+        vkUpdateDescriptorSets(framework->device()->vkDevice(),
+            static_cast<uint32_t>(primaryWrites.size()), primaryWrites.data(), 0, nullptr);
+
+        struct DirectLightPrimaryPushConstant {
+            int32_t width;
+            int32_t height;
+        } primaryPC = {
+            static_cast<int32_t>(hdrNoisyOutputImage->width()),
+            static_cast<int32_t>(hdrNoisyOutputImage->height()),
+        };
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->directLightPrimaryPipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->directLightPrimaryPipelineLayout_,
+            0, 1, &primarySet, 0, nullptr);
+        vkCmdPushConstants(cmd, module->directLightPrimaryPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(primaryPC), &primaryPC);
+        vkCmdDispatch(cmd,
+            (hdrNoisyOutputImage->width() + 7) / 8,
+            (hdrNoisyOutputImage->height() + 7) / 8,
+            1);
+
+        VkMemoryBarrier postPrimaryBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        postPrimaryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        postPrimaryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            0, 1, &postPrimaryBarrier, 0, nullptr, 0, nullptr);
+
+        g_crashRing.record("DirectLight:primaryDispatch:done");
+        primaryProfile.close();
+        worldCommandBuffer->endLabel();
+    } else if (directLightPipelineActive) {
+        auto runDirectLightBoundaryPass = [&](const char* label, const char* profileName,
+                                              float r, float g, float b) {
+            worldCommandBuffer->beginLabel(label, r, g, b);
+            ScopedGpuProfile profile(profileCmd, profileName);
+            profile.close();
+            worldCommandBuffer->endLabel();
+        };
+        runDirectLightBoundaryPass("RT:Primary Surface Unavailable", "RT.Primary", 0.25f, 0.55f, 1.0f);
+    }
+
+    if (directLightPipelineActive) {
+        auto runDirectLightBoundaryPass = [&](const char* label, const char* profileName,
+                                              float r, float g, float b) {
+            worldCommandBuffer->beginLabel(label, r, g, b);
+            ScopedGpuProfile profile(profileCmd, profileName);
+            profile.close();
+            worldCommandBuffer->endLabel();
+        };
+        runDirectLightBoundaryPass("RT:DirectLight Initial Skeleton", "RT.DirectLight.Initial", 0.1f, 0.7f, 0.4f);
+        runDirectLightBoundaryPass("RT:DirectLight Temporal Skeleton", "RT.DirectLight.Temporal", 0.1f, 0.75f, 0.55f);
+        runDirectLightBoundaryPass("RT:DirectLight Spatial Skeleton", "RT.DirectLight.Spatial", 0.1f, 0.8f, 0.7f);
+        runDirectLightBoundaryPass("RT:DirectLight Visibility Skeleton", "RT.DirectLight.Visibility", 0.9f, 0.75f, 0.25f);
+        runDirectLightBoundaryPass("RT:DirectLight Shade Skeleton", "RT.DirectLight.Shade", 0.95f, 0.55f, 0.2f);
+    }
+#endif
 
 #ifdef MCVR_ENABLE_SHARC_QUERY_PASS
     if (sharcQueryPassActive) {

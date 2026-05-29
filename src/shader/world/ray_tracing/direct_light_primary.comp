@@ -1,0 +1,44 @@
+#version 460
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D positionViewSpaceImage;
+layout(set = 0, binding = 1, rgba32f) uniform readonly image2D normalRoughnessImage;
+layout(set = 0, binding = 2, r32f) uniform readonly image2D linearDepthImage;
+layout(set = 0, binding = 3, rgba32f) uniform writeonly image2D primarySurfaceImage;
+
+layout(set = 0, binding = 4) buffer DirectLightCounters {
+    uint counters[];
+} directLightCounters;
+
+layout(push_constant) uniform PushConstant {
+    int width;
+    int height;
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height) {
+        return;
+    }
+
+    vec4 viewPos = imageLoad(positionViewSpaceImage, pixel);
+    vec4 normalRoughness = imageLoad(normalRoughnessImage, pixel);
+    float linearDepth = imageLoad(linearDepthImage, pixel).r;
+
+    bool valid =
+        viewPos.a > 0.5 &&
+        linearDepth > 0.0 &&
+        linearDepth < 65500.0 &&
+        !isnan(linearDepth) &&
+        !isinf(linearDepth) &&
+        dot(normalRoughness.xyz, normalRoughness.xyz) > 0.25;
+
+    if (!valid) {
+        imageStore(primarySurfaceImage, pixel, vec4(0.0));
+        return;
+    }
+
+    imageStore(primarySurfaceImage, pixel, normalRoughness);
+    atomicAdd(directLightCounters.counters[0], 1u);
+}

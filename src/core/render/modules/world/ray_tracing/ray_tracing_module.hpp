@@ -107,6 +107,7 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     void initSBT();
     void initSpatialPipeline();
     void initClusterPipeline();
+    void initDirectLightPipeline();
     void initSharcBuffers();
     void initSharcUpdatePipeline();
     void initSharcResolvePipeline();
@@ -207,13 +208,19 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidatePrefixRadianceFlagsImages_;
 
 #ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    // Private direct-light split skeleton resources. Stage 1 only allocates and profiles the boundary.
+    // Private direct-light split resources. These stay internal until a backend proves useful.
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightPrimarySurfaceImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightReservoirPingImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightReservoirPongImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightOutputImages_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> directLightCounterBuffers_;
     uint32_t directLightLastCounters_[8] = {};
+    VkPipeline directLightPrimaryPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout directLightPrimaryPipelineLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout directLightPrimaryDescSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool directLightPrimaryDescPool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> directLightPrimaryDescSets_;
+    std::shared_ptr<vk::Shader> directLightPrimaryShader_;
 #endif
 
     // ReSTIR DI reservoir images (fixed roles)
