@@ -25,6 +25,7 @@ namespace {
 constexpr int kSharcMinCapacityExponent = 18;
 constexpr int kSharcMaxCapacityExponent = 24;
 constexpr uint32_t kSharcDispatchStableFrameThreshold = 60;
+constexpr uint32_t kSharcMainTraceMaxWarmupFrames = 8;
 
 int effectiveSharcCapacityExponent() {
     return std::clamp(Renderer::options.sharcCapacityExponent,
@@ -46,6 +47,12 @@ int effectiveSharcUpdateBlockSize() {
 
 int effectiveSharcUpdateBounces() {
     return std::clamp(Renderer::options.sharcUpdateBounces, 2, 8);
+}
+
+uint32_t effectiveSharcMainTraceWarmupFrames() {
+    return std::min<uint32_t>(
+        kSharcMainTraceMaxWarmupFrames,
+        static_cast<uint32_t>(std::clamp(Renderer::options.sharcAccumulationFrames, 1, 256)));
 }
 
 class ScopedGpuProfile {
@@ -111,7 +118,10 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
     }
     const bool updatePipelineReady = sharcUpdatePipeline_ != nullptr && sharcSbtReady > 0;
     const bool resolvePipelineReady = sharcResolvePipeline_ != VK_NULL_HANDLE;
-    const bool mainTraceQueryPossible = sharcMainTraceCompiled && Renderer::options.sharcEnabled && !accumulating && buffersAllocated;
+    const uint32_t mainTraceWarmupFrames = effectiveSharcMainTraceWarmupFrames();
+    const bool mainTraceQueryPossible = sharcMainTraceCompiled && Renderer::options.sharcEnabled && !accumulating
+        && buffersAllocated && sharcBuffersInitialized_ && sharcDispatchReady_;
+    const bool mainTraceQueryActive = mainTraceQueryPossible && sharcFrameIndex_ >= mainTraceWarmupFrames;
     const bool updateResolvePossible = Renderer::options.sharcEnabled && !accumulating && buffersAllocated
         && (sharcUpdateCompiled ? updatePipelineReady : true)
         && (sharcResolveCompiled ? resolvePipelineReady : true);
@@ -125,7 +135,9 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
     constexpr size_t sharcSbtReady = 0;
     constexpr bool updatePipelineReady = false;
     constexpr bool resolvePipelineReady = false;
+    constexpr uint32_t mainTraceWarmupFrames = 0;
     constexpr bool mainTraceQueryPossible = false;
+    constexpr bool mainTraceQueryActive = false;
     constexpr bool updateResolvePossible = false;
 #endif
 
@@ -146,6 +158,8 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",sharcUpdatePipeline:" << (updatePipelineReady ? 1 : 0)
         << ",sharcResolvePipeline:" << (resolvePipelineReady ? 1 : 0)
         << ",sharcMainTraceQueryPossible:" << (mainTraceQueryPossible ? 1 : 0)
+        << ",sharcMainTraceQueryActive:" << (mainTraceQueryActive ? 1 : 0)
+        << ",sharcMainTraceWarmupFrames:" << mainTraceWarmupFrames
         << ",sharcUpdateResolvePossible:" << (updateResolvePossible ? 1 : 0)
 #ifdef MCVR_ENABLE_SHARC
         << ",sharcUpdateSbtReady:" << sharcSbtReady
@@ -1330,7 +1344,16 @@ void RayTracingModule::initPipeline() {
     endGatewayAnyHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/end_gateway_rahit.spv").string());
 
-    RadianceLogger::log("RayTracing", "INFO", "World RT pipeline create start");
+    RadianceLogger::log("RayTracing", "INFO",
+                        "World RT pipeline create start sharcQueryMode=%d sharcMainTraceCompiled=%d",
+                        MCVR_SHARC_MAIN_TRACE_QUERY_MODE,
+#ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
+                        1
+#else
+                        0
+#endif
+                        );
+    g_crashRing.record("RT:pipeline:create:start");
     rayTracingPipeline_ =
         vk::RayTracingPipelineBuilder{}
             .beginShaderStage()
@@ -1388,6 +1411,7 @@ void RayTracingModule::initPipeline() {
             .build(device);
     RadianceLogger::log("RayTracing", "INFO", "World RT pipeline create done (ok=%d)",
                         rayTracingPipeline_ ? 1 : 0);
+    g_crashRing.record(rayTracingPipeline_ ? "RT:pipeline:create:done" : "RT:pipeline:create:failed");
 }
 
 void RayTracingModule::initSBT() {
@@ -2012,6 +2036,32 @@ void RayTracingModuleContext::render() {
     }
 #endif
 
+    uint32_t sharcMainTraceWarmupFrames = 0;
+    bool sharcMainTraceQueryActive = false;
+#if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY)
+    sharcMainTraceWarmupFrames = effectiveSharcMainTraceWarmupFrames();
+    sharcMainTraceQueryActive =
+        Renderer::options.sharcEnabled && !accumulating && module->sharcHashEntries_
+        && module->sharcBuffersInitialized_ && module->sharcDispatchReady_
+        && module->sharcFrameIndex_ >= sharcMainTraceWarmupFrames;
+#endif
+    {
+        static bool lastLoggedSharcMainTraceQueryActive = false;
+        static bool loggedSharcMainTraceQueryState = false;
+        if (!loggedSharcMainTraceQueryState
+            || lastLoggedSharcMainTraceQueryActive != sharcMainTraceQueryActive) {
+            loggedSharcMainTraceQueryState = true;
+            lastLoggedSharcMainTraceQueryActive = sharcMainTraceQueryActive;
+            renderDiag("SHARC mainTrace query state active=%d mode=%d frame=%u warmup=%u ready=%d initialized=%d",
+                       sharcMainTraceQueryActive ? 1 : 0,
+                       MCVR_SHARC_MAIN_TRACE_QUERY_MODE,
+                       module->sharcFrameIndex_,
+                       sharcMainTraceWarmupFrames,
+                       module->sharcDispatchReady_ ? 1 : 0,
+                       module->sharcBuffersInitialized_ ? 1 : 0);
+        }
+    }
+
     RayTracingPushConstant pushConstant{};
     pushConstant.numRayBounces = accumulating
         ? static_cast<int>(Renderer::options.offlineBounces)
@@ -2022,8 +2072,7 @@ void RayTracingModuleContext::render() {
                        | (Renderer::options.restirSimplifiedBRDF ? 8 : 0)
                        | (Renderer::options.restirBounceEnabled ? 16 : 0)
 #if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY)
-                       | ((Renderer::options.sharcEnabled && !accumulating && module->sharcHashEntries_
-                           && module->sharcBuffersInitialized_ && module->sharcDispatchReady_) ? 32 : 0)
+                       | (sharcMainTraceQueryActive ? 32 : 0)
 #endif
                        | (Renderer::options.noiseLOD ? 64 : 0)
                        | (Renderer::options.multiScatterGGX ? 128 : 0)
@@ -2068,10 +2117,12 @@ void RayTracingModuleContext::render() {
         if (curFrame - lastPCLog >= 60) {
             lastPCLog = curFrame;
             RadianceLogger::log("RayTracing", "INFO",
-                "pushConst: bounces=%d flags=0x%x rtDebug=0x%x handInst=%u lights=%d shadowSoft=%.2f displacementEnabled=%d displacementQuality=%u displacementDepth=%.4f displacementSteps=%d displacementRefinement=%d displacementFade=%.0f",
+                "pushConst: bounces=%d flags=0x%x rtDebug=0x%x handInst=%u lights=%d shadowSoft=%.2f sharcQuery=%d sharcFrame=%u sharcWarmup=%u sharcMode=%d displacementEnabled=%d displacementQuality=%u displacementDepth=%.4f displacementSteps=%d displacementRefinement=%d displacementFade=%.0f",
                 pushConstant.numRayBounces, pushConstant.flags, pushConstant.rtDebugFlags,
                 pushConstant.handInstanceCount, pushConstant.areaLightCount,
-                pushConstant.shadowSoftness, Renderer::options.pomEnabled ? 1 : 0,
+                pushConstant.shadowSoftness, sharcMainTraceQueryActive ? 1 : 0,
+                module->sharcFrameIndex_, sharcMainTraceWarmupFrames,
+                MCVR_SHARC_MAIN_TRACE_QUERY_MODE, Renderer::options.pomEnabled ? 1 : 0,
                 Renderer::options.displacementQuality, pushConstant.pomHeightScale,
                 pushConstant.pomSteps, pushConstant.pomRefinement, pushConstant.pomFadeDistance);
         }
