@@ -90,11 +90,14 @@ vec3 directionalDirect(vec3 worldPos, vec3 normal, vec3 albedo) {
         return vec3(0.0);
     }
 
+    atomicAdd(directLightCounters.counters[7], 1u);
+    atomicAdd(directLightCounters.counters[8], 1u);
     bool occluded = traceOccluded(worldPos, normal, lightDir, 1000.0);
     atomicAdd(directLightCounters.counters[4], 1u);
     if (occluded) {
         return vec3(0.0);
     }
+    atomicAdd(directLightCounters.counters[9], 1u);
 
     float rainFade = clamp(skyUBO.rainGradient, 0.0, 1.0);
     return lightRadiance * (albedo / DIRECT_LIGHT_PI) * nDotL * (1.0 - rainFade);
@@ -113,6 +116,7 @@ vec3 areaLightDirect(ivec2 pixel, vec3 worldPos, vec3 normal, vec3 albedo) {
     if (tileCount == 0u) {
         return vec3(0.0);
     }
+    atomicAdd(directLightCounters.counters[10], 1u);
 
     uint seed = hashPixel(pixel);
     uint start = seed % tileCount;
@@ -142,11 +146,14 @@ vec3 areaLightDirect(ivec2 pixel, vec3 worldPos, vec3 normal, vec3 albedo) {
             continue;
         }
 
+        atomicAdd(directLightCounters.counters[11], 1u);
+        atomicAdd(directLightCounters.counters[12], 1u);
         bool occluded = traceOccluded(worldPos, normal, lightDir, max(dist - al.halfExtent - 0.02, 0.01));
         atomicAdd(directLightCounters.counters[4], 1u);
         if (occluded) {
             continue;
         }
+        atomicAdd(directLightCounters.counters[13], 1u);
 
         float invDist2 = 1.0 / max(dist2, 0.01);
         float f = cullDist / max(al.radius, 0.001);
@@ -199,6 +206,10 @@ void main() {
     imageStore(firstHitDiffuseDirectLightImage, pixel, vec4(radiance, 1.0));
 
     atomicAdd(directLightCounters.counters[1], 1u);
+    atomicAdd(directLightCounters.counters[14], 1u);
+    if (hasDirectSample) {
+        atomicAdd(directLightCounters.counters[15], 1u);
+    }
     if (directHitT > 0.0 && directHitT < 65500.0 && !isnan(directHitT) && !isinf(directHitT)) {
         atomicAdd(directLightCounters.counters[5], 1u);
     }

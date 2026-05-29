@@ -214,7 +214,7 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightReservoirPongImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightOutputImages_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> directLightCounterBuffers_;
-    uint32_t directLightLastCounters_[8] = {};
+    uint32_t directLightLastCounters_[16] = {};
     VkPipeline directLightPrimaryPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout directLightPrimaryPipelineLayout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout directLightPrimaryDescSetLayout_ = VK_NULL_HANDLE;

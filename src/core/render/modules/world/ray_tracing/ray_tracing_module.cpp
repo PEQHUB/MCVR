@@ -27,7 +27,7 @@ constexpr int kSharcMaxCapacityExponent = 24;
 constexpr uint32_t kSharcDispatchStableFrameThreshold = 60;
 constexpr uint32_t kSharcMainTraceMaxWarmupFrames = 8;
 constexpr uint32_t kSharcQueryCounterCount = 8;
-constexpr uint32_t kDirectLightCounterCount = 8;
+constexpr uint32_t kDirectLightCounterCount = 16;
 constexpr uint32_t kRtDebugDisableDirectLighting = 16;
 constexpr bool kForceDisableShaderDisplacementForGpuFaultIsolation = true;
 
@@ -170,6 +170,17 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",directLightTemporalReused:" << directLightLastCounters_[2]
         << ",directLightSpatialTaps:" << directLightLastCounters_[3]
         << ",directLightVisibilityRays:" << directLightLastCounters_[4]
+        << ",directLightDepthHits:" << directLightLastCounters_[5]
+        << ",directLightShadeValidPixels:" << directLightLastCounters_[6]
+        << ",directLightDirectionalCandidates:" << directLightLastCounters_[7]
+        << ",directLightDirectionalVisibilityRays:" << directLightLastCounters_[8]
+        << ",directLightDirectionalUnoccluded:" << directLightLastCounters_[9]
+        << ",directLightAreaTilePixels:" << directLightLastCounters_[10]
+        << ",directLightAreaCandidates:" << directLightLastCounters_[11]
+        << ",directLightAreaVisibilityRays:" << directLightLastCounters_[12]
+        << ",directLightAreaUnoccluded:" << directLightLastCounters_[13]
+        << ",directLightOutputPixels:" << directLightLastCounters_[14]
+        << ",directLightNonzeroOutputPixels:" << directLightLastCounters_[15]
 #else
         << ",directLightPrimaryPipelineReady:0"
         << ",directLightInitialPipelineReady:0"
@@ -180,6 +191,17 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",directLightTemporalReused:0"
         << ",directLightSpatialTaps:0"
         << ",directLightVisibilityRays:0"
+        << ",directLightDepthHits:0"
+        << ",directLightShadeValidPixels:0"
+        << ",directLightDirectionalCandidates:0"
+        << ",directLightDirectionalVisibilityRays:0"
+        << ",directLightDirectionalUnoccluded:0"
+        << ",directLightAreaTilePixels:0"
+        << ",directLightAreaCandidates:0"
+        << ",directLightAreaVisibilityRays:0"
+        << ",directLightAreaUnoccluded:0"
+        << ",directLightOutputPixels:0"
+        << ",directLightNonzeroOutputPixels:0"
 #endif
         << ",sharcOption:" << (Renderer::options.sharcEnabled ? 1 : 0)
         << ",offlineAccumulating:" << (accumulating ? 1 : 0);
