@@ -1,0 +1,112 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : enable
+#extension GL_EXT_control_flow_attributes : require
+
+#ifndef SHARC_COMPILE_ENABLE
+#define SHARC_COMPILE_ENABLE 0
+#endif
+
+#define SHARC_MAIN_TRACE_QUERY_MODE 4
+#include "sharc_query_readonly.glsl"
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D sharcCandidatePosHitTImage;
+layout(set = 0, binding = 1, rgba32f) uniform readonly image2D sharcCandidateNormalRoughnessImage;
+layout(set = 0, binding = 2, rgba32f) uniform readonly image2D sharcCandidateThroughputImage;
+layout(set = 0, binding = 3, rgba32f) uniform readonly image2D sharcCandidatePrefixRadianceFlagsImage;
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D firstHitDiffuseDirectLightImage;
+layout(set = 0, binding = 5, rgba16f) uniform readonly image2D firstHitBaseEmissionImage;
+layout(set = 0, binding = 6, rgba16f) uniform image2D firstHitDiffuseIndirectLightImage;
+
+layout(set = 0, binding = 7) buffer SharcQueryCounters {
+    uint counters[];
+} sharcQueryCounters;
+
+layout(push_constant) uniform PushConstant {
+    int width;
+    int height;
+    int mode; // 0=off, 1=observe, 2=active
+    int reserved0;
+    uint64_t hashEntriesBDA;
+    uint64_t resolvedBDA;
+    float cameraX;
+    float cameraY;
+    float cameraZ;
+    float sceneScale;
+    uint capacity;
+    float roughnessThreshold;
+    uint frameIndex;
+    uint reserved1;
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+#if !SHARC_COMPILE_ENABLE
+    return;
+#else
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= pc.width || pixel.y >= pc.height || pc.mode == 0) return;
+
+    vec4 prefixFlags = imageLoad(sharcCandidatePrefixRadianceFlagsImage, pixel);
+    uint flags = uint(prefixFlags.a + 0.5);
+    if ((flags & 1u) == 0u) return;
+
+    atomicAdd(sharcQueryCounters.counters[0], 1u); // candidates
+    bool activeCandidate = (flags & 2u) != 0u;
+    if (activeCandidate) {
+        atomicAdd(sharcQueryCounters.counters[1], 1u);
+    }
+
+    vec4 posHitT = imageLoad(sharcCandidatePosHitTImage, pixel);
+    vec4 normalRoughness = imageLoad(sharcCandidateNormalRoughnessImage, pixel);
+    vec4 throughput = imageLoad(sharcCandidateThroughputImage, pixel);
+    if (pc.hashEntriesBDA == uint64_t(0) || pc.resolvedBDA == uint64_t(0) || pc.capacity == 0u ||
+        any(isnan(posHitT.xyz)) || any(isinf(posHitT.xyz)) ||
+        any(isnan(normalRoughness.xyz)) || any(isinf(normalRoughness.xyz)) ||
+        any(isnan(throughput.xyz)) || any(isinf(throughput.xyz))) {
+        atomicAdd(sharcQueryCounters.counters[5], 1u);
+        return;
+    }
+
+    atomicAdd(sharcQueryCounters.counters[2], 1u); // attempts
+    vec3 cachedRadiance;
+    float queryVoxelSize;
+    bool sharcHit = sharcQueryCachedRadiance(
+        pc.hashEntriesBDA,
+        pc.resolvedBDA,
+        pc.capacity,
+        vec3(pc.cameraX, pc.cameraY, pc.cameraZ),
+        pc.sceneScale,
+        posHitT.xyz,
+        normalize(normalRoughness.xyz),
+        cachedRadiance,
+        queryVoxelSize);
+
+    if (!sharcHit) {
+        atomicAdd(sharcQueryCounters.counters[4], 1u);
+        return;
+    }
+    if (posHitT.w < queryVoxelSize) {
+        atomicAdd(sharcQueryCounters.counters[6], 1u);
+        return;
+    }
+
+    atomicAdd(sharcQueryCounters.counters[3], 1u);
+    if (pc.mode >= 2 && activeCandidate) {
+        vec3 finalRadiance = prefixFlags.rgb + throughput.rgb * cachedRadiance;
+        vec3 firstHitDirect = imageLoad(firstHitDiffuseDirectLightImage, pixel).rgb;
+        vec3 firstHitEmission = imageLoad(firstHitBaseEmissionImage, pixel).rgb;
+        vec3 finalIndirect = max(finalRadiance - firstHitDirect - firstHitEmission, vec3(0.0));
+        if (!any(isnan(finalIndirect)) && !any(isinf(finalIndirect))) {
+            imageStore(firstHitDiffuseIndirectLightImage, pixel, vec4(finalIndirect, 1.0));
+            atomicAdd(sharcQueryCounters.counters[7], 1u);
+        } else {
+            atomicAdd(sharcQueryCounters.counters[5], 1u);
+        }
+    }
+#endif
+}

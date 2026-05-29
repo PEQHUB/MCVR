@@ -130,12 +130,14 @@ layout(push_constant) uniform PushConstant {
     float _sharcPad7;
     int _sharcPad8;
     int _sharcPad9;
-    // Offline accumulation fields (offset 120)
+    int _sharcQueryModePad;
+    int _sharcQueryReservedPad;
+    // Offline accumulation fields
     int offlineFlags;
     int accumFrameCount;
     float aperture;
     float focalDistance;
-    // Material SSBO BDA (offset 128)
+    // Material SSBO BDA
     uint64_t materialClassAddr;
 } pc;
 #define SIMPLIFIED_INDIRECT ((pc.flags & 1) != 0)

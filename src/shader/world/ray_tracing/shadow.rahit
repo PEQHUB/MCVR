@@ -70,6 +70,7 @@ layout(push_constant) uniform PushConstant {
     uint _sharcPad6;
     float _sharcPad7;
     int _sharcPad8, _sharcPad9;
+    int _sharcQueryModePad, _sharcQueryReservedPad;
     int offlineFlags;
     int accumFrameCount;
     float aperture;

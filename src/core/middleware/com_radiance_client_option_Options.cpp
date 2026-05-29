@@ -169,6 +169,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     // Note: buffer reallocation requires restart. The exponent is used at init time.
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharcQueryMode(
+    JNIEnv *, jclass, jint mode, jboolean write) {
+    Renderer::options.sharcQueryMode = std::clamp(static_cast<int>(mode), 0, 2);
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOutputScale2x(
     JNIEnv *, jclass, jboolean enabled, jboolean write) {
     Renderer::options.outputScale2x = enabled;

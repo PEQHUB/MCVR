@@ -55,7 +55,9 @@ struct RayTracingPushConstant {
     float sharcRoughnessThreshold; // min roughness for cache query (0=all, 1=diffuse only)
     int sharcUpdateBlockSize;      // sparse update NxN block size (2-8)
     int sharcUpdateBounces;        // max bounces in SHARC update pass (2-8)
-    // Offline accumulation fields (offset 112, 16 bytes)
+    int sharcQueryMode;            // 0=off, 1=observe, 2=active isolated query pass
+    int sharcQueryReserved;        // keep materialClassAddr 8-byte aligned
+    // Offline accumulation fields
     int offlineFlags;              // bit 0: accumulating, bit 1: disable RR, bit 2: disable clamp
     int accumFrameCount;           // frame index for jitter sequence during accumulation
     float aperture;                // thin lens aperture radius (0 = pinhole)
@@ -108,6 +110,7 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     void initSharcBuffers();
     void initSharcUpdatePipeline();
     void initSharcResolvePipeline();
+    void initSharcQueryPipeline();
 
   private:
     // input
@@ -197,6 +200,12 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerOpacityImages_;  // [27] glass/water per-channel opacity
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerMvecsImages_;    // [28] glass/water surface MVs
 
+    // Private SHARC query-pass candidate images. These are internal to RayTracingModule.
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidatePosHitTImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidateNormalRoughnessImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidateThroughputImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidatePrefixRadianceFlagsImages_;
+
     // ReSTIR DI reservoir images (fixed roles)
     // [0] = temporal output (CHS writes), [1] = spatial output (compute writes)
     std::shared_ptr<vk::DeviceLocalImage> reservoirImages_[2];
@@ -245,6 +254,16 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     VkPipeline sharcResolvePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout sharcResolvePipelineLayout_ = VK_NULL_HANDLE;
     std::shared_ptr<vk::Shader> sharcResolveShader_;
+
+    // SHARC isolated query compute pipeline (keeps hash/BDA traversal out of world.rgen)
+    VkPipeline sharcQueryPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout sharcQueryPipelineLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout sharcQueryDescSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool sharcQueryDescPool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> sharcQueryDescSets_;
+    std::shared_ptr<vk::Shader> sharcQueryShader_;
+    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> sharcQueryCounterBuffers_;
+    uint32_t sharcQueryLastCounters_[8] = {};
 
     // Offline accumulation compute pipeline (resources stored in Renderer statics)
     std::shared_ptr<vk::Shader> accumShader_;

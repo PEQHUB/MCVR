@@ -26,6 +26,12 @@ constexpr int kSharcMinCapacityExponent = 18;
 constexpr int kSharcMaxCapacityExponent = 24;
 constexpr uint32_t kSharcDispatchStableFrameThreshold = 60;
 constexpr uint32_t kSharcMainTraceMaxWarmupFrames = 8;
+constexpr uint32_t kSharcQueryCounterCount = 8;
+constexpr bool kForceDisableShaderDisplacementForGpuFaultIsolation = true;
+
+bool shaderDisplacementRuntimeAllowed() {
+    return !kForceDisableShaderDisplacementForGpuFaultIsolation;
+}
 
 int effectiveSharcCapacityExponent() {
     return std::clamp(Renderer::options.sharcCapacityExponent,
@@ -53,6 +59,10 @@ uint32_t effectiveSharcMainTraceWarmupFrames() {
     return std::min<uint32_t>(
         kSharcMainTraceMaxWarmupFrames,
         static_cast<uint32_t>(std::clamp(Renderer::options.sharcAccumulationFrames, 1, 256)));
+}
+
+int effectiveSharcQueryMode() {
+    return std::clamp(Renderer::options.sharcQueryMode, 0, 2);
 }
 
 class ScopedGpuProfile {
@@ -106,6 +116,11 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
 #else
     constexpr bool sharcResolveCompiled = false;
 #endif
+#ifdef MCVR_ENABLE_SHARC_QUERY_PASS
+    constexpr bool sharcQueryPassCompiled = true;
+#else
+    constexpr bool sharcQueryPassCompiled = false;
+#endif
 #ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
     constexpr bool sharcMainTraceCompiled = true;
 #else
@@ -118,6 +133,7 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
     }
     const bool updatePipelineReady = sharcUpdatePipeline_ != nullptr && sharcSbtReady > 0;
     const bool resolvePipelineReady = sharcResolvePipeline_ != VK_NULL_HANDLE;
+    const bool queryPipelineReady = sharcQueryPipeline_ != VK_NULL_HANDLE;
     const uint32_t mainTraceWarmupFrames = effectiveSharcMainTraceWarmupFrames();
     const bool mainTraceQueryPossible = sharcMainTraceCompiled && Renderer::options.sharcEnabled && !accumulating
         && buffersAllocated && sharcBuffersInitialized_ && sharcDispatchReady_;
@@ -125,27 +141,35 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
     const bool updateResolvePossible = Renderer::options.sharcEnabled && !accumulating && buffersAllocated
         && (sharcUpdateCompiled ? updatePipelineReady : true)
         && (sharcResolveCompiled ? resolvePipelineReady : true);
+    const bool queryPassPossible = sharcQueryPassCompiled && Renderer::options.sharcEnabled && !accumulating
+        && effectiveSharcQueryMode() > 0 && buffersAllocated && sharcBuffersInitialized_
+        && sharcDispatchReady_ && queryPipelineReady;
 #else
     constexpr bool sharcCompiled = false;
     constexpr bool sharcBuffersCompiled = false;
     constexpr bool sharcUpdateCompiled = false;
     constexpr bool sharcResolveCompiled = false;
+    constexpr bool sharcQueryPassCompiled = false;
     constexpr bool sharcMainTraceCompiled = false;
     constexpr bool buffersAllocated = false;
     constexpr size_t sharcSbtReady = 0;
     constexpr bool updatePipelineReady = false;
     constexpr bool resolvePipelineReady = false;
+    constexpr bool queryPipelineReady = false;
     constexpr uint32_t mainTraceWarmupFrames = 0;
     constexpr bool mainTraceQueryPossible = false;
     constexpr bool mainTraceQueryActive = false;
     constexpr bool updateResolvePossible = false;
+    constexpr bool queryPassPossible = false;
 #endif
 
     out << ",sharcCompiled:" << (sharcCompiled ? 1 : 0)
         << ",sharcBuffersCompiled:" << (sharcBuffersCompiled ? 1 : 0)
         << ",sharcUpdateCompiled:" << (sharcUpdateCompiled ? 1 : 0)
         << ",sharcResolveCompiled:" << (sharcResolveCompiled ? 1 : 0)
+        << ",sharcQueryPassCompiled:" << (sharcQueryPassCompiled ? 1 : 0)
         << ",sharcMainTraceCompiled:" << (sharcMainTraceCompiled ? 1 : 0)
+        << ",sharcQueryMode:" << effectiveSharcQueryMode()
         << ",sharcMainTraceQueryMode:" << MCVR_SHARC_MAIN_TRACE_QUERY_MODE
         << ",sharcBuffersAllocated:" << (buffersAllocated ? 1 : 0)
 #ifdef MCVR_ENABLE_SHARC
@@ -157,8 +181,10 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
 #endif
         << ",sharcUpdatePipeline:" << (updatePipelineReady ? 1 : 0)
         << ",sharcResolvePipeline:" << (resolvePipelineReady ? 1 : 0)
+        << ",sharcQueryPipeline:" << (queryPipelineReady ? 1 : 0)
         << ",sharcMainTraceQueryPossible:" << (mainTraceQueryPossible ? 1 : 0)
         << ",sharcMainTraceQueryActive:" << (mainTraceQueryActive ? 1 : 0)
+        << ",sharcQueryPassPossible:" << (queryPassPossible ? 1 : 0)
         << ",sharcMainTraceWarmupFrames:" << mainTraceWarmupFrames
         << ",sharcUpdateResolvePossible:" << (updateResolvePossible ? 1 : 0)
 #ifdef MCVR_ENABLE_SHARC
@@ -171,12 +197,28 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",sharcStreamStableFrames:" << sharcStreamStableFrames_
         << ",sharcDispatchReady:" << (sharcDispatchReady_ ? 1 : 0)
         << ",sharcCapacity:" << sharcCapacity_
-        << ",sharcFrameIndex:" << sharcFrameIndex_;
+        << ",sharcFrameIndex:" << sharcFrameIndex_
+        << ",sharcCandidates:" << sharcQueryLastCounters_[0]
+        << ",sharcActiveTerminated:" << sharcQueryLastCounters_[1]
+        << ",sharcQueryAttempts:" << sharcQueryLastCounters_[2]
+        << ",sharcQueryHits:" << sharcQueryLastCounters_[3]
+        << ",sharcQueryMisses:" << sharcQueryLastCounters_[4]
+        << ",sharcQueryInvalid:" << sharcQueryLastCounters_[5]
+        << ",sharcQueryVoxelSkips:" << sharcQueryLastCounters_[6]
+        << ",sharcQueryWrites:" << sharcQueryLastCounters_[7];
 #else
         << ",sharcUpdateSbtReady:0"
         << ",sharcUpdateSbtTotal:0"
         << ",sharcCapacity:0"
-        << ",sharcFrameIndex:0";
+        << ",sharcFrameIndex:0"
+        << ",sharcCandidates:0"
+        << ",sharcActiveTerminated:0"
+        << ",sharcQueryAttempts:0"
+        << ",sharcQueryHits:0"
+        << ",sharcQueryMisses:0"
+        << ",sharcQueryInvalid:0"
+        << ",sharcQueryVoxelSkips:0"
+        << ",sharcQueryWrites:0";
 #endif
 
     return out.str();
@@ -216,6 +258,11 @@ void RayTracingModule::init(std::shared_ptr<Framework> framework, std::shared_pt
     transparencyLayerImages_.resize(size);
     transparencyLayerOpacityImages_.resize(size);
     transparencyLayerMvecsImages_.resize(size);
+    sharcCandidatePosHitTImages_.resize(size);
+    sharcCandidateNormalRoughnessImages_.resize(size);
+    sharcCandidateThroughputImages_.resize(size);
+    sharcCandidatePrefixRadianceFlagsImages_.resize(size);
+    sharcQueryCounterBuffers_.resize(size);
 
     atmosphere_ = Atmosphere::create(framework, shared_from_this());
     worldPrepare_ = WorldPrepare::create(framework, shared_from_this());
@@ -314,6 +361,28 @@ bool RayTracingModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::D
         }
     }
 
+#ifdef MCVR_ENABLE_SHARC_QUERY_PASS
+    auto ensureCandidateImage =
+        [&](std::vector<std::shared_ptr<vk::DeviceLocalImage>> &target) {
+            auto &img = target[frameIndex];
+            if (!img || img->width() != width || img->height() != height) {
+                img = vk::DeviceLocalImage::create(
+                    framework->device(), framework->vma(), false, width, height, 1,
+                    VK_FORMAT_R32G32B32A32_SFLOAT,
+                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+            }
+        };
+    ensureCandidateImage(sharcCandidatePosHitTImages_);
+    ensureCandidateImage(sharcCandidateNormalRoughnessImages_);
+    ensureCandidateImage(sharcCandidateThroughputImages_);
+    ensureCandidateImage(sharcCandidatePrefixRadianceFlagsImages_);
+    if (!sharcQueryCounterBuffers_[frameIndex]) {
+        sharcQueryCounterBuffers_[frameIndex] = vk::HostVisibleBuffer::create(
+            framework->vma(), framework->device(), kSharcQueryCounterCount * sizeof(uint32_t),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    }
+#endif
+
     return true;
 }
 
@@ -363,6 +432,9 @@ void RayTracingModule::build() {
 #endif
 #ifdef MCVR_ENABLE_SHARC_RESOLVE_PASS
         initSharcResolvePipeline();
+#endif
+#ifdef MCVR_ENABLE_SHARC_QUERY_PASS
+        initSharcQueryPipeline();
 #endif
     }
 #endif
@@ -536,6 +608,10 @@ void RayTracingModule::preClose() {
         if (clusterDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, clusterDescPool_, nullptr);
         if (sharcResolvePipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, sharcResolvePipeline_, nullptr);
         if (sharcResolvePipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, sharcResolvePipelineLayout_, nullptr);
+        if (sharcQueryPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, sharcQueryPipeline_, nullptr);
+        if (sharcQueryPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, sharcQueryPipelineLayout_, nullptr);
+        if (sharcQueryDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, sharcQueryDescSetLayout_, nullptr);
+        if (sharcQueryDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, sharcQueryDescPool_, nullptr);
         if (Renderer::accumPipeline != VK_NULL_HANDLE) vkDestroyPipeline(dev, Renderer::accumPipeline, nullptr);
         if (Renderer::accumPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, Renderer::accumPipelineLayout, nullptr);
         if (Renderer::accumDescSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, Renderer::accumDescSetLayout, nullptr);
@@ -980,6 +1056,30 @@ void RayTracingModule::initDescriptorTables() {
                     .descriptorCount = 1,
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
                 })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 34, // binding 34: SHARC candidate position + hitT
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 35, // binding 35: SHARC candidate normal + roughness
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 36, // binding 36: SHARC candidate throughput
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 37, // binding 37: SHARC candidate prefix radiance + flags
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
                 .definePushConstant({
@@ -1255,6 +1355,16 @@ void RayTracingModule::initImages() {
             imageBindings.push_back({transparencyLayerOpacityImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 32});
         if (transparencyLayerMvecsImages_[i])
             imageBindings.push_back({transparencyLayerMvecsImages_[i],   VK_IMAGE_LAYOUT_GENERAL, 3, 33});
+#ifdef MCVR_ENABLE_SHARC_QUERY_PASS
+        if (sharcCandidatePosHitTImages_[i])
+            imageBindings.push_back({sharcCandidatePosHitTImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 34});
+        if (sharcCandidateNormalRoughnessImages_[i])
+            imageBindings.push_back({sharcCandidateNormalRoughnessImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 35});
+        if (sharcCandidateThroughputImages_[i])
+            imageBindings.push_back({sharcCandidateThroughputImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 36});
+        if (sharcCandidatePrefixRadianceFlagsImages_[i])
+            imageBindings.push_back({sharcCandidatePrefixRadianceFlagsImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 37});
+#endif
 
         // ReSTIR DI reservoir images (initial binding, rebound each frame in render)
         if (reservoirImages_[0]) {
@@ -1303,19 +1413,20 @@ void RayTracingModule::initPipeline() {
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_solid_transparent_rchit.spv").string());
     worldSolidTransparentNoDisplacementClosestHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_solid_transparent_no_displacement_rchit.spv").string());
+    const bool displacementRequested = Renderer::options.pomEnabled && worldSolidTransparentClosestHitShader_;
+    const bool useShaderDisplacement = displacementRequested && shaderDisplacementRuntimeAllowed();
     auto activeWorldSolidTransparentClosestHitShader =
-        Renderer::options.pomEnabled && worldSolidTransparentClosestHitShader_
+        useShaderDisplacement
             ? worldSolidTransparentClosestHitShader_
             : worldSolidTransparentNoDisplacementClosestHitShader_;
     if (!activeWorldSolidTransparentClosestHitShader) {
         activeWorldSolidTransparentClosestHitShader = worldSolidTransparentClosestHitShader_;
     }
     RadianceLogger::log("RayTracing", "INFO",
-                        "World closest-hit variant: %s (displacementEnabled=%d noDisplacementShader=%d)",
-                        (Renderer::options.pomEnabled && worldSolidTransparentClosestHitShader_)
-                            ? "displacement"
-                            : "no_displacement",
-                        Renderer::options.pomEnabled ? 1 : 0,
+                        "World closest-hit variant: %s (displacementRequested=%d displacementRuntimeAllowed=%d noDisplacementShader=%d)",
+                        useShaderDisplacement ? "displacement" : "no_displacement",
+                        displacementRequested ? 1 : 0,
+                        shaderDisplacementRuntimeAllowed() ? 1 : 0,
                         worldSolidTransparentNoDisplacementClosestHitShader_ ? 1 : 0);
     worldNoReflectClosestHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_no_reflect_rchit.spv").string());
@@ -1604,19 +1715,20 @@ void RayTracingModule::initSharcUpdatePipeline() {
         std::cerr << "[SHARC] Failed to load sharc_update_rgen.spv" << std::endl;
         return;
     }
+    const bool displacementRequested = Renderer::options.pomEnabled && worldSolidTransparentClosestHitShader_;
+    const bool useShaderDisplacement = displacementRequested && shaderDisplacementRuntimeAllowed();
     auto activeWorldSolidTransparentClosestHitShader =
-        Renderer::options.pomEnabled && worldSolidTransparentClosestHitShader_
+        useShaderDisplacement
             ? worldSolidTransparentClosestHitShader_
             : worldSolidTransparentNoDisplacementClosestHitShader_;
     if (!activeWorldSolidTransparentClosestHitShader) {
         activeWorldSolidTransparentClosestHitShader = worldSolidTransparentClosestHitShader_;
     }
     RadianceLogger::log("RayTracing", "INFO",
-                        "SHARC closest-hit variant: %s (displacementEnabled=%d noDisplacementShader=%d)",
-                        (Renderer::options.pomEnabled && worldSolidTransparentClosestHitShader_)
-                            ? "displacement"
-                            : "no_displacement",
-                        Renderer::options.pomEnabled ? 1 : 0,
+                        "SHARC closest-hit variant: %s (displacementRequested=%d displacementRuntimeAllowed=%d noDisplacementShader=%d)",
+                        useShaderDisplacement ? "displacement" : "no_displacement",
+                        displacementRequested ? 1 : 0,
+                        shaderDisplacementRuntimeAllowed() ? 1 : 0,
                         worldSolidTransparentNoDisplacementClosestHitShader_ ? 1 : 0);
 
     // Build update RT pipeline with same CHS/AHS/miss shaders as main pipeline
@@ -1742,6 +1854,140 @@ void RayTracingModule::initSharcResolvePipeline() {
                         "SHARC resolve pipeline create done ok=%d result=%d",
                         result == VK_SUCCESS ? 1 : 0, static_cast<int>(result));
     g_crashRing.record(result == VK_SUCCESS ? "SHARC:resolvePipeline:create:done" : "SHARC:resolvePipeline:create:failed");
+}
+
+void RayTracingModule::initSharcQueryPipeline() {
+#ifndef MCVR_ENABLE_SHARC_QUERY_PASS
+    return;
+#else
+    auto framework = framework_.lock();
+    if (!framework) return;
+    auto device = framework->device();
+    VkDevice dev = device->vkDevice();
+    uint32_t size = framework->swapchain()->imageCount();
+
+    RadianceLogger::log("RayTracing", "INFO", "SHARC query pipeline create start");
+    g_crashRing.record("SHARC:queryPipeline:create:start");
+
+    if (sharcQueryPipeline_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(dev, sharcQueryPipeline_, nullptr);
+        sharcQueryPipeline_ = VK_NULL_HANDLE;
+    }
+    if (sharcQueryPipelineLayout_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(dev, sharcQueryPipelineLayout_, nullptr);
+        sharcQueryPipelineLayout_ = VK_NULL_HANDLE;
+    }
+    if (sharcQueryDescSetLayout_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(dev, sharcQueryDescSetLayout_, nullptr);
+        sharcQueryDescSetLayout_ = VK_NULL_HANDLE;
+    }
+    if (sharcQueryDescPool_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(dev, sharcQueryDescPool_, nullptr);
+        sharcQueryDescPool_ = VK_NULL_HANDLE;
+    }
+
+    std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
+    sharcQueryShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/sharc_query_comp.spv").string());
+    if (!sharcQueryShader_) {
+        std::cerr << "[SHARC] Failed to load sharc_query_comp.spv" << std::endl;
+        RadianceLogger::log("RayTracing", "ERROR", "SHARC query shader load failed");
+        g_crashRing.record("SHARC:queryPipeline:create:missingShader");
+        return;
+    }
+
+    std::vector<VkDescriptorSetLayoutBinding> bindings = {
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+    };
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+    layoutInfo.pBindings = bindings.data();
+    VkResult layoutResult = vkCreateDescriptorSetLayout(dev, &layoutInfo, nullptr, &sharcQueryDescSetLayout_);
+    if (layoutResult != VK_SUCCESS) {
+        RadianceLogger::log("RayTracing", "ERROR", "SHARC query descriptor layout failed result=%d",
+                            static_cast<int>(layoutResult));
+        g_crashRing.record("SHARC:queryPipeline:create:layoutFailed");
+        return;
+    }
+
+    struct SharcQueryPushConstant {
+        int32_t width, height, mode, reserved0;
+        uint64_t hashEntriesBDA, resolvedBDA;
+        float cameraX, cameraY, cameraZ, sceneScale;
+        uint32_t capacity;
+        float roughnessThreshold;
+        uint32_t frameIndex;
+        uint32_t reserved1;
+    };
+    VkPushConstantRange pushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(SharcQueryPushConstant)};
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &sharcQueryDescSetLayout_;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+    VkResult pipelineLayoutResult = vkCreatePipelineLayout(dev, &pipelineLayoutInfo, nullptr, &sharcQueryPipelineLayout_);
+    if (pipelineLayoutResult != VK_SUCCESS) {
+        RadianceLogger::log("RayTracing", "ERROR", "SHARC query pipeline layout failed result=%d",
+                            static_cast<int>(pipelineLayoutResult));
+        g_crashRing.record("SHARC:queryPipeline:create:pipelineLayoutFailed");
+        return;
+    }
+
+    VkComputePipelineCreateInfo pipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipelineInfo.stage.module = sharcQueryShader_->vkShaderModule();
+    pipelineInfo.stage.pName = "main";
+    pipelineInfo.layout = sharcQueryPipelineLayout_;
+    VkResult pipelineResult = vkCreateComputePipelines(dev, device->pipelineCache(), 1, &pipelineInfo, nullptr,
+                                                       &sharcQueryPipeline_);
+    if (pipelineResult != VK_SUCCESS) {
+        sharcQueryPipeline_ = VK_NULL_HANDLE;
+        RadianceLogger::log("RayTracing", "ERROR", "SHARC query pipeline create done ok=0 result=%d",
+                            static_cast<int>(pipelineResult));
+        g_crashRing.record("SHARC:queryPipeline:create:failed");
+        return;
+    }
+
+    VkDescriptorPoolSize poolSizes[] = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 7u * size},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, size},
+    };
+    VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = size;
+    poolInfo.poolSizeCount = 2;
+    poolInfo.pPoolSizes = poolSizes;
+    VkResult poolResult = vkCreateDescriptorPool(dev, &poolInfo, nullptr, &sharcQueryDescPool_);
+    if (poolResult != VK_SUCCESS) {
+        RadianceLogger::log("RayTracing", "ERROR", "SHARC query descriptor pool failed result=%d",
+                            static_cast<int>(poolResult));
+        g_crashRing.record("SHARC:queryPipeline:create:poolFailed");
+        return;
+    }
+
+    std::vector<VkDescriptorSetLayout> layouts(size, sharcQueryDescSetLayout_);
+    VkDescriptorSetAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocInfo.descriptorPool = sharcQueryDescPool_;
+    allocInfo.descriptorSetCount = size;
+    allocInfo.pSetLayouts = layouts.data();
+    sharcQueryDescSets_.resize(size);
+    VkResult allocResult = vkAllocateDescriptorSets(dev, &allocInfo, sharcQueryDescSets_.data());
+    if (allocResult != VK_SUCCESS) {
+        RadianceLogger::log("RayTracing", "ERROR", "SHARC query descriptor alloc failed result=%d",
+                            static_cast<int>(allocResult));
+        g_crashRing.record("SHARC:queryPipeline:create:allocFailed");
+        return;
+    }
+
+    RadianceLogger::log("RayTracing", "INFO", "SHARC query pipeline create done ok=1 sets=%u", size);
+    g_crashRing.record("SHARC:queryPipeline:create:done");
+#endif
 }
 
 RayTracingModuleContext::RayTracingModuleContext(std::shared_ptr<FrameworkContext> frameworkContext,
@@ -1898,6 +2144,15 @@ void RayTracingModuleContext::render() {
                 {module->bounceReservoirImages_[b], VK_IMAGE_LAYOUT_GENERAL, 3, static_cast<uint32_t>(18 + b)});
         }
     }
+#ifdef MCVR_ENABLE_SHARC_QUERY_PASS
+    if (context->frameIndex < module->sharcCandidatePosHitTImages_.size()
+        && module->sharcCandidatePosHitTImages_[context->frameIndex]) {
+        frameImageBindings.push_back({module->sharcCandidatePosHitTImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL, 3, 34});
+        frameImageBindings.push_back({module->sharcCandidateNormalRoughnessImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL, 3, 35});
+        frameImageBindings.push_back({module->sharcCandidateThroughputImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL, 3, 36});
+        frameImageBindings.push_back({module->sharcCandidatePrefixRadianceFlagsImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL, 3, 37});
+    }
+#endif
     rayTracingDescriptorTable->bindImages(frameImageBindings);
 
     // Bind block sprite texture arrays (set 0, bindings 3-5)
@@ -2004,6 +2259,9 @@ void RayTracingModuleContext::render() {
 #ifdef MCVR_ENABLE_SHARC_RESOLVE_PASS
         module->initSharcResolvePipeline();
 #endif
+#ifdef MCVR_ENABLE_SHARC_QUERY_PASS
+        module->initSharcQueryPipeline();
+#endif
         // Refresh ALL contexts' stale SBT pointers — were nullptr at construction time
         for (size_t ci = 0; ci < module->contexts_.size(); ci++) {
             auto rtCtx = std::static_pointer_cast<RayTracingModuleContext>(module->contexts_[ci]);
@@ -2045,15 +2303,50 @@ void RayTracingModuleContext::render() {
         && module->sharcBuffersInitialized_ && module->sharcDispatchReady_
         && module->sharcFrameIndex_ >= sharcMainTraceWarmupFrames;
 #endif
+
+    int sharcQueryMode = 0;
+    bool sharcQueryPassActive = false;
+#if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_QUERY_PASS)
+    sharcMainTraceWarmupFrames = effectiveSharcMainTraceWarmupFrames();
+    sharcQueryMode = effectiveSharcQueryMode();
+    sharcQueryPassActive =
+        Renderer::options.sharcEnabled && !accumulating && sharcQueryMode > 0
+        && module->sharcHashEntries_ && module->sharcResolved_
+        && module->sharcBuffersInitialized_ && module->sharcDispatchReady_
+        && module->sharcFrameIndex_ >= sharcMainTraceWarmupFrames
+        && module->sharcQueryPipeline_ != VK_NULL_HANDLE
+        && context->frameIndex < module->sharcQueryDescSets_.size()
+        && module->sharcCandidatePosHitTImages_[context->frameIndex]
+        && module->sharcCandidatePrefixRadianceFlagsImages_[context->frameIndex]
+        && module->sharcQueryCounterBuffers_[context->frameIndex];
+#endif
+    bool sharcCacheConsumerRequested = false;
+#if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY)
+    sharcCacheConsumerRequested = Renderer::options.sharcEnabled && !accumulating
+        && module->sharcHashEntries_ && module->sharcResolved_;
+#endif
+#if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_QUERY_PASS)
+    sharcCacheConsumerRequested = sharcCacheConsumerRequested
+        || (Renderer::options.sharcEnabled && !accumulating && sharcQueryMode > 0
+            && module->sharcQueryPipeline_ != VK_NULL_HANDLE);
+#endif
     {
         static bool lastLoggedSharcMainTraceQueryActive = false;
+        static bool lastLoggedSharcQueryPassActive = false;
+        static int lastLoggedSharcQueryMode = -1;
         static bool loggedSharcMainTraceQueryState = false;
         if (!loggedSharcMainTraceQueryState
-            || lastLoggedSharcMainTraceQueryActive != sharcMainTraceQueryActive) {
+            || lastLoggedSharcMainTraceQueryActive != sharcMainTraceQueryActive
+            || lastLoggedSharcQueryPassActive != sharcQueryPassActive
+            || lastLoggedSharcQueryMode != sharcQueryMode) {
             loggedSharcMainTraceQueryState = true;
             lastLoggedSharcMainTraceQueryActive = sharcMainTraceQueryActive;
-            renderDiag("SHARC mainTrace query state active=%d mode=%d frame=%u warmup=%u ready=%d initialized=%d",
+            lastLoggedSharcQueryPassActive = sharcQueryPassActive;
+            lastLoggedSharcQueryMode = sharcQueryMode;
+            renderDiag("SHARC query state mainActive=%d passActive=%d passMode=%d legacyMode=%d frame=%u warmup=%u ready=%d initialized=%d",
                        sharcMainTraceQueryActive ? 1 : 0,
+                       sharcQueryPassActive ? 1 : 0,
+                       sharcQueryMode,
                        MCVR_SHARC_MAIN_TRACE_QUERY_MODE,
                        module->sharcFrameIndex_,
                        sharcMainTraceWarmupFrames,
@@ -2073,6 +2366,8 @@ void RayTracingModuleContext::render() {
                        | (Renderer::options.restirBounceEnabled ? 16 : 0)
 #if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY)
                        | (sharcMainTraceQueryActive ? 32 : 0)
+#elif defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_QUERY_PASS)
+                       | (sharcQueryPassActive ? 32 : 0)
 #endif
                        | (Renderer::options.noiseLOD ? 64 : 0)
                        | (Renderer::options.multiScatterGGX ? 128 : 0)
@@ -2098,8 +2393,10 @@ void RayTracingModuleContext::render() {
     // Only apply when DLSS-RR is active (denoiserMode == 1).
     pushConstant.preExposure = (Renderer::options.denoiserMode == 1) ? 0.1f : 1.0f;
 
-    // Shader displacement
-    pushConstant.pomHeightScale  = Renderer::options.pomEnabled ? Renderer::options.pomHeightScale : 0.0f;
+    // Shader displacement is temporarily forced off at runtime to isolate NVIDIA DMA page faults
+    // from the full SHARC refactor path without changing the user's saved option.
+    const bool displacementActive = Renderer::options.pomEnabled && shaderDisplacementRuntimeAllowed();
+    pushConstant.pomHeightScale  = displacementActive ? Renderer::options.pomHeightScale : 0.0f;
     pushConstant.pomSteps        = Renderer::options.pomSteps;
     pushConstant.pomRefinement   = Renderer::options.pomRefinement;
     pushConstant.pomFadeDistance = Renderer::options.pomFadeDistance;
@@ -2109,6 +2406,8 @@ void RayTracingModuleContext::render() {
     pushConstant.blueNoiseFrame = context->frameIndex;
     pushConstant.rtDebugFlags = Renderer::options.rtDebugFlags;
     pushConstant.handInstanceCount = worldPrepareContext->handInstanceCount;
+    pushConstant.sharcQueryMode = sharcQueryPassActive ? sharcQueryMode : 0;
+    pushConstant.sharcQueryReserved = 0;
 
     // Structured logging: push constants (every ~1 second)
     if (RadianceLogger::isEnabled()) {
@@ -2117,12 +2416,14 @@ void RayTracingModuleContext::render() {
         if (curFrame - lastPCLog >= 60) {
             lastPCLog = curFrame;
             RadianceLogger::log("RayTracing", "INFO",
-                "pushConst: bounces=%d flags=0x%x rtDebug=0x%x handInst=%u lights=%d shadowSoft=%.2f sharcQuery=%d sharcFrame=%u sharcWarmup=%u sharcMode=%d displacementEnabled=%d displacementQuality=%u displacementDepth=%.4f displacementSteps=%d displacementRefinement=%d displacementFade=%.0f",
+                "pushConst: bounces=%d flags=0x%x rtDebug=0x%x handInst=%u lights=%d shadowSoft=%.2f sharcQuery=%d sharcQueryPass=%d sharcQueryMode=%d sharcFrame=%u sharcWarmup=%u sharcMode=%d displacementEnabled=%d displacementRequested=%d displacementQuality=%u displacementDepth=%.4f displacementSteps=%d displacementRefinement=%d displacementFade=%.0f",
                 pushConstant.numRayBounces, pushConstant.flags, pushConstant.rtDebugFlags,
                 pushConstant.handInstanceCount, pushConstant.areaLightCount,
                 pushConstant.shadowSoftness, sharcMainTraceQueryActive ? 1 : 0,
+                sharcQueryPassActive ? 1 : 0, pushConstant.sharcQueryMode,
                 module->sharcFrameIndex_, sharcMainTraceWarmupFrames,
-                MCVR_SHARC_MAIN_TRACE_QUERY_MODE, Renderer::options.pomEnabled ? 1 : 0,
+                MCVR_SHARC_MAIN_TRACE_QUERY_MODE, displacementActive ? 1 : 0,
+                Renderer::options.pomEnabled ? 1 : 0,
                 Renderer::options.displacementQuality, pushConstant.pomHeightScale,
                 pushConstant.pomSteps, pushConstant.pomRefinement, pushConstant.pomFadeDistance);
         }
@@ -2146,6 +2447,8 @@ void RayTracingModuleContext::render() {
         pushConstant.sharcRoughnessThreshold = Renderer::options.sharcRoughnessThreshold;
         pushConstant.sharcUpdateBlockSize = effectiveSharcUpdateBlockSize();
         pushConstant.sharcUpdateBounces = effectiveSharcUpdateBounces();
+        pushConstant.sharcQueryMode = sharcQueryPassActive ? sharcQueryMode : 0;
+        pushConstant.sharcQueryReserved = 0;
     }
 #endif
 #endif
@@ -2235,6 +2538,14 @@ void RayTracingModuleContext::render() {
     addBarrier(directLightDepthImage, VK_IMAGE_LAYOUT_GENERAL);
     addBarrier(diffuseRayDirHitDistImage, VK_IMAGE_LAYOUT_GENERAL);
     addBarrier(specularRayDirHitDistImage, VK_IMAGE_LAYOUT_GENERAL);
+#ifdef MCVR_ENABLE_SHARC_QUERY_PASS
+    if (context->frameIndex < module->sharcCandidatePosHitTImages_.size()) {
+        addBarrier(module->sharcCandidatePosHitTImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
+        addBarrier(module->sharcCandidateNormalRoughnessImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
+        addBarrier(module->sharcCandidateThroughputImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
+        addBarrier(module->sharcCandidatePrefixRadianceFlagsImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
+    }
+#endif
     addBarrier(module->reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL);
     addBarrier(module->reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL);
     for (int b = 0; b < 3; b++) {
@@ -2249,6 +2560,27 @@ void RayTracingModuleContext::render() {
         worldCommandBuffer->barriersBufferImage({}, barriers);
         renderDiag("RT imageBarriers end");
     }
+
+#ifdef MCVR_ENABLE_SHARC_QUERY_PASS
+    if (context->frameIndex < module->sharcQueryCounterBuffers_.size()
+        && module->sharcQueryCounterBuffers_[context->frameIndex]) {
+        auto counterBuffer = module->sharcQueryCounterBuffers_[context->frameIndex];
+        counterBuffer->downloadFromBuffer();
+        if (counterBuffer->mappedPtr()) {
+            std::memcpy(module->sharcQueryLastCounters_, counterBuffer->mappedPtr(),
+                        kSharcQueryCounterCount * sizeof(uint32_t));
+        }
+        vkCmdFillBuffer(worldCommandBuffer->vkCommandBuffer(), counterBuffer->vkBuffer(), 0,
+                        kSharcQueryCounterCount * sizeof(uint32_t), 0);
+        VkMemoryBarrier counterClearBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        counterClearBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        counterClearBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(worldCommandBuffer->vkCommandBuffer(),
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &counterClearBarrier, 0, nullptr, 0, nullptr);
+    }
+#endif
 
     // Light clustering compute pass — DISABLED: contribution-sorted global list replaces tile clustering.
     // Tile buffer stays allocated (descriptor layout unchanged); CHS reads tileCount=0 → global fallback.
@@ -2369,6 +2701,7 @@ void RayTracingModuleContext::render() {
     }
 
     const bool sharcBuffersReady = Renderer::options.sharcEnabled && !accumulating
+        && sharcCacheConsumerRequested
         && module->sharcHashEntries_ && module->sharcAccumulation_ && module->sharcResolved_;
     if (sharcBuffersReady && !module->sharcDispatchReady_) {
         static uint64_t lastSharcGateLog = 0;
@@ -2542,6 +2875,101 @@ void RayTracingModuleContext::render() {
     renderDiag("RT mainTrace end");
     mainTraceProfile.close();
     worldCommandBuffer->endLabel(); // end MainTrace
+
+#ifdef MCVR_ENABLE_SHARC_QUERY_PASS
+    if (sharcQueryPassActive) {
+        worldCommandBuffer->beginLabel("RT:SHARC Query", 0.9f, 0.8f, 0.2f);
+        ScopedGpuProfile sharcQueryProfile(profileCmd, "RT.SHARCQuery");
+        VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
+        uint32_t frameIdx = context->frameIndex;
+        g_crashRing.record("SHARC:queryDispatch:start");
+
+        VkMemoryBarrier preQueryBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        preQueryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        preQueryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &preQueryBarrier, 0, nullptr, 0, nullptr);
+
+        VkDescriptorSet querySet = module->sharcQueryDescSets_[frameIdx];
+        auto addQueryImg = [&](uint32_t binding, const std::shared_ptr<vk::DeviceLocalImage>& img,
+                               std::vector<VkWriteDescriptorSet>& writes,
+                               std::vector<std::unique_ptr<VkDescriptorImageInfo>>& infos) {
+            auto info = std::make_unique<VkDescriptorImageInfo>();
+            info->imageView = img->vkImageView(0);
+            info->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            info->sampler = VK_NULL_HANDLE;
+            writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, querySet, binding, 0, 1,
+                             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info.get(), nullptr, nullptr});
+            infos.push_back(std::move(info));
+        };
+
+        std::vector<VkWriteDescriptorSet> queryWrites;
+        std::vector<std::unique_ptr<VkDescriptorImageInfo>> queryInfos;
+        addQueryImg(0, module->sharcCandidatePosHitTImages_[frameIdx], queryWrites, queryInfos);
+        addQueryImg(1, module->sharcCandidateNormalRoughnessImages_[frameIdx], queryWrites, queryInfos);
+        addQueryImg(2, module->sharcCandidateThroughputImages_[frameIdx], queryWrites, queryInfos);
+        addQueryImg(3, module->sharcCandidatePrefixRadianceFlagsImages_[frameIdx], queryWrites, queryInfos);
+        addQueryImg(4, firstHitDiffuseDirectLightImage, queryWrites, queryInfos);
+        addQueryImg(5, firstHitBaseEmissionImage, queryWrites, queryInfos);
+        addQueryImg(6, firstHitDiffuseIndirectLightImage, queryWrites, queryInfos);
+
+        VkDescriptorBufferInfo counterInfo{
+            module->sharcQueryCounterBuffers_[frameIdx]->vkBuffer(), 0,
+            module->sharcQueryCounterBuffers_[frameIdx]->size()};
+        queryWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, querySet, 7, 0, 1,
+                               VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &counterInfo, nullptr});
+        vkUpdateDescriptorSets(framework->device()->vkDevice(),
+            static_cast<uint32_t>(queryWrites.size()), queryWrites.data(), 0, nullptr);
+
+        struct SharcQueryPushConstant {
+            int32_t width, height, mode, reserved0;
+            uint64_t hashEntriesBDA, resolvedBDA;
+            float cameraX, cameraY, cameraZ, sceneScale;
+            uint32_t capacity;
+            float roughnessThreshold;
+            uint32_t frameIndex;
+            uint32_t reserved1;
+        } queryPC = {};
+        queryPC.width = static_cast<int32_t>(hdrNoisyOutputImage->width());
+        queryPC.height = static_cast<int32_t>(hdrNoisyOutputImage->height());
+        queryPC.mode = sharcQueryMode;
+        queryPC.hashEntriesBDA = module->sharcHashEntries_->bufferAddress();
+        queryPC.resolvedBDA = module->sharcResolved_->bufferAddress();
+        queryPC.cameraX = pushConstant.sharcCameraX;
+        queryPC.cameraY = pushConstant.sharcCameraY;
+        queryPC.cameraZ = pushConstant.sharcCameraZ;
+        queryPC.sceneScale = Renderer::options.sharcSceneScale;
+        queryPC.capacity = module->sharcCapacity_;
+        queryPC.roughnessThreshold = Renderer::options.sharcRoughnessThreshold;
+        queryPC.frameIndex = module->sharcFrameIndex_;
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->sharcQueryPipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->sharcQueryPipelineLayout_,
+            0, 1, &querySet, 0, nullptr);
+        vkCmdPushConstants(cmd, module->sharcQueryPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(queryPC), &queryPC);
+        vkCmdDispatch(cmd,
+            (hdrNoisyOutputImage->width() + 7) / 8,
+            (hdrNoisyOutputImage->height() + 7) / 8,
+            1);
+
+        VkMemoryBarrier postQueryBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        postQueryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        postQueryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            0, 1, &postQueryBarrier, 0, nullptr, 0, nullptr);
+
+        renderDiag("SHARC query end mode=%d", sharcQueryMode);
+        g_crashRing.record("SHARC:queryDispatch:done");
+        sharcQueryProfile.close();
+        worldCommandBuffer->endLabel();
+    }
+#endif
 
     // Spatial reuse compute pass (when ReSTIR and spatial reuse are both enabled)
     if (Renderer::options.restirEnabled && Renderer::options.restirSpatialEnabled && module->spatialPipeline_ != VK_NULL_HANDLE

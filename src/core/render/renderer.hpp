@@ -168,6 +168,7 @@ struct Options {
     int sharcUpdateBlockSize = 5;            // Sparse update NxN block size (2-8)
     int sharcUpdateBounces = 4;              // Max bounces in update pass (2-8)
     int sharcCapacityExponent = 21;          // Cache capacity = 2^N entries (20-24)
+    int sharcQueryMode = 0;                  // 0=Off, 1=Observe counters, 2=Active early termination
 
     // Material-owned shader displacement (old field names retained as compatibility shims)
     bool  pomEnabled      = false;

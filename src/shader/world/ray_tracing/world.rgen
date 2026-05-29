@@ -19,6 +19,9 @@
 #ifndef SHARC_MAIN_TRACE_ENABLE
 #define SHARC_MAIN_TRACE_ENABLE 0
 #endif
+#ifndef SHARC_QUERY_PASS_ENABLE
+#define SHARC_QUERY_PASS_ENABLE 0
+#endif
 
 #include "../util/labpbr.glsl"
 #include "../util/random.glsl"
@@ -132,6 +135,12 @@ layout(set = 3, binding = 30, rgba32f) uniform image2D positionViewSpaceImage;
 layout(set = 3, binding = 31, rgba16f) uniform image2D transparencyLayerImage;
 layout(set = 3, binding = 32, rgba16f) uniform image2D transparencyLayerOpacityImage;
 layout(set = 3, binding = 33, rg32f)   uniform image2D transparencyLayerMvecsImage;
+#if SHARC_COMPILE_ENABLE && SHARC_QUERY_PASS_ENABLE
+layout(set = 3, binding = 34, rgba32f) uniform image2D sharcCandidatePosHitTImage;
+layout(set = 3, binding = 35, rgba32f) uniform image2D sharcCandidateNormalRoughnessImage;
+layout(set = 3, binding = 36, rgba32f) uniform image2D sharcCandidateThroughputImage;
+layout(set = 3, binding = 37, rgba32f) uniform image2D sharcCandidatePrefixRadianceFlagsImage;
+#endif
 
 // VertexBuffer and IndexBuffer declared in vertex_fetch.glsl
 
@@ -167,12 +176,14 @@ layout(push_constant) uniform PushConstant {
     float sharcRoughnessThreshold;
     int sharcUpdateBlockSize;
     int sharcUpdateBounces;
+    int sharcQueryMode;
+    int sharcQueryReserved;
     // Offline accumulation
     int offlineFlags;
     int accumFrameCount;
     float aperture;
     float focalDistance;
-    // Material SSBO BDA (offset 128)
+    // Material SSBO BDA
     uint64_t materialClassAddr;
 }
 pc;
@@ -215,6 +226,12 @@ vec3 applyFog(vec3 radiance, float t, float fogStart, float dBase, float dFog, v
 
 void main() {
     ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+#if SHARC_COMPILE_ENABLE && SHARC_QUERY_PASS_ENABLE
+    bool sharcCandidateRecorded = false;
+    if (pc.sharcQueryMode != 0) {
+        imageStore(sharcCandidatePrefixRadianceFlagsImage, pixel, vec4(0.0));
+    }
+#endif
     vec2 pixelCenter = pixel + 0.5;
     vec2 unjitteredPixelCenter = pixelCenter;
     pixelCenter += worldUBO.cameraJitter;
@@ -904,6 +921,26 @@ void main() {
                     // cachedRadiance = total outgoing radiance at this surface (direct + all indirect).
                     mainRay.radiance = radianceBeforeBounce + throughputBeforeBounce * cachedRadiance;
                     break; // Early path termination - cache hit
+                }
+            }
+#endif
+
+#if SHARC_COMPILE_ENABLE && SHARC_QUERY_PASS_ENABLE
+            if (SHARC_ENABLED && pc.sharcQueryMode != 0 && !sharcCandidateRecorded
+                && b >= 1 && !prGetStop(mainRay)
+                && mainRay.hitT != INF_DISTANCE
+                && minPathRoughness >= pc.sharcRoughnessThreshold
+                && mainRay.roughness >= pc.sharcRoughnessThreshold) {
+                vec3 absoluteHitPos = mainRay.worldPos + vec3(worldUBO.cameraPos.xyz);
+                float activeFlag = pc.sharcQueryMode >= 2 ? 3.0 : 1.0; // bit 0 valid, bit 1 active
+                imageStore(sharcCandidatePosHitTImage, pixel, vec4(absoluteHitPos, mainRay.hitT));
+                imageStore(sharcCandidateNormalRoughnessImage, pixel, vec4(mainRay.normal, mainRay.roughness));
+                imageStore(sharcCandidateThroughputImage, pixel, vec4(throughputBeforeBounce, minPathRoughness));
+                imageStore(sharcCandidatePrefixRadianceFlagsImage, pixel, vec4(radianceBeforeBounce, activeFlag));
+                sharcCandidateRecorded = true;
+                if (pc.sharcQueryMode >= 2) {
+                    mainRay.radiance = radianceBeforeBounce;
+                    break;
                 }
             }
 #endif
