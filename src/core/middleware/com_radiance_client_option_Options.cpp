@@ -656,6 +656,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.restirBounceEnabled = enabled;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDirectLightBackend(
+    JNIEnv *, jclass, jint backend, jboolean write) {
+    Renderer::options.directLightBackend = static_cast<uint32_t>(std::clamp(static_cast<int>(backend), 0, 2));
+}
+
 // --- Material-owned shader displacement ---
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMEnabled(

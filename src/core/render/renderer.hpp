@@ -117,6 +117,7 @@ struct Options {
     bool restirSimplifiedBRDF = false;    // Lambertian instead of Disney for area lights
     bool restirSpatialEnabled = false;    // Enable spatial reuse compute pass
     bool restirBounceEnabled = false;     // Enable ReSTIR on indirect bounces (1-3)
+    uint32_t directLightBackend = 0;       // 0=Legacy, 1=UpstreamReSTIR, 2=RTXDI; non-legacy is gated off by default
 
     float perBlockIntensity[50] = {       // Per-block intensity multiplier, indexed by LightTypeId
         1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,

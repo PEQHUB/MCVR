@@ -65,6 +65,10 @@ int effectiveSharcQueryMode() {
     return std::clamp(Renderer::options.sharcQueryMode, 0, 2);
 }
 
+uint32_t effectiveDirectLightBackend() {
+    return std::clamp<uint32_t>(Renderer::options.directLightBackend, 0, 2);
+}
+
 class ScopedGpuProfile {
 public:
     ScopedGpuProfile(VkCommandBuffer cmd, const char* name) : cmd_(cmd) {
@@ -96,7 +100,30 @@ RayTracingModule::RayTracingModule() {}
 std::string RayTracingModule::diagnosticFeatureTruth() const {
     std::ostringstream out;
     const bool accumulating = Renderer::options.offlineState == 2;
-    out << "sharcOption:" << (Renderer::options.sharcEnabled ? 1 : 0)
+    const uint32_t directLightBackend = effectiveDirectLightBackend();
+#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+    constexpr bool directLightPipelineCompiled = true;
+#else
+    constexpr bool directLightPipelineCompiled = false;
+#endif
+#ifdef MCVR_ENABLE_RTXDI
+    constexpr bool rtxdiCompiled = true;
+#else
+    constexpr bool rtxdiCompiled = false;
+#endif
+    const bool directLightPipelinePossible = directLightPipelineCompiled && directLightBackend != 0;
+    const bool rtxdiBackendPossible = directLightPipelineCompiled && rtxdiCompiled && directLightBackend == 2;
+
+    out << "directLightBackend:" << directLightBackend
+        << ",directLightPipelineCompiled:" << (directLightPipelineCompiled ? 1 : 0)
+        << ",rtxdiCompiled:" << (rtxdiCompiled ? 1 : 0)
+        << ",directLightPipelinePossible:" << (directLightPipelinePossible ? 1 : 0)
+        << ",rtxdiBackendPossible:" << (rtxdiBackendPossible ? 1 : 0)
+        << ",directLightPipelineActive:0"
+        << ",directLightReservoirPixels:0"
+        << ",directLightValidReservoirs:0"
+        << ",directLightVisibilityRays:0"
+        << ",sharcOption:" << (Renderer::options.sharcEnabled ? 1 : 0)
         << ",offlineAccumulating:" << (accumulating ? 1 : 0);
 
 #ifdef MCVR_ENABLE_SHARC

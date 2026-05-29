@@ -153,6 +153,8 @@ option(MCVR_ENABLE_SHARC_UPDATE_PASS "Enable SHARC sparse update RT pipeline cre
 option(MCVR_ENABLE_SHARC_RESOLVE_PASS "Enable SHARC resolve compute pipeline creation/dispatch. Off by default until explicitly profiling SHARC." OFF)
 option(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY "Compile the small read-only SHARC cache query into the main world RT raygen. Off by default because current NVIDIA drivers crash compiling this path into the main RT pipeline." OFF)
 option(MCVR_ENABLE_SHARC_QUERY_PASS "Compile the isolated SHARC candidate/query compute pass. Runtime default stays Off; this avoids SHARC hash/BDA reads in world.rgen." OFF)
+option(MCVR_ENABLE_DIRECT_LIGHT_PIPELINE "Compile experimental upstream-style split direct-light pipeline scaffolding. Runtime default stays Legacy." OFF)
+option(MCVR_ENABLE_RTXDI "Compile experimental RTXDI 3.0 direct-light backend scaffolding. Requires MCVR_ENABLE_DIRECT_LIGHT_PIPELINE and remains runtime-disabled by default." OFF)
 set(MCVR_SHARC_MAIN_TRACE_QUERY_MODE "off" CACHE STRING "SHARC main trace query compile mode: off, stub, math, hash, or radiance")
 set_property(CACHE MCVR_SHARC_MAIN_TRACE_QUERY_MODE PROPERTY STRINGS off stub math hash radiance)
 string(TOLOWER "${MCVR_SHARC_MAIN_TRACE_QUERY_MODE}" MCVR_SHARC_MAIN_TRACE_QUERY_MODE_LOWER)
