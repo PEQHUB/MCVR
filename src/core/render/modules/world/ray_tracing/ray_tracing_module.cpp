@@ -2,6 +2,7 @@
 #include <chrono>
 
 #include "core/render/buffers.hpp"
+#include "core/render/chunks.hpp"
 #include "core/render/gpu_diagnostics.hpp"
 #include "core/render/lights.hpp"
 #include "core/render/modules/world/ray_tracing/submodules/atmosphere.hpp"
@@ -15,11 +16,38 @@
 #include "core/vulkan/debug_utils.hpp"
 
 #include <cmath>
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <string>
 
 namespace {
+constexpr int kSharcMinCapacityExponent = 18;
+constexpr int kSharcMaxCapacityExponent = 24;
+constexpr uint32_t kSharcDispatchStableFrameThreshold = 60;
+
+int effectiveSharcCapacityExponent() {
+    return std::clamp(Renderer::options.sharcCapacityExponent,
+                      kSharcMinCapacityExponent,
+                      kSharcMaxCapacityExponent);
+}
+
+uint32_t effectiveSharcCapacity() {
+    return 1u << static_cast<uint32_t>(effectiveSharcCapacityExponent());
+}
+
+int effectiveSharcDownscale() {
+    return std::clamp(Renderer::options.sharcDownscale, 1, 8);
+}
+
+int effectiveSharcUpdateBlockSize() {
+    return std::clamp(Renderer::options.sharcUpdateBlockSize, 2, 8);
+}
+
+int effectiveSharcUpdateBounces() {
+    return std::clamp(Renderer::options.sharcUpdateBounces, 2, 8);
+}
+
 class ScopedGpuProfile {
 public:
     ScopedGpuProfile(VkCommandBuffer cmd, const char* name) : cmd_(cmd) {
@@ -122,6 +150,12 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
 #ifdef MCVR_ENABLE_SHARC
         << ",sharcUpdateSbtReady:" << sharcSbtReady
         << ",sharcUpdateSbtTotal:" << sharcUpdateSbts_.size()
+        << ",sharcRequestedCapacityExponent:" << Renderer::options.sharcCapacityExponent
+        << ",sharcEffectiveCapacityExponent:" << effectiveSharcCapacityExponent()
+        << ",sharcRequestedUpdateBounces:" << Renderer::options.sharcUpdateBounces
+        << ",sharcEffectiveUpdateBounces:" << effectiveSharcUpdateBounces()
+        << ",sharcStreamStableFrames:" << sharcStreamStableFrames_
+        << ",sharcDispatchReady:" << (sharcDispatchReady_ ? 1 : 0)
         << ",sharcCapacity:" << sharcCapacity_
         << ",sharcFrameIndex:" << sharcFrameIndex_;
 #else
@@ -307,7 +341,7 @@ void RayTracingModule::build() {
     initSpatialPipeline();
     initClusterPipeline();
 #if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_BUFFERS)
-    sharcCapacity_ = 1u << static_cast<uint32_t>(Renderer::options.sharcCapacityExponent);
+    sharcCapacity_ = effectiveSharcCapacity();
     if (Renderer::options.sharcEnabled) {
         initSharcBuffers();
 #ifdef MCVR_ENABLE_SHARC_UPDATE_PASS
@@ -1508,7 +1542,12 @@ void RayTracingModule::initSharcBuffers() {
     auto framework = framework_.lock();
     if (!framework) return;
 
-    RadianceLogger::log("RayTracing", "INFO", "SHARC buffers create start capacity=%u", sharcCapacity_);
+    RadianceLogger::log("RayTracing", "INFO",
+                        "SHARC buffers create start requestedExp=%d effectiveExp=%d capacity=%u bytes=%llu",
+                        Renderer::options.sharcCapacityExponent,
+                        effectiveSharcCapacityExponent(),
+                        sharcCapacity_,
+                        static_cast<unsigned long long>(sharcCapacity_) * 40ull);
     g_crashRing.record("SHARC:buffers:create:start");
     VkBufferUsageFlags sharcUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
@@ -1926,13 +1965,14 @@ void RayTracingModuleContext::render() {
     renderDiag("RT descriptors end");
 
     bool accumulating = Renderer::options.offlineState == 2;
+    bool sharcQueuesIdle = true;
 
 #ifdef MCVR_ENABLE_SHARC
     // Lazy SHARC init: create buffers + pipelines if enabled at runtime but not yet allocated.
     // Must happen BEFORE push constant population so SHARC BDAs are available on the same frame.
 #ifdef MCVR_ENABLE_SHARC_BUFFERS
     if (Renderer::options.sharcEnabled && !module->sharcHashEntries_) {
-        module->sharcCapacity_ = 1u << static_cast<uint32_t>(Renderer::options.sharcCapacityExponent);
+        module->sharcCapacity_ = effectiveSharcCapacity();
         module->initSharcBuffers();
 #ifdef MCVR_ENABLE_SHARC_UPDATE_PASS
         module->initSharcUpdatePipeline();
@@ -1951,6 +1991,27 @@ void RayTracingModuleContext::render() {
 #endif
 #endif
 
+#if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_BUFFERS)
+    if (Renderer::options.sharcEnabled && !accumulating) {
+        auto chunkScheduler = Renderer::instance().world()->chunks()->chunkBuildScheduler();
+        if (chunkScheduler) {
+            auto stats = chunkScheduler->stats();
+            sharcQueuesIdle = stats.inputQueue == 0 && stats.completedQueue == 0 && stats.inFlight == 0;
+        }
+        const bool hasWorldGeometry = worldPrepareContext->prevBlasSnapshot_.chunkInstanceCount > 0;
+        if (sharcQueuesIdle && hasWorldGeometry) {
+            module->sharcStreamStableFrames_++;
+        } else {
+            module->sharcStreamStableFrames_ = 0;
+        }
+        module->sharcDispatchReady_ =
+            module->sharcStreamStableFrames_ >= kSharcDispatchStableFrameThreshold;
+    } else {
+        module->sharcStreamStableFrames_ = 0;
+        module->sharcDispatchReady_ = false;
+    }
+#endif
+
     RayTracingPushConstant pushConstant{};
     pushConstant.numRayBounces = accumulating
         ? static_cast<int>(Renderer::options.offlineBounces)
@@ -1961,7 +2022,8 @@ void RayTracingModuleContext::render() {
                        | (Renderer::options.restirSimplifiedBRDF ? 8 : 0)
                        | (Renderer::options.restirBounceEnabled ? 16 : 0)
 #if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY)
-                       | ((Renderer::options.sharcEnabled && !accumulating && module->sharcHashEntries_) ? 32 : 0)
+                       | ((Renderer::options.sharcEnabled && !accumulating && module->sharcHashEntries_
+                           && module->sharcBuffersInitialized_ && module->sharcDispatchReady_) ? 32 : 0)
 #endif
                        | (Renderer::options.noiseLOD ? 64 : 0)
                        | (Renderer::options.multiScatterGGX ? 128 : 0)
@@ -2031,8 +2093,8 @@ void RayTracingModuleContext::render() {
         pushConstant.sharcRadianceScale = 1e3f;
         pushConstant.sharcFrameIndex = module->sharcFrameIndex_;
         pushConstant.sharcRoughnessThreshold = Renderer::options.sharcRoughnessThreshold;
-        pushConstant.sharcUpdateBlockSize = Renderer::options.sharcUpdateBlockSize;
-        pushConstant.sharcUpdateBounces = Renderer::options.sharcUpdateBounces;
+        pushConstant.sharcUpdateBlockSize = effectiveSharcUpdateBlockSize();
+        pushConstant.sharcUpdateBounces = effectiveSharcUpdateBounces();
     }
 #endif
 #endif
@@ -2216,8 +2278,7 @@ void RayTracingModuleContext::render() {
     // Deferred SHARC resize: process pending capacity change at frame boundary.
     // Previous frame's SHARC dispatch used old buffers via BDA - drain GPU before freeing them.
     if (module->sharcResizePending_ && module->sharcHashEntries_) {
-        uint32_t desiredCapacity = 1u << static_cast<uint32_t>(
-            std::max(18, std::min(26, Renderer::options.sharcCapacityExponent)));
+        uint32_t desiredCapacity = effectiveSharcCapacity();
         auto fw = module->framework_.lock();
         if (fw) {
             RadianceLogger::log("RayTracing", "INFO", "SHARC resize start capacity=%u", desiredCapacity);
@@ -2236,6 +2297,8 @@ void RayTracingModuleContext::render() {
                 fw->vma(), fw->device(), desiredCapacity * 16, sharcUsage);
             module->sharcBuffersInitialized_ = false;
             module->sharcFrameIndex_ = 0;
+            module->sharcStreamStableFrames_ = 0;
+            module->sharcDispatchReady_ = false;
             pushConstant.sharcHashEntries = module->sharcHashEntries_->bufferAddress();
             pushConstant.sharcAccumulation = module->sharcAccumulation_->bufferAddress();
             pushConstant.sharcResolved = module->sharcResolved_->bufferAddress();
@@ -2248,8 +2311,7 @@ void RayTracingModuleContext::render() {
 
     // Check if SHARC capacity exponent changed - mark for deferred resize at next frame boundary.
     {
-        uint32_t desiredCapacity = 1u << static_cast<uint32_t>(
-            std::max(18, std::min(26, Renderer::options.sharcCapacityExponent)));
+        uint32_t desiredCapacity = effectiveSharcCapacity();
         if (desiredCapacity != module->sharcCapacity_ && module->sharcHashEntries_) {
             module->sharcResizePending_ = true;
         }
@@ -2257,7 +2319,24 @@ void RayTracingModuleContext::render() {
 
     const bool sharcBuffersReady = Renderer::options.sharcEnabled && !accumulating
         && module->sharcHashEntries_ && module->sharcAccumulation_ && module->sharcResolved_;
-    if (sharcBuffersReady && !module->sharcBuffersInitialized_) {
+    if (sharcBuffersReady && !module->sharcDispatchReady_) {
+        static uint64_t lastSharcGateLog = 0;
+        uint64_t curFrame = g_crashRing.frameCount();
+        if (curFrame - lastSharcGateLog >= 120) {
+            lastSharcGateLog = curFrame;
+            renderDiag("SHARC gated waiting for settled BLAS stream stableFrames=%u/%u queuesIdle=%d chunkInstances=%u requestedExp=%d effectiveExp=%d requestedBounces=%d effectiveBounces=%d",
+                       module->sharcStreamStableFrames_,
+                       kSharcDispatchStableFrameThreshold,
+                       sharcQueuesIdle ? 1 : 0,
+                       worldPrepareContext->prevBlasSnapshot_.chunkInstanceCount,
+                       Renderer::options.sharcCapacityExponent,
+                       effectiveSharcCapacityExponent(),
+                       Renderer::options.sharcUpdateBounces,
+                       effectiveSharcUpdateBounces());
+        }
+    }
+
+    if (sharcBuffersReady && module->sharcDispatchReady_ && !module->sharcBuffersInitialized_) {
         worldCommandBuffer->beginLabel("RT:SHARC Init", 0.8f, 0.5f, 0.1f);
         ScopedGpuProfile sharcInitProfile(profileCmd, "RT.SHARCInit");
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
@@ -2282,13 +2361,15 @@ void RayTracingModuleContext::render() {
     }
 
 #ifdef MCVR_ENABLE_SHARC_UPDATE_PASS
-    if (sharcBuffersReady && module->sharcUpdatePipeline_ && sharcUpdateSbt) {
+    if (sharcBuffersReady && module->sharcDispatchReady_ && module->sharcUpdatePipeline_ && sharcUpdateSbt) {
         worldCommandBuffer->beginLabel("RT:SHARC Update", 0.9f, 0.6f, 0.1f);
         ScopedGpuProfile sharcUpdateProfile(profileCmd, "RT.SHARCUpdate");
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
         GpuDiag::checkpoint(cmd, GpuDiag::SHARC_UPDATE_RT);
-        renderDiag("SHARC update begin downscale=%d block=%d bounces=%d", Renderer::options.sharcDownscale,
-                   Renderer::options.sharcUpdateBlockSize, Renderer::options.sharcUpdateBounces);
+        renderDiag("SHARC update begin downscale=%d block=%d bounces=%d requestedDownscale=%d requestedBlock=%d requestedBounces=%d",
+                   effectiveSharcDownscale(), effectiveSharcUpdateBlockSize(), effectiveSharcUpdateBounces(),
+                   Renderer::options.sharcDownscale, Renderer::options.sharcUpdateBlockSize,
+                   Renderer::options.sharcUpdateBounces);
         g_crashRing.record("SHARC:updateDispatch:start");
 
         RayTracingPushConstant updatePC = pushConstant;
@@ -2299,7 +2380,7 @@ void RayTracingModuleContext::render() {
                                VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
                            0, sizeof(RayTracingPushConstant), &updatePC);
 
-        int ds = std::max(1, Renderer::options.sharcDownscale);
+        int ds = effectiveSharcDownscale();
         worldCommandBuffer->bindDescriptorTable(rayTracingDescriptorTable, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
             ->bindRTPipeline(module->sharcUpdatePipeline_)
             ->raytracing(sharcUpdateSbt, hdrNoisyOutputImage->width() / ds, hdrNoisyOutputImage->height() / ds, 1);
@@ -2324,7 +2405,8 @@ void RayTracingModuleContext::render() {
 #endif
 
 #ifdef MCVR_ENABLE_SHARC_RESOLVE_PASS
-    if (sharcBuffersReady && module->sharcResolvePipeline_ != VK_NULL_HANDLE) {
+    if (sharcBuffersReady && module->sharcDispatchReady_ && module->sharcBuffersInitialized_
+        && module->sharcResolvePipeline_ != VK_NULL_HANDLE) {
         worldCommandBuffer->beginLabel("RT:SHARC Resolve", 0.9f, 0.7f, 0.2f);
         ScopedGpuProfile sharcResolveProfile(profileCmd, "RT.SHARCResolve");
         VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();

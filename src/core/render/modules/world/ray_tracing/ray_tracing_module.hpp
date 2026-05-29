@@ -231,6 +231,8 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::shared_ptr<vk::DeviceLocalBuffer> sharcResolved_;
     bool sharcBuffersInitialized_ = false;
     bool sharcResizePending_ = false;
+    bool sharcDispatchReady_ = false;
+    uint32_t sharcStreamStableFrames_ = 0;
     uint32_t sharcFrameIndex_ = 0;
     float sharcPrevCameraX_ = 0.0f, sharcPrevCameraY_ = 0.0f, sharcPrevCameraZ_ = 0.0f;
 
