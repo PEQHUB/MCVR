@@ -31,15 +31,12 @@ layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Sha
 };
 #endif
 
+// SHARC stores each resolved entry as 16 bytes:
+//   half2 radiance.xy, half2 radiance.z/sampleCount, uint sampleData, uint sampleDataExt.
+// Read it as uvec4 here instead of f16vec4 to avoid NVIDIA driver compiler crashes in world.rgen.
 #if SHARC_MAIN_TRACE_QUERY_MODE >= 4
-struct SharcReadonlyPackedData {
-    f16vec4 radianceData;
-    uint sampleData;
-    uint sampleDataExt;
-};
-
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer SharcReadonlyPackedBuffer {
-    SharcReadonlyPackedData data[];
+    uvec4 data[];
 };
 #endif
 
@@ -151,13 +148,15 @@ bool sharcQueryCachedRadiance(
     }
 
     SharcReadonlyPackedBuffer resolved = SharcReadonlyPackedBuffer(resolvedBDA);
-    SharcReadonlyPackedData packedData = resolved.data[cacheIndex];
-    float sampleNum = float(packedData.radianceData.w);
+    uvec4 packedData = resolved.data[cacheIndex];
+    vec2 radianceXY = unpackHalf2x16(packedData.x);
+    vec2 radianceZSample = unpackHalf2x16(packedData.y);
+    float sampleNum = radianceZSample.y;
     if (sampleNum <= RADIANCE_SHARC_SAMPLE_NUM_THRESHOLD) {
         return false;
     }
 
-    radiance = vec3(packedData.radianceData.xyz);
+    radiance = vec3(radianceXY.xy, radianceZSample.x);
     return !any(isnan(radiance)) && !any(isinf(radiance));
 #endif
 }
