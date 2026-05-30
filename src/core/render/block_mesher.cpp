@@ -67,17 +67,23 @@ void BlockMesher::emitQuad(std::vector<PBRTriangle>& vertices,
 
     glm::vec3 normal = (quad.direction < 6) ? DIRECTION_NORMALS[quad.direction] : glm::vec3(0, 1, 0);
 
+    constexpr uint8_t TINT_FLAG_THIN_CUTOUT_PLANT = 0x80u;
+    uint8_t tintType = entry.tintColorType & 0x7Fu;
+
     uint32_t flags = vk::VertexFormat::PBR_FLAG_USE_NORM
                    | vk::VertexFormat::PBR_FLAG_USE_TEXTURE
                    | vk::VertexFormat::PBR_FLAG_BLOCK_GEOMETRY;
+    if (entry.tintColorType != 255 && (entry.tintColorType & TINT_FLAG_THIN_CUTOUT_PLANT) != 0) {
+        flags |= vk::VertexFormat::PBR_FLAG_THIN_CUTOUT_CARD;
+    }
 
     // Biome tint: encode type in flag bits 12-13 for shader-side resolution.
     // Overlay is now handled via SpriteRegistry.overlaySprite — no colorLayer hack needed.
     glm::vec4 color(1.0f);
-    if (quad.tintIndex >= 0 && entry.tintColorType <= 2) {
+    if (quad.tintIndex >= 0 && tintType <= 2) {
         // Biome-dependent tint (grass, foliage, water) — shader resolves from SSBO
-        flags |= (static_cast<uint32_t>(entry.tintColorType + 1) << vk::VertexFormat::PBR_FLAG_BIOME_TINT_SHIFT);
-    } else if (quad.tintIndex >= 0 && entry.tintColorType == 3) {
+        flags |= (static_cast<uint32_t>(tintType + 1) << vk::VertexFormat::PBR_FLAG_BIOME_TINT_SHIFT);
+    } else if (quad.tintIndex >= 0 && tintType == 3) {
         // Fixed color (birch/spruce leaves, lily pad)
         color = glm::vec4(entry.fixedTintR / 255.0f, entry.fixedTintG / 255.0f,
                           entry.fixedTintB / 255.0f, 1.0f);
@@ -539,7 +545,8 @@ BlockMesher::SectionOutput BlockMesher::mesh(const SectionInput& input,
                     // emit only the base quad with an overlay alpha mask flag.
                     // Grass block sides: overlay quads are still skipped in geometry.
                     // The shader now resolves overlay via SpriteRegistry.overlaySprite.
-                    bool isGrassSide = (entry->tintColorType == 0 && dir >= 2 && dir <= 5 && quadCount >= 2);
+                    uint8_t tintType = entry->tintColorType & 0x7Fu;
+                    bool isGrassSide = (tintType == 0 && dir >= 2 && dir <= 5 && quadCount >= 2);
 
                     for (uint8_t q = 0; q < quadCount; q++) {
                         const auto& quad = quads[q];

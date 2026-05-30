@@ -67,7 +67,7 @@ static int safeLocalCoord(float worldCoord) {
 static constexpr uint32_t MATERIAL_FLAGS_MASK =
     vk::VertexFormat::PBR_FLAG_USE_TEXTURE |
     vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER |
-    vk::VertexFormat::PBR_FLAG_OVERLAY_ALPHA_MASK |
+    vk::VertexFormat::PBR_FLAG_THIN_CUTOUT_CARD |
     vk::VertexFormat::PBR_FLAG_COORD_MASK |
     vk::VertexFormat::PBR_FLAG_BIOME_TINT_MASK;
 

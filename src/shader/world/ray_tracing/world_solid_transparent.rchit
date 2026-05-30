@@ -467,6 +467,10 @@ vec3 calculateNormal(vec3 p0, vec3 p1, vec3 p2, vec2 uv0, vec2 uv1, vec2 uv2, ve
         return finalNormal;
 }
 
+vec3 thinCutoutCardRayOrigin(vec3 p, vec3 rayDir) {
+    return p + rayDir * 0.0015;
+}
+
 void main() {
     vec3 viewDir = -mainRay.direction;
 
@@ -477,6 +481,7 @@ void main() {
     uint vertexFormat;
     UnpackedVertex v0, v1, v2;
     fetchTriangleVertices(instanceID, geometryID, gl_PrimitiveID, v0, v1, v2, blasOffset, vertexFormat);
+    bool thinCutoutPlant = (v0.flags & PBR_FLAG_THIN_CUTOUT_CARD) != 0u;
 
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     // Compute world-space hit position from ray parameters instead of vertex buffer positions.
@@ -589,7 +594,8 @@ void main() {
     uint materialClassIdx = 0u;
     bool hasMaterialClass = false;
 #if RARSER_SHADER_DISPLACEMENT
-    bool displacementGlobalEligible = mainRay.index == 0u &&
+    bool displacementGlobalEligible = !thinCutoutPlant &&
+                                      mainRay.index == 0u &&
                                       pc.pomHeightScale > DISPLACEMENT_MIN_DEPTH &&
                                       actualHitT < pc.pomFadeDistance;
 #else
@@ -638,7 +644,7 @@ void main() {
     uint displacementMaterialMode = hasMaterialEntry ? ((mc.pomPacked0 >> 3u) & 0x3u) : 0u; // 0=inherit,1=off,2=custom
     bool displacementMaterialAllows = displacementMaterialMode != 1u &&
                                       (displacementMaterialMode != 2u || mc.pomDepth > DISPLACEMENT_MIN_DEPTH);
-    bool canDisplace = displacementGlobalEligible && useTexture &&
+    bool canDisplace = !thinCutoutPlant && displacementGlobalEligible && useTexture &&
                        coordinateMode == 0u && !prGetIsHand(mainRay) && !fluidGeometry &&
                        displacementMaterialAllows;
 
@@ -948,6 +954,13 @@ void main() {
         }
     }
 
+    if (thinCutoutPlant) {
+        mat.normal = vec3(0.0, 0.0, 1.0);
+        mat.metallic = 0.0;
+        mat.transmission = max(mat.transmission, 0.0);
+        matNoiseStrength = 0.0;
+    }
+
     // Texture gamut boost: Oklab chroma scaling in Rec.709 (dielectric only)
     // Per-material value from SSBO; fallback to global push constant for vivid-flagged non-material blocks
     float gamutFactor = (materialType != 0u) ? matGamutBoost
@@ -1002,8 +1015,11 @@ void main() {
     vec3 geometricNormal;
     vec3 normal =
         calculateNormal(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, mat.normal, viewDir, geometricNormal, false);
+    if (thinCutoutPlant) {
+        normal = vec3(0.0, 1.0, 0.0);
+    }
 #if RARSER_SHADER_DISPLACEMENT
-    if (hasDisplacedSurface) {
+    if (!thinCutoutPlant && hasDisplacedSurface) {
         geometricNormal = displacedGeometricNormal;
         vec3 tangent = displacementNormalize(displacedDpu - geometricNormal * dot(geometricNormal, displacedDpu),
                                              abs(geometricNormal.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0));
@@ -1340,7 +1356,7 @@ void main() {
     vec2 vmfBN = vec2(-1.0); // A/B test: force PCG, disable blue noise
     vec3 sampledLightDir = SampleVMF(mainRay.seed, lightDir, kappa, vmfBN);
     vec3 shadowBiasN = dot(sampledLightDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
-    vec3 shadowRayOrigin = offset_ray(worldPos, shadowBiasN);
+    vec3 shadowRayOrigin = thinCutoutPlant ? thinCutoutCardRayOrigin(worldPos, sampledLightDir) : offset_ray(worldPos, shadowBiasN);
 
     bool skipSecondarySunShadow = RT_DEBUG_DISABLE_SECONDARY_SUN_SHADOW && mainRay.index > 0;
     if (worldUbo.skyType == 1 && !skipSecondarySunShadow) {
@@ -1569,7 +1585,7 @@ void main() {
                 vec3 toSample = cs.worldPos - worldPos;
                 float sDist = length(toSample);
                 vec3 sDir = toSample / sDist;
-                vec3 shadowOrigin = offset_ray(worldPos, geometricNormal);
+                vec3 shadowOrigin = thinCutoutPlant ? thinCutoutCardRayOrigin(worldPos, sDir) : offset_ray(worldPos, geometricNormal);
 
                 shadowRay.radiance = vec3(0.0);
                 shadowRay.throughput = vec3(0.0);
@@ -1682,7 +1698,7 @@ void main() {
                 vec3 toSample = cs.worldPos - worldPos;
                 float sDist = length(toSample);
                 vec3 sDir = toSample / sDist;
-                vec3 shadowOrigin = offset_ray(worldPos, geometricNormal);
+                vec3 shadowOrigin = thinCutoutPlant ? thinCutoutCardRayOrigin(worldPos, sDir) : offset_ray(worldPos, geometricNormal);
 
                 shadowRay.radiance = vec3(0.0);
                 shadowRay.throughput = vec3(0.0);
@@ -1860,7 +1876,7 @@ void main() {
             vec3 toSample = cs.worldPos - worldPos;
             float sDist = length(toSample);
             vec3 sDir = toSample / sDist;
-            vec3 shadowOrigin = offset_ray(worldPos, geometricNormal);
+            vec3 shadowOrigin = thinCutoutPlant ? thinCutoutCardRayOrigin(worldPos, sDir) : offset_ray(worldPos, geometricNormal);
 
             shadowRay.radiance = vec3(0.0);
             shadowRay.throughput = vec3(0.0);
@@ -1999,7 +2015,7 @@ void main() {
                     }
                 }
 #endif
-                mainRay.origin = offset_ray(bounceWorldPos, bounceOffsetN);
+                mainRay.origin = thinCutoutPlant ? thinCutoutCardRayOrigin(bounceWorldPos, reflectDir) : offset_ray(bounceWorldPos, bounceOffsetN);
                 mainRay.direction = reflectDir;
                 mainRay.throughput *= mat.f0;
                 prSetLobeType(mainRay, 1u); // specular
@@ -2018,7 +2034,7 @@ void main() {
                     }
                 }
 #endif
-                mainRay.origin = offset_ray(bounceWorldPos, bounceOffsetN);
+                mainRay.origin = thinCutoutPlant ? thinCutoutCardRayOrigin(bounceWorldPos, refractDir) : offset_ray(bounceWorldPos, bounceOffsetN);
                 mainRay.direction = refractDir;
                 mainRay.throughput *= (1.0 - fresnelReflect);
                 prSetLobeType(mainRay, 2u); // transmission
@@ -2042,7 +2058,7 @@ void main() {
                 }
             }
 #endif
-            mainRay.origin = offset_ray(bounceWorldPos, bounceOffsetN);
+            mainRay.origin = thinCutoutPlant ? thinCutoutCardRayOrigin(bounceWorldPos, reflectDir) : offset_ray(bounceWorldPos, bounceOffsetN);
             mainRay.direction = reflectDir;
 
             // Fresnel reflectance (Schlick) — preserves mirror tint for metals
@@ -2077,7 +2093,7 @@ void main() {
     // Prevent light leaks: perturbed normals can sample directions below the
     // geometric surface plane. Kill these for non-transmissive lobes (diffuse/specular).
     // Transmission (lobeType 2: glass/water) still needs through-surface rays.
-    if (lobeType != 2 && dot(sampleDir, geometricNormal) <= 0.0) {
+    if (!thinCutoutPlant && lobeType != 2 && dot(sampleDir, geometricNormal) <= 0.0) {
         mainRay.flags |= PR_STOP_BIT;
         return;
     }
@@ -2100,7 +2116,7 @@ void main() {
         }
     }
 #endif
-    mainRay.origin = offset_ray(bounceWorldPos, bounceOffsetN);
+    mainRay.origin = thinCutoutPlant ? thinCutoutCardRayOrigin(bounceWorldPos, sampleDir) : offset_ray(bounceWorldPos, bounceOffsetN);
 
     mainRay.direction = sampleDir;
     mainRay.flags &= ~PR_STOP_BIT;
