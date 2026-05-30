@@ -149,7 +149,8 @@ class DeviceLocalImage : public Image, public SharedObject<DeviceLocalImage> {
     static std::shared_ptr<DeviceLocalImage> create3D(
         std::shared_ptr<Device> device, std::shared_ptr<VMA> vma,
         uint32_t width, uint32_t height, uint32_t depth,
-        VkFormat format, VkImageUsageFlags usage);
+        VkFormat format, VkImageUsageFlags usage,
+        bool persistStaging = false);
 
     VkImageType imageType() const { return imageType_; }
 

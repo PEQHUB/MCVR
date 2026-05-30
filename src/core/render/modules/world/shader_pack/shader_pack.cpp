@@ -3025,7 +3025,7 @@ void ShaderPack::loadRuntimeResources() {
 
         texture.importedImage = vk::DeviceLocalImage::create3D(device, vma, texture.config.importedWidth,
                                                                texture.config.importedHeight, texture.config.importedDepth,
-                                                               texture.config.format, VK_IMAGE_USAGE_SAMPLED_BIT);
+                                                               texture.config.format, VK_IMAGE_USAGE_SAMPLED_BIT, true);
         texture.importedImage->uploadToStagingBuffer(raw.data());
     }
 
