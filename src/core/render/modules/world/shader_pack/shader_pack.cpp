@@ -2749,7 +2749,7 @@ void ShaderPack::initRuntimeTextures() {
     uint32_t frameCount = framework->swapchain()->imageCount();
 
     std::vector<RuntimeTexture> runtimeTextures(shaderPack_.textures.size());
-    mcvr::parallelFor(shaderPack_.textures.size(), [&](size_t textureIndex) {
+    for (size_t textureIndex = 0; textureIndex < shaderPack_.textures.size(); ++textureIndex) {
         const auto &textureConfig = shaderPack_.textures[textureIndex];
         RuntimeTexture runtimeTexture;
         runtimeTexture.config = textureConfig;
@@ -2892,7 +2892,7 @@ void ShaderPack::initRuntimeTextures() {
         }
 
         runtimeTextures[textureIndex] = std::move(runtimeTexture);
-    });
+    }
 
     runtimeTextures_ = std::move(runtimeTextures);
     runtimeTextureIndices_.clear();
@@ -2909,7 +2909,7 @@ void ShaderPack::initRuntimeBuffers() {
     uint32_t frameCount = framework->swapchain()->imageCount();
 
     std::vector<RuntimeBuffer> runtimeBuffers(shaderPack_.buffers.size());
-    mcvr::parallelFor(shaderPack_.buffers.size(), [&](size_t bufferIndex) {
+    for (size_t bufferIndex = 0; bufferIndex < shaderPack_.buffers.size(); ++bufferIndex) {
         const auto &bufferConfig = shaderPack_.buffers[bufferIndex];
         RuntimeBuffer runtimeBuffer;
         runtimeBuffer.config = bufferConfig;
@@ -2925,7 +2925,7 @@ void ShaderPack::initRuntimeBuffers() {
         }
 
         runtimeBuffers[bufferIndex] = std::move(runtimeBuffer);
-    });
+    }
 
     runtimeBuffers_ = std::move(runtimeBuffers);
     runtimeBufferIndices_.clear();
@@ -2969,9 +2969,9 @@ void ShaderPack::loadRuntimeResources() {
         return data;
     };
 
-    mcvr::parallelFor(runtimeTextures_.size(), [&](size_t textureIndex) {
+    for (size_t textureIndex = 0; textureIndex < runtimeTextures_.size(); ++textureIndex) {
         auto &texture = runtimeTextures_[textureIndex];
-        if (!texture.config.imported) { return; }
+        if (!texture.config.imported) { continue; }
         if (texture.config.dimension == ShaderPackLoader::TextureDimension::Texture2D) {
             if (texture.config.format != VK_FORMAT_R8G8B8A8_UNORM) {
                 throw std::runtime_error("Imported 2d textures currently require R8G8B8A8_UNORM: " + texture.config.name);
@@ -2989,7 +2989,7 @@ void ShaderPack::loadRuntimeResources() {
                                                                  texture.config.format, VK_IMAGE_USAGE_SAMPLED_BIT);
             texture.importedImage->uploadToStagingBuffer(pixels);
             stbi_image_free(pixels);
-            return;
+            continue;
         }
 
         if (texture.config.dimension == ShaderPackLoader::TextureDimension::Texture2DArray) {
@@ -3007,7 +3007,7 @@ void ShaderPack::loadRuntimeResources() {
                                                                  texture.config.importedHeight, texture.config.importedDepth,
                                                                  texture.config.format, VK_IMAGE_USAGE_SAMPLED_BIT);
             texture.importedImage->uploadToStagingBuffer(raw.data());
-            return;
+            continue;
         }
 
         if (texture.config.dimension != ShaderPackLoader::TextureDimension::Texture3D) {
@@ -3027,7 +3027,7 @@ void ShaderPack::loadRuntimeResources() {
                                                                texture.config.importedHeight, texture.config.importedDepth,
                                                                texture.config.format, VK_IMAGE_USAGE_SAMPLED_BIT);
         texture.importedImage->uploadToStagingBuffer(raw.data());
-    });
+    }
 
     auto commandPool = vk::CommandPool::create(physicalDevice, device);
     auto commandBuffer = vk::CommandBuffer::create(device, commandPool);

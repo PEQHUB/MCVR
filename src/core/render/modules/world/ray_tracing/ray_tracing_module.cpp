@@ -2383,6 +2383,8 @@ void RayTracingModule::refreshUpstreamDirectLightRuntime(uint32_t frameIndex) {
 
     try {
         auto image = hdrNoisyOutputImages_[frameIndex];
+        renderDiag("UpstreamRT runtime refresh begin frame=%u size=%ux%u", frameIndex, image->width(), image->height());
+        g_crashRing.record("UpstreamRT:runtimeRefresh:start");
         auto expressionVariables = upstreamDirectLightExpressionVariables();
         bool hasRenderWidth = false;
         bool hasRenderHeight = false;
@@ -2401,16 +2403,22 @@ void RayTracingModule::refreshUpstreamDirectLightRuntime(uint32_t frameIndex) {
         if (!hasRenderHeight) {
             expressionVariables.push_back({.name = "RENDER_HEIGHT", .value = static_cast<double>(image->height())});
         }
+        g_crashRing.record("UpstreamRT:runtimeRefresh:variables");
         directLightUpstreamShaderPack_->setRuntimeResourceExpressionVariables(std::move(expressionVariables));
+        g_crashRing.record("UpstreamRT:runtimeRefresh:ensure:start");
         directLightUpstreamShaderPack_->ensureRuntimeResources(image->width(), image->height());
+        g_crashRing.record("UpstreamRT:runtimeRefresh:ensure:done");
         directLightUpstreamRuntimeResourcesReady_ =
             directLightUpstreamShaderPack_->runtimeResourcesReady();
         if (directLightUpstreamRuntimeResourcesReady_ &&
             frameIndex < directLightUpstreamDescriptorTables_.size() &&
             directLightUpstreamDescriptorTables_[frameIndex]) {
+            g_crashRing.record("UpstreamRT:runtimeRefresh:bind:start");
             directLightUpstreamShaderPack_->bindRuntimeResources(
                 directLightUpstreamDescriptorTables_[frameIndex], 5, frameIndex);
+            g_crashRing.record("UpstreamRT:runtimeRefresh:bind:done");
         }
+        renderDiag("UpstreamRT runtime refresh end ready=%d", directLightUpstreamRuntimeResourcesReady_ ? 1 : 0);
     } catch (const std::exception& e) {
         directLightUpstreamRuntimeResourcesReady_ = false;
         directLightUpstreamShaderCompileReady_ = false;
