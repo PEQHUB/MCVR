@@ -3,6 +3,7 @@
 #include "common/shared.hpp"
 #include "common/singleton.hpp"
 #include "core/all_extern.hpp"
+#include "core/render/modules/world/shader_pack/shader_pack.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
 #include "core/render/modules/world/world_module.hpp"
@@ -19,6 +20,10 @@ class AtmosphereContext;
 class WorldPrepare;
 class WorldPrepareContext;
 class ShaderPack;
+
+#include <optional>
+#include <unordered_map>
+#include <variant>
 
 struct RayTracingPushConstant {
     int numRayBounces;
@@ -77,6 +82,22 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     constexpr static uint32_t inputImageNum = 0;
     constexpr static uint32_t outputImageNum = 29;
 
+    constexpr static std::string_view TARGET_RADIANCE = "out:radiance";
+    constexpr static std::string_view TARGET_DIFFUSE_ALBEDO_METALLIC = "out:diffuse_albedo_metallic";
+    constexpr static std::string_view TARGET_SPECULAR_ALBEDO = "out:specular_albedo";
+    constexpr static std::string_view TARGET_NORMAL_ROUGHNESS = "out:normal_roughness";
+    constexpr static std::string_view TARGET_MOTION_VECTOR = "out:motion_vector";
+    constexpr static std::string_view TARGET_LINEAR_DEPTH = "out:linear_depth";
+    constexpr static std::string_view TARGET_SPECULAR_HIT_DEPTH = "out:specular_hit_depth";
+    constexpr static std::string_view TARGET_FIRST_HIT_DEPTH = "out:first_hit_depth";
+    constexpr static std::string_view TARGET_FIRST_HIT_DIFFUSE_DIRECT_LIGHT = "out:first_hit_diffuse_direct_light";
+    constexpr static std::string_view TARGET_FIRST_HIT_DIFFUSE_INDIRECT_LIGHT = "out:first_hit_diffuse_indirect_light";
+    constexpr static std::string_view TARGET_FIRST_HIT_SPECULAR = "out:first_hit_specular";
+    constexpr static std::string_view TARGET_FIRST_HIT_CLEAR = "out:first_hit_clear";
+    constexpr static std::string_view TARGET_FIRST_HIT_BASE_EMISSION = "out:first_hit_base_emission";
+    constexpr static std::string_view TARGET_FOG_IMAGE = "out:fog_image";
+    constexpr static std::string_view TARGET_FIRST_HIT_REFRACTION = "out:first_hit_refraction";
+
     RayTracingModule();
 
     void init(std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline);
@@ -111,6 +132,47 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     void initDirectLightPipeline();
     void initUpstreamDirectLightRuntime();
     void refreshUpstreamDirectLightRuntime(uint32_t frameIndex);
+    void initUpstreamDirectLightDescriptorTables();
+    void initUpstreamDirectLightPipelines();
+    bool renderUpstreamDirectLight(RayTracingModuleContext &context);
+    std::vector<ExpressionEvaluator::Variable> upstreamDirectLightExpressionVariables() const;
+    double evaluateUpstreamDirectLightNumericExpression(
+        const std::string &expression,
+        const ShaderPack::ExecutionVariables &variables);
+    std::optional<std::reference_wrapper<ShaderPackLoader::VariableConfig>>
+    findUpstreamDirectLightExecutionVariableConfig(std::string_view name);
+    std::shared_ptr<vk::DeviceLocalImage> findUpstreamDirectLightTargetImage(
+        const std::string &target,
+        uint32_t frameIndex);
+    std::optional<std::reference_wrapper<ShaderPack::RuntimeTexture>>
+    findUpstreamDirectLightRuntimeTexture(std::string_view name);
+    std::optional<std::reference_wrapper<ShaderPack::RuntimeBuffer>>
+    findUpstreamDirectLightRuntimeBuffer(std::string_view name);
+    void collectUpstreamDirectLightRayTracingRequests(
+        RayTracingPass &pass,
+        std::vector<ShaderPack::ShaderCreateInfo> &requests);
+    void collectUpstreamDirectLightComputeRequests(
+        const ComputePass &pass,
+        std::vector<ShaderPack::ShaderCreateInfo> &requests);
+    void buildUpstreamDirectLightRayTracingPass(
+        RayTracingPass &pass,
+        std::shared_ptr<vk::Device> device,
+        const std::vector<std::shared_ptr<vk::Shader>> &compiledShaders,
+        size_t &shaderOffset);
+    void buildUpstreamDirectLightComputePass(
+        ComputePass &pass,
+        std::shared_ptr<vk::Device> device,
+        const std::vector<std::shared_ptr<vk::Shader>> &compiledShaders,
+        size_t &shaderOffset);
+    void renderUpstreamDirectLightRayTracingPass(
+        RayTracingPass &pass,
+        RayTracingModuleContext &context,
+        const ShaderPack::ExecutionVariables &variables);
+    void renderUpstreamDirectLightComputePass(
+        ComputePass &pass,
+        RayTracingModuleContext &context,
+        const ShaderPack::ExecutionVariables &variables);
+    void uploadUpstreamDirectLightStaticSbts(std::shared_ptr<vk::Device> device);
     void initSharcBuffers();
     void initSharcUpdatePipeline();
     void initSharcResolvePipeline();
@@ -203,6 +265,8 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerImages_;         // [26] glass/water foreground color
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerOpacityImages_;  // [27] glass/water per-channel opacity
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerMvecsImages_;    // [28] glass/water surface MVs
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> upstreamFogImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> upstreamFirstHitRefractionImages_;
 
     // Private SHARC query-pass candidate images. These are internal to RayTracingModule.
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidatePosHitTImages_;
@@ -237,6 +301,14 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<VkDescriptorSet> directLightUtilityDescSets_;
     std::shared_ptr<vk::Shader> directLightUtilityShader_;
     std::shared_ptr<ShaderPack> directLightUpstreamShaderPack_;
+    using UpstreamExecutionVariable = ShaderPack::ExecutionVariable;
+    using UpstreamExecutionVariables = ShaderPack::ExecutionVariables;
+    using UpstreamPassVariant = std::variant<std::shared_ptr<RayTracingPass>, std::shared_ptr<ComputePass>>;
+    std::vector<std::shared_ptr<vk::DescriptorTable>> directLightUpstreamDescriptorTables_;
+    std::vector<UpstreamPassVariant> directLightUpstreamPasses_;
+    std::unordered_map<std::string, UpstreamPassVariant> directLightUpstreamPassNameToPass_;
+    std::unordered_map<std::string, ShaderPackLoader::VariableConfig> directLightUpstreamExecutionVariableConfigs_;
+    std::unordered_map<std::string, std::string> directLightUpstreamGlobalVariables_;
     bool directLightUpstreamPackRuntimeReady_ = false;
     bool directLightUpstreamRuntimeResourcesReady_ = false;
     bool directLightUpstreamPassRuntimeReady_ = false;
@@ -334,6 +406,7 @@ struct RayTracingModuleContext : public WorldModuleContext, SharedObject<RayTrac
 
     // ray tracing
     std::shared_ptr<vk::DescriptorTable> rayTracingDescriptorTable;
+    std::shared_ptr<vk::DescriptorTable> directLightUpstreamDescriptorTable;
     std::shared_ptr<vk::SBT> sbt;
     std::shared_ptr<vk::SBT> sharcUpdateSbt;  // SHARC update pipeline SBT
 

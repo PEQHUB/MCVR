@@ -1435,6 +1435,7 @@ void WorldPrepareContext::render() {
     g_crashRing.record("WP:sbt");
     {
         ScopedGpuProfile profile(profileCmd, "RT.WP.SBTSetup");
+        lastGeometryTypes_ = geometryTypes;
         rtModuleCtx->sbt->setupHitSBT(geometryTypes);
         if (rtModuleCtx->sharcUpdateSbt) {
             rtModuleCtx->sharcUpdateSbt->setupHitSBT(geometryTypes);

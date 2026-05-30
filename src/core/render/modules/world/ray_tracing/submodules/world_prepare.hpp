@@ -125,6 +125,7 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
 
     // Persistent per-context SSBO buffers — reused across frames, grow-only.
     // Safe because acquireContext() waits for previous GPU work on this context before reuse.
+    std::vector<uint32_t> lastGeometryTypes_;
     std::shared_ptr<vk::DeviceLocalBuffer> blasOffsetsBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> vertexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> indexBufferAddr;

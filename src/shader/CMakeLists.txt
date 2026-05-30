@@ -103,6 +103,18 @@ install(
     FILES_MATCHING PATTERN "*.spv"
 )
 
+install(
+    DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/util/"
+    DESTINATION "${MCVR_INSTALL_BIN_DIR}/res/util"
+    FILES_MATCHING PATTERN "*.glsl"
+)
+
+install(
+    DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/util/"
+    DESTINATION "${MCVR_INSTALL_LIB_DIR}/shaders/util"
+    FILES_MATCHING PATTERN "*.glsl"
+)
+
 set(UPSTREAM_RT_PACK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/world/ray_tracing/internal")
 if(EXISTS "${UPSTREAM_RT_PACK_DIR}/advanced/configs.json")
     install(
