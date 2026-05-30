@@ -2383,10 +2383,25 @@ void RayTracingModule::refreshUpstreamDirectLightRuntime(uint32_t frameIndex) {
 
     try {
         auto image = hdrNoisyOutputImages_[frameIndex];
-        directLightUpstreamShaderPack_->setRuntimeResourceExpressionVariables({
-            {.name = "RENDER_WIDTH", .value = static_cast<double>(image->width())},
-            {.name = "RENDER_HEIGHT", .value = static_cast<double>(image->height())},
-        });
+        auto expressionVariables = upstreamDirectLightExpressionVariables();
+        bool hasRenderWidth = false;
+        bool hasRenderHeight = false;
+        for (auto &variable : expressionVariables) {
+            if (variable.name == "RENDER_WIDTH") {
+                variable.value = static_cast<double>(image->width());
+                hasRenderWidth = true;
+            } else if (variable.name == "RENDER_HEIGHT") {
+                variable.value = static_cast<double>(image->height());
+                hasRenderHeight = true;
+            }
+        }
+        if (!hasRenderWidth) {
+            expressionVariables.push_back({.name = "RENDER_WIDTH", .value = static_cast<double>(image->width())});
+        }
+        if (!hasRenderHeight) {
+            expressionVariables.push_back({.name = "RENDER_HEIGHT", .value = static_cast<double>(image->height())});
+        }
+        directLightUpstreamShaderPack_->setRuntimeResourceExpressionVariables(std::move(expressionVariables));
         directLightUpstreamShaderPack_->ensureRuntimeResources(image->width(), image->height());
         directLightUpstreamRuntimeResourcesReady_ =
             directLightUpstreamShaderPack_->runtimeResourcesReady();
