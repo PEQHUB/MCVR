@@ -35,6 +35,7 @@ constexpr uint32_t kDirectLightCounterCount = 16;
 constexpr uint32_t kRtDebugDisableDirectLighting = 16;
 constexpr bool kForceDisableShaderDisplacementForGpuFaultIsolation = true;
 constexpr bool kAllowUpstreamRtExecutorDispatch = false;
+constexpr bool kAllowDirectLightScaffoldDispatch = false;
 
 bool shaderDisplacementRuntimeAllowed() {
     return !kForceDisableShaderDisplacementForGpuFaultIsolation;
@@ -196,6 +197,8 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         directLightUpstreamShaderCompileReady_ &&
         directLightUpstreamPipelineReady_ &&
         directLightUpstreamSbtReady_;
+    const bool upstreamExecutorActive = kAllowUpstreamRtExecutorDispatch && upstreamExecutorReady;
+    const bool directLightScaffoldActive = kAllowDirectLightScaffoldDispatch && directLightBackend == 2;
 #else
     constexpr bool directLightResourcesReady = false;
     constexpr uint32_t directLightReservoirWidth = 0;
@@ -203,6 +206,8 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
     constexpr uint64_t directLightReservoirPixels = 0;
     constexpr int directLightLightCount = 0;
     constexpr bool upstreamExecutorReady = false;
+    constexpr bool upstreamExecutorActive = false;
+    constexpr bool directLightScaffoldActive = false;
 #endif
 
     out << "directLightBackend:" << directLightBackend
@@ -210,11 +215,11 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",rtxdiCompiled:" << (rtxdiCompiled ? 1 : 0)
         << ",directLightPipelinePossible:" << (directLightPipelinePossible ? 1 : 0)
         << ",rtxdiBackendPossible:" << (rtxdiBackendPossible ? 1 : 0)
-        << ",directLightPipelineActive:" << (directLightPipelinePossible ? 1 : 0)
+        << ",directLightPipelineActive:" << ((upstreamExecutorActive || directLightScaffoldActive) ? 1 : 0)
         << ",directLightVisualOverrideActive:0"
         << ",directLightScaffoldVisualSubstituteActive:0"
         << ",directLightRuntimeCompilerReady:1"
-        << ",directLightUpstreamExecutionActive:" << (upstreamExecutorReady ? 1 : 0)
+        << ",directLightUpstreamExecutionActive:" << (upstreamExecutorActive ? 1 : 0)
         << ",directLightUpstreamExecutorReady:" << (upstreamExecutorReady ? 1 : 0)
 #ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
         << ",directLightUpstreamExecutorBlockedNoPassRuntime:" << (directLightUpstreamPassRuntimeReady_ ? 0 : 1)
@@ -3590,7 +3595,7 @@ void RayTracingModuleContext::render() {
 #ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
     const uint32_t directLightBackend = effectiveDirectLightBackend();
     const bool upstreamDirectLightActive = kAllowUpstreamRtExecutorDispatch && directLightBackend == 1;
-    const bool directLightPipelineActive = directLightBackend == 2;
+    const bool directLightPipelineActive = kAllowDirectLightScaffoldDispatch && directLightBackend == 2;
     bool directLightExternalActive = false;
     if (directLightPipelineActive) {
         const uint32_t frameIdx = context->frameIndex;
@@ -3650,6 +3655,17 @@ void RayTracingModuleContext::render() {
     renderDiag("RT descriptors begin");
     g_crashRing.record("RT:descriptors");
     rayTracingDescriptorTable->bindAS(worldPrepareContext->tlas, 1, 0);
+
+    if (atmosphereContext && atmosphereContext->atmCubeMapImage && module->atmosphere_) {
+        g_crashRing.record("RT:skyDescriptors");
+        rayTracingDescriptorTable->bindSamplerImageForShader(
+            module->atmosphere_->atmLUTImageSampler_, module->atmosphere_->atmLUTImage_, 0, 1);
+        if (context->frameIndex < module->atmosphere_->atmCubeMapImageSamplers_.size()) {
+            rayTracingDescriptorTable->bindSamplerImageForShader(
+                module->atmosphere_->atmCubeMapImageSamplers_[context->frameIndex],
+                atmosphereContext->atmCubeMapImage, 0, 2, 7);
+        }
+    }
 
     auto buffers = Renderer::instance().buffers();
     auto worldBuffer = buffers->worldUniformBuffer();
