@@ -636,8 +636,6 @@ void RayTracingModule::build() {
     initDirectLightPipeline();
     initUpstreamDirectLightRuntime();
     initUpstreamDirectLightDescriptorTables();
-    refreshUpstreamDirectLightRuntime(0);
-    initUpstreamDirectLightPipelines();
 #endif
 #if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_BUFFERS)
     sharcCapacity_ = effectiveSharcCapacity();
@@ -2996,14 +2994,30 @@ void RayTracingModule::renderUpstreamDirectLightComputePass(
 
 bool RayTracingModule::renderUpstreamDirectLight(RayTracingModuleContext &context) {
     if (effectiveDirectLightBackend() != 1 || !directLightUpstreamShaderPack_ ||
-        !directLightUpstreamPackRuntimeReady_ || !directLightUpstreamRuntimeResourcesReady_ ||
-        !directLightUpstreamPassRuntimeReady_ || !directLightUpstreamPipelineReady_ ||
-        !directLightUpstreamSbtReady_ || !context.directLightUpstreamDescriptorTable) {
+        !directLightUpstreamPackRuntimeReady_ || !directLightUpstreamPassRuntimeReady_ ||
+        !context.directLightUpstreamDescriptorTable) {
         return false;
     }
     auto frameworkContext = context.frameworkContext.lock();
     if (!frameworkContext) { return false; }
     refreshUpstreamDirectLightRuntime(frameworkContext->frameIndex);
+    if (!directLightUpstreamRuntimeResourcesReady_) { return false; }
+    if (!directLightUpstreamPipelineReady_ || !directLightUpstreamSbtReady_) {
+        RadianceLogger::log("RayTracing", "INFO", "Upstream RT executor lazy pipeline init start");
+        g_crashRing.record("UpstreamRT:pipelineLazy:start");
+        initUpstreamDirectLightPipelines();
+        g_crashRing.record("UpstreamRT:pipelineLazy:done");
+        RadianceLogger::log("RayTracing", "INFO",
+                            "Upstream RT executor lazy pipeline init done shader=%d pipeline=%d sbt=%d",
+                            directLightUpstreamShaderCompileReady_ ? 1 : 0,
+                            directLightUpstreamPipelineReady_ ? 1 : 0,
+                            directLightUpstreamSbtReady_ ? 1 : 0);
+    }
+    if (!directLightUpstreamShaderCompileReady_ ||
+        !directLightUpstreamPipelineReady_ ||
+        !directLightUpstreamSbtReady_) {
+        return false;
+    }
     auto buffers = Renderer::instance().buffers();
     auto world = Renderer::instance().world();
     auto chunks = world ? world->chunks() : nullptr;
