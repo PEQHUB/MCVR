@@ -1,5 +1,8 @@
 #include "core/render/modules/world/shader_pack/shader_pack.hpp"
 
+#include "core/render/crash_ring_buffer.hpp"
+#include "core/render/radiance_logger.hpp"
+#include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 #include "core/util/parallel.hpp"
 
@@ -2222,15 +2225,34 @@ ShaderPack::createShaders(std::shared_ptr<vk::Device> device,
         requestToUniqueIndex[i] = iter->second;
     }
 
+    renderDiag("ShaderPack createShaders begin requests=%zu unique=%zu", requests.size(), uniqueIndices.size());
+    RadianceLogger::log("ShaderPack", "INFO", "createShaders begin requests=%zu unique=%zu",
+                        requests.size(), uniqueIndices.size());
+
     std::vector<vk::Shader::CompileResult> compileResults(uniqueIndices.size());
-    mcvr::parallelFor(uniqueIndices.size(), [&](size_t ui) {
+    for (size_t ui = 0; ui < uniqueIndices.size(); ++ui) {
         const size_t requestIndex = uniqueIndices[ui];
         const auto &request = requests[requestIndex];
+        const auto stageValue = static_cast<unsigned>(request.stage);
+        const std::string compileTag =
+            "ShaderPack:compile:" + std::to_string(ui) + ":" + request.path.filename().string();
+        g_crashRing.record(compileTag.c_str());
+        renderDiag("ShaderPack compile begin unique=%zu/%zu request=%zu stage=0x%x file=%s",
+                   ui + 1, uniqueIndices.size(), requestIndex, stageValue, request.path.string().c_str());
         compileResults[ui] = vk::Shader::compileGlslToSpv(
             request.path.string(), request.stage,
             mergeDefinitions(filteredRequestAttributes[requestIndex], requestDefinitions[requestIndex]),
             shaderPack_.includeDirectories, executionSources[requestIndex], cacheDir);
-    });
+        renderDiag("ShaderPack compile end unique=%zu/%zu request=%zu stage=0x%x file=%s words=%zu cacheHit=%d",
+                   ui + 1, uniqueIndices.size(), requestIndex, stageValue, request.path.string().c_str(),
+                   compileResults[ui].spirv.size(),
+#ifdef DEBUG
+                   compileResults[ui].cacheHit ? 1 : 0
+#else
+                   -1
+#endif
+        );
+    }
 
 #ifdef DEBUG
     if (stats != nullptr) {
@@ -2248,9 +2270,21 @@ ShaderPack::createShaders(std::shared_ptr<vk::Device> device,
 #endif
 
     std::vector<std::shared_ptr<vk::Shader>> shaders(requests.size());
-    mcvr::parallelFor(requests.size(), [&](size_t i) {
+    for (size_t i = 0; i < requests.size(); ++i) {
+        const auto &request = requests[i];
+        const auto stageValue = static_cast<unsigned>(request.stage);
+        const std::string moduleTag =
+            "ShaderPack:module:" + std::to_string(i) + ":" + request.path.filename().string();
+        g_crashRing.record(moduleTag.c_str());
+        renderDiag("ShaderPack module begin request=%zu/%zu unique=%zu stage=0x%x file=%s",
+                   i + 1, requests.size(), requestToUniqueIndex[i], stageValue, request.path.string().c_str());
         shaders[i] = vk::Shader::create(device, compileResults[requestToUniqueIndex[i]].clone());
-    });
+        renderDiag("ShaderPack module end request=%zu/%zu unique=%zu stage=0x%x file=%s",
+                   i + 1, requests.size(), requestToUniqueIndex[i], stageValue, request.path.string().c_str());
+    }
+    renderDiag("ShaderPack createShaders end requests=%zu unique=%zu", requests.size(), uniqueIndices.size());
+    RadianceLogger::log("ShaderPack", "INFO", "createShaders end requests=%zu unique=%zu",
+                        requests.size(), uniqueIndices.size());
     return shaders;
 }
 
