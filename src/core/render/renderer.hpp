@@ -22,7 +22,7 @@ struct Options {
     uint32_t inactivityFpsLimit = 1e6;
     bool vsync = true;
     uint32_t upscalerMode = 2;       // Quality preset: 0=Performance, 1=Balanced, 2=Quality, 3=Native/DLAA, 4=Custom
-    uint32_t upscalerResOverride = 100; // Resolution override percentage (33-100%)
+    uint32_t upscalerResOverride = 100; // Resolution override percentage (1-100%)
     uint32_t upscalerType = 1;       // 0=Off, 1=FSR3, 2=DLSS SR
     uint32_t upscalerQuality = 0;
     uint32_t denoiserMode = 1;

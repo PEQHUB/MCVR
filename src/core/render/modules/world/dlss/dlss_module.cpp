@@ -6,6 +6,8 @@
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
+#include <algorithm>
+
 std::shared_ptr<NgxContext> DLSSModule::ngxContext_ = nullptr;
 
 bool DLSSModule::initNGXContext() {
@@ -123,7 +125,7 @@ bool DLSSModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLo
 
     if (Renderer::options.upscalerMode == 4) {
         // Custom mode: use resolution override percentage instead of NGX presets
-        float scale = static_cast<float>(Renderer::options.upscalerResOverride) / 100.0f;
+        float scale = static_cast<float>(std::clamp(Renderer::options.upscalerResOverride, 1u, 100u)) / 100.0f;
         inputWidth_ = std::max(1u, static_cast<uint32_t>(outputWidth_ * scale));
         inputHeight_ = std::max(1u, static_cast<uint32_t>(outputHeight_ * scale));
     } else {

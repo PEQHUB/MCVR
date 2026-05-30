@@ -188,7 +188,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssResOverride(
     JNIEnv *, jclass, jint resOverride, jboolean write) {
-    Renderer::options.upscalerResOverride = resOverride;
+    Renderer::options.upscalerResOverride = std::clamp(resOverride, 1, 100);
     if (write) Renderer::options.needRecreate = true;
 }
 
