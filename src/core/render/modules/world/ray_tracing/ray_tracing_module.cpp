@@ -13,6 +13,7 @@
 #include "core/render/crash_ring_buffer.hpp"
 #include "core/render/radiance_logger.hpp"
 #include "core/render/renderer.hpp"
+#include "core/render/textures.hpp"
 #include "core/render/modules/world/svgf/blue_noise.hpp"
 #include "core/vulkan/debug_utils.hpp"
 
@@ -2619,6 +2620,14 @@ void RayTracingModule::initUpstreamDirectLightDescriptorTables() {
         table->bindImage(upstreamFogImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 13);
         table->bindImage(upstreamFirstHitRefractionImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 14);
     }
+
+    // Upstream descriptor tables are created lazily after Minecraft has usually
+    // published its bindless texture atlas. Replay existing texture bindings so
+    // upstream set 0 matches the legacy RT descriptor tables before any dispatch.
+    Renderer::instance().textures()->bindAllTextures();
+    RadianceLogger::log("RayTracing", "INFO",
+                        "Upstream RT descriptor tables ready frames=%u texturesReplayed=1",
+                        size);
 }
 
 void RayTracingModule::collectUpstreamDirectLightRayTracingRequests(
@@ -3132,6 +3141,8 @@ bool RayTracingModule::renderUpstreamDirectLight(RayTracingModuleContext &contex
             }
             return;
         }
+        const std::string crashBegin = "UpstreamRT:pass:" + passName + ":begin";
+        g_crashRing.record(crashBegin.c_str());
         ScopedGpuProfile profile(frameworkContext->worldCommandBuffer->vkCommandBuffer(),
                                  upstreamPassProfileName(passName));
         std::visit([&](auto &pass) {
@@ -3151,6 +3162,8 @@ bool RayTracingModule::renderUpstreamDirectLight(RayTracingModuleContext &contex
             }
         }, iter->second);
         profile.close();
+        const std::string crashEnd = "UpstreamRT:pass:" + passName + ":end";
+        g_crashRing.record(crashEnd.c_str());
     };
 
     try {
