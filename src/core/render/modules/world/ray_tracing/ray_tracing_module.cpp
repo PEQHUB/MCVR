@@ -104,6 +104,17 @@ bool upstreamRtPackReady() {
         (upstreamRtPassReadinessMask() & kRequiredPassMask) == kRequiredPassMask;
 }
 
+bool upstreamDirectLightExecutorPassIncluded(const std::string& name) {
+    return name == "primary" ||
+        name == "precompute_light_neighborhoods" ||
+        name == "generate_initial_samples" ||
+        name == "visibility" ||
+        name == "temporal_reuse" ||
+        name == "spatial_reuse" ||
+        name == "direct_light" ||
+        name == "final_compose";
+}
+
 class ScopedGpuProfile {
 public:
     ScopedGpuProfile(VkCommandBuffer cmd, const char* name) : cmd_(cmd) {
@@ -2857,10 +2868,15 @@ void RayTracingModule::initUpstreamDirectLightPipelines() {
     size_t executionBufferSize =
         directLightUpstreamShaderPack_->shaderPack().rayTracingExecution.variables.size() * sizeof(float);
     std::vector<ShaderPack::ShaderCreateInfo> requests;
+    size_t skippedInactivePasses = 0;
     for (const auto &passConfig : directLightUpstreamShaderPack_->shaderPack().passes) {
         if (passConfig.stage != ShaderPackLoader::Stage::RayTracing) { continue; }
         switch (passConfig.type) {
             case ShaderPackLoader::PassConfig::Type::RayTracing: {
+                if (!upstreamDirectLightExecutorPassIncluded(passConfig.rayTracing.name)) {
+                    skippedInactivePasses++;
+                    break;
+                }
                 auto pass = std::make_shared<RayTracingPass>();
                 pass->config = passConfig.rayTracing;
                 pass->querySharcEnabled = false;
@@ -2873,6 +2889,10 @@ void RayTracingModule::initUpstreamDirectLightPipelines() {
                 break;
             }
             case ShaderPackLoader::PassConfig::Type::Compute: {
+                if (!upstreamDirectLightExecutorPassIncluded(passConfig.compute.name)) {
+                    skippedInactivePasses++;
+                    break;
+                }
                 auto pass = std::make_shared<ComputePass>();
                 pass->config = passConfig.compute;
                 pass->executionBuffer = ShaderPack::createPassExecutionBuffer(
@@ -2888,18 +2908,38 @@ void RayTracingModule::initUpstreamDirectLightPipelines() {
     }
 
     try {
+        RadianceLogger::log("RayTracing", "INFO",
+                            "Upstream RT executor compile start selectedPasses=%zu skippedPasses=%zu shaderRequests=%zu",
+                            directLightUpstreamPasses_.size(), skippedInactivePasses, requests.size());
+        renderDiag("UpstreamRT pipeline compile start selectedPasses=%zu skippedPasses=%zu shaderRequests=%zu",
+                   directLightUpstreamPasses_.size(), skippedInactivePasses, requests.size());
+        g_crashRing.record("UpstreamRT:pipeline:compile:start");
         auto shaders = directLightUpstreamShaderPack_->createShaders(device, requests);
+        g_crashRing.record("UpstreamRT:pipeline:compile:done");
+        renderDiag("UpstreamRT pipeline compile done shaders=%zu", shaders.size());
         directLightUpstreamShaderCompileReady_ = !shaders.empty() || requests.empty();
         size_t shaderOffset = 0;
         for (auto &passVariant : directLightUpstreamPasses_) {
             if (auto pass = std::get_if<std::shared_ptr<RayTracingPass>>(&passVariant)) {
+                const std::string tag = "UpstreamRT:buildRT:" + (*pass)->config.name;
+                g_crashRing.record(tag.c_str());
+                renderDiag("UpstreamRT build RT pass=%s", (*pass)->config.name.c_str());
                 buildUpstreamDirectLightRayTracingPass(**pass, device, shaders, shaderOffset);
+                renderDiag("UpstreamRT build RT pass done=%s", (*pass)->config.name.c_str());
             } else if (auto pass = std::get_if<std::shared_ptr<ComputePass>>(&passVariant)) {
+                const std::string tag = "UpstreamRT:buildC:" + (*pass)->config.name;
+                g_crashRing.record(tag.c_str());
+                renderDiag("UpstreamRT build compute pass=%s", (*pass)->config.name.c_str());
                 buildUpstreamDirectLightComputePass(**pass, device, shaders, shaderOffset);
+                renderDiag("UpstreamRT build compute pass done=%s", (*pass)->config.name.c_str());
             }
         }
         directLightUpstreamPipelineReady_ = shaderOffset == shaders.size() && !directLightUpstreamPasses_.empty();
+        g_crashRing.record("UpstreamRT:pipeline:sbtUpload:start");
+        renderDiag("UpstreamRT static SBT upload start");
         uploadUpstreamDirectLightStaticSbts(device);
+        g_crashRing.record("UpstreamRT:pipeline:sbtUpload:done");
+        renderDiag("UpstreamRT static SBT upload done");
         directLightUpstreamSbtReady_ = directLightUpstreamPipelineReady_;
         RadianceLogger::log("RayTracing", "INFO",
                             "Upstream RT executor pipelines ready passes=%zu shaders=%zu",
