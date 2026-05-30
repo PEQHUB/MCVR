@@ -1,0 +1,416 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+#include "util/disney.glsl"
+#include "util/random.glsl"
+#include "util/ray_cone.glsl"
+#include "util/ray.glsl"
+#include "util/util.glsl"
+#include "common/first_hit_state.glsl"
+#include "common/runtime_primary_secondary_arrays.glsl"
+
+#ifndef ADV_CAPTURE_VOLUMETRIC_CLOUD_INDIRECT
+#    define ADV_CAPTURE_VOLUMETRIC_CLOUD_INDIRECT 1
+#endif
+#ifndef ADV_VOLUMETRIC_CLOUD_BOTTOM_HEIGHT
+#    define ADV_VOLUMETRIC_CLOUD_BOTTOM_HEIGHT 3000.0
+#endif
+#ifndef ADV_VOLUMETRIC_CLOUD_TOP_HEIGHT
+#    define ADV_VOLUMETRIC_CLOUD_TOP_HEIGHT 11000.0
+#endif
+
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
+
+layout(set = 2, binding = 0) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+
+layout(set = 2, binding = 1) uniform LastWorldUniform {
+    WorldUBO lastWorldUBO;
+};
+
+layout(set = 3, binding = 0, rgba16f) uniform image2D outputImage;
+layout(set = 3, binding = 1, rgba8) uniform image2D diffuseAlbedoImage;
+layout(set = 3, binding = 2, rgba8) uniform image2D specularAlbedoImage;
+layout(set = 3, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+layout(set = 3, binding = 4, rg16f) uniform image2D motionVectorImage;
+layout(set = 3, binding = 5, r16f) uniform image2D linearDepthImage;
+layout(set = 3, binding = 7, r16f) uniform image2D firstHitDepthImage;
+layout(set = 3, binding = 9, rgba16f) uniform image2D firstHitDiffuseIndirectLightImage;
+layout(set = 3, binding = 10, rgba16f) uniform image2D firstHitSpecularImage;
+layout(set = 3, binding = 11, rgba16f) uniform image2D firstHitClearImage;
+layout(set = 3, binding = 12, rgba16f) uniform image2D firstHitBaseEmissionImage;
+layout(set = 3, binding = 13, rgba16f) uniform image2D fogImage;
+layout(set = 3, binding = 14, rgba16f) uniform image2D firstHitRefractionImage;
+
+layout(location = 0) rayPayloadEXT MainRay mainRay;
+
+#include "common/primary_trace.glsl"
+#include "common/constants.glsl"
+
+bool restirFiniteFloat(float value) {
+    return !isnan(value) && !isinf(value);
+}
+
+bool restirFiniteVec3(vec3 value) {
+    return !any(isnan(value)) && !any(isinf(value));
+}
+
+void storePrimaryRayScratchData(ivec2 pixel,
+                                vec3 origin,
+                                vec3 direction,
+                                vec3 throughput,
+                                vec2 aux,
+                                float coneWidth,
+                                float cloudTransmittance,
+                                uint lobeType,
+                                bool noisy,
+                                bool insideBoat,
+                                bool skipFog,
+                                bool indirectVolumetricCloud,
+                                int startBounce,
+                                bool hitSky,
+                                bool isHand) {
+    float encodedFlags =
+        encodeFirstHitFlags(hitSky, noisy, isHand, insideBoat, skipFog, indirectVolumetricCloud);
+
+    storePrimaryRayStateLayer(pixel, 0, vec4(origin, float(startBounce)));
+    storePrimaryRayStateLayer(pixel, 1, vec4(direction, float(lobeType)));
+    storePrimaryRayStateLayer(pixel, 2, vec4(throughput, encodedFlags));
+    storePrimaryRayStateLayer(pixel, 3, vec4(aux, coneWidth, cloudTransmittance));
+}
+
+void storeSecondaryRayScratchData(ivec2 pixel,
+                                  vec3 origin,
+                                  vec3 direction,
+                                  vec3 throughput,
+                                  vec2 aux,
+                                  float coneWidth,
+                                  float cloudTransmittance,
+                                  uint lobeType,
+                                  bool noisy,
+                                  bool insideBoat,
+                                  bool skipFog,
+                                  bool indirectVolumetricCloud,
+                                  int startBounce,
+                                  bool hitSky,
+                                  bool isHand) {
+    float encodedFlags =
+        encodeFirstHitFlags(hitSky, noisy, isHand, insideBoat, skipFog, indirectVolumetricCloud);
+
+    storeSecondaryRayStateLayer(pixel, 0, vec4(origin, float(startBounce)));
+    storeSecondaryRayStateLayer(pixel, 1, vec4(direction, float(lobeType)));
+    storeSecondaryRayStateLayer(pixel, 2, vec4(throughput, encodedFlags));
+    storeSecondaryRayStateLayer(pixel, 3, vec4(aux, coneWidth, cloudTransmittance));
+}
+
+void storePrimaryRayScratch(ivec2 pixel, MainRay rayState, int startBounce, bool hitSky, bool isHand) {
+    storePrimaryRayScratchData(pixel, rayState.origin, rayState.direction, rayState.throughput, rayLoadAux(rayState),
+                               rayState.coneWidth, hitSky ? rayState.directLightRadiance.x : 1.0,
+                               rayLobeType(rayState), rayIsNoisy(rayState), rayInsideBoat(rayState),
+                               raySkipFog(rayState), rayUseIndirectVolumetricCloud(rayState), startBounce, hitSky,
+                               isHand);
+}
+
+void clearPrimarySurfaceCache(ivec2 pixel) {
+    storePrimarySurfaceCacheLayer(pixel, 0, vec4(0.0));
+    storePrimarySurfaceCacheLayer(pixel, 1, vec4(0.0));
+    storePrimarySurfaceCacheLayer(pixel, 2, vec4(0.0));
+    storePrimarySurfaceCacheLayer(pixel, 3, vec4(0.0));
+    storePrimarySurfaceCacheLayer(pixel, 4, vec4(ADV_SURFACE_CACHE_INVALID_FLAG));
+    storePrimarySurfaceCacheLayer(pixel, 5, vec4(0.0));
+    storePrimarySurfaceCacheLayer(pixel, 6, vec4(0.0));
+    storePrimarySurfaceCacheLayer(pixel, 7, vec4(0.0, 0.0, 0.0, ADV_SURFACE_CACHE_INVALID_FLAG));
+}
+
+void clearSecondarySurfaceCache(ivec2 pixel) {
+    storeSecondarySurfaceCacheLayer(pixel, 0, vec4(0.0));
+    storeSecondarySurfaceCacheLayer(pixel, 1, vec4(0.0));
+    storeSecondarySurfaceCacheLayer(pixel, 2, vec4(0.0));
+    storeSecondarySurfaceCacheLayer(pixel, 3, vec4(0.0));
+    storeSecondarySurfaceCacheLayer(pixel, 4, vec4(ADV_SURFACE_CACHE_INVALID_FLAG));
+    storeSecondarySurfaceCacheLayer(pixel, 5, vec4(0.0));
+    storeSecondarySurfaceCacheLayer(pixel, 6, vec4(0.0));
+    storeSecondarySurfaceCacheLayer(pixel, 7, vec4(0.0, 0.0, 0.0, ADV_SURFACE_CACHE_INVALID_FLAG));
+}
+
+void copyPrimarySurfaceCacheToSecondary(ivec2 pixel) {
+    memoryBarrierImage();
+    storeSecondarySurfaceCacheLayer(pixel, 0, loadPrimarySurfaceCacheLayer(pixel, 0));
+    storeSecondarySurfaceCacheLayer(pixel, 1, loadPrimarySurfaceCacheLayer(pixel, 1));
+    storeSecondarySurfaceCacheLayer(pixel, 2, loadPrimarySurfaceCacheLayer(pixel, 2));
+    storeSecondarySurfaceCacheLayer(pixel, 3, loadPrimarySurfaceCacheLayer(pixel, 3));
+    storeSecondarySurfaceCacheLayer(pixel, 4, loadPrimarySurfaceCacheLayer(pixel, 4));
+    storeSecondarySurfaceCacheLayer(pixel, 5, loadPrimarySurfaceCacheLayer(pixel, 5));
+    storeSecondarySurfaceCacheLayer(pixel, 6, loadPrimarySurfaceCacheLayer(pixel, 6));
+    storeSecondarySurfaceCacheLayer(pixel, 7, loadPrimarySurfaceCacheLayer(pixel, 7));
+}
+
+bool traceSecondarySurface(int startStep, int isHand, inout MainRay rayState, out int nextStartBounce) {
+    nextStartBounce = startStep;
+    raySetCaptureSurface(rayState, true);
+    for (int step = startStep; step < ADV_PRIMARY_TRACE_STEP_LIMIT; ++step) {
+        resetMainRay(rayState, step);
+        raySetSurfaceCacheTargetSecondary(rayState, true);
+        MainRay traceInput = rayState;
+
+        float len;
+        uint mask;
+        uint missId;
+        preparePrimary(step, isHand, len, mask, missId);
+        if (ADV_CAPTURE_VOLUMETRIC_CLOUD_INDIRECT != 0 && missId == ADV_WORLD_NO_VOLUMETRIC_MISS_INDEX &&
+            rayUseIndirectVolumetricCloud(rayState)) {
+            missId = ADV_WORLD_MISS_INDEX;
+        }
+
+        mainRay = rayState;
+        traceRayEXT(topLevelAS, ADV_RAY_FLAGS, mask, 1, 1, missId, mainRay.origin, 0.0001, mainRay.direction, len, 0);
+        rayState = mainRay;
+
+        if (rayState.hitT == INF_DISTANCE) {
+            nextStartBounce = step;
+            raySetCaptureSurface(rayState, false);
+            return false;
+        }
+        if (rayShouldContinue(rayState)) {
+            nextStartBounce = step + 1;
+            continue;
+        }
+        if (!raySurfaceCacheWritten(rayState)) {
+            rayState = traceInput;
+            nextStartBounce = step;
+            raySetCaptureSurface(rayState, false);
+            return false;
+        }
+        nextStartBounce = step + 1;
+        raySetCaptureSurface(rayState, false);
+        return true;
+    }
+
+    raySetCaptureSurface(rayState, false);
+    return false;
+}
+
+bool initTransparentRefractionScratch(MainRay sourceRay,
+                                      MaterialInfo mat,
+                                      vec3 incomingDirection,
+                                      vec3 normal,
+                                      vec3 worldPos,
+                                      out MainRay branchRay) {
+    if (!restirFiniteVec3(incomingDirection) || !restirFiniteVec3(normal) || !restirFiniteVec3(worldPos) ||
+        !restirFiniteVec3(mat.albedoValue.rgb) || !restirFiniteFloat(mat.ior) || mat.ior <= EPS) {
+        return false;
+    }
+
+    float normalLen2 = dot(normal, normal);
+    float incomingLen2 = dot(incomingDirection, incomingDirection);
+    if (!restirFiniteFloat(normalLen2) || !restirFiniteFloat(incomingLen2) || normalLen2 <= 1e-12 ||
+        incomingLen2 <= 1e-12) {
+        return false;
+    }
+
+    vec3 incident = incomingDirection * inversesqrt(incomingLen2);
+    vec3 surfaceNormal = normal * inversesqrt(normalLen2);
+    vec3 viewDir = -incident;
+    vec2 branchAux = rayLoadAux(sourceRay);
+    bool isWaterSurface = branchAux.y > 0.5;
+    bool enteringMaterial = dot(viewDir, surfaceNormal) > 0.0;
+    if (isWaterSurface) {
+        vec3 waterUpNormal = surfaceNormal.y >= 0.0 ? surfaceNormal : -surfaceNormal;
+        enteringMaterial = dot(incident, waterUpNormal) < 0.0;
+    }
+
+    float eta = enteringMaterial ? (1.0 / mat.ior) : mat.ior;
+    float fresnel = clamp(DielectricFresnel(abs(dot(viewDir, surfaceNormal)), eta), 0.0, 1.0);
+    vec3 branchDirection = refract(incident, surfaceNormal, eta);
+    float branchDirectionLen2 = dot(branchDirection, branchDirection);
+    if (!restirFiniteVec3(branchDirection) || !restirFiniteFloat(branchDirectionLen2) ||
+        branchDirectionLen2 <= 1e-6) {
+        return false;
+    }
+    branchDirection *= inversesqrt(branchDirectionLen2);
+
+    vec3 branchThroughput = pow(max(mat.albedoValue.rgb, vec3(0.0)), vec3(0.5)) * (1.0 - fresnel);
+    if (!restirFiniteVec3(branchThroughput) ||
+        max(branchThroughput.r, max(branchThroughput.g, branchThroughput.b)) <= 1e-6) {
+        return false;
+    }
+
+    float originBias = isWaterSurface ? max(branchAux.x, 0.0002) : 0.0001;
+    vec3 originBiasNormal = surfaceNormal;
+    if (isWaterSurface) {
+        originBiasNormal = surfaceNormal.y >= 0.0 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0);
+    }
+
+    branchRay = sourceRay;
+    branchRay.origin =
+        worldPos + (dot(branchDirection, originBiasNormal) > 0.0 ? originBiasNormal : -originBiasNormal) * originBias;
+    branchRay.direction = branchDirection;
+    branchRay.radiance = vec3(0.0);
+    branchRay.throughput = branchThroughput;
+    branchRay.hitT = 0.0;
+    branchRay.seed = xxhash32(uvec3(sourceRay.seed, 0x3C6EF372u, worldUBO.seed));
+    branchRay.prevScenePos = vec3(0.0);
+    branchRay.hasPrevScenePos = 0u;
+    branchRay.normal = vec3(0.0);
+    raySetStop(branchRay, false);
+    raySetContinue(branchRay, false);
+    raySetNoisy(branchRay, true);
+    raySetLobeType(branchRay, 2u);
+    raySetIgnoreWaterSelf(branchRay, isWaterSurface);
+    raySetSurfaceCacheWritten(branchRay, false);
+    raySetIndirectVolumetricCloud(branchRay, true);
+    branchRay.directLightRadiance = vec3(0.0);
+    rayStoreAux(branchRay, branchAux);
+    return true;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+    vec2 resolution = vec2(gl_LaunchSizeEXT.xy);
+    vec2 pixelCenter = vec2(pixel) + 0.5;
+    pixelCenter += worldUBO.cameraJitter;
+    clearPrimarySurfaceCache(pixel);
+    clearSecondarySurfaceCache(pixel);
+
+    float fovY = fovYFromProj(worldUBO.cameraProjMat);
+    float fovX = fovXFromProj(worldUBO.cameraProjMat);
+
+    vec2 ndc = pixelCenter / resolution * 2.0 - 1.0;
+    vec4 nearPoint = vec4(ndc, 0.0, 1.0);
+    vec4 viewNear = worldUBO.cameraProjMatInv * nearPoint;
+    viewNear /= viewNear.w;
+
+    vec3 origin = vec3(worldUBO.cameraEffectedViewMatInv * vec4(0.0, 0.0, 0.0, 1.0));
+    vec3 direction = normalize(vec3(worldUBO.cameraEffectedViewMatInv * vec4(viewNear.xyz, 0.0)));
+    vec3 orgDirection = direction;
+
+    MainRay worldRay;
+    initMainRay(origin, direction, worldUBO.seed, coneSpreadFromFov(fovY, fovX, resolution), worldRay);
+    FirstHitPayload worldFirstHit;
+    tracePrimary(origin, orgDirection, ADV_RAY_FLAGS, 0, worldRay, worldFirstHit);
+
+    MainRay handRay;
+    initMainRay(origin, direction, worldUBO.seed ^ 0x9E3779B9u, coneSpreadFromFov(fovY, fovX, resolution), handRay);
+    FirstHitPayload handFirstHit;
+    tracePrimary(origin, orgDirection, ADV_RAY_FLAGS, 1, handRay, handFirstHit);
+
+    bool isHand = false;
+    FirstHitPayload selectedFirstHit = worldFirstHit;
+    mainRay = worldRay;
+    if (handFirstHit.surfaceDepth != INF_DISTANCE) {
+        isHand = true;
+        selectedFirstHit = handFirstHit;
+        mainRay = handRay;
+    }
+
+    bool hitSky = selectedFirstHit.hitSky;
+    imageStore(outputImage, pixel, vec4(mainRay.radiance, 1.0));
+    imageStore(firstHitDepthImage, pixel, vec4(selectedFirstHit.firstHitLinearDepth));
+    
+    MainRay primaryContinuationRay = mainRay;
+    int primaryStartBounce = selectedFirstHit.startBounce;
+    MainRay primaryRayState = primaryContinuationRay;
+    primaryRayState.origin = origin;
+    primaryRayState.direction = orgDirection;
+    primaryRayState.throughput = vec3(1.0);
+    primaryRayState.hitT = 0.0;
+    primaryRayState.coneWidth = primaryContinuationRay.coneWidth;
+    primaryRayState.radiance = vec3(0.0);
+    primaryRayState.prevScenePos = vec3(0.0);
+    primaryRayState.hasPrevScenePos = 0u;
+    primaryRayState.normal = vec3(0.0);
+    rayStoreAux(primaryRayState, rayLoadAux(primaryContinuationRay));
+
+    MainRay secondaryRay = primaryRayState;
+    int secondaryStartBounce = primaryStartBounce;
+    bool secondaryHitSky = hitSky;
+    uint secondaryLobeType = rayLobeType(secondaryRay);
+    bool secondaryNoisy = rayIsNoisy(secondaryRay);
+    bool secondaryInsideBoat = rayInsideBoat(secondaryRay);
+    bool secondarySkipFog = raySkipFog(secondaryRay);
+    MaterialInfo primaryHitMat;
+    primaryHitMat.albedoValue = vec4(0.0);
+    primaryHitMat.f0 = vec3(0.0);
+    primaryHitMat.roughness = 0.0;
+    primaryHitMat.metallic = 0.0;
+    primaryHitMat.transmission = 0.0;
+    primaryHitMat.ior = 1.0;
+    primaryHitMat.emission = 0.0;
+    if (!hitSky) {
+        primaryHitMat = rayLoadMaterial(primaryContinuationRay);
+        copyPrimarySurfaceCacheToSecondary(pixel);
+    }
+    bool shouldTraceSecondary = !hitSky && primaryHitMat.transmission > EPS;
+
+    if (shouldTraceSecondary) {
+        secondaryHitSky = false;
+        clearSecondarySurfaceCache(pixel);
+
+        MainRay tracedSecondaryRay;
+        bool initializedSecondaryRay =
+            initTransparentRefractionScratch(primaryContinuationRay, primaryHitMat, selectedFirstHit.incomingDirection,
+                                             selectedFirstHit.normal, selectedFirstHit.worldPos, tracedSecondaryRay);
+        int tracedSecondaryStartBounce = primaryStartBounce;
+        if (initializedSecondaryRay) {
+            secondaryHitSky = true;
+            secondaryLobeType = 2u;
+            secondaryNoisy = rayIsNoisy(tracedSecondaryRay);
+            secondaryInsideBoat = rayInsideBoat(tracedSecondaryRay);
+            secondarySkipFog = raySkipFog(tracedSecondaryRay);
+
+            traceSecondarySurface(primaryStartBounce, isHand ? 1 : 0, tracedSecondaryRay, tracedSecondaryStartBounce);
+            secondaryRay = tracedSecondaryRay;
+            secondaryStartBounce = tracedSecondaryStartBounce;
+            secondaryHitSky = tracedSecondaryRay.hitT == INF_DISTANCE;
+        }
+    }
+    mainRay = primaryContinuationRay;
+
+    dvec3 currCameraPos = worldUBO.cameraPos.xyz;
+    dvec3 lastCameraPos = lastWorldUBO.cameraPos.xyz;
+    vec3 cameraDelta = vec3(currCameraPos - lastCameraPos);
+    mat4 prevRelativeMVP = lastWorldUBO.cameraProjMat * lastWorldUBO.cameraEffectedViewMat;
+
+    MaterialInfo firstHitMat;
+    if (hitSky) {
+        firstHitMat.albedoValue = vec4(0.0);
+        firstHitMat.f0 = vec3(0.0);
+        firstHitMat.roughness = 0.0;
+        firstHitMat.metallic = 0.0;
+        firstHitMat.transmission = 0.0;
+        firstHitMat.ior = 1.0;
+        firstHitMat.emission = 0.0;
+
+        imageStore(diffuseAlbedoImage, pixel, vec4(reinhardMax(mainRay.radiance), 0.0));
+        imageStore(specularAlbedoImage, pixel, vec4(0.0));
+        imageStore(normalRoughnessImage, pixel, vec4(0.0));
+        imageStore(linearDepthImage, pixel, vec4(INF_DISTANCE));
+
+        vec2 motionVec = computeCameraMotionVector(prevRelativeMVP, pixelCenter, vec4(orgDirection, 0.0));
+        imageStore(motionVectorImage, pixel, vec4(motionVec, 0.0, 0.0));
+    } else {
+        firstHitMat = primaryHitMat;
+
+        imageStore(diffuseAlbedoImage, pixel,
+                   vec4(firstHitMat.albedoValue.rgb * firstHitMat.albedoValue.a, firstHitMat.metallic));
+        imageStore(specularAlbedoImage, pixel, vec4(firstHitMat.f0, 0.0));
+        imageStore(normalRoughnessImage, pixel, vec4(mainRay.normal, firstHitMat.roughness));
+        imageStore(linearDepthImage, pixel, vec4(selectedFirstHit.viewDepth));
+
+        vec3 originRelativeToPrevCam = origin + orgDirection * selectedFirstHit.tracedDistance + cameraDelta;
+        if (mainRay.hasPrevScenePos > 0u) { originRelativeToPrevCam = mainRay.prevScenePos; }
+        vec2 motionVec = computeCameraMotionVector(prevRelativeMVP, pixelCenter, vec4(originRelativeToPrevCam, 1.0));
+        imageStore(motionVectorImage, pixel, vec4(motionVec, 0.0, 0.0));
+    }
+
+    storePrimaryRayScratch(pixel, primaryContinuationRay, primaryStartBounce, hitSky, isHand);
+    storeSecondaryRayScratchData(pixel, secondaryRay.origin, secondaryRay.direction, secondaryRay.throughput,
+                                 rayLoadAux(secondaryRay), secondaryRay.coneWidth,
+                                 secondaryHitSky ? secondaryRay.directLightRadiance.x : 1.0, secondaryLobeType,
+                                 secondaryNoisy, secondaryInsideBoat, secondarySkipFog,
+                                 rayUseIndirectVolumetricCloud(secondaryRay), secondaryStartBounce, secondaryHitSky,
+                                 isHand);
+}

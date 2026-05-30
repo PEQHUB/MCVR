@@ -1,0 +1,1514 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_control_flow_attributes : require
+
+#ifndef USE_SHARC
+#    define USE_SHARC 0
+#endif
+
+#if USE_SHARC
+#    extension GL_EXT_shader_atomic_int64 : require
+#    extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#    extension GL_EXT_shader_16bit_storage : enable
+#endif
+
+#ifndef SHARC_UPDATE
+#    define SHARC_UPDATE 0
+#endif
+#ifndef SHARC_QUERY
+#    define SHARC_QUERY 0
+#endif
+#define ADV_WORLD_PASS_CONT_REFLECTION 0
+#define ADV_WORLD_PASS_CONT_REFRACTION 1
+#define ADV_WORLD_PASS_FINAL_COMPOSE 2
+#ifndef ADV_WORLD_PASS
+#    define ADV_WORLD_PASS ADV_WORLD_PASS_FINAL_COMPOSE
+#endif
+#ifndef ADV_VOLUMETRIC_LIGHT_LUMINANCE_LIMIT
+#    define ADV_VOLUMETRIC_LIGHT_LUMINANCE_LIMIT 0.75
+#endif
+#ifndef ADV_VOLUMETRIC_LIGHT_MAX_DISTANCE
+#    define ADV_VOLUMETRIC_LIGHT_MAX_DISTANCE 128.0
+#endif
+#ifndef ADV_VOLUMETRIC_LIGHT_MODE
+#    define ADV_VOLUMETRIC_LIGHT_MODE 1
+#endif
+#ifndef ADV_CAPTURE_VOLUMETRIC_CLOUD_INDIRECT
+#    define ADV_CAPTURE_VOLUMETRIC_CLOUD_INDIRECT 1
+#endif
+#ifndef ADV_ENABLE_VOLUMETRIC_CLOUD_TEMPORAL
+#    define ADV_ENABLE_VOLUMETRIC_CLOUD_TEMPORAL 1
+#endif
+#ifndef ADV_INDIRECT_VOLUMETRIC_CLOUD_REFLECTION_MAX_ROUGHNESS
+#    define ADV_INDIRECT_VOLUMETRIC_CLOUD_REFLECTION_MAX_ROUGHNESS 0.12
+#endif
+#define ADV_VOLUMETRIC_LIGHT_MODE_VANILLA 0u
+#define ADV_VOLUMETRIC_LIGHT_MODE_VOLUMETRIC 1u
+#if USE_SHARC
+#    define SHARC_ENABLE_GLSL 1
+#    define SHARC_ENABLE_64_BIT_ATOMICS 1
+#endif
+
+#include "common/shared.hpp"
+#include "common/chunk_lookup.glsl"
+#include "util/disney.glsl"
+#include "common/light.glsl"
+#include "util/alpha_mode.glsl"
+#include "util/labpbr.glsl"
+#include "common/fft_water.glsl"
+#include "util/height_map.glsl"
+#include "util/random.glsl"
+#include "util/ray_cone.glsl"
+#include "util/ray.glsl"
+#include "util/util.glsl"
+#include "common/first_hit_state.glsl"
+#define ADV_RUNTIME_PRIMARY_SECONDARY_READONLY 1
+#include "common/runtime_primary_secondary_arrays.glsl"
+#undef ADV_RUNTIME_PRIMARY_SECONDARY_READONLY
+#if USE_SHARC
+// clang-format off
+#    include "extern/sharc/include/SharcGlsl.h"
+#    include "extern/sharc/include/SharcCommon.h"
+// clang-format on
+#endif
+
+layout(set = 0, binding = 0) uniform sampler2D textures[];
+
+layout(set = 5, binding = 2) uniform samplerCube skyFull;
+
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
+
+layout(set = 1, binding = 1) readonly buffer BLASOffsets {
+    uint offsets[];
+}
+blasOffsets;
+
+layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
+    TextureMapping mapping;
+};
+
+layout(set = 2, binding = 0) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+
+layout(set = 2, binding = 1) uniform LastWorldUniform {
+    WorldUBO lastWorldUBO;
+};
+
+layout(set = 2, binding = 2) uniform SkyUniform {
+    SkyUBO skyUBO;
+};
+
+#include "common/celestial.glsl"
+
+layout(set = 3, binding = 0, rgba16f) uniform image2D outputImage;
+layout(set = 3, binding = 1, rgba8) uniform image2D diffuseAlbedoImage;
+layout(set = 3, binding = 2, rgba8) uniform image2D specularAlbedoImage;
+layout(set = 3, binding = 3, rgba16f) uniform image2D normalRoughnessImage;
+layout(set = 3, binding = 4, rg16f) uniform image2D motionVectorImage;
+layout(set = 3, binding = 5, r16f) uniform image2D linearDepthImage;
+layout(set = 3, binding = 6, r16f) uniform image2D specularHitDepthImage;
+layout(set = 3, binding = 7, r16f) uniform image2D firstHitDepthImage;
+layout(set = 3, binding = 8, rgba16f) uniform image2D firstHitDiffuseDirectLightImage;
+layout(set = 3, binding = 9, rgba16f) uniform image2D firstHitDiffuseIndirectLightImage;
+layout(set = 3, binding = 10, rgba16f) uniform image2D firstHitSpecularImage;
+layout(set = 3, binding = 11, rgba16f) uniform image2D firstHitClearImage;
+layout(set = 3, binding = 12, rgba16f) uniform image2D firstHitBaseEmissionImage;
+layout(set = 3, binding = 13, rgba16f) uniform image2D fogImage;
+layout(set = 3, binding = 14, rgba16f) uniform image2D firstHitRefractionImage;
+
+layout(set = 5, binding = 15, rgba16f) uniform image2D contReflectionRadianceImage;
+layout(set = 5, binding = 16, rgba32f) uniform image2D contReflectionMetaImage;
+layout(set = 5, binding = 17, rgba16f) uniform image2D contRefractionRadianceImage;
+layout(set = 5, binding = 20, rgba16f) uniform readonly image2D volumetricLightImage;
+layout(set = 5, binding = 34, rgba16f) uniform readonly image2D volumetricCloudTemporalImage;
+layout(set = 5, binding = 32, r16f) uniform image2D postStarCloudTransmittanceImage;
+
+#define CONST_ONLY
+#include "util/vertex.glsl"
+
+#include "common/surface_eval.glsl"
+#define ADV_DIRECT_LIGHT_SURFACE_HAS_SECONDARY_CACHE 1
+#define ADV_EVALUATE_HEIGHT_MAP 1
+#include "common/direct_light_surface.glsl"
+#include "common/constants.glsl"
+
+#if USE_SHARC
+struct SharcConfig {
+    uvec2 hashEntriesAddress;
+    uvec2 lockAddress;
+    uvec2 accumulationAddress;
+    uvec2 resolvedAddress;
+    vec4 cameraPosition;
+    vec4 cameraPositionPrev;
+    float sceneScale;
+    float radianceScale;
+    uint accumulationFrameNum;
+    uint staleFrameNumMax;
+    uint capacity;
+    uint frameIndex;
+    uint enableAntiFireflyFilter;
+    uint useLockBuffer;
+    uint debugMode;
+    uint updateDownsampleFactor;
+};
+
+layout(set = 4, binding = 0) readonly buffer SharcConfigBuffer {
+    SharcConfig sharcConfig;
+};
+layout(set = 4, binding = 1) readonly buffer SharcHashEntriesBuffer {
+    uint64_t sharcHashEntriesRaw[];
+};
+layout(set = 4, binding = 2) readonly buffer SharcAccumulationBuffer {
+    uvec4 sharcAccumulationRaw[];
+};
+layout(set = 4, binding = 3) readonly buffer SharcResolvedBuffer {
+    uvec4 sharcResolvedRaw[];
+};
+layout(set = 4, binding = 4) readonly buffer SharcLockBuffer {
+    uint sharcLockRaw[];
+};
+#endif
+
+layout(location = 0) rayPayloadEXT MainRay mainRay;
+
+const uint ADV_WORLD_MISS_INDEX = 1u;
+const uint ADV_HAND_MISS_INDEX = 2u;
+const uint ADV_WORLD_NO_VOLUMETRIC_MISS_INDEX = 3u;
+
+void applyFog(vec3 radiance,
+              float t,
+              float fogStart,
+              float dBase,
+              float dFog,
+              vec3 fogRadiance,
+              out vec3 foggedRadiance,
+              out float transmittance,
+              out vec3 additiveRadiance) {
+    float opticalDepth = 0.0;
+
+    if (t <= fogStart) {
+        opticalDepth = t * dBase;
+    } else {
+        float distOutside = fogStart;
+        float distInside = t - fogStart;
+        opticalDepth = (distOutside * dBase) + (distInside * dFog);
+    }
+
+    transmittance = exp(-opticalDepth);
+    additiveRadiance = fogRadiance * (1.0 - transmittance);
+    foggedRadiance = radiance * transmittance + additiveRadiance;
+}
+
+float volumetricMediumMaxDistance(bool underwater) {
+    return underwater ? clamp(worldUBO.fogEnd * 1.5, 16.0, 96.0) :
+                        clamp(ADV_VOLUMETRIC_LIGHT_MAX_DISTANCE, 32.0, 320.0);
+}
+
+float volumetricAirDensityFade(float t) {
+    float fogStart = max(worldUBO.fogStart, 0.0);
+    float fogRange = max(worldUBO.fogEnd - worldUBO.fogStart, 1.0);
+    float rampLength = clamp(fogRange * 0.08, 4.0, 24.0);
+    float sunHeight = abs(celestialSunDirection().y);
+    float baseDensity = mix(0.80, 0.50, smoothstep(0.05, 0.35, sunHeight));
+    return mix(baseDensity, 1.0, smoothstep(fogStart, fogStart + rampLength, t));
+}
+
+vec3 volumetricAirSigmaTBase() {
+    float fogRange = max(worldUBO.fogEnd - worldUBO.fogStart, 1.0);
+    float fogDensity = max(2.0 / fogRange, 0.0) * 0.02;
+    vec3 betaR = ADV_ATMOSPHERE_BETA_R * 18.0;
+    vec3 betaM = ADV_ATMOSPHERE_BETA_M * mix(18.0, 54.0, skyUBO.rainGradient);
+    return betaR + betaM * 1.15 + vec3(fogDensity);
+}
+
+vec3 volumetricWaterSigmaTBase() {
+    float fogRange = max(worldUBO.fogEnd - worldUBO.fogStart, 1.0);
+    float waterDensity = max(2.0 / fogRange, 0.015);
+    vec3 waterTint = ADV_WATER_TINT;
+    return (vec3(1.0) - waterTint) * waterDensity * 1.20 + waterTint * waterDensity * 0.18;
+}
+
+vec3 integrateVolumetricFogTransmittance(float endDistance, bool underwater) {
+    if (endDistance <= 0.05) { return vec3(1.0); }
+
+    const int stepCount = 4;
+    float stepLength = endDistance / float(stepCount);
+    float extinctionScale = underwater ? 1.0 : 0.45;
+    vec3 baseSigmaT = underwater ? volumetricWaterSigmaTBase() : volumetricAirSigmaTBase();
+    vec3 transmittance = vec3(1.0);
+
+    for (int i = 0; i < stepCount; ++i) {
+        float t = (float(i) + 0.5) * stepLength;
+        float densityScale = underwater ? 1.0 : volumetricAirDensityFade(t);
+        vec3 localSigmaT = baseSigmaT * densityScale * extinctionScale;
+        transmittance *= exp(-localSigmaT * stepLength);
+
+        if (max(transmittance.r, max(transmittance.g, transmittance.b)) < 1e-3) { break; }
+    }
+
+    return clamp(transmittance, vec3(0.0), vec3(1.0));
+}
+
+float volumetricDepthWeight(float fullDepth, float sampleDepth) {
+    bool fullSky = fullDepth >= INF_DISTANCE * 0.5;
+    bool sampleSky = sampleDepth >= INF_DISTANCE * 0.5;
+    if (fullSky || sampleSky) { return fullSky == sampleSky ? 1.0 : 0.0; }
+    if (sampleDepth <= 0.0) { return 0.0; }
+    float depthSigma = max(fullDepth * 0.10, 2.0);
+    return exp(-abs(sampleDepth - fullDepth) / depthSigma);
+}
+
+float volumetricLightLuminance(vec3 value) {
+    return dot(value, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 softClampVolumetricLight(vec3 value) {
+    if (any(isnan(value)) || any(isinf(value))) { return vec3(0.0); }
+
+    float limit = max(ADV_VOLUMETRIC_LIGHT_LUMINANCE_LIMIT, 1e-4);
+    float lum = volumetricLightLuminance(max(value, vec3(0.0)));
+    if (lum <= 1e-6) { return vec3(0.0); }
+
+    float knee = limit * 0.25;
+    if (lum <= knee) { return value; }
+
+    float range = max(limit - knee, 1e-4);
+    float compressedLum = min(knee + range * (1.0 - exp(-(lum - knee) / range)), limit);
+    return value * (compressedLum / lum);
+}
+
+vec3 sampleNearestCompatibleVolumetricLight(vec2 srcPos, ivec2 maxPixel, float fullDepth) {
+    ivec2 centerPixel = clamp(ivec2(round(srcPos)), ivec2(0), maxPixel);
+    vec3 bestRadiance = vec3(0.0);
+    float bestScore = 0.0;
+
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            ivec2 samplePixel = clamp(centerPixel + ivec2(x, y), ivec2(0), maxPixel);
+            vec4 sampleValue = imageLoad(volumetricLightImage, samplePixel);
+            float depthWeight = volumetricDepthWeight(fullDepth, sampleValue.a);
+            if (depthWeight <= 1e-6) { continue; }
+
+            vec2 sampleOffset = vec2(samplePixel) - srcPos;
+            float spatialWeight = 1.0 / (1.0 + dot(sampleOffset, sampleOffset));
+            float score = depthWeight * spatialWeight;
+            if (score > bestScore) {
+                bestScore = score;
+                bestRadiance = sampleValue.rgb;
+            }
+        }
+    }
+
+    return bestScore > 1e-6 ? softClampVolumetricLight(bestRadiance) : vec3(0.0);
+}
+
+vec3 sampleVolumetricLight(ivec2 pixel) {
+    ivec2 srcResolution = imageSize(volumetricLightImage);
+    ivec2 dstResolution = imageSize(outputImage);
+    if (srcResolution.x <= 0 || srcResolution.y <= 0 || dstResolution.x <= 0 || dstResolution.y <= 0) {
+        return vec3(0.0);
+    }
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(dstResolution);
+    vec2 srcPos = uv * vec2(srcResolution) - 0.5;
+    ivec2 p0 = ivec2(floor(srcPos));
+    ivec2 p1 = p0 + ivec2(1);
+    vec2 f = fract(srcPos);
+
+    ivec2 maxPixel = srcResolution - ivec2(1);
+    vec4 s00 = imageLoad(volumetricLightImage, clamp(p0, ivec2(0), maxPixel));
+    vec4 s10 = imageLoad(volumetricLightImage, clamp(ivec2(p1.x, p0.y), ivec2(0), maxPixel));
+    vec4 s01 = imageLoad(volumetricLightImage, clamp(ivec2(p0.x, p1.y), ivec2(0), maxPixel));
+    vec4 s11 = imageLoad(volumetricLightImage, clamp(p1, ivec2(0), maxPixel));
+
+    float fullDepth = imageLoad(linearDepthImage, pixel).r;
+    float w00 = (1.0 - f.x) * (1.0 - f.y) * volumetricDepthWeight(fullDepth, s00.a);
+    float w10 = f.x * (1.0 - f.y) * volumetricDepthWeight(fullDepth, s10.a);
+    float w01 = (1.0 - f.x) * f.y * volumetricDepthWeight(fullDepth, s01.a);
+    float w11 = f.x * f.y * volumetricDepthWeight(fullDepth, s11.a);
+    float weightSum = w00 + w10 + w01 + w11;
+
+    if (weightSum <= 1e-6) {
+        return sampleNearestCompatibleVolumetricLight(srcPos, maxPixel, fullDepth);
+    }
+
+    vec3 radiance = (s00.rgb * w00 + s10.rgb * w10 + s01.rgb * w01 + s11.rgb * w11) / weightSum;
+    return softClampVolumetricLight(radiance);
+}
+
+#if USE_SHARC
+SharcParameters makeSharcParameters() {
+    HashMapData hashMapData;
+    hashMapData.capacity = sharcConfig.capacity;
+    hashMapData.hashEntriesBuffer = RWStructuredBuffer_uint64_t(sharcConfig.hashEntriesAddress);
+#    if !HASH_GRID_ENABLE_64_BIT_ATOMICS
+    hashMapData.lockBuffer = RWStructuredBuffer_uint(sharcConfig.lockAddress);
+#    endif
+
+    HashGridParameters gridParameters;
+    gridParameters.cameraPosition = sharcConfig.cameraPosition.xyz;
+    gridParameters.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
+    gridParameters.sceneScale = sharcConfig.sceneScale;
+    gridParameters.levelBias = SHARC_GRID_LEVEL_BIAS;
+
+    SharcParameters sharcParameters;
+    sharcParameters.gridParameters = gridParameters;
+    sharcParameters.hashMapData = hashMapData;
+    sharcParameters.radianceScale = sharcConfig.radianceScale;
+    sharcParameters.enableAntiFireflyFilter = sharcConfig.enableAntiFireflyFilter != 0;
+    sharcParameters.accumulationBuffer = RWStructuredBuffer_SharcAccumulationData(sharcConfig.accumulationAddress);
+    sharcParameters.resolvedBuffer = RWStructuredBuffer_SharcPackedData(sharcConfig.resolvedAddress);
+    return sharcParameters;
+}
+
+bool sharcAllowQuery(bool isPrimaryCameraPath,
+                     float hitT,
+                     float roughness,
+                     uint lobeType,
+                     SharcParameters sharcParameters,
+                     vec3 positionWorld) {
+    if (isPrimaryCameraPath) return false;
+    uint level = HashGridGetLevel(positionWorld, sharcParameters.gridParameters);
+    float voxelSize = HashGridGetVoxelSize(level, sharcParameters.gridParameters);
+    if (hitT <= voxelSize) return false;
+    if (lobeType == 0) return true;
+    float roughness2 = roughness * roughness;
+    float denom = max(1.0 - roughness2, 1e-4);
+    float coneSpread = 2.0 * hitT * sqrt(max(0.5 * roughness2 / denom, 0.0));
+    return coneSpread > voxelSize;
+}
+#endif
+
+struct FirstHitPayload {
+    bool hitSky;
+    float surfaceDepth;
+    float viewDepth;
+    float firstHitLinearDepth;
+    float tracedDistance;
+    int startBounce;
+    vec3 incomingDirection;
+    vec3 outgoingDirection;
+    vec3 normal;
+    vec3 worldPos;
+};
+
+bool shouldCaptureIndirectVolumetricCloud(uint lobeType, float roughness) {
+    if (lobeType == 2u) { return true; }
+    if (lobeType != 1u) { return false; }
+    return roughness <= clamp(ADV_INDIRECT_VOLUMETRIC_CLOUD_REFLECTION_MAX_ROUGHNESS, 0.0, 1.0);
+}
+
+void initMainRay(vec3 origin, vec3 direction, uint seed, float coneSpread, out MainRay ray) {
+    ray.origin = origin;
+    ray.hitT = 0.0;
+    ray.direction = direction;
+    ray.seed = xxhash32(uvec3(gl_LaunchIDEXT.x, gl_LaunchIDEXT.y, seed));
+    ray.radiance = vec3(0.0);
+    ray.coneWidth = 0.0;
+    ray.throughput = vec3(1.0);
+    ray.coneSpread = coneSpread;
+    ray.stateBits = 0u;
+    raySetBounce(ray, 0u);
+    raySetInsideBoat(ray, false);
+    raySetStop(ray, false);
+    raySetContinue(ray, false);
+    raySetNoisy(ray, false);
+    raySetSkipFog(ray, false);
+    raySetSurfaceCacheWritten(ray, false);
+    ray.prevScenePos = vec3(0.0);
+    ray.hasPrevScenePos = 0u;
+    ray.normal = vec3(0.0);
+    raySetLobeType(ray, 0u);
+    ray.directLightRadiance = vec3(0.0);
+    ray.pad0 = 0u;
+}
+
+void resetMainRay(inout MainRay ray, int bounce) {
+    raySetBounce(ray, uint(bounce));
+    ray.hitT = 0.0;
+    raySetStop(ray, false);
+    raySetContinue(ray, false);
+    raySetNoisy(ray, false);
+    raySetSkipFog(ray, false);
+    raySetSurfaceCacheWritten(ray, false);
+    ray.prevScenePos = vec3(0.0);
+    ray.hasPrevScenePos = 0u;
+    ray.normal = vec3(0.0);
+    raySetLobeType(ray, 0u);
+    ray.directLightRadiance = vec3(0.0);
+    ray.pad0 = 0u;
+}
+
+void preparePrimary(int step, int isHand, out float len, out uint mask, out uint missId) {
+    if (isHand == 0) {
+        missId = step == 0 ? ADV_WORLD_MISS_INDEX : ADV_WORLD_NO_VOLUMETRIC_MISS_INDEX;
+        if (step == 0) {
+            len = 1000.0;
+            if (worldUBO.isFirstPerson > 0) {
+                mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+            } else {
+                mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK |
+                       BOAT_WATER_MASK;
+            }
+        } else if (step <= 1) {
+            len = 1000.0;
+            mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK |
+                   BOAT_WATER_MASK;
+        } else {
+            len = 384.0;
+            mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | BOAT_WATER_MASK;
+        }
+    } else {
+        if (step == 0) {
+            len = 10.0;
+            mask = HAND_MASK;
+            missId = ADV_HAND_MISS_INDEX;
+        } else if (step <= 1) {
+            len = 384.0;
+            mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+            missId = step == 1 ? ADV_WORLD_MISS_INDEX : ADV_WORLD_NO_VOLUMETRIC_MISS_INDEX;
+        } else {
+            len = 384.0;
+            mask = WORLD_MASK | FISHING_BOBBER_MASK | BOAT_WATER_MASK;
+            missId = ADV_WORLD_NO_VOLUMETRIC_MISS_INDEX;
+        }
+    }
+}
+
+void prepareSecondary(int bounce, int isHand, out float len, out uint mask) {
+    if (bounce == 0) {
+        len = 1000.0;
+        if (worldUBO.isFirstPerson > 0) {
+            mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+        } else {
+            mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+        }
+    } else if (bounce <= 1) {
+        len = 1000.0;
+        if (isHand == 0) {
+            mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+        } else {
+            mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+        }
+    } else {
+        len = 384.0;
+        mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK;
+    }
+}
+
+void tracePrimary(vec3 eyePos,
+                  vec3 orgDirection,
+                  uint rayFlags,
+                  int isHand,
+                  inout MainRay rayState,
+                  out FirstHitPayload firstHit) {
+    firstHit.hitSky = false;
+    firstHit.surfaceDepth = INF_DISTANCE;
+    firstHit.viewDepth = INF_DISTANCE;
+    firstHit.firstHitLinearDepth = INF_DISTANCE;
+    firstHit.tracedDistance = 0.0;
+    firstHit.startBounce = 0;
+    firstHit.incomingDirection = vec3(0.0);
+    firstHit.outgoingDirection = vec3(0.0);
+    firstHit.normal = vec3(0.0);
+    firstHit.worldPos = vec3(0.0);
+
+    bool surfaceDepthSampled = false;
+    for (int step = 0; step < ADV_PRIMARY_TRACE_STEP_LIMIT; ++step) {
+        resetMainRay(rayState, step);
+
+        float len;
+        uint mask;
+        uint missId;
+        preparePrimary(step, isHand, len, mask, missId);
+
+        vec3 tracedOrigin = rayState.origin;
+        vec3 tracedDirection = rayState.direction;
+        mainRay = rayState;
+        traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, missId, mainRay.origin, 0.0001, mainRay.direction, len, 0);
+        rayState = mainRay;
+
+        if (!surfaceDepthSampled) {
+            firstHit.surfaceDepth = rayState.hitT;
+            surfaceDepthSampled = true;
+            if (rayState.hitT != INF_DISTANCE) {
+                vec3 hitPos = eyePos + orgDirection * rayState.hitT;
+                hitPos -= worldUBO.cameraViewMatInv[3].xyz;
+                firstHit.firstHitLinearDepth = -(mat3(worldUBO.cameraEffectedViewMat) * hitPos).z;
+            }
+        }
+
+        if (rayState.hitT == INF_DISTANCE) {
+            firstHit.hitSky = true;
+            firstHit.startBounce = step + 1;
+            return;
+        }
+
+        firstHit.tracedDistance += rayState.hitT;
+        firstHit.startBounce = step + 1;
+
+        if (rayShouldContinue(rayState)) { continue; }
+
+        firstHit.incomingDirection = tracedDirection;
+        firstHit.outgoingDirection = rayState.direction;
+        firstHit.normal = rayState.normal;
+        firstHit.worldPos = tracedOrigin + tracedDirection * rayState.hitT;
+        break;
+    }
+
+    vec3 virtualOrigin = eyePos + orgDirection * firstHit.tracedDistance;
+    firstHit.viewDepth = -(worldUBO.cameraEffectedViewMat * vec4(virtualOrigin, 1.0)).z;
+}
+
+bool initTransparent(MainRay rayState,
+                     MaterialInfo mat,
+                     vec3 incomingDirection,
+                     vec3 normal,
+                     vec3 worldPos,
+                     uint branchSalt,
+                     bool isReflection,
+                     out MainRay branchRay) {
+    if (!isFiniteVec3(incomingDirection) || !isFiniteVec3(normal) || !isFiniteVec3(worldPos) ||
+        !isFiniteVec3(mat.albedoValue.rgb) || !isFiniteFloat(mat.ior) || mat.ior <= EPS) {
+        return false;
+    }
+
+    float incomingLen2 = dot(incomingDirection, incomingDirection);
+    float normalLen2 = dot(normal, normal);
+    if (!isFiniteFloat(incomingLen2) || !isFiniteFloat(normalLen2) || incomingLen2 <= 1e-12 ||
+        normalLen2 <= 1e-12) {
+        return false;
+    }
+
+    vec3 incident = incomingDirection * inversesqrt(incomingLen2);
+    vec3 surfaceNormal = normal * inversesqrt(normalLen2);
+    vec3 viewDir = -incident;
+    vec2 branchAux = rayLoadAux(rayState);
+    bool isWaterSurface = branchAux.y > 0.5;
+    bool enteringMaterial = dot(viewDir, surfaceNormal) > 0.0;
+    if (isWaterSurface) {
+        vec3 waterUpNormal = surfaceNormal.y >= 0.0 ? surfaceNormal : -surfaceNormal;
+        enteringMaterial = dot(incident, waterUpNormal) < 0.0;
+    }
+    float eta = enteringMaterial ? (1.0 / mat.ior) : mat.ior;
+    float fresnel = clamp(DielectricFresnel(abs(dot(viewDir, surfaceNormal)), eta), 0.0, 1.0);
+
+    vec3 branchDirection = isReflection ? reflect(incident, surfaceNormal) : refract(incident, surfaceNormal, eta);
+    float branchDirectionLen2 = dot(branchDirection, branchDirection);
+    if (!isFiniteVec3(branchDirection) || !isFiniteFloat(branchDirectionLen2) || branchDirectionLen2 <= 1e-6) {
+        return false;
+    }
+    branchDirection *= inversesqrt(branchDirectionLen2);
+
+    vec3 branchThroughput =
+        isReflection ? vec3(fresnel) : pow(max(mat.albedoValue.rgb, vec3(0.0)), vec3(0.5)) * (1.0 - fresnel);
+    if (!isFiniteVec3(branchThroughput) ||
+        max(branchThroughput.r, max(branchThroughput.g, branchThroughput.b)) <= 1e-6) {
+        return false;
+    }
+
+    float originBias = isWaterSurface ? max(branchAux.x, 0.0002) : 0.0001;
+    vec3 originBiasNormal = surfaceNormal;
+    if (isWaterSurface) {
+        originBiasNormal = surfaceNormal.y >= 0.0 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, -1.0, 0.0);
+    }
+
+    branchRay = rayState;
+    branchRay.origin =
+        worldPos + (dot(branchDirection, originBiasNormal) > 0.0 ? originBiasNormal : -originBiasNormal) * originBias;
+    branchRay.direction = branchDirection;
+    branchRay.radiance = vec3(0.0);
+    branchRay.throughput = branchThroughput;
+    branchRay.hitT = 0.0;
+    branchRay.seed = xxhash32(uvec3(rayState.seed, branchSalt, worldUBO.seed));
+    raySetStop(branchRay, false);
+    raySetContinue(branchRay, false);
+    raySetNoisy(branchRay, false);
+    branchRay.prevScenePos = vec3(0.0);
+    branchRay.hasPrevScenePos = 0u;
+    branchRay.normal = vec3(0.0);
+    raySetLobeType(branchRay, isReflection ? 1u : 2u);
+    raySetIgnoreWaterSelf(branchRay, isWaterSurface);
+    raySetSurfaceCacheWritten(branchRay, false);
+    raySetIndirectVolumetricCloud(
+        branchRay, shouldCaptureIndirectVolumetricCloud(isReflection ? 1u : 2u, mat.roughness));
+    branchRay.directLightRadiance = vec3(0.0);
+    return true;
+}
+
+bool initPreparedSurfaceContinuation(MainRay incomingRayState,
+                                     DirectLightPreparedSurface prepared,
+                                     uint branchSalt,
+                                     out MainRay branchRay) {
+    vec3 currentViewDir = -normalizeF(incomingRayState.direction, vec3(0.0, 0.0, -1.0));
+    SampledSurface currentSurface = prepared.surface;
+    if (!isValidSampledSurface(currentSurface) || !isFiniteVec3(incomingRayState.direction) ||
+        !isFiniteVec3(incomingRayState.throughput)) {
+        return false;
+    }
+
+    bool isOpaqueSurface = currentSurface.mat.transmission <= EPS;
+
+    vec3 sampleDir = vec3(0.0);
+    float pdf = 0.0;
+    uint lobeType = 0u;
+    vec3 bsdf = vec3(0.0);
+
+    if (prepared.isFftWaterSurface && currentSurface.mat.transmission > EPS) {
+        vec3 incident = -currentViewDir;
+        vec3 waterNormal = currentSurface.shadingNormal;
+        float eta = fftWaterEtaForIncident(incident, waterNormal, currentSurface.mat.ior);
+        float fresnel = clamp(DielectricFresnel(abs(dot(currentViewDir, waterNormal)), eta), 0.0, 1.0);
+        vec3 refractionDir = refract(incident, waterNormal, eta);
+        bool hasRefraction = dot(refractionDir, refractionDir) > 1e-6;
+        bool chooseReflection = !hasRefraction || rand(incomingRayState.seed) < fresnel;
+        if (chooseReflection) {
+            sampleDir = normalize(reflect(incident, waterNormal));
+            pdf = max(fresnel, 1e-4);
+            lobeType = 1u;
+            bsdf = vec3(fresnel);
+        } else {
+            sampleDir = normalize(refractionDir);
+            pdf = max(1.0 - fresnel, 1e-4);
+            lobeType = 2u;
+            bsdf = pow(max(currentSurface.albedoValue.rgb, vec3(0.0)), vec3(0.5)) * (1.0 - fresnel);
+        }
+    } else {
+        uint sampleSeed = xxhash32(uvec3(incomingRayState.seed, branchSalt, worldUBO.seed));
+        bsdf = DisneySample(currentSurface.mat, currentViewDir, currentSurface.shadingNormal, sampleDir, pdf, sampleSeed,
+                            lobeType, RADIANCE_BRDF_FLAGS);
+        incomingRayState.seed = sampleSeed;
+    }
+
+    if (!isFiniteFloat(pdf) || !isFiniteVec3(sampleDir) || !isFiniteVec3(bsdf) || pdf <= 1e-6 ||
+        max(bsdf.r, max(bsdf.g, bsdf.b)) <= 1e-6) {
+        return false;
+    }
+    if (isOpaqueSurface && dot(sampleDir, currentSurface.geometricNormal) <= 0.0) { return false; }
+
+    branchRay = incomingRayState;
+    branchRay.radiance = vec3(0.0);
+    branchRay.hitT = 0.0;
+    branchRay.seed = xxhash32(uvec3(incomingRayState.seed, branchSalt, worldUBO.seed));
+    branchRay.throughput *= bsdf / max(pdf, 1e-4);
+    branchRay.prevScenePos = vec3(0.0);
+    branchRay.hasPrevScenePos = 0u;
+    branchRay.normal = vec3(0.0);
+    raySetStop(branchRay, false);
+    raySetContinue(branchRay, false);
+    raySetNoisy(branchRay, true);
+    raySetLobeType(branchRay, lobeType);
+    raySetIgnoreWaterSelf(branchRay, prepared.isFftWaterSurface);
+    raySetSurfaceCacheWritten(branchRay, false);
+    raySetIndirectVolumetricCloud(
+        branchRay, shouldCaptureIndirectVolumetricCloud(lobeType, currentSurface.mat.roughness));
+    branchRay.directLightRadiance = vec3(0.0);
+    rayStoreAux(branchRay, prepared.isFftWaterSurface ? vec2(ADV_FFT_WATER_ORIGIN_BIAS, 1.0) : vec2(0.0));
+
+    if (!prepared.traceLocalHeight) {
+        if (prepared.isFftWaterSurface) {
+            vec3 exitNormal = dot(sampleDir, currentSurface.geometricNormal) >= 0.0 ? currentSurface.geometricNormal :
+                                                                                       -currentSurface.geometricNormal;
+            branchRay.origin = currentSurface.worldPos + exitNormal * ADV_FFT_WATER_ORIGIN_BIAS;
+        } else if (prepared.maxDepthWorld > heightMapMinWorldDepth) {
+            vec3 exitBasePos = basePlaneWorldPosAtUv(currentSurface.uv, prepared.referenceUv, prepared.referenceWorldPos,
+                                                     prepared.dPduWorld, prepared.dPdvWorld);
+            vec3 exitNormal = dot(sampleDir, prepared.baseGeoNormal) >= 0.0 ? prepared.baseGeoNormal :
+                                                                             -prepared.baseGeoNormal;
+            branchRay.origin = exitBasePos + exitNormal * 0.0002;
+        } else {
+            vec3 exitNormal = dot(sampleDir, currentSurface.geometricNormal) >= 0.0 ? currentSurface.geometricNormal :
+                                                                                       -currentSurface.geometricNormal;
+            branchRay.origin = currentSurface.worldPos + exitNormal * 0.0002;
+        }
+        branchRay.direction = sampleDir;
+        return true;
+    }
+
+    HeightMapHit localBounceHit;
+    vec2 exitUv;
+    float exitDepth;
+    float exitDistance;
+    bool localBlocked = traceLocalHeightIntersectionAndExit(
+        prepared.normalTextureID, prepared.atlasUvMin, prepared.atlasUvMax, prepared.dPduWorld, prepared.dPdvWorld,
+        prepared.baseGeoNormal, prepared.maxDepthWorld, currentSurface, sampleDir, ADV_PARALLAX_SECONDARY_MAX_STEPS,
+        localBounceHit, exitUv, exitDepth, exitDistance);
+    if (!localBlocked) {
+        vec3 exitBasePos = heightMapWorldPosAtUvDepth(exitUv, exitDepth, prepared.referenceUv,
+                                                      prepared.referenceWorldPos, prepared.dPduWorld,
+                                                      prepared.dPdvWorld, prepared.baseGeoNormal);
+        vec3 exitNormal = dot(sampleDir, prepared.baseGeoNormal) >= 0.0 ? prepared.baseGeoNormal :
+                                                                         -prepared.baseGeoNormal;
+        branchRay.origin = exitBasePos + exitNormal * 0.0002;
+        branchRay.direction = sampleDir;
+        return true;
+    }
+
+    return false;
+}
+
+void traceSecondary(inout MainRay rayState,
+                   int startBounce,
+                   int isHand,
+#if SHARC_QUERY && USE_SHARC
+                   SharcParameters sharcParameters,
+                   inout int sharcDebugBounceCount,
+                   inout bool sharcCacheHit,
+#endif
+                   out bool hasSecondHit,
+                   out float secondHitDistance) {
+    bool isPrimaryCameraPath = true;
+    hasSecondHit = false;
+    secondHitDistance = 0.0;
+
+    for (int b = startBounce; b < ADV_NUM_RAY_BOUNCES; b++) {
+        if (rayShouldStop(rayState)) break;
+
+        uint mask;
+        float len;
+        uint firstBounceLobeType = b == startBounce ? rayLobeType(rayState) : 0u;
+        resetMainRay(rayState, b);
+        prepareSecondary(b, isHand, len, mask);
+
+        vec3 tracedOrigin = rayState.origin;
+        vec3 tracedDirection = rayState.direction;
+        mainRay = rayState;
+        uint missId = ADV_WORLD_NO_VOLUMETRIC_MISS_INDEX;
+        if (b == startBounce) {
+            bool allowIndirectCloudMiss =
+                (firstBounceLobeType == 1u || firstBounceLobeType == 2u) &&
+                rayUseIndirectVolumetricCloud(rayState);
+            if (ADV_CAPTURE_VOLUMETRIC_CLOUD_INDIRECT != 0 && allowIndirectCloudMiss) {
+                missId = ADV_WORLD_MISS_INDEX;
+            }
+        }
+        traceRayEXT(topLevelAS, ADV_RAY_FLAGS, mask, 1, 1, missId, mainRay.origin, 0.001, mainRay.direction, len, 0);
+        rayState = mainRay;
+        raySetIgnoreWaterSelf(rayState, false);
+
+        if (b == startBounce) {
+            secondHitDistance = rayState.hitT;
+            hasSecondHit = rayState.hitT != INF_DISTANCE;
+        }
+
+        if (rayState.hitT != INF_DISTANCE) {
+            MaterialInfo hitMat = rayLoadMaterial(rayState);
+            vec3 hitWorldPos = tracedOrigin + tracedDirection * rayState.hitT;
+#if SHARC_QUERY && USE_SHARC
+            vec3 positionWorld = hitWorldPos + vec3(worldUBO.cameraPos.xyz);
+            if (sharcAllowQuery(isPrimaryCameraPath, rayState.hitT, hitMat.roughness, rayLobeType(rayState), sharcParameters,
+                                positionWorld)) {
+                SharcHitData sharcHitData;
+                sharcHitData.positionWorld = positionWorld;
+                sharcHitData.normalWorld = rayState.normal;
+                vec3 cachedRadiance = vec3(0.0);
+                if (SharcGetCachedRadiance(sharcParameters, sharcHitData, cachedRadiance, false)) {
+                    sharcCacheHit = true;
+                    rayState.radiance += cachedRadiance * rayState.throughput;
+                    break;
+                }
+            }
+            sharcDebugBounceCount = max(sharcDebugBounceCount, b + 1);
+#endif
+            bool isPerfectMirrorOrTransparent = (hitMat.roughness < 0.02) && (rayLobeType(rayState) != 0u);
+            if (!isPerfectMirrorOrTransparent) { isPrimaryCameraPath = false; }
+        }
+
+        if (b > 2) {
+            float maxComponent = max(rayState.throughput.r, max(rayState.throughput.g, rayState.throughput.b));
+            float rrProbability = min(maxComponent, 0.9);
+            if (rand(rayState.seed) > rrProbability) { break; }
+            rayState.throughput /= rrProbability;
+        }
+    }
+
+    mainRay = rayState;
+}
+
+MaterialInfo materialInfoFromSurface(SampledSurface surface) {
+    MaterialInfo mat;
+    mat.albedoValue = surface.albedoValue;
+    mat.f0 = surface.mat.f0;
+    mat.roughness = surface.mat.roughness;
+    mat.metallic = surface.mat.metallic;
+    mat.transmission = surface.mat.transmission;
+    mat.ior = surface.mat.ior;
+    mat.emission = surface.mat.emission;
+    return mat;
+}
+
+MainRay loadPrimaryScratchState(ivec2 pixel,
+                                uint seed,
+                                float coneSpread,
+                                out int startBounce,
+                                out uint firstHitLobeType,
+                                out uint firstHitFlags) {
+    vec4 originState = loadPrimaryRayStateLayer(pixel, 0);
+    vec4 directionState = loadPrimaryRayStateLayer(pixel, 1);
+    vec4 throughputState = loadPrimaryRayStateLayer(pixel, 2);
+    vec4 scratchAux = loadPrimaryRayStateLayer(pixel, 3);
+
+    startBounce = int(max(originState.w + 0.5, 0.0));
+    firstHitLobeType = uint(max(directionState.w + 0.5, 0.0));
+    firstHitFlags = decodeFirstHitFlags(throughputState.w);
+
+    MainRay ray;
+    ray.origin = originState.xyz;
+    ray.hitT = 0.0;
+    ray.direction = directionState.xyz;
+    ray.seed = seed;
+    ray.radiance = imageLoad(outputImage, pixel).rgb;
+    ray.coneWidth = scratchAux.z;
+    ray.throughput = throughputState.rgb;
+    ray.coneSpread = coneSpread;
+    ray.stateBits = 0u;
+    raySetBounce(ray, uint(max(startBounce - 1, 0)));
+    raySetInsideBoat(ray, hasFirstHitFlag(firstHitFlags, ADV_FIRST_HIT_FLAG_INSIDE_BOAT));
+    raySetStop(ray, false);
+    raySetContinue(ray, false);
+    raySetNoisy(ray, hasFirstHitFlag(firstHitFlags, ADV_FIRST_HIT_FLAG_NOISY));
+    raySetSkipFog(ray, hasFirstHitFlag(firstHitFlags, ADV_FIRST_HIT_FLAG_SKIP_FOG));
+    raySetLobeType(ray, firstHitLobeType);
+    raySetIndirectVolumetricCloud(ray, hasFirstHitFlag(firstHitFlags, ADV_FIRST_HIT_FLAG_INDIRECT_VOLUMETRIC_CLOUD));
+    ray.prevScenePos = vec3(0.0);
+    ray.hasPrevScenePos = 0u;
+    ray.normal = vec3(0.0);
+    raySetSurfaceCacheWritten(ray, false);
+    rayStoreAux(ray, scratchAux.xy);
+    ray.directLightRadiance = vec3(scratchAux.w, 0.0, 0.0);
+    ray.pad0 = packHalf2x16(scratchAux.xy);
+    return ray;
+}
+
+MainRay loadSecondaryScratchState(ivec2 pixel,
+                                  uint seed,
+                                  float coneSpread,
+                                  out int startBounce,
+                                  out uint lobeType,
+                                  out uint flags) {
+    vec4 originState = loadSecondaryRayStateLayer(pixel, 0);
+    vec4 directionState = loadSecondaryRayStateLayer(pixel, 1);
+    vec4 throughputState = loadSecondaryRayStateLayer(pixel, 2);
+    vec4 auxState = loadSecondaryRayStateLayer(pixel, 3);
+
+    startBounce = int(max(originState.w + 0.5, 0.0));
+    lobeType = uint(max(directionState.w + 0.5, 0.0));
+    flags = decodeFirstHitFlags(throughputState.w);
+
+    MainRay ray;
+    ray.origin = originState.xyz;
+    ray.hitT = 0.0;
+    ray.direction = directionState.xyz;
+    ray.seed = seed;
+    ray.radiance = imageLoad(outputImage, pixel).rgb;
+    ray.coneWidth = auxState.z;
+    ray.throughput = throughputState.rgb;
+    ray.coneSpread = coneSpread;
+    ray.stateBits = 0u;
+    raySetBounce(ray, uint(max(startBounce - 1, 0)));
+    raySetInsideBoat(ray, hasFirstHitFlag(flags, ADV_FIRST_HIT_FLAG_INSIDE_BOAT));
+    raySetStop(ray, false);
+    raySetContinue(ray, false);
+    raySetNoisy(ray, hasFirstHitFlag(flags, ADV_FIRST_HIT_FLAG_NOISY));
+    raySetSkipFog(ray, hasFirstHitFlag(flags, ADV_FIRST_HIT_FLAG_SKIP_FOG));
+    raySetLobeType(ray, lobeType);
+    raySetIndirectVolumetricCloud(ray, hasFirstHitFlag(flags, ADV_FIRST_HIT_FLAG_INDIRECT_VOLUMETRIC_CLOUD));
+    ray.prevScenePos = vec3(0.0);
+    ray.hasPrevScenePos = 0u;
+    ray.normal = vec3(0.0);
+    raySetSurfaceCacheWritten(ray, false);
+    rayStoreAux(ray, auxState.xy);
+    ray.directLightRadiance = vec3(auxState.w, 0.0, 0.0);
+    ray.pad0 = packHalf2x16(auxState.xy);
+    return ray;
+}
+
+#if USE_SHARC && SHARC_UPDATE
+void traceSharcUpdate(
+    ivec2 pixel, vec2 resolution, vec3 origin, vec3 direction, float fovY, float fovX, uint rayFlags) {
+    SharcParameters sharcParameters = makeSharcParameters();
+    SharcState sharcState;
+    SharcInit(sharcState);
+
+    initMainRay(origin, direction, worldUBO.seed ^ sharcConfig.frameIndex, coneSpreadFromFov(fovY, fovX, resolution),
+                    mainRay);
+
+    for (int b = 0; b < ADV_NUM_RAY_BOUNCES; ++b) {
+        resetMainRay(mainRay, b);
+        mainRay.throughput = vec3(1.0);
+        mainRay.radiance = vec3(0.0);
+
+        uint mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+        if (b > 1) {
+            mask = WORLD_MASK | PLAYER_MASK | FISHING_BOBBER_MASK | CLOUD_MASK;
+        } else if (b == 0 && worldUBO.isFirstPerson > 0) {
+            mask = WORLD_MASK | FISHING_BOBBER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK;
+        }
+        float len = (b <= 1) ? 1000.0 : 384.0;
+
+        vec3 tracedOrigin = mainRay.origin;
+        vec3 tracedDirection = mainRay.direction;
+        traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, ADV_WORLD_NO_VOLUMETRIC_MISS_INDEX, mainRay.origin, 0.0001,
+                    mainRay.direction, len, 0);
+
+        if (mainRay.hitT == INF_DISTANCE) {
+            SharcUpdateMiss(sharcParameters, sharcState, mainRay.radiance);
+            break;
+        }
+
+        MaterialInfo mat = rayLoadMaterial(mainRay);
+        if (mat.transmission > 0.95) {
+            mainRay.throughput = vec3(1.0);
+            mainRay.radiance = vec3(0.0);
+            if (rayShouldStop(mainRay)) { break; }
+            continue;
+        }
+
+        SharcHitData sharcHitData;
+        sharcHitData.positionWorld = tracedOrigin + tracedDirection * mainRay.hitT + vec3(worldUBO.cameraPos.xyz);
+        sharcHitData.normalWorld = mainRay.normal;
+        bool accepted = SharcUpdateHit(sharcParameters, sharcState, sharcHitData, mainRay.radiance, rand(mainRay.seed));
+        if (!accepted) { break; }
+
+        SharcSetThroughput(sharcState, max(mainRay.throughput, vec3(0.0)));
+        mainRay.throughput = vec3(1.0);
+        mainRay.radiance = vec3(0.0);
+        if (rayShouldStop(mainRay)) { break; }
+    }
+}
+#endif
+
+void main() {
+    ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+    vec2 resolution = vec2(gl_LaunchSizeEXT.xy);
+#if SHARC_UPDATE && USE_SHARC
+    vec2 fullResolution = vec2(imageSize(outputImage));
+    ivec2 block = ivec2(gl_LaunchIDEXT.xy);
+    uint downsampleFactor = max(sharcConfig.updateDownsampleFactor, 1u);
+    uint blockHash = xxhash32(uvec3(uint(block.x), uint(block.y), sharcConfig.frameIndex ^ worldUBO.seed));
+    ivec2 selectedOffset =
+        ivec2(int(blockHash % downsampleFactor), int((blockHash / downsampleFactor) % downsampleFactor));
+    pixel = block * int(downsampleFactor) + selectedOffset;
+    resolution = fullResolution;
+    if (pixel.x >= int(resolution.x) || pixel.y >= int(resolution.y)) { return; }
+#endif
+    vec2 pixelCenter = vec2(pixel) + 0.5;
+    pixelCenter += worldUBO.cameraJitter;
+
+#if ADV_WORLD_PASS == ADV_WORLD_PASS_CONT_REFLECTION
+    imageStore(contReflectionRadianceImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+    imageStore(contReflectionMetaImage, ivec2(pixel), vec4(0.0));
+#elif ADV_WORLD_PASS == ADV_WORLD_PASS_CONT_REFRACTION
+    imageStore(contRefractionRadianceImage, ivec2(pixel), vec4(vec3(0.0), -1.0));
+#endif
+
+    float fovY = fovYFromProj(worldUBO.cameraProjMat);
+    float fovX = fovXFromProj(worldUBO.cameraProjMat);
+
+    vec2 ndc = pixelCenter / resolution * 2.0 - 1.0;
+
+    vec4 nearPoint = vec4(ndc, 0.0, 1.0);
+
+    vec4 viewNear = worldUBO.cameraProjMatInv * nearPoint;
+    viewNear /= viewNear.w;
+
+    vec3 origin = vec3(worldUBO.cameraEffectedViewMatInv * vec4(0, 0, 0, 1));
+    const vec3 eyePos = origin;
+    vec3 direction = normalize(vec3(worldUBO.cameraEffectedViewMatInv * vec4(viewNear.xyz, 0.0)));
+    const vec3 orgDirection = direction;
+
+    const uint rayFlags = ADV_RAY_FLAGS;
+
+#if USE_SHARC && SHARC_UPDATE
+    traceSharcUpdate(pixel, resolution, origin, direction, fovY, fovX, rayFlags);
+    return;
+#else
+    float surfaceDepth = INF_DISTANCE;
+    bool psrHitSky = false;
+    vec3 psrHitPosition = eyePos;
+
+    MaterialInfo firstHitMat;
+    bool hasSecondHit = false;
+    float distFirstToSecond = 0.0;
+    bool isFirstHitNoisy = false;
+    bool isFirstHitDiffuse = false;
+    bool isFirstHitTransparent = false;
+    vec3 firstHitEmission = vec3(0.0);
+    vec3 firstHitDirectRadiance = vec3(0.0);
+    vec3 firstHitIndirectRadiance = vec3(0.0);
+    vec3 firstHitIncomingDirection = vec3(0.0);
+    vec3 firstHitNormal = vec3(0.0);
+    vec3 firstHitWorldPos = vec3(0.0);
+    vec3 transparentReflectionRadiance = vec3(0.0);
+    vec3 transparentRefractionRadiance = vec3(0.0);
+    bool hasTransparentReflection = false;
+    bool hasTransparentRefraction = false;
+    bool hasTransparentReflectionSecondHit = false;
+    float transparentReflectionSecondHitDistance = 0.0;
+    vec3 composeFogAdditive = vec3(0.0);
+    float composeFogTransmittance = -1.0;
+#    if SHARC_QUERY && USE_SHARC
+    SharcParameters sharcParameters = makeSharcParameters();
+    int sharcDebugBounceCount = 0;
+    bool sharcDebugCacheHit = false;
+#    endif
+    int startBounce = 0;
+    uint firstHitLobeType = 0u;
+    uint firstHitFlags = 0u;
+    int secondaryStartBounce = 0;
+    uint secondaryLobeType = 0u;
+    uint secondaryFlags = 0u;
+    uint continuationSeed = xxhash32(uvec3(gl_LaunchIDEXT.x, gl_LaunchIDEXT.y, worldUBO.seed ^ 0xC13FA9A9u));
+    MainRay primaryState = loadPrimaryScratchState(pixel, continuationSeed, coneSpreadFromFov(fovY, fovX, resolution),
+                                                   startBounce, firstHitLobeType, firstHitFlags);
+    MainRay primaryViewState = primaryState;
+    primaryViewState.origin = origin;
+    primaryViewState.direction = orgDirection;
+    primaryViewState.hitT = 0.0;
+    primaryViewState.radiance = primaryState.radiance;
+    primaryViewState.throughput = vec3(1.0);
+    primaryViewState.prevScenePos = vec3(0.0);
+    primaryViewState.hasPrevScenePos = 0u;
+    primaryViewState.normal = vec3(0.0);
+    MainRay secondaryState = loadSecondaryScratchState(pixel, continuationSeed,
+                                                       coneSpreadFromFov(fovY, fovX, resolution),
+                                                       secondaryStartBounce, secondaryLobeType, secondaryFlags);
+    PrimarySurfaceCache primarySurfaceCache =
+        decodeSurfaceCache(loadPrimarySurfaceCacheLayer(pixel, 0), loadPrimarySurfaceCacheLayer(pixel, 1),
+                           loadPrimarySurfaceCacheLayer(pixel, 2), loadPrimarySurfaceCacheLayer(pixel, 3),
+                           loadPrimarySurfaceCacheLayer(pixel, 4), loadPrimarySurfaceCacheLayer(pixel, 5),
+                           loadPrimarySurfaceCacheLayer(pixel, 6), loadPrimarySurfaceCacheLayer(pixel, 7));
+    PrimarySurfaceCache secondarySurfaceCache = loadSecondarySurfaceCache(pixel);
+    DirectLightCameraRay primaryCameraRay =
+        buildStoredDirectLightCameraRay(primaryViewState.origin, primaryViewState.direction, primaryViewState.coneSpread);
+    DirectLightCameraRay secondaryCameraRay =
+        buildStoredDirectLightCameraRay(secondaryState.origin, secondaryState.direction, secondaryState.coneSpread);
+    DirectLightPreparedSurface primaryPrepared;
+    if (primarySurfaceCache.valid) { prepareDirectLightSurface(primarySurfaceCache, primaryCameraRay, primaryPrepared); }
+    DirectLightPreparedSurface secondaryPrepared;
+    if (secondarySurfaceCache.valid) {
+        prepareDirectLightSurface(secondarySurfaceCache, secondaryCameraRay, secondaryPrepared);
+    }
+    bool hitSky = hasFirstHitFlag(firstHitFlags, ADV_FIRST_HIT_FLAG_HIT_SKY);
+    bool secondaryHitSky = hasFirstHitFlag(secondaryFlags, ADV_FIRST_HIT_FLAG_HIT_SKY);
+
+#    if ADV_WORLD_PASS == ADV_WORLD_PASS_FINAL_COMPOSE
+    if (ADV_CLOUD_MODE == 2u && ADV_ENABLE_VOLUMETRIC_CLOUD_TEMPORAL != 0 && hitSky) {
+        vec4 temporalCloud = imageLoad(volumetricCloudTemporalImage, pixel);
+        if (isFiniteVec3(temporalCloud.rgb)) {
+            primaryState.radiance = temporalCloud.rgb;
+            primaryViewState.radiance = temporalCloud.rgb;
+        }
+        if (isFiniteFloat(temporalCloud.a) && temporalCloud.a >= 0.0) {
+            float temporalCloudTransmittance = clamp(temporalCloud.a, 0.0, 1.0);
+            primaryState.directLightRadiance.x = temporalCloudTransmittance;
+            primaryViewState.directLightRadiance.x = temporalCloudTransmittance;
+        }
+    }
+#    endif
+
+    float postStarCloudTransmittance = hitSky ? clamp(primaryState.directLightRadiance.x, 0.0, 1.0) : 1.0;
+    mainRay = hitSky ? primaryState : primaryViewState;
+    int isHand = hasFirstHitFlag(firstHitFlags, ADV_FIRST_HIT_FLAG_HAND) ? 1 : 0;
+    bool firstHitNoisyFlag = hasFirstHitFlag(firstHitFlags, ADV_FIRST_HIT_FLAG_NOISY);
+    bool firstHitSkipFogFlag = hasFirstHitFlag(firstHitFlags, ADV_FIRST_HIT_FLAG_SKIP_FOG);
+    vec3 storedFirstHitNormal = imageLoad(normalRoughnessImage, pixel).xyz;
+    float storedLinearDepth = imageLoad(linearDepthImage, pixel).r;
+    float viewDepthPerWorldDistance = -(mat3(worldUBO.cameraEffectedViewMat) * orgDirection).z;
+    float fallbackFirstHitDistance =
+        (isFiniteFloat(storedLinearDepth) && storedLinearDepth < INF_DISTANCE &&
+         abs(viewDepthPerWorldDistance) > 1e-6) ?
+            max(storedLinearDepth / viewDepthPerWorldDistance, 0.0) :
+            0.0;
+    vec3 storedFirstHitWorldPos = primarySurfaceCache.valid ?
+                                      primarySurfaceCache.planeHitWorldPos :
+                                      (eyePos + orgDirection * fallbackFirstHitDistance);
+
+    if (!hitSky && firstHitSkipFogFlag) {
+#    if ADV_WORLD_PASS == ADV_WORLD_PASS_FINAL_COMPOSE
+        imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitSpecularImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitClearImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+        imageStore(firstHitBaseEmissionImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
+        imageStore(firstHitRefractionImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(fogImage, ivec2(pixel), vec4(0.0, 0.0, 0.0, -1.0));
+        imageStore(postStarCloudTransmittanceImage, ivec2(pixel), vec4(postStarCloudTransmittance));
+        imageStore(specularHitDepthImage, ivec2(pixel), vec4(0.0, vec3(1.0)));
+        imageStore(outputImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+#    endif
+        return;
+    }
+
+    if (hitSky || !firstHitNoisyFlag || !primarySurfaceCache.valid) {
+        firstHitMat.albedoValue = vec4(0.0);
+        firstHitMat.f0 = vec3(0.0);
+        firstHitMat.roughness = 0.0;
+        firstHitMat.metallic = 0.0;
+        firstHitMat.transmission = 0.0;
+        firstHitMat.ior = 1.0;
+        firstHitMat.emission = 0.0;
+    } else {
+        firstHitMat = materialInfoFromSurface(primaryPrepared.surface);
+    }
+
+    firstHitIncomingDirection = primaryViewState.direction;
+    firstHitNormal = hitSky ? vec3(0.0) :
+                             ((firstHitNoisyFlag && primarySurfaceCache.valid) ? primaryPrepared.surface.shadingNormal :
+                                                                                storedFirstHitNormal);
+    firstHitWorldPos = hitSky ? vec3(0.0) :
+                               ((firstHitNoisyFlag && primarySurfaceCache.valid) ? primaryPrepared.surface.worldPos :
+                                                                                  storedFirstHitWorldPos);
+    surfaceDepth = hitSky ? INF_DISTANCE : max(dot(firstHitWorldPos - eyePos, orgDirection), 0.0);
+    psrHitSky = hitSky;
+    if (!hitSky) { psrHitPosition = firstHitWorldPos; }
+
+    hasSecondHit = false;
+    distFirstToSecond = 0.0;
+    firstHitEmission = vec3(0.0);
+    firstHitDirectRadiance = vec3(0.0);
+    firstHitIndirectRadiance = vec3(0.0);
+    transparentReflectionRadiance = vec3(0.0);
+    transparentRefractionRadiance = vec3(0.0);
+    hasTransparentReflection = false;
+    hasTransparentRefraction = false;
+    hasTransparentReflectionSecondHit = false;
+    transparentReflectionSecondHitDistance = 0.0;
+#    if USE_SHARC && SHARC_QUERY
+    sharcDebugBounceCount = 0;
+    sharcDebugCacheHit = false;
+#    endif
+
+    if (!hitSky) {
+        if (startBounce == 1 && firstHitNoisyFlag) {
+            vec3 basicRadiance =
+                ADV_BASIC_RADIANCE * firstHitMat.albedoValue.rgb * firstHitMat.albedoValue.a * mainRay.throughput;
+            mainRay.radiance += basicRadiance;
+            primaryState.radiance += basicRadiance;
+            primaryViewState.radiance += basicRadiance;
+            secondaryState.radiance += basicRadiance;
+        }
+
+        isFirstHitNoisy = firstHitNoisyFlag;
+        isFirstHitDiffuse = false;
+        isFirstHitTransparent = false;
+        bool isTransparentSurface = firstHitMat.transmission > EPS;
+        if (isFirstHitNoisy) {
+            firstHitEmission = firstHitMat.albedoValue.rgb * firstHitMat.emission;
+            firstHitDirectRadiance = imageLoad(firstHitDiffuseDirectLightImage, pixel).rgb;
+            if (isTransparentSurface) {
+                isFirstHitTransparent = true;
+            } else if (firstHitLobeType == 0u) {
+                isFirstHitDiffuse = true;
+            }
+        }
+
+#    if ADV_WORLD_PASS == ADV_WORLD_PASS_CONT_REFLECTION
+        if (isFirstHitTransparent) {
+            MainRay transparentReflectionRay;
+            if (initTransparent(primaryViewState, firstHitMat, firstHitIncomingDirection, firstHitNormal,
+                                firstHitWorldPos, 0x9E3779B9u, true, transparentReflectionRay)) {
+                traceSecondary(transparentReflectionRay, startBounce, isHand,
+#        if SHARC_QUERY && USE_SHARC
+                               sharcParameters, sharcDebugBounceCount, sharcDebugCacheHit,
+#        endif
+                               hasTransparentReflectionSecondHit, transparentReflectionSecondHitDistance);
+                imageStore(contReflectionRadianceImage, ivec2(pixel), vec4(transparentReflectionRay.radiance, 1.0));
+                imageStore(contReflectionMetaImage, ivec2(pixel),
+                           vec4(hasTransparentReflectionSecondHit ? 1.0 : 0.0,
+                                transparentReflectionSecondHitDistance, 0.0, 0.0));
+            }
+        }
+        return;
+#    elif ADV_WORLD_PASS == ADV_WORLD_PASS_CONT_REFRACTION
+        if (isFirstHitTransparent) {
+            MainRay transparentRefractionRay;
+            if (secondarySurfaceCache.valid) {
+                vec3 secondaryEmission =
+                    secondaryPrepared.surface.albedoValue.rgb * secondaryPrepared.surface.mat.emission * secondaryState.throughput;
+                transparentRefractionRadiance = secondaryEmission + firstHitDirectRadiance;
+                hasTransparentRefraction = true;
+
+                bool continuedTransparentRefraction = false;
+                MaterialInfo secondaryMat = materialInfoFromSurface(secondaryPrepared.surface);
+                if (secondaryMat.transmission > EPS &&
+                    initTransparent(secondaryState, secondaryMat, secondaryState.direction,
+                                    secondaryPrepared.surface.shadingNormal, secondaryPrepared.surface.worldPos,
+                                    0x3C6EF372u, false, transparentRefractionRay)) {
+                    bool hasTransparentRefractionSecondHit = false;
+                    float transparentRefractionSecondHitDistance = 0.0;
+                    traceSecondary(transparentRefractionRay, secondaryStartBounce, isHand,
+#        if SHARC_QUERY && USE_SHARC
+                                   sharcParameters, sharcDebugBounceCount, sharcDebugCacheHit,
+#        endif
+                                   hasTransparentRefractionSecondHit, transparentRefractionSecondHitDistance);
+                    transparentRefractionRadiance += transparentRefractionRay.radiance;
+                    continuedTransparentRefraction = true;
+                }
+
+                if (!continuedTransparentRefraction &&
+                    initPreparedSurfaceContinuation(secondaryState, secondaryPrepared, 0x3C6EF372u,
+                                                    transparentRefractionRay)) {
+                    bool hasTransparentRefractionSecondHit = false;
+                    float transparentRefractionSecondHitDistance = 0.0;
+                    traceSecondary(transparentRefractionRay, secondaryStartBounce, isHand,
+#        if SHARC_QUERY && USE_SHARC
+                                   sharcParameters, sharcDebugBounceCount, sharcDebugCacheHit,
+#        endif
+                                   hasTransparentRefractionSecondHit, transparentRefractionSecondHitDistance);
+                    transparentRefractionRadiance += transparentRefractionRay.radiance;
+                }
+            } else if (secondaryHitSky || secondaryLobeType == 2u) {
+                transparentRefractionRay = secondaryState;
+                transparentRefractionRay.radiance = vec3(0.0);
+                bool hasTransparentRefractionSecondHit = false;
+                float transparentRefractionSecondHitDistance = 0.0;
+                traceSecondary(transparentRefractionRay, secondaryStartBounce, isHand,
+#        if SHARC_QUERY && USE_SHARC
+                               sharcParameters, sharcDebugBounceCount, sharcDebugCacheHit,
+#        endif
+                               hasTransparentRefractionSecondHit, transparentRefractionSecondHitDistance);
+                transparentRefractionRadiance = transparentRefractionRay.radiance + firstHitDirectRadiance;
+                hasTransparentRefraction = true;
+            } else if (initTransparent(primaryViewState, firstHitMat, firstHitIncomingDirection, firstHitNormal,
+                                       firstHitWorldPos, 0x3C6EF372u, false, transparentRefractionRay)) {
+                bool hasTransparentRefractionSecondHit = false;
+                float transparentRefractionSecondHitDistance = 0.0;
+                traceSecondary(transparentRefractionRay, startBounce, isHand,
+#        if SHARC_QUERY && USE_SHARC
+                               sharcParameters, sharcDebugBounceCount, sharcDebugCacheHit,
+#        endif
+                               hasTransparentRefractionSecondHit, transparentRefractionSecondHitDistance);
+                transparentRefractionRadiance = transparentRefractionRay.radiance + firstHitDirectRadiance;
+                hasTransparentRefraction = true;
+            }
+
+            imageStore(contRefractionRadianceImage, ivec2(pixel),
+                       vec4(transparentRefractionRadiance, hasTransparentRefraction ? 1.0 : -1.0));
+        }
+        return;
+#    elif ADV_WORLD_PASS == ADV_WORLD_PASS_FINAL_COMPOSE
+
+        bool initializedContinuation = !isFirstHitNoisy;
+        if (isFirstHitTransparent) {
+            vec4 reflectionState = imageLoad(contReflectionRadianceImage, ivec2(pixel));
+            vec4 reflectionMeta = imageLoad(contReflectionMetaImage, ivec2(pixel));
+            vec4 refractionState = imageLoad(contRefractionRadianceImage, ivec2(pixel));
+            transparentReflectionRadiance = reflectionState.rgb;
+            transparentRefractionRadiance = refractionState.rgb;
+            hasTransparentReflection = reflectionState.a > 0.5;
+            hasTransparentRefraction = refractionState.a > 0.5;
+            hasTransparentReflectionSecondHit = reflectionMeta.x > 0.5;
+            transparentReflectionSecondHitDistance = reflectionMeta.y;
+            mainRay.radiance = transparentReflectionRadiance + transparentRefractionRadiance;
+            mainRay.directLightRadiance = vec3(0.0);
+            initializedContinuation = true;
+        } else if (primarySurfaceCache.valid) {
+            initializedContinuation =
+                initPreparedSurfaceContinuation(primaryViewState, primaryPrepared, 0xA511E9B3u, mainRay);
+            if (initializedContinuation) {
+                traceSecondary(mainRay, startBounce, isHand,
+#    if SHARC_QUERY && USE_SHARC
+                               sharcParameters, sharcDebugBounceCount, sharcDebugCacheHit,
+#    endif
+                               hasSecondHit, distFirstToSecond);
+            }
+        }
+
+        if (!initializedContinuation) {
+            mainRay.radiance = vec3(0.0);
+            mainRay.directLightRadiance = vec3(0.0);
+        }
+#    endif
+    }
+
+#    if ADV_WORLD_PASS != ADV_WORLD_PASS_FINAL_COMPOSE
+    return;
+#    else
+
+    if (!hitSky && isFirstHitNoisy && !isFirstHitTransparent) {
+        if (isFirstHitDiffuse) { firstHitIndirectRadiance = mainRay.radiance; }
+        mainRay.radiance += firstHitEmission + firstHitDirectRadiance;
+    }
+
+    if (isnan(mainRay.radiance.r) || isinf(mainRay.radiance.r)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
+    if (isnan(mainRay.radiance.g) || isinf(mainRay.radiance.g)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
+    if (isnan(mainRay.radiance.b) || isinf(mainRay.radiance.b)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
+
+    float densityAir = 0.0000;
+    float densityFog = 2.0 / (worldUBO.fogEnd - worldUBO.fogStart);
+    float transparentFogTransmittance = 1.0;
+    vec3 transparentFogAdditive = vec3(0.0);
+    bool useVolumetricFog = uint(ADV_VOLUMETRIC_LIGHT_MODE) == ADV_VOLUMETRIC_LIGHT_MODE_VOLUMETRIC;
+    if (!raySkipFog(mainRay)) {
+        if (skyUBO.cameraSubmersionType == 1) {
+            vec3 waterColor = vec3(0.0, 0.48, 0.65);
+            vec3 preFogRadiance = mainRay.radiance * waterColor;
+
+            if (surfaceDepth == INF_DISTANCE) surfaceDepth = 0;
+            if (isFirstHitTransparent) {
+                applyFog(preFogRadiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog, waterColor * 0.01,
+                         mainRay.radiance, transparentFogTransmittance, transparentFogAdditive);
+                transparentReflectionRadiance *= waterColor * transparentFogTransmittance;
+                transparentRefractionRadiance *= waterColor * transparentFogTransmittance;
+            } else {
+                applyFog(preFogRadiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog, waterColor * 0.01,
+                         mainRay.radiance, composeFogTransmittance, composeFogAdditive);
+            }
+        } else {
+            if (worldUBO.skyType == 0) {
+                if (isFirstHitTransparent) {
+                    applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog,
+                             worldUBO.fogColor.rgb, mainRay.radiance, transparentFogTransmittance,
+                             transparentFogAdditive);
+                    transparentReflectionRadiance *= transparentFogTransmittance;
+                    transparentRefractionRadiance *= transparentFogTransmittance;
+                } else {
+                    applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog,
+                             worldUBO.fogColor.rgb, mainRay.radiance, composeFogTransmittance, composeFogAdditive);
+                }
+            } else if (worldUBO.skyType == 1) {
+                if (!psrHitSky && !useVolumetricFog) {
+                    vec3 eyeToPSRHitPosition = psrHitPosition - eyePos;
+                    eyeToPSRHitPosition.y = 0;
+                    float len = length(eyeToPSRHitPosition);
+
+                    vec3 sunDir = celestialSunDirection();
+                    vec3 rayDir = orgDirection;
+                    float progress = skyUBO.rainGradient;
+                    vec3 rainyRadiance = mix(vec3(0.0), vec3(0.1), smoothstep(-0.3, 0.3, sunDir.y));
+                    vec3 sunnyRadiance = texture(skyFull, rayDir).rgb;
+                    vec3 fogRadiance = mix(sunnyRadiance, rainyRadiance, progress);
+
+                    if (isFirstHitTransparent) {
+                        applyFog(mainRay.radiance, len, worldUBO.fogStart, densityAir, densityFog, fogRadiance,
+                                 mainRay.radiance, transparentFogTransmittance, transparentFogAdditive);
+                        transparentReflectionRadiance *= transparentFogTransmittance;
+                        transparentRefractionRadiance *= transparentFogTransmittance;
+                    } else {
+                        applyFog(mainRay.radiance, len, worldUBO.fogStart, densityAir, densityFog, fogRadiance,
+                                 mainRay.radiance, composeFogTransmittance, composeFogAdditive);
+                    }
+                }
+            } else if (worldUBO.skyType == 2) {
+                if (isFirstHitTransparent) {
+                    applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog,
+                             worldUBO.fogColor.rgb, mainRay.radiance, transparentFogTransmittance,
+                             transparentFogAdditive);
+                    transparentReflectionRadiance *= transparentFogTransmittance;
+                    transparentRefractionRadiance *= transparentFogTransmittance;
+                } else {
+                    applyFog(mainRay.radiance, surfaceDepth, worldUBO.fogStart, densityAir, densityFog,
+                             worldUBO.fogColor.rgb, mainRay.radiance, composeFogTransmittance, composeFogAdditive);
+                }
+            }
+        }
+    }
+
+    if (isFirstHitTransparent) {
+        firstHitEmission += transparentFogAdditive;
+        mainRay.radiance = transparentReflectionRadiance + transparentRefractionRadiance + firstHitEmission;
+        composeFogAdditive = vec3(0.0);
+        composeFogTransmittance = -1.0;
+    }
+
+    if (!psrHitSky && isFirstHitNoisy) {
+        if (isFirstHitTransparent) {
+            imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitSpecularImage, ivec2(pixel), vec4(transparentReflectionRadiance, 1.0));
+            imageStore(firstHitClearImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+            imageStore(firstHitRefractionImage, ivec2(pixel),
+                       vec4(transparentRefractionRadiance, hasTransparentRefraction ? 1.0 : -1.0));
+        } else if (isFirstHitDiffuse) {
+            imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(firstHitDirectRadiance, 1.0));
+            imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(firstHitIndirectRadiance, 1.0));
+            imageStore(firstHitSpecularImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitClearImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+            imageStore(firstHitRefractionImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        } else {
+            imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(vec3(0.0), 1.0));
+            imageStore(firstHitSpecularImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+            imageStore(firstHitClearImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+            imageStore(firstHitRefractionImage, ivec2(pixel), vec4(vec3(0.0), isFirstHitTransparent ? -1.0 : 0.0));
+        }
+    } else {
+        imageStore(firstHitDiffuseDirectLightImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitDiffuseIndirectLightImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitSpecularImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+        imageStore(firstHitClearImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+        imageStore(firstHitRefractionImage, ivec2(pixel), vec4(vec3(0.0), 0.0));
+    }
+    imageStore(firstHitBaseEmissionImage, ivec2(pixel), vec4(firstHitEmission, 1.0));
+    bool isFirstHitSpecular =
+        isFirstHitTransparent ? hasTransparentReflection : (isFirstHitNoisy && !isFirstHitDiffuse);
+    float specHitDepth = 0.0;
+    if (isFirstHitTransparent) {
+        specHitDepth = hasTransparentReflection ?
+                           (hasTransparentReflectionSecondHit ? transparentReflectionSecondHitDistance : INF_DISTANCE) :
+                           0.0;
+    } else {
+        specHitDepth = isFirstHitSpecular ? (hasSecondHit ? distFirstToSecond : INF_DISTANCE) : 0.0;
+    }
+    bool applyVolumetricCompose =
+        useVolumetricFog && !raySkipFog(mainRay) && skyUBO.cameraSubmersionType != 1 && worldUBO.skyType == 1;
+    if (applyVolumetricCompose && (primarySurfaceCache.valid || hitSky)) {
+        float volumetricDistance = psrHitSky ? volumetricMediumMaxDistance(false) : length(psrHitPosition - eyePos);
+        volumetricDistance = min(volumetricDistance, volumetricMediumMaxDistance(false));
+
+        vec3 volumetricTransmittance = integrateVolumetricFogTransmittance(volumetricDistance, false);
+        vec3 volumetricLight = sampleVolumetricLight(pixel);
+        mainRay.radiance = mainRay.radiance * volumetricTransmittance + volumetricLight;
+
+        if (!isFirstHitTransparent) {
+            composeFogTransmittance = clamp(volumetricLightLuminance(volumetricTransmittance), 0.0, 1.0);
+            composeFogAdditive = volumetricLight;
+        }
+    } else if (!useVolumetricFog && (primarySurfaceCache.valid || hitSky)) {
+        float fogBlendTransmittance =
+            isFirstHitTransparent ? transparentFogTransmittance :
+                                    (composeFogTransmittance >= 0.0 ? composeFogTransmittance : 1.0);
+        vec3 volumetricLight = sampleVolumetricLight(pixel) * clamp(fogBlendTransmittance, 0.0, 1.0);
+        mainRay.radiance += volumetricLight;
+        if (!isFirstHitTransparent) {
+            if (composeFogTransmittance < 0.0) {
+                composeFogTransmittance = 1.0;
+                composeFogAdditive = volumetricLight;
+            } else {
+                composeFogAdditive += volumetricLight;
+            }
+        }
+    }
+    imageStore(fogImage, ivec2(pixel), vec4(composeFogAdditive, composeFogTransmittance));
+    imageStore(postStarCloudTransmittanceImage, ivec2(pixel), vec4(postStarCloudTransmittance));
+    imageStore(specularHitDepthImage, ivec2(pixel), vec4(specHitDepth, vec3(1.0)));
+#    if SHARC_QUERY && USE_SHARC
+    if (sharcConfig.debugMode == 1u && !psrHitSky) {
+        vec3 debugPosWorld = psrHitPosition + vec3(worldUBO.cameraPos.xyz);
+        vec3 debugNormal = vec3(0.0, 1.0, 0.0);
+        mainRay.radiance = HashGridDebugColoredHash(debugPosWorld, debugNormal, sharcParameters.gridParameters);
+    } else if (sharcConfig.debugMode == 2u) {
+        mainRay.radiance =
+            HashGridDebugOccupancy(uvec2(pixel), uvec2(imageSize(outputImage)), sharcParameters.hashMapData);
+    } else if (sharcConfig.debugMode == 3u) {
+        float t = clamp(float(sharcDebugBounceCount) / max(float(ADV_NUM_RAY_BOUNCES), 1.0), 0.0, 1.0);
+        vec3 heat = mix(vec3(0.0, 0.8, 0.0), vec3(1.0, 0.0, 0.0), t);
+        if (sharcDebugCacheHit) { heat = vec3(0.0, 0.5, 1.0); }
+        mainRay.radiance = heat;
+    }
+#    endif
+
+    if (isnan(mainRay.radiance.r) || isinf(mainRay.radiance.r)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
+    if (isnan(mainRay.radiance.g) || isinf(mainRay.radiance.g)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
+    if (isnan(mainRay.radiance.b) || isinf(mainRay.radiance.b)) { mainRay.radiance = vec3(0.0, 0.0, 0.0); }
+    imageStore(outputImage, ivec2(pixel), vec4(mainRay.radiance, 1.0));
+#    endif
+#endif
+}

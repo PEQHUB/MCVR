@@ -7,6 +7,7 @@ endif(WIN32)
 
 file(GLOB_RECURSE GLSL_SHADERS CONFIGURE_DEPENDS "*.vert" "*.frag" "*.rgen" "*.rmiss" "*.rchit" "*.rahit" "*.rint" "*.comp")
 file(GLOB_RECURSE GLSL_DEPENDS CONFIGURE_DEPENDS "../common/*.hpp" "../common/*.glsl" "util/*.glsl")
+list(FILTER GLSL_SHADERS EXCLUDE REGEX "/world/ray_tracing/internal/")
 
 set(SPIRV_OUTPUT_PATH "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 file(MAKE_DIRECTORY ${SPIRV_OUTPUT_PATH})
@@ -101,6 +102,18 @@ install(
     DESTINATION ${MCVR_INSTALL_LIB_DIR}/shaders
     FILES_MATCHING PATTERN "*.spv"
 )
+
+set(UPSTREAM_RT_PACK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/world/ray_tracing/internal")
+if(EXISTS "${UPSTREAM_RT_PACK_DIR}/advanced/configs.json")
+    install(
+        DIRECTORY "${UPSTREAM_RT_PACK_DIR}/"
+        DESTINATION "${MCVR_INSTALL_BIN_DIR}/res/world/ray_tracing/internal"
+    )
+    install(
+        DIRECTORY "${UPSTREAM_RT_PACK_DIR}/"
+        DESTINATION "${MCVR_INSTALL_LIB_DIR}/shaders/world/ray_tracing/internal"
+    )
+endif()
 
 if(WIN32 AND MCVR_SHADER_DEBUG_INFO)
     find_program(SPIRV_DIS spirv-dis.exe HINTS "$ENV{VULKAN_SDK}/Bin")

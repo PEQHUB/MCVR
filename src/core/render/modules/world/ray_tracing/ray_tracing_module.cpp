@@ -18,6 +18,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <sstream>
 #include <string>
 
@@ -71,6 +72,36 @@ uint32_t effectiveDirectLightBackend() {
     return std::clamp<uint32_t>(Renderer::options.directLightBackend, 0, 2);
 }
 
+bool upstreamRtPackFileExists(const char* relativePath) {
+    return std::filesystem::exists(
+        Renderer::folderPath / "shaders/world/ray_tracing/internal/advanced" / relativePath);
+}
+
+uint32_t upstreamRtPassReadinessMask() {
+    uint32_t mask = 0;
+    const char* passFiles[] = {
+        "primary/primary.rgen",
+        "generate_initial_samples/generate_initial_samples.comp",
+        "visibility/visibility.rgen",
+        "temporal_reuse/temporal_reuse.comp",
+        "spatial_reuse/spatial_reuse.comp",
+        "direct_light/direct_light.rgen",
+        "world/world.rgen",
+    };
+    for (uint32_t i = 0; i < static_cast<uint32_t>(sizeof(passFiles) / sizeof(passFiles[0])); ++i) {
+        if (upstreamRtPackFileExists(passFiles[i])) {
+            mask |= (1u << i);
+        }
+    }
+    return mask;
+}
+
+bool upstreamRtPackReady() {
+    constexpr uint32_t kRequiredPassMask = 0x7fu;
+    return upstreamRtPackFileExists("configs.json") &&
+        (upstreamRtPassReadinessMask() & kRequiredPassMask) == kRequiredPassMask;
+}
+
 class ScopedGpuProfile {
 public:
     ScopedGpuProfile(VkCommandBuffer cmd, const char* name) : cmd_(cmd) {
@@ -115,6 +146,8 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
 #endif
     const bool directLightPipelinePossible = directLightPipelineCompiled && directLightBackend != 0;
     const bool rtxdiBackendPossible = directLightPipelineCompiled && rtxdiCompiled && directLightBackend == 2;
+    const uint32_t upstreamRtPassMask = upstreamRtPassReadinessMask();
+    const bool upstreamRtReady = upstreamRtPackReady();
 #ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
     bool directLightResourcesReady = false;
     uint32_t directLightReservoirWidth = 0;
@@ -154,6 +187,17 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",directLightPipelinePossible:" << (directLightPipelinePossible ? 1 : 0)
         << ",rtxdiBackendPossible:" << (rtxdiBackendPossible ? 1 : 0)
         << ",directLightPipelineActive:" << (directLightPipelinePossible ? 1 : 0)
+        << ",directLightVisualOverrideActive:0"
+        << ",directLightScaffoldVisualSubstituteActive:0"
+        << ",directLightUpstreamPackReady:" << (upstreamRtReady ? 1 : 0)
+        << ",directLightUpstreamPassMask:" << upstreamRtPassMask
+        << ",directLightUpstreamPrimaryReady:" << ((upstreamRtPassMask & (1u << 0)) ? 1 : 0)
+        << ",directLightUpstreamInitialReady:" << ((upstreamRtPassMask & (1u << 1)) ? 1 : 0)
+        << ",directLightUpstreamVisibilityReady:" << ((upstreamRtPassMask & (1u << 2)) ? 1 : 0)
+        << ",directLightUpstreamTemporalReady:" << ((upstreamRtPassMask & (1u << 3)) ? 1 : 0)
+        << ",directLightUpstreamSpatialReady:" << ((upstreamRtPassMask & (1u << 4)) ? 1 : 0)
+        << ",directLightUpstreamDirectLightReady:" << ((upstreamRtPassMask & (1u << 5)) ? 1 : 0)
+        << ",directLightUpstreamWorldReady:" << ((upstreamRtPassMask & (1u << 6)) ? 1 : 0)
         << ",directLightResourcesReady:" << (directLightResourcesReady ? 1 : 0)
         << ",directLightReservoirWidth:" << directLightReservoirWidth
         << ",directLightReservoirHeight:" << directLightReservoirHeight
@@ -164,7 +208,7 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",directLightPrimaryPipelineReady:" << (directLightPrimaryPipeline_ != VK_NULL_HANDLE ? 1 : 0)
         << ",directLightInitialPipelineReady:" << (directLightInitialPipeline_ != VK_NULL_HANDLE ? 1 : 0)
         << ",directLightUtilityPipelineReady:" << (directLightUtilityPipeline_ != VK_NULL_HANDLE ? 1 : 0)
-        << ",directLightExternalized:" << (directLightBackend == 1 && directLightInitialPipeline_ != VK_NULL_HANDLE ? 1 : 0)
+        << ",directLightExternalized:0"
         << ",directLightPrimarySurfacePixels:" << directLightLastCounters_[0]
         << ",directLightValidReservoirs:" << directLightLastCounters_[1]
         << ",directLightTemporalReused:" << directLightLastCounters_[2]
@@ -2579,7 +2623,10 @@ void RayTracingModuleContext::render() {
                 framework->vma(), framework->device(), kDirectLightCounterCount * sizeof(uint32_t),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         }
-        directLightExternalActive = effectiveDirectLightBackend() == 1
+        // Backend 1 is reserved for upstream parity. The old compute scaffold is
+        // diagnostics-only and must not replace legacy direct lighting; doing so
+        // drops the real RT sun/shadow path and makes visual comparisons invalid.
+        directLightExternalActive = false && effectiveDirectLightBackend() == 1
             && module->directLightInitialPipeline_ != VK_NULL_HANDLE
             && frameIdx < module->directLightInitialDescSets_.size()
             && frameIdx < module->directLightPrimarySurfaceImages_.size()

@@ -1,0 +1,318 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+#include "common/shared.hpp"
+#include "common/chunk_lookup.glsl"
+#include "common/light.glsl"
+#include "util/disney.glsl"
+#include "util/alpha_mode.glsl"
+#include "common/fft_water.glsl"
+#include "util/height_map.glsl"
+#include "util/random.glsl"
+#include "util/ray_cone.glsl"
+#include "util/sampling_helpers.glsl"
+#include "common/first_hit_state.glsl"
+#define ADV_RUNTIME_PRIMARY_SECONDARY_READONLY 1
+#include "common/runtime_primary_secondary_arrays.glsl"
+#undef ADV_RUNTIME_PRIMARY_SECONDARY_READONLY
+#include "common/runtime_texture_arrays.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D textures[];
+
+layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
+    TextureMapping mapping;
+};
+
+layout(set = 2, binding = 0) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+
+#define AREA_LIGHT_RESERVOIR_LOAD_RAW0(pixel) loadRestirLightReservoirLayer(pixel, ADV_RESERVOIR_PING_INPUT, 0)
+#define AREA_LIGHT_RESERVOIR_LOAD_RAW1(pixel) loadRestirLightReservoirLayer(pixel, ADV_RESERVOIR_PING_INPUT, 1)
+#define AREA_LIGHT_RESERVOIR_LOAD_RAW2(pixel) loadRestirLightReservoirLayer(pixel, ADV_RESERVOIR_PING_INPUT, 2)
+#define AREA_LIGHT_RESERVOIR_STORE_RAW0(pixel, value) storeRestirLightReservoirLayer(pixel, !ADV_RESERVOIR_PING_INPUT, 0, value)
+#define AREA_LIGHT_RESERVOIR_STORE_RAW1(pixel, value) storeRestirLightReservoirLayer(pixel, !ADV_RESERVOIR_PING_INPUT, 1, value)
+#define AREA_LIGHT_RESERVOIR_STORE_RAW2(pixel, value) storeRestirLightReservoirLayer(pixel, !ADV_RESERVOIR_PING_INPUT, 2, value)
+#define AREA_LIGHT_RESERVOIR_LOAD_SOURCE_RAW(pixel) loadRestirLightReservoirSource(pixel, ADV_RESERVOIR_PING_INPUT)
+#define AREA_LIGHT_RESERVOIR_STORE_SOURCE_RAW(pixel, value) storeRestirLightReservoirSource(pixel, !ADV_RESERVOIR_PING_INPUT, value)
+
+#define CONST_ONLY
+#include "util/vertex.glsl"
+
+#include "common/surface_eval.glsl"
+#define ADV_DIRECT_LIGHT_SURFACE_HAS_SECONDARY_CACHE 1
+#include "common/direct_light_surface.glsl"
+#include "common/direct_light_reservoir.glsl"
+#include "common/direct_light_reuse_query.glsl"
+#include "common/constants.glsl"
+
+struct SpatialReuseGateCache {
+    vec3 planeHitWorldPos;
+    vec3 baseGeoNormal;
+};
+
+struct SpatialReuseReferenceCache {
+    vec3 planeHitWorldPos;
+    vec2 textureUV;
+    vec3 dPduWorld;
+    vec3 dPdvWorld;
+    vec3 baseGeoNormal;
+    vec2 atlasUvMin;
+    vec2 atlasUvMax;
+};
+
+SpatialReuseReferenceCache loadSpatialReuseReferenceCache(ivec2 pixel) {
+    vec4 cache0 = loadSecondarySurfaceCacheLayer(pixel, 0);
+    vec4 cache1 = loadSecondarySurfaceCacheLayer(pixel, 1);
+    vec4 cache2 = loadSecondarySurfaceCacheLayer(pixel, 2);
+    vec4 cache3 = loadSecondarySurfaceCacheLayer(pixel, 3);
+    vec4 cache4 = loadSecondarySurfaceCacheLayer(pixel, 4);
+
+    SpatialReuseReferenceCache cache;
+    cache.planeHitWorldPos = cache0.xyz;
+    cache.textureUV = vec2(cache0.w, cache1.w);
+    cache.dPduWorld = cache1.xyz;
+    cache.dPdvWorld = cache2.xyz;
+    cache.baseGeoNormal = cache3.xyz;
+    cache.atlasUvMin = vec2(cache2.w, cache3.w);
+    cache.atlasUvMax = cache4.xy;
+    return cache;
+}
+
+struct SpatialReuseReservoirCandidate {
+    vec3 point;
+    float valid;
+    vec3 normal;
+    vec3 emission;
+    float contributionWeight;
+    float confidence;
+};
+
+bool tryLoadSpatialReuseReservoirCandidate(ivec2 pixel, out SpatialReuseReservoirCandidate candidate) {
+    candidate.point = vec3(0.0);
+    candidate.valid = 0.0;
+    candidate.normal = vec3(0.0, 1.0, 0.0);
+    candidate.emission = vec3(0.0);
+    candidate.contributionWeight = 0.0;
+    candidate.confidence = 0.0;
+
+    vec4 reservoir0 = loadRestirLightReservoirLayer(pixel, ADV_RESERVOIR_PING_INPUT, 0);
+    unpackAreaLightReservoirValidityConfidence(reservoir0.w, candidate.valid, candidate.confidence);
+    if (!(candidate.valid > 0.5) || !(candidate.confidence > 1e-8)) { return false; }
+
+    vec4 reservoir2 = loadRestirLightReservoirLayer(pixel, ADV_RESERVOIR_PING_INPUT, 2);
+    candidate.emission = reservoir2.xyz;
+    candidate.contributionWeight = reservoir2.w;
+    if (!(candidate.contributionWeight > 1e-8)) { return false; }
+
+    vec4 reservoir1 = loadRestirLightReservoirLayer(pixel, ADV_RESERVOIR_PING_INPUT, 1);
+    candidate.point = reservoir0.xyz;
+    candidate.normal = normalizeF(reservoir1.xyz, vec3(0.0, 1.0, 0.0));
+    return true;
+}
+
+float spatialReuseReservoirSampleCount(SpatialReuseReservoirCandidate candidate) {
+    return candidate.valid > 0.5 ? candidate.confidence : 0.0;
+}
+
+float evaluateSpatialReuseReservoirTargetAtQuery(SpatialReuseReservoirCandidate candidate,
+                                                 DirectLightReuseQuery query,
+                                                 SpatialReuseReferenceCache cache) {
+    if (!(candidate.valid > 0.5) || !query.valid) { return 0.0; }
+
+    SampledSurface surface = sampledSurfaceFromReuseQuery(query);
+    float targetFunction = 0.0;
+    evaluateAreaLightSampleContribution(surface, query.viewDir, cache.textureUV, cache.planeHitWorldPos,
+                                        cache.atlasUvMin, cache.atlasUvMax, cache.dPduWorld, cache.dPdvWorld,
+                                        cache.baseGeoNormal, query.traceLocalHeight, query.normalTextureID,
+                                        query.maxDepthWorld, candidate.emission, candidate.point, candidate.normal, false,
+                                        targetFunction);
+    return targetFunction;
+}
+
+AreaLightSample areaLightSampleFromSpatialReuseReservoir(ivec2 pixel,
+                                                         SpatialReuseReservoirCandidate candidate,
+                                                         float targetFunction) {
+    AreaLightSample lightSample = makeEmptyAreaLightSample();
+    if (!(candidate.valid > 0.5)) { return lightSample; }
+
+    uvec4 reservoirSource = loadRestirLightReservoirSource(pixel, ADV_RESERVOIR_PING_INPUT);
+    lightSample.point = candidate.point;
+    lightSample.targetFunction = targetFunction;
+    lightSample.normal = candidate.normal;
+    lightSample.contributionWeight = candidate.contributionWeight;
+    lightSample.emission = candidate.emission;
+    lightSample.confidence = candidate.confidence;
+    lightSample.sourceID = reservoirSource.xy;
+    lightSample.sourceLightIndex = reservoirSource.z;
+    lightSample.sourceChunkIndex = reservoirSource.w;
+    return lightSample;
+}
+
+void spatialReuseRisAddReservoirCandidate(inout AreaLightRisState ris,
+                                          ivec2 pixel,
+                                          SpatialReuseReservoirCandidate candidate,
+                                          float targetFunction,
+                                          float weight,
+                                          inout uint seed) {
+    if (!(weight > 1e-8) || !(targetFunction > 1e-8) || !(candidate.contributionWeight > 1e-8) ||
+        !(candidate.confidence > 1e-8)) {
+        return;
+    }
+
+    ris.weightSum += weight;
+    if (!ris.hasSampleOut || rand(seed) * ris.weightSum < weight) {
+        ris.sampleOut = areaLightSampleFromSpatialReuseReservoir(pixel, candidate, targetFunction);
+        ris.hasSampleOut = true;
+    }
+}
+
+struct SpatialReuseQueryContext {
+    vec3 currentWorldPos;
+    vec3 currentNormal;
+    float worldPerPixel;
+};
+
+SpatialReuseQueryContext buildSpatialReuseQueryContext(SpatialReuseReferenceCache cacheQ, ivec2 resolution) {
+    SpatialReuseQueryContext queryContext;
+    queryContext.currentWorldPos = cacheQ.planeHitWorldPos;
+    queryContext.currentNormal = cacheQ.baseGeoNormal;
+    queryContext.worldPerPixel = directLightWorldPerPixel(length(cacheQ.planeHitWorldPos), resolution);
+    return queryContext;
+}
+
+bool spatialReuseDonorMatches(ivec2 q,
+                              ivec2 p,
+                              SpatialReuseQueryContext queryContext,
+                              SpatialReuseGateCache donorCache) {
+    vec3 donorWorldPos = donorCache.planeHitWorldPos;
+    vec3 donorNormal = donorCache.baseGeoNormal;
+
+    float normalSimilarity = dot(donorNormal, queryContext.currentNormal);
+    if (normalSimilarity <= ADV_SPATIAL_REUSE_NORMAL_THRESHOLD) { return false; }
+
+    vec3 worldPosDelta = donorWorldPos - queryContext.currentWorldPos;
+    float planeDistance =
+        max(abs(dot(worldPosDelta, queryContext.currentNormal)), abs(dot(worldPosDelta, donorNormal)));
+    if (planeDistance > ADV_SPATIAL_REUSE_PLANE_DISTANCE_TOLERANCE) { return false; }
+
+    vec3 tangentReferenceNormal = normalizeF(queryContext.currentNormal + donorNormal, queryContext.currentNormal);
+    vec3 tangentDelta = worldPosDelta - tangentReferenceNormal * dot(worldPosDelta, tangentReferenceNormal);
+    float tangentDistance = length(tangentDelta);
+    float donorPixelDistance = max(length(vec2(p - q)), 1.0);
+    float tangentTolerance =
+        max(ADV_SPATIAL_REUSE_MIN_TANGENT_TOLERANCE,
+            queryContext.worldPerPixel * donorPixelDistance * ADV_SPATIAL_REUSE_TANGENT_PIXEL_FOOTPRINT_SCALE);
+    return tangentDistance <= tangentTolerance;
+}
+
+void clearAreaLightReservoirOutputs(ivec2 pixel) {
+    storeAreaLightReservoir(pixel, makeEmptyAreaLightReservoir());
+}
+
+DirectLightCameraRay buildDirectLightCameraRay(ivec2 pixel, vec2 resolution) {
+    DirectLightCameraRay cameraRay = buildPrimaryViewDirectLightCameraRay(pixel, resolution);
+
+    vec4 secondaryOriginState = loadSecondaryRayStateLayer(pixel, 0);
+    vec4 secondaryDirectionState = loadSecondaryRayStateLayer(pixel, 1);
+    return buildStoredDirectLightCameraRay(secondaryOriginState.xyz, secondaryDirectionState.xyz, cameraRay.coneSpread);
+}
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 resolution = imageSize(secondaryRayStateImage).xy;
+    if (any(greaterThanEqual(q, resolution))) { return; }
+
+    PrimarySurfaceCache primaryCacheQ = loadSecondarySurfaceCache(q);
+    if (!primaryCacheQ.valid) {
+        clearAreaLightReservoirOutputs(q);
+        return;
+    }
+    
+    DirectLightCameraRay cameraRay = buildDirectLightCameraRay(q, vec2(resolution));
+    DirectLightPreparedSurface prepared;
+    prepareDirectLightSurface(primaryCacheQ, cameraRay, prepared);
+    DirectLightReuseQuery queryQ = buildDirectLightReuseQuery(prepared, cameraRay.viewDir);
+
+    if (!queryQ.valid) {
+        clearAreaLightReservoirOutputs(q);
+        return;
+    }
+    SpatialReuseReferenceCache cacheQ = loadSpatialReuseReferenceCache(q);
+
+    uint spatialPassSeedSalt = ADV_RESERVOIR_PING_INPUT ? 0x53A71A11u : 0xC4F82E4Du;
+    uint seed = xxhash32(uvec3(uint(q.x), uint(q.y), worldUBO.seed ^ spatialPassSeedSalt));
+    AreaLightRisState r = makeAreaLightRisState();
+    float sampleCountSum = 0.0;
+    SpatialReuseQueryContext queryContext = buildSpatialReuseQueryContext(cacheQ, resolution);
+    SpatialReuseReservoirCandidate cur;
+    float curSampleCount = tryLoadSpatialReuseReservoirCandidate(q, cur) ? spatialReuseReservoirSampleCount(cur) : 0.0;
+    bool firstSpatialPass = ADV_RESERVOIR_PING_INPUT == ADV_RESERVOIR_FRAME_PING_INPUT;
+    bool disocclusionBoostActive = firstSpatialPass && curSampleCount < float(ADV_TEMPORAL_CONFIDENCE_CAP);
+    int spatialSampleCount = ADV_SPATIAL_REUSE_SAMPLE_COUNT;
+    if (disocclusionBoostActive) {
+        spatialSampleCount = max(spatialSampleCount, ADV_SPATIAL_REUSE_DISOCCLUSION_BOOST_SAMPLES);
+    }
+
+    if (curSampleCount > 1e-8) {
+        sampleCountSum += curSampleCount;
+
+        float curTarget = evaluateSpatialReuseReservoirTargetAtQuery(cur, queryQ, cacheQ);
+        if (curTarget > 1e-8) {
+            float w = curSampleCount * curTarget * cur.contributionWeight;
+            spatialReuseRisAddReservoirCandidate(r, q, cur, curTarget, w, seed);
+        }
+    }
+
+    for (int i = 0; i < spatialSampleCount; ++i) {
+        float diskRadius = sqrt(rand(seed)) * float(ADV_SPATIAL_REUSE_RADIUS);
+        float diskAngle = 2.0 * PI * rand(seed);
+        ivec2 p = q + ivec2(round(vec2(cos(diskAngle), sin(diskAngle)) * diskRadius));
+        if (any(lessThan(p, ivec2(0))) || any(greaterThanEqual(p, resolution))) { continue; }
+        if (all(equal(p, q))) { continue; }
+
+        PrimarySurfaceCache donorSurfaceCache = loadSecondarySurfaceCache(p);
+        if (!donorSurfaceCache.valid) { continue; }
+        SpatialReuseGateCache donorCache;
+        donorCache.planeHitWorldPos = donorSurfaceCache.planeHitWorldPos;
+        donorCache.baseGeoNormal = donorSurfaceCache.baseGeoNormal;
+        if (!spatialReuseDonorMatches(q, p, queryContext, donorCache)) { continue; }
+
+        SpatialReuseReservoirCandidate s;
+        if (!tryLoadSpatialReuseReservoirCandidate(p, s)) { continue; }
+        float donorSampleCount = spatialReuseReservoirSampleCount(s);
+        if (!(donorSampleCount > 1e-8)) { continue; }
+        float donorMergeCount = 0.0;
+        if (!(donorSampleCount > 1.0)) {
+            donorMergeCount = disocclusionBoostActive ?
+                                  min(donorSampleCount, ADV_SPATIAL_REUSE_BOOST_NAIVE_DONOR_MERGE_COUNT) :
+                                  0.0;
+        } else {
+            float donorCountFade =
+                clamp((donorSampleCount - 1.0) / max(ADV_SPATIAL_REUSE_NAIVE_M_THRESHOLD - 1.0, 1e-8), 0.0, 1.0);
+            donorMergeCount = donorSampleCount * donorCountFade;
+        }
+        if (!(donorMergeCount > 1e-8)) { continue; }
+
+        float target = evaluateSpatialReuseReservoirTargetAtQuery(s, queryQ, cacheQ);
+        if (!(target > 1e-8)) { continue; }
+
+        sampleCountSum += donorMergeCount;
+        float w = donorMergeCount * target * s.contributionWeight;
+        spatialReuseRisAddReservoirCandidate(r, p, s, target, w, seed);
+    }
+
+    if (!(sampleCountSum > 1e-8) || !r.hasSampleOut) {
+        storeAreaLightReservoir(q, makeEmptyAreaLightReservoir());
+        return;
+    }
+
+    float outputConfidence = min(sampleCountSum, float(ADV_TEMPORAL_CONFIDENCE_CAP));
+    AreaLightReservoir spatiallyReused = areaLightReservoirFromRis(r, sampleCountSum, outputConfidence);
+    storeAreaLightReservoir(q, spatiallyReused);
+}
