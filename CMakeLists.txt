@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(minecraft-vulkan-renderer)
+project(minecraft-vulkan-renderer LANGUAGES C CXX)
 
 if(NOT DEFINED JAVA_PROJECT_ROOT_DIR OR "${JAVA_PROJECT_ROOT_DIR}" STREQUAL "")
     message(FATAL_ERROR "JAVA_PROJECT_ROOT_DIR is required. Pass -DJAVA_PROJECT_ROOT_DIR=/path/to/root/of/the/java/project/")
@@ -11,6 +11,7 @@ else()
 endif()
 
 set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_C_STANDARD 99)
 if (MSVC)
     # Generate PDB in Release for crash stack traces (no perf impact — debug info is in separate .pdb)
     add_compile_options($<$<CONFIG:Release>:/Zi>)

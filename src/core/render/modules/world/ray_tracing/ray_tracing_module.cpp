@@ -189,7 +189,11 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",directLightPipelineActive:" << (directLightPipelinePossible ? 1 : 0)
         << ",directLightVisualOverrideActive:0"
         << ",directLightScaffoldVisualSubstituteActive:0"
+        << ",directLightRuntimeCompilerReady:1"
         << ",directLightUpstreamExecutionActive:0"
+        << ",directLightUpstreamExecutorReady:0"
+        << ",directLightUpstreamExecutorBlockedNoPassRuntime:1"
+        << ",directLightUpstreamExecutorBlockedNoRuntimeDescriptors:1"
         << ",directLightPerfComparisonValid:0"
         << ",directLightUpstreamPackReady:" << (upstreamRtReady ? 1 : 0)
         << ",directLightUpstreamPassMask:" << upstreamRtPassMask

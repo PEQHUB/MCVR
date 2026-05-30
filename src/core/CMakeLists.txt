@@ -2,6 +2,33 @@ file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS "*.cpp")
 
 add_library(core SHARED ${SOURCE_FILES})
 target_link_libraries(core PUBLIC ngx ${JNI_LIBRARIES} VulkanMemoryAllocator volk::volk glfw streamline)
+
+if(DEFINED ENV{VULKAN_SDK} AND NOT "$ENV{VULKAN_SDK}" STREQUAL "")
+    set(MCVR_VULKAN_SDK "$ENV{VULKAN_SDK}")
+else()
+    set(MCVR_VULKAN_SDK "C:/VulkanSDK/1.4.341.1")
+endif()
+
+find_path(SHADERC_INCLUDE_DIR shaderc/shaderc.hpp
+    HINTS
+        "${MCVR_VULKAN_SDK}/Include"
+        "${MCVR_VULKAN_SDK}/include"
+        "${MCVR_VULKAN_SDK}/x86_64/include"
+)
+find_library(SHADERC_LIBRARY
+    NAMES shaderc_combined shaderc_shared shaderc
+    HINTS
+        "${MCVR_VULKAN_SDK}/Lib"
+        "${MCVR_VULKAN_SDK}/lib"
+        "${MCVR_VULKAN_SDK}/x86_64/lib"
+)
+
+if(NOT SHADERC_INCLUDE_DIR OR NOT SHADERC_LIBRARY)
+    message(FATAL_ERROR "shaderc was not found. Set VULKAN_SDK or install shaderc.")
+endif()
+
+target_include_directories(core PUBLIC ${SHADERC_INCLUDE_DIR})
+target_link_libraries(core PUBLIC ${SHADERC_LIBRARY})
 if (MCVR_ENABLE_OMM)
     target_link_libraries(core PUBLIC omm-lib)
     target_compile_definitions(core PUBLIC MCVR_ENABLE_OMM)
