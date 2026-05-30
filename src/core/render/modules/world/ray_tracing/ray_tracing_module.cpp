@@ -34,6 +34,7 @@ constexpr uint32_t kSharcQueryCounterCount = 8;
 constexpr uint32_t kDirectLightCounterCount = 16;
 constexpr uint32_t kRtDebugDisableDirectLighting = 16;
 constexpr bool kForceDisableShaderDisplacementForGpuFaultIsolation = true;
+constexpr bool kAllowUpstreamRtExecutorDispatch = false;
 
 bool shaderDisplacementRuntimeAllowed() {
     return !kForceDisableShaderDisplacementForGpuFaultIsolation;
@@ -3588,7 +3589,7 @@ void RayTracingModuleContext::render() {
 
 #ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
     const uint32_t directLightBackend = effectiveDirectLightBackend();
-    const bool upstreamDirectLightActive = directLightBackend == 1;
+    const bool upstreamDirectLightActive = kAllowUpstreamRtExecutorDispatch && directLightBackend == 1;
     const bool directLightPipelineActive = directLightBackend == 2;
     bool directLightExternalActive = false;
     if (directLightPipelineActive) {
