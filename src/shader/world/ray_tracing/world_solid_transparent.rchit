@@ -1002,6 +1002,12 @@ void main() {
     vec3 geometricNormal;
     vec3 normal =
         calculateNormal(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, mat.normal, viewDir, geometricNormal, false);
+    const uint MATERIAL_CLASS_ORGANIC = 19u;
+    bool crossedGrassPlant = isBlockGeometry &&
+                             biomeTintType == 1u &&
+                             hasMaterialClass &&
+                             mc.classId == MATERIAL_CLASS_ORGANIC &&
+                             abs(geometricNormal.y) < 0.001;
 #if RARSER_SHADER_DISPLACEMENT
     if (hasDisplacedSurface) {
         geometricNormal = displacedGeometricNormal;
@@ -1016,6 +1022,10 @@ void main() {
         if (dot(viewDir, normal) < 0.0) normal = geometricNormal;
     }
 #endif
+    if (crossedGrassPlant) {
+        geometricNormal = vec3(0.0, 1.0, 0.0);
+        normal = geometricNormal;
+    }
 
     // Procedural noise modulation — gated by noiseTarget bits
     // bit 0 = roughness, bit 1 = normal perturbation, bit 2 = metallic, bit 3 = roughness additive only
