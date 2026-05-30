@@ -7,6 +7,7 @@
 #include "core/render/lights.hpp"
 #include "core/render/modules/world/ray_tracing/submodules/atmosphere.hpp"
 #include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
+#include "core/render/modules/world/shader_pack/shader_pack.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/crash_ring_buffer.hpp"
@@ -173,12 +174,21 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
             }
         }
     }
+    const bool upstreamExecutorReady =
+        directLightBackend == 1 &&
+        directLightUpstreamPackRuntimeReady_ &&
+        directLightUpstreamRuntimeResourcesReady_ &&
+        directLightUpstreamPassRuntimeReady_ &&
+        directLightUpstreamShaderCompileReady_ &&
+        directLightUpstreamPipelineReady_ &&
+        directLightUpstreamSbtReady_;
 #else
     constexpr bool directLightResourcesReady = false;
     constexpr uint32_t directLightReservoirWidth = 0;
     constexpr uint32_t directLightReservoirHeight = 0;
     constexpr uint64_t directLightReservoirPixels = 0;
     constexpr int directLightLightCount = 0;
+    constexpr bool upstreamExecutorReady = false;
 #endif
 
     out << "directLightBackend:" << directLightBackend
@@ -190,11 +200,28 @@ std::string RayTracingModule::diagnosticFeatureTruth() const {
         << ",directLightVisualOverrideActive:0"
         << ",directLightScaffoldVisualSubstituteActive:0"
         << ",directLightRuntimeCompilerReady:1"
-        << ",directLightUpstreamExecutionActive:0"
-        << ",directLightUpstreamExecutorReady:0"
+        << ",directLightUpstreamExecutionActive:" << (upstreamExecutorReady ? 1 : 0)
+        << ",directLightUpstreamExecutorReady:" << (upstreamExecutorReady ? 1 : 0)
+#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+        << ",directLightUpstreamExecutorBlockedNoPassRuntime:" << (directLightUpstreamPassRuntimeReady_ ? 0 : 1)
+        << ",directLightUpstreamExecutorBlockedNoRuntimeDescriptors:" << (directLightUpstreamRuntimeResourcesReady_ ? 0 : 1)
+        << ",directLightUpstreamPackRuntimeReady:" << (directLightUpstreamPackRuntimeReady_ ? 1 : 0)
+        << ",directLightUpstreamRuntimeResourcesReady:" << (directLightUpstreamRuntimeResourcesReady_ ? 1 : 0)
+        << ",directLightUpstreamPassRuntimeReady:" << (directLightUpstreamPassRuntimeReady_ ? 1 : 0)
+        << ",directLightUpstreamShaderCompileReady:" << (directLightUpstreamShaderCompileReady_ ? 1 : 0)
+        << ",directLightUpstreamPipelineReady:" << (directLightUpstreamPipelineReady_ ? 1 : 0)
+        << ",directLightUpstreamSbtReady:" << (directLightUpstreamSbtReady_ ? 1 : 0)
+#else
         << ",directLightUpstreamExecutorBlockedNoPassRuntime:1"
         << ",directLightUpstreamExecutorBlockedNoRuntimeDescriptors:1"
-        << ",directLightPerfComparisonValid:0"
+        << ",directLightUpstreamPackRuntimeReady:0"
+        << ",directLightUpstreamRuntimeResourcesReady:0"
+        << ",directLightUpstreamPassRuntimeReady:0"
+        << ",directLightUpstreamShaderCompileReady:0"
+        << ",directLightUpstreamPipelineReady:0"
+        << ",directLightUpstreamSbtReady:0"
+#endif
+        << ",directLightPerfComparisonValid:" << (upstreamExecutorReady ? 1 : 0)
         << ",directLightUpstreamPackReady:" << (upstreamRtReady ? 1 : 0)
         << ",directLightUpstreamPassMask:" << upstreamRtPassMask
         << ",directLightUpstreamPrimaryReady:" << ((upstreamRtPassMask & (1u << 0)) ? 1 : 0)
@@ -589,6 +616,7 @@ void RayTracingModule::build() {
     initClusterPipeline();
 #ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
     initDirectLightPipeline();
+    initUpstreamDirectLightRuntime();
 #endif
 #if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_BUFFERS)
     sharcCapacity_ = effectiveSharcCapacity();
@@ -2207,6 +2235,159 @@ void RayTracingModule::initDirectLightPipeline() {
 #endif
 }
 
+void RayTracingModule::initUpstreamDirectLightRuntime() {
+#ifndef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+    return;
+#else
+    directLightUpstreamPackRuntimeReady_ = false;
+    directLightUpstreamRuntimeResourcesReady_ = false;
+    directLightUpstreamPassRuntimeReady_ = false;
+    directLightUpstreamShaderCompileReady_ = false;
+    directLightUpstreamPipelineReady_ = false;
+    directLightUpstreamSbtReady_ = false;
+    directLightUpstreamRuntimeError_.clear();
+
+    auto framework = framework_.lock();
+    if (!framework) {
+        directLightUpstreamRuntimeError_ = "framework unavailable";
+        return;
+    }
+
+    try {
+        directLightUpstreamShaderPack_ = std::make_shared<ShaderPack>(framework);
+        ShaderPack::BuildConfig config;
+        config.shaderPackPath =
+            (Renderer::folderPath / "shaders/world/ray_tracing/internal/advanced").string();
+        config.shouldUseSharc = false;
+        config.language = "en_us";
+        config.staticAttributes.emplace(
+            "render_pipeline.module.ray_tracing.attribute.cloud_mode",
+            "render_pipeline.module.ray_tracing.attribute.cloud_mode.vanilla");
+        config.staticAttributes.emplace(
+            "render_pipeline.module.ray_tracing.attribute.volumetric_light_mode",
+            "render_pipeline.module.ray_tracing.attribute.volumetric_light_mode.vanilla");
+
+        std::string error;
+        if (!directLightUpstreamShaderPack_->initialize(config, error)) {
+            directLightUpstreamShaderPack_.reset();
+            directLightUpstreamRuntimeError_ = error;
+            RadianceLogger::log("RayTracing", "ERROR",
+                                "Upstream RT shader-pack runtime init failed: %s",
+                                error.c_str());
+            return;
+        }
+        directLightUpstreamPackRuntimeReady_ = true;
+
+        const auto& pack = directLightUpstreamShaderPack_->shaderPack();
+        const char* requiredPasses[] = {
+            "primary",
+            "precompute_light_neighborhoods",
+            "generate_initial_samples",
+            "visibility",
+            "temporal_reuse",
+            "spatial_reuse",
+            "direct_light",
+            "final_compose",
+        };
+        uint32_t foundMask = 0;
+        for (const auto& passConfig : pack.passes) {
+            std::string name;
+            switch (passConfig.type) {
+                case ShaderPackLoader::PassConfig::Type::RayTracing:
+                    name = passConfig.rayTracing.name;
+                    break;
+                case ShaderPackLoader::PassConfig::Type::Compute:
+                    name = passConfig.compute.name;
+                    break;
+                case ShaderPackLoader::PassConfig::Type::FullScreen:
+                    name = passConfig.fullScreen.name;
+                    break;
+                case ShaderPackLoader::PassConfig::Type::Render:
+                    name = passConfig.render.name;
+                    break;
+            }
+            for (uint32_t i = 0; i < static_cast<uint32_t>(std::size(requiredPasses)); ++i) {
+                if (name == requiredPasses[i]) {
+                    foundMask |= (1u << i);
+                    break;
+                }
+            }
+        }
+        directLightUpstreamPassRuntimeReady_ =
+            foundMask == ((1u << static_cast<uint32_t>(std::size(requiredPasses))) - 1u);
+        if (!directLightUpstreamPassRuntimeReady_) {
+            directLightUpstreamRuntimeError_ =
+                "missing required upstream pass runtime mask=" + std::to_string(foundMask);
+            RadianceLogger::log("RayTracing", "ERROR",
+                                "Upstream RT pass runtime incomplete mask=%u",
+                                foundMask);
+            return;
+        }
+
+        RadianceLogger::log(
+            "RayTracing", "INFO",
+            "Upstream RT shader-pack runtime ready passes=%zu textures=%zu buffers=%zu",
+            pack.passes.size(), pack.textures.size(), pack.buffers.size());
+    } catch (const std::exception& e) {
+        directLightUpstreamShaderPack_.reset();
+        directLightUpstreamRuntimeError_ = e.what();
+        RadianceLogger::log("RayTracing", "ERROR",
+                            "Upstream RT shader-pack runtime exception: %s",
+                            e.what());
+    } catch (...) {
+        directLightUpstreamShaderPack_.reset();
+        directLightUpstreamRuntimeError_ = "unknown exception";
+        RadianceLogger::log("RayTracing", "ERROR",
+                            "Upstream RT shader-pack runtime unknown exception");
+    }
+#endif
+}
+
+void RayTracingModule::refreshUpstreamDirectLightRuntime(uint32_t frameIndex) {
+#ifndef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
+    (void)frameIndex;
+    return;
+#else
+    if (effectiveDirectLightBackend() != 1) { return; }
+    if (!directLightUpstreamShaderPack_) {
+        initUpstreamDirectLightRuntime();
+    }
+    if (!directLightUpstreamShaderPack_ || !directLightUpstreamPassRuntimeReady_) { return; }
+    if (frameIndex >= hdrNoisyOutputImages_.size() || !hdrNoisyOutputImages_[frameIndex]) { return; }
+
+    try {
+        auto image = hdrNoisyOutputImages_[frameIndex];
+        directLightUpstreamShaderPack_->setRuntimeResourceExpressionVariables({
+            {.name = "RENDER_WIDTH", .value = static_cast<double>(image->width())},
+            {.name = "RENDER_HEIGHT", .value = static_cast<double>(image->height())},
+        });
+        directLightUpstreamShaderPack_->ensureRuntimeResources(image->width(), image->height());
+        directLightUpstreamRuntimeResourcesReady_ =
+            directLightUpstreamShaderPack_->runtimeResourcesReady();
+
+        // The full upstream executor still needs RadSER-specific descriptor-table
+        // and SBT integration before it can dispatch. Keep these explicit so
+        // DebugBridge cannot treat a resource-only runtime as a valid compare.
+        directLightUpstreamShaderCompileReady_ = directLightUpstreamRuntimeResourcesReady_;
+        directLightUpstreamPipelineReady_ = false;
+        directLightUpstreamSbtReady_ = false;
+    } catch (const std::exception& e) {
+        directLightUpstreamRuntimeResourcesReady_ = false;
+        directLightUpstreamShaderCompileReady_ = false;
+        directLightUpstreamRuntimeError_ = e.what();
+        RadianceLogger::log("RayTracing", "ERROR",
+                            "Upstream RT runtime resource refresh failed: %s",
+                            e.what());
+    } catch (...) {
+        directLightUpstreamRuntimeResourcesReady_ = false;
+        directLightUpstreamShaderCompileReady_ = false;
+        directLightUpstreamRuntimeError_ = "unknown exception";
+        RadianceLogger::log("RayTracing", "ERROR",
+                            "Upstream RT runtime resource refresh unknown exception");
+    }
+#endif
+}
+
 void RayTracingModule::initSharcBuffers() {
     auto framework = framework_.lock();
     if (!framework) return;
@@ -2629,6 +2810,7 @@ void RayTracingModuleContext::render() {
                 framework->vma(), framework->device(), kDirectLightCounterCount * sizeof(uint32_t),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         }
+        module->refreshUpstreamDirectLightRuntime(frameIdx);
         // Backend 1 is reserved for upstream parity. The old compute scaffold is
         // diagnostics-only and must not replace legacy direct lighting; doing so
         // drops the real RT sun/shadow path and makes visual comparisons invalid.

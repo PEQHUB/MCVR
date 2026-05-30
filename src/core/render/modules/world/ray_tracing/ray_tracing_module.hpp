@@ -18,6 +18,7 @@ class Atmosphere;
 class AtmosphereContext;
 class WorldPrepare;
 class WorldPrepareContext;
+class ShaderPack;
 
 struct RayTracingPushConstant {
     int numRayBounces;
@@ -108,6 +109,8 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     void initSpatialPipeline();
     void initClusterPipeline();
     void initDirectLightPipeline();
+    void initUpstreamDirectLightRuntime();
+    void refreshUpstreamDirectLightRuntime(uint32_t frameIndex);
     void initSharcBuffers();
     void initSharcUpdatePipeline();
     void initSharcResolvePipeline();
@@ -233,6 +236,14 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     VkDescriptorPool directLightUtilityDescPool_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> directLightUtilityDescSets_;
     std::shared_ptr<vk::Shader> directLightUtilityShader_;
+    std::shared_ptr<ShaderPack> directLightUpstreamShaderPack_;
+    bool directLightUpstreamPackRuntimeReady_ = false;
+    bool directLightUpstreamRuntimeResourcesReady_ = false;
+    bool directLightUpstreamPassRuntimeReady_ = false;
+    bool directLightUpstreamShaderCompileReady_ = false;
+    bool directLightUpstreamPipelineReady_ = false;
+    bool directLightUpstreamSbtReady_ = false;
+    std::string directLightUpstreamRuntimeError_;
 #endif
 
     // ReSTIR DI reservoir images (fixed roles)

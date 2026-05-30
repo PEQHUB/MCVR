@@ -1,7 +1,8 @@
 file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS "*.cpp")
 
 add_library(core SHARED ${SOURCE_FILES})
-target_link_libraries(core PUBLIC ngx ${JNI_LIBRARIES} VulkanMemoryAllocator volk::volk glfw streamline)
+target_link_libraries(core PUBLIC ngx ${JNI_LIBRARIES} VulkanMemoryAllocator volk::volk glfw streamline minizip tinyexpr)
+target_include_directories(core PRIVATE ${PROJECT_SOURCE_DIR}/extern/json/include ${PROJECT_SOURCE_DIR}/extern/minizip-ng)
 
 if(DEFINED ENV{VULKAN_SDK} AND NOT "$ENV{VULKAN_SDK}" STREQUAL "")
     set(MCVR_VULKAN_SDK "$ENV{VULKAN_SDK}")
@@ -27,7 +28,7 @@ if(NOT SHADERC_INCLUDE_DIR OR NOT SHADERC_LIBRARY)
     message(FATAL_ERROR "shaderc was not found. Set VULKAN_SDK or install shaderc.")
 endif()
 
-target_include_directories(core PUBLIC ${SHADERC_INCLUDE_DIR})
+target_include_directories(core PUBLIC ${SHADERC_INCLUDE_DIR} ${TINYEXPR_INCLUDE_DIR})
 target_link_libraries(core PUBLIC ${SHADERC_LIBRARY})
 if (MCVR_ENABLE_OMM)
     target_link_libraries(core PUBLIC omm-lib)

@@ -60,6 +60,11 @@ set(VK_XML_PATH ${PROJECT_SOURCE_DIR}/extern/vulkan_headers/registry/vk.xml)
 # STB
 set(STB_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/extern/stb)
 
+# Runtime shader-pack support (upstream RT executor)
+add_library(tinyexpr STATIC extern/tinyexpr/tinyexpr.c)
+set_target_properties(tinyexpr PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set(TINYEXPR_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/extern/tinyexpr)
+
 # DLSS
 add_subdirectory(extern/DLSS EXCLUDE_FROM_ALL)
 
@@ -144,6 +149,19 @@ if (MCVR_ENABLE_NRD)
 else()
     message(STATUS "NRD Denoiser Disabled")
 endif()
+
+# Runtime shader-pack support. Zip packs are not the RadSER production path yet,
+# but upstream's loader is built around minizip, so keep it linked while bringing
+# up the pass executor.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static libraries" FORCE)
+set(MZ_BUILD_TESTS OFF CACHE BOOL "Disable minizip tests" FORCE)
+set(MZ_BUILD_UNIT_TESTS OFF CACHE BOOL "Disable minizip unit tests" FORCE)
+set(MZ_FETCH_ZLIB ON CACHE BOOL "Fetch zlib automatically" FORCE)
+set(MZ_ZSTD OFF CACHE BOOL "Disable zstd in minizip-ng due to upstream target mismatch" FORCE)
+add_subdirectory(extern/minizip-ng EXCLUDE_FROM_ALL)
+set_target_properties(minizip PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+add_subdirectory(extern/json EXCLUDE_FROM_ALL)
 
 # OMM SDK (Opacity Micro-Map) - CPU baker only
 # We bypass the OMM top-level CMake and add only the library + its deps,
