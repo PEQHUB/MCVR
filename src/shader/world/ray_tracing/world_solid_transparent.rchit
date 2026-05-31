@@ -183,6 +183,31 @@ layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
 layout(location = 1) rayPayloadEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
 
+vec3 thinPlantRayOrigin(vec3 worldPos, vec3 rayDir) {
+    return worldPos + normalize(rayDir) * 0.0015;
+}
+
+float thinPlantDiffuseFactor(vec3 lightDir) {
+    float y = clamp(normalize(lightDir).y, -1.0, 1.0);
+    float side = sqrt(max(1.0 - y * y, 0.0));
+    return clamp(0.34 + 0.42 * max(y, 0.0) + 0.16 * side, 0.34, 0.82);
+}
+
+vec3 thinPlantDiffuseEval(LabPBRMat mat, vec3 lightDir) {
+    return mat.albedo * (thinPlantDiffuseFactor(lightDir) * INV_PI);
+}
+
+vec3 thinPlantDiffuseSample(LabPBRMat mat, out vec3 sampleDir, out float pdf, inout uint seed) {
+    vec3 plantNormal = vec3(0.0, 1.0, 0.0);
+    vec3 T, B;
+    Onb(plantNormal, T, B);
+
+    vec3 localDir = CosineSampleHemisphere(rand(seed), rand(seed));
+    sampleDir = normalize(ToWorld(T, B, plantNormal, localDir));
+    pdf = max(localDir.z * INV_PI, 1e-6);
+    return mat.albedo * (localDir.z * INV_PI);
+}
+
 // Sample height value from texture based on height source mode
 float sampleHeightRaw(uint texID, vec2 uv, vec2 uvMin, vec2 uvMax, int heightSourceMode, vec3 channelWeights, bool isBlock) {
     vec2 clampedUV = clamp(uv, uvMin, uvMax);
@@ -1026,14 +1051,13 @@ void main() {
 
 #if RARSER_THIN_PLANT_PRIMARY_FIX
     if (thinCutoutPlant) {
-        vec3 viewPlanar = vec3(viewDir.x, 0.0, viewDir.z);
-        float viewPlanarLen = length(viewPlanar);
-        vec3 plantNormal = viewPlanarLen > 1e-4
-            ? normalize(viewPlanar / viewPlanarLen + vec3(0.0, 0.35, 0.0))
-            : vec3(0.0, 1.0, 0.0);
-        normal = plantNormal;
+        normal = vec3(0.0, 1.0, 0.0);
         mat.normal = vec3(0.0, 0.0, 1.0);
-        mat.roughness = max(mat.roughness, 0.8);
+        mat.roughness = max(mat.roughness, 0.92);
+        mat.metallic = 0.0;
+        mat.transmission = 0.0;
+        mat.f0 = vec3(0.04);
+        mat.coatWeight = 0.0;
     }
 #endif
 
@@ -1360,12 +1384,14 @@ void main() {
     vec2 vmfBN = vec2(-1.0); // A/B test: force PCG, disable blue noise
     vec3 sampledLightDir = SampleVMF(mainRay.seed, lightDir, kappa, vmfBN);
     vec3 shadowBiasN = dot(sampledLightDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
-    vec3 shadowRayOrigin = offset_ray(worldPos, shadowBiasN);
+    vec3 shadowRayOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sampledLightDir)
+                                           : offset_ray(worldPos, shadowBiasN);
 
     bool skipSecondarySunShadow = RT_DEBUG_DISABLE_SECONDARY_SUN_SHADOW && mainRay.index > 0;
     if (worldUbo.skyType == 1 && !skipSecondarySunShadow) {
         float pdf; // not used
-        vec3 lightBRDF = DisneyEval(mat, viewDir, normal, sampledLightDir, pdf, pc.flags);
+        vec3 lightBRDF = thinCutoutPlant ? thinPlantDiffuseEval(mat, sampledLightDir)
+                                         : DisneyEval(mat, viewDir, normal, sampledLightDir, pdf, pc.flags);
 
         shadowRay.radiance = vec3(0.0);
         shadowRay.throughput = vec3(1.0);
@@ -1489,7 +1515,7 @@ void main() {
                 if (cullDist > al.radius) continue;
 
                 float NdotL = dot(normal, alDir);
-                if (NdotL < -0.1 || dist < 0.05) continue;
+                if ((!thinCutoutPlant && NdotL < -0.1) || dist < 0.05) continue;
 
                 // Windowed inverse-square attenuation
                 float invDist2 = 1.0 / max(dist2, 0.01);
@@ -1545,7 +1571,7 @@ void main() {
                 if (cullDist <= prevAL.radius && dist >= 0.05) {
                     vec3 alDir = toLight / max(dist, 0.001);
 
-                    if (dot(normal, alDir) > -0.1) {
+                    if (thinCutoutPlant || dot(normal, alDir) > -0.1) {
                         float invDist2 = 1.0 / max(dist2, 0.01);
                         float f2 = cullDist / prevAL.radius;
                         float window = max(1.0 - f2 * f2, 0.0);
@@ -1589,7 +1615,8 @@ void main() {
                 vec3 toSample = cs.worldPos - worldPos;
                 float sDist = length(toSample);
                 vec3 sDir = toSample / sDist;
-                vec3 shadowOrigin = offset_ray(worldPos, geometricNormal);
+                vec3 shadowOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sDir)
+                                                    : offset_ray(worldPos, geometricNormal);
 
                 shadowRay.radiance = vec3(0.0);
                 shadowRay.throughput = vec3(0.0);
@@ -1620,7 +1647,9 @@ void main() {
 #endif
 
                 vec3 brdf;
-                if (RESTIR_SIMPLIFIED_BRDF) {
+                if (thinCutoutPlant) {
+                    brdf = thinPlantDiffuseEval(mat, currentRes.lightDir);
+                } else if (RESTIR_SIMPLIFIED_BRDF) {
                     float NdotL = max(dot(normal, currentRes.lightDir), 0.0);
                     brdf = NdotL / PI * mat.albedo;
                 } else {
@@ -1659,7 +1688,7 @@ void main() {
                 if (cullDist > al.radius) continue;
 
                 float NdotL = dot(normal, alDir);
-                if (NdotL < -0.1 || dist < 0.05) continue;
+                if ((!thinCutoutPlant && NdotL < -0.1) || dist < 0.05) continue;
 
                 float invDist2 = 1.0 / max(dist2, 0.01);
                 float f = cullDist / al.radius;
@@ -1702,7 +1731,8 @@ void main() {
                 vec3 toSample = cs.worldPos - worldPos;
                 float sDist = length(toSample);
                 vec3 sDir = toSample / sDist;
-                vec3 shadowOrigin = offset_ray(worldPos, geometricNormal);
+                vec3 shadowOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sDir)
+                                                    : offset_ray(worldPos, geometricNormal);
 
                 shadowRay.radiance = vec3(0.0);
                 shadowRay.throughput = vec3(0.0);
@@ -1732,7 +1762,9 @@ void main() {
                 }
 #endif
                 vec3 brdf;
-                if (RESTIR_SIMPLIFIED_BRDF) {
+                if (thinCutoutPlant) {
+                    brdf = thinPlantDiffuseEval(mat, bestDir[k]);
+                } else if (RESTIR_SIMPLIFIED_BRDF) {
                     float NdotL = max(dot(normal, bestDir[k]), 0.0);
                     brdf = NdotL / PI * mat.albedo;
                 } else {
@@ -1784,7 +1816,7 @@ void main() {
             float cullDist = chebyDist;
             if (cullDist > al.radius) continue;
             float NdotL = dot(normal, alDir);
-            if (NdotL < -0.1 || dist < 0.05) continue;
+            if ((!thinCutoutPlant && NdotL < -0.1) || dist < 0.05) continue;
 
             float invDist2 = 1.0 / max(dist2, 0.01);
             float f = cullDist / al.radius;
@@ -1836,7 +1868,7 @@ void main() {
             if (cullDist <= prevAL.radius && dist >= 0.05) {
                 vec3 alDir = toLight / max(dist, 0.001);
 
-                if (dot(normal, alDir) > -0.1) {
+                if (thinCutoutPlant || dot(normal, alDir) > -0.1) {
                     float invDist2 = 1.0 / max(dist2, 0.01);
                     float f2 = cullDist / prevAL.radius;
                     float window = max(1.0 - f2 * f2, 0.0);
@@ -1880,7 +1912,8 @@ void main() {
             vec3 toSample = cs.worldPos - worldPos;
             float sDist = length(toSample);
             vec3 sDir = toSample / sDist;
-            vec3 shadowOrigin = offset_ray(worldPos, geometricNormal);
+            vec3 shadowOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sDir)
+                                                : offset_ray(worldPos, geometricNormal);
 
             shadowRay.radiance = vec3(0.0);
             shadowRay.throughput = vec3(0.0);
@@ -1912,7 +1945,8 @@ void main() {
 
             // Simplified Lambertian BRDF for indirect bounces (specular invisible behind denoiser)
             float NdotL = max(dot(normal, currentRes.lightDir), 0.0);
-            vec3 brdf = NdotL / PI * mat.albedo;
+            vec3 brdf = thinCutoutPlant ? thinPlantDiffuseEval(mat, currentRes.lightDir)
+                                        : NdotL / PI * mat.albedo;
             alAccum = currentRes.unshadowed * brdf * currentRes.W * visibility;
         }
 
@@ -1940,7 +1974,7 @@ void main() {
             if (cullDist > al.radius) continue;
 
             float NdotL = dot(normal, alDir);
-            if (NdotL < -0.1 || dist < 0.05) continue;
+            if ((!thinCutoutPlant && NdotL < -0.1) || dist < 0.05) continue;
 
             float invDist2 = 1.0 / max(dist2, 0.01);
             float f = cullDist / al.radius;
@@ -1961,7 +1995,9 @@ void main() {
             vec3 unshadowed = al.color * al.intensity * atten;
 
             vec3 brdf;
-            if (RESTIR_SIMPLIFIED_BRDF) {
+            if (thinCutoutPlant) {
+                brdf = thinPlantDiffuseEval(mat, alDir);
+            } else if (RESTIR_SIMPLIFIED_BRDF) {
                 float NdotL_b = max(dot(normal, alDir), 0.0);
                 brdf = NdotL_b / PI * mat.albedo;
             } else {
@@ -2083,7 +2119,13 @@ void main() {
     float pdf;
     uint lobeType;
     vec3 bsdfXi = vec3(-1.0); // A/B: PCG only
-    vec3 bsdf = DisneySample(mat, viewDir, normal, sampleDir, pdf, mainRay.seed, lobeType, pc.flags, bsdfXi);
+    vec3 bsdf;
+    if (thinCutoutPlant) {
+        bsdf = thinPlantDiffuseSample(mat, sampleDir, pdf, mainRay.seed);
+        lobeType = 0u;
+    } else {
+        bsdf = DisneySample(mat, viewDir, normal, sampleDir, pdf, mainRay.seed, lobeType, pc.flags, bsdfXi);
+    }
 
     prSetLobeType(mainRay, lobeType);
     mainRay.flags |= PR_NOISY_BIT;
@@ -2097,7 +2139,7 @@ void main() {
     // Prevent light leaks: perturbed normals can sample directions below the
     // geometric surface plane. Kill these for non-transmissive lobes (diffuse/specular).
     // Transmission (lobeType 2: glass/water) still needs through-surface rays.
-    if (lobeType != 2 && dot(sampleDir, geometricNormal) <= 0.0) {
+    if (!thinCutoutPlant && lobeType != 2 && dot(sampleDir, geometricNormal) <= 0.0) {
         mainRay.flags |= PR_STOP_BIT;
         return;
     }
@@ -2120,7 +2162,8 @@ void main() {
         }
     }
 #endif
-    mainRay.origin = offset_ray(bounceWorldPos, bounceOffsetN);
+    mainRay.origin = thinCutoutPlant ? thinPlantRayOrigin(bounceWorldPos, sampleDir)
+                                     : offset_ray(bounceWorldPos, bounceOffsetN);
 
     mainRay.direction = sampleDir;
     mainRay.flags &= ~PR_STOP_BIT;
