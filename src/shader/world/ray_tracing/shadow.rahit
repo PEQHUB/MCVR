@@ -85,10 +85,13 @@ layout(push_constant) uniform PushConstant {
 layout(location = 1) rayPayloadInEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
 
-vec3 thinPlantShadowTransmittance(vec3 tint) {
+vec3 thinPlantShadowTransmittance(vec3 tint, bool hasMaterialEntry, MaterialClassEntry mc) {
     vec3 plantTint = clamp(tint, vec3(0.0), vec3(1.0));
-    vec3 coloredTransmission = mix(vec3(1.0), plantTint, 0.35);
-    return clamp(coloredTransmission * 0.78, vec3(0.60), vec3(0.86));
+    float fill = hasMaterialEntry ? clamp(mc.subsurface, 0.0, 1.0) : 0.18;
+    float shadowStrength = hasMaterialEntry ? clamp(mc.normalStrength, 0.0, 2.0) : 1.0;
+    vec3 coloredTransmission = mix(vec3(1.0), plantTint, clamp(fill * 0.55, 0.0, 0.75));
+    float transmission = clamp(1.0 - shadowStrength * 0.28, 0.28, 0.95);
+    return clamp(coloredTransmission * transmission, vec3(0.25), vec3(0.95));
 }
 
 void main() {
@@ -193,13 +196,23 @@ void main() {
     }
 
     tint = CS_BT709_TO_BT2020 * tint;  // BT.709 -> BT.2020 working space
+    uint packedBlockType = v0.emissiveBlockType;
+    uint materialType = (packedBlockType >> 8u) & 0xFFu;
+    MaterialClassEntry thinPlantMc;
+    bool thinPlantHasMaterialEntry = false;
+    if (materialType > 0u && pc.materialClassAddr != 0) {
+        uint thinPlantMatIdx = materialType - 1u;
+        MaterialClassBufferRef matBuf = MaterialClassBufferRef(pc.materialClassAddr);
+        thinPlantMc = matBuf.materialClassMapping.entries[thinPlantMatIdx];
+        thinPlantHasMaterialEntry = true;
+    }
     bool thinCutoutPlant = isBlockGeometry && ((v0.emissiveBlockType & PBR_PACKED_THIN_CUTOUT_PLANT) != 0u);
     if (thinCutoutPlant) {
         if (alpha < 0.05) {
             ignoreIntersectionEXT;
             return;
         }
-        shadowRay.throughput *= thinPlantShadowTransmittance(tint);
+        shadowRay.throughput *= thinPlantShadowTransmittance(tint, thinPlantHasMaterialEntry, thinPlantMc);
         ignoreIntersectionEXT;
         return;
     }

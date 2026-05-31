@@ -187,21 +187,37 @@ vec3 thinPlantRayOrigin(vec3 worldPos, vec3 rayDir) {
     return worldPos + normalize(rayDir) * 0.0015;
 }
 
-vec3 thinPlantAlbedo(vec3 albedo) {
-    return min(clamp(albedo, vec3(0.0), vec3(1.0)), vec3(0.72));
+float thinPlantFill(bool hasMaterialEntry, MaterialClassEntry mc) {
+    return hasMaterialEntry ? clamp(mc.subsurface, 0.0, 1.0) : 0.18;
 }
 
-float thinPlantDiffuseFactor(vec3 lightDir) {
+float thinPlantBrightness(bool hasMaterialEntry, MaterialClassEntry mc) {
+    return hasMaterialEntry ? clamp(mc.gamutBoost, 0.25, 2.0) : 0.85;
+}
+
+vec3 thinPlantAlbedo(vec3 albedo, bool hasMaterialEntry, MaterialClassEntry mc) {
+    float brightness = thinPlantBrightness(hasMaterialEntry, mc);
+    float cap = clamp(0.40 + 0.38 * brightness, 0.40, 0.88);
+    return min(clamp(albedo, vec3(0.0), vec3(1.0)) * clamp(brightness, 0.35, 1.25), vec3(cap));
+}
+
+float thinPlantDiffuseFactor(vec3 lightDir, bool hasMaterialEntry, MaterialClassEntry mc) {
+    float fill = thinPlantFill(hasMaterialEntry, mc);
     float y = clamp(normalize(lightDir).y, -1.0, 1.0);
     float side = sqrt(max(1.0 - y * y, 0.0));
-    return clamp(0.16 + 0.34 * max(y, 0.0) + 0.07 * side, 0.16, 0.57);
+    float floorTerm = mix(0.06, 0.22, fill);
+    float topTerm = mix(0.30, 0.52, fill);
+    float sideTerm = mix(0.03, 0.09, fill);
+    return clamp(floorTerm + topTerm * max(y, 0.0) + sideTerm * side, 0.04, 0.62);
 }
 
-vec3 thinPlantDiffuseEval(LabPBRMat mat, vec3 lightDir) {
-    return thinPlantAlbedo(mat.albedo) * (thinPlantDiffuseFactor(lightDir) * INV_PI);
+vec3 thinPlantDiffuseEval(LabPBRMat mat, vec3 lightDir, bool hasMaterialEntry, MaterialClassEntry mc) {
+    return thinPlantAlbedo(mat.albedo, hasMaterialEntry, mc) *
+        (thinPlantDiffuseFactor(lightDir, hasMaterialEntry, mc) * INV_PI);
 }
 
-vec3 thinPlantDiffuseSample(LabPBRMat mat, out vec3 sampleDir, out float pdf, inout uint seed) {
+vec3 thinPlantDiffuseSample(LabPBRMat mat, bool hasMaterialEntry, MaterialClassEntry mc,
+                            out vec3 sampleDir, out float pdf, inout uint seed) {
     vec3 plantNormal = vec3(0.0, 1.0, 0.0);
     vec3 T, B;
     Onb(plantNormal, T, B);
@@ -209,7 +225,9 @@ vec3 thinPlantDiffuseSample(LabPBRMat mat, out vec3 sampleDir, out float pdf, in
     vec3 localDir = CosineSampleHemisphere(rand(seed), rand(seed));
     sampleDir = normalize(ToWorld(T, B, plantNormal, localDir));
     pdf = max(localDir.z * INV_PI, 1e-6);
-    return thinPlantAlbedo(mat.albedo) * (localDir.z * INV_PI) * 0.65;
+    float fill = thinPlantFill(hasMaterialEntry, mc);
+    float sampleScale = mix(0.42, 0.72, fill);
+    return thinPlantAlbedo(mat.albedo, hasMaterialEntry, mc) * (localDir.z * INV_PI) * sampleScale;
 }
 
 // Sample height value from texture based on height source mode
@@ -1057,7 +1075,7 @@ void main() {
     if (thinCutoutPlant) {
         normal = vec3(0.0, 1.0, 0.0);
         mat.normal = vec3(0.0, 0.0, 1.0);
-        mat.roughness = max(mat.roughness, 0.92);
+        mat.roughness = max(mat.roughness, hasMaterialEntry ? clamp(mc.roughness, 0.45, 1.0) : 0.92);
         mat.metallic = 0.0;
         mat.transmission = 0.0;
         mat.f0 = vec3(0.04);
@@ -1394,7 +1412,7 @@ void main() {
     bool skipSecondarySunShadow = RT_DEBUG_DISABLE_SECONDARY_SUN_SHADOW && mainRay.index > 0;
     if (worldUbo.skyType == 1 && !skipSecondarySunShadow) {
         float pdf; // not used
-        vec3 lightBRDF = thinCutoutPlant ? thinPlantDiffuseEval(mat, sampledLightDir)
+        vec3 lightBRDF = thinCutoutPlant ? thinPlantDiffuseEval(mat, sampledLightDir, hasMaterialEntry, mc)
                                          : DisneyEval(mat, viewDir, normal, sampledLightDir, pdf, pc.flags);
 
         shadowRay.radiance = vec3(0.0);
@@ -1652,7 +1670,7 @@ void main() {
 
                 vec3 brdf;
                 if (thinCutoutPlant) {
-                    brdf = thinPlantDiffuseEval(mat, currentRes.lightDir);
+                    brdf = thinPlantDiffuseEval(mat, currentRes.lightDir, hasMaterialEntry, mc);
                 } else if (RESTIR_SIMPLIFIED_BRDF) {
                     float NdotL = max(dot(normal, currentRes.lightDir), 0.0);
                     brdf = NdotL / PI * mat.albedo;
@@ -1767,7 +1785,7 @@ void main() {
 #endif
                 vec3 brdf;
                 if (thinCutoutPlant) {
-                    brdf = thinPlantDiffuseEval(mat, bestDir[k]);
+                    brdf = thinPlantDiffuseEval(mat, bestDir[k], hasMaterialEntry, mc);
                 } else if (RESTIR_SIMPLIFIED_BRDF) {
                     float NdotL = max(dot(normal, bestDir[k]), 0.0);
                     brdf = NdotL / PI * mat.albedo;
@@ -1949,7 +1967,7 @@ void main() {
 
             // Simplified Lambertian BRDF for indirect bounces (specular invisible behind denoiser)
             float NdotL = max(dot(normal, currentRes.lightDir), 0.0);
-            vec3 brdf = thinCutoutPlant ? thinPlantDiffuseEval(mat, currentRes.lightDir)
+            vec3 brdf = thinCutoutPlant ? thinPlantDiffuseEval(mat, currentRes.lightDir, hasMaterialEntry, mc)
                                         : NdotL / PI * mat.albedo;
             alAccum = currentRes.unshadowed * brdf * currentRes.W * visibility;
         }
@@ -2000,7 +2018,7 @@ void main() {
 
             vec3 brdf;
             if (thinCutoutPlant) {
-                brdf = thinPlantDiffuseEval(mat, alDir);
+                brdf = thinPlantDiffuseEval(mat, alDir, hasMaterialEntry, mc);
             } else if (RESTIR_SIMPLIFIED_BRDF) {
                 float NdotL_b = max(dot(normal, alDir), 0.0);
                 brdf = NdotL_b / PI * mat.albedo;
@@ -2125,7 +2143,7 @@ void main() {
     vec3 bsdfXi = vec3(-1.0); // A/B: PCG only
     vec3 bsdf;
     if (thinCutoutPlant) {
-        bsdf = thinPlantDiffuseSample(mat, sampleDir, pdf, mainRay.seed);
+        bsdf = thinPlantDiffuseSample(mat, hasMaterialEntry, mc, sampleDir, pdf, mainRay.seed);
         lobeType = 0u;
     } else {
         bsdf = DisneySample(mat, viewDir, normal, sampleDir, pdf, mainRay.seed, lobeType, pc.flags, bsdfXi);
