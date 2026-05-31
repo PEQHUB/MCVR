@@ -135,6 +135,7 @@ namespace VertexFormat {
     static constexpr uint32_t PBR_FLAG_BIOME_TINT_MASK  = 0x3u << 12u;
     static constexpr uint32_t PBR_FLAG_BLOCK_GEOMETRY   = 1u << 14; // block chunk: use texture array, not bindless atlas
     static constexpr uint32_t PBR_FLAG_FLUID_GEOMETRY   = 1u << 15; // fluid surface: alpha is not a cutout mask
+    static constexpr uint32_t PBR_PACKED_THIN_CUTOUT_PLANT = 1u << 31; // emissiveBlockType bit: exact Minecraft plant cards
 #else
     #define PBR_FLAG_USE_NORM        (1u << 0)
     #define PBR_FLAG_USE_COLOR_LAYER (1u << 1)
@@ -151,6 +152,7 @@ namespace VertexFormat {
     #define PBR_FLAG_BIOME_TINT_MASK  (0x3u << 12u)
     #define PBR_FLAG_BLOCK_GEOMETRY   (1u << 14)
     #define PBR_FLAG_FLUID_GEOMETRY   (1u << 15)
+    #define PBR_PACKED_THIN_CUTOUT_PLANT (1u << 31)
 #endif
 
     // 96 bytes per vertex, std430 aligned (6 x vec4)

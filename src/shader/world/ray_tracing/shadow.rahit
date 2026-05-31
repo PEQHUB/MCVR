@@ -85,6 +85,12 @@ layout(push_constant) uniform PushConstant {
 layout(location = 1) rayPayloadInEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
 
+vec3 thinPlantShadowTransmittance(vec3 tint) {
+    const float opacity = 0.25;
+    vec3 plantTint = clamp(tint, vec3(0.0), vec3(1.0));
+    return max(mix(vec3(1.0), plantTint, opacity), vec3(0.78));
+}
+
 void main() {
     uint instanceID = gl_InstanceCustomIndexEXT;
     uint geometryID = gl_GeometryIndexEXT;
@@ -187,6 +193,16 @@ void main() {
     }
 
     tint = CS_BT709_TO_BT2020 * tint;  // BT.709 -> BT.2020 working space
+    bool thinCutoutPlant = isBlockGeometry && ((v0.emissiveBlockType & PBR_PACKED_THIN_CUTOUT_PLANT) != 0u);
+    if (thinCutoutPlant) {
+        if (alpha < 0.05) {
+            ignoreIntersectionEXT;
+            return;
+        }
+        shadowRay.throughput *= thinPlantShadowTransmittance(tint);
+        ignoreIntersectionEXT;
+        return;
+    }
 
     // When simplified, skip LabPBR conversion — only transmission matters,
     // which is equivalent to alpha < (1.0 - 1e-6)

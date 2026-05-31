@@ -32,7 +32,7 @@ struct BlockModelEntry {
     uint8_t  isFullOpaqueCube;       // 1B: 1 if all 6 faces are solid (for neighbor face culling)
     uint8_t  emissiveOrdinal;        // 1B: EmissiveBlock.ordinal() or 255
     uint8_t  materialOrdinal;        // 1B: MaterialBlock ordinal or 255
-    uint16_t blockTypeId;            // 2B: BlockTypeIdRegistry ID (for greedy mesher)
+    uint16_t blockTypeId;            // 2B: BlockTypeIdRegistry packed ID + thin plant semantic
     uint8_t  isVivid;               // 1B: VividColorBlock flag
     uint8_t  fluidType;             // 1B: 0=none, 1=water, 2=lava, 3=flowing_water, 4=flowing_lava
     uint32_t quadOffset;             // 4B: byte offset into quad array (NOT index — for direct pointer math)
