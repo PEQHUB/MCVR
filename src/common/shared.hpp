@@ -124,7 +124,7 @@ namespace VertexFormat {
     static constexpr uint32_t PBR_FLAG_USE_GLINT        = 1u << 4;
     static constexpr uint32_t PBR_FLAG_USE_LIGHT        = 1u << 5;
     static constexpr uint32_t PBR_FLAG_GREEDY_MERGED    = 1u << 6; // UV tiling needed (greedy-merged quad)
-    static constexpr uint32_t PBR_FLAG_THIN_CUTOUT_CARD = 1u << 7; // Minecraft plant-card proxy: exact cutout, non-wall lighting/bias
+    static constexpr uint32_t PBR_FLAG_OVERLAY_ALPHA_MASK = 1u << 7; // colorLayer holds overlay sprite bounds for alpha-masked biome tinting
     static constexpr uint32_t PBR_FLAG_COORD_SHIFT      = 8u;
     static constexpr uint32_t PBR_FLAG_COORD_MASK       = 0x7u << 8u; // 3 bits
     // Compact format: vivid flag relocated from emissiveBlockType bit 16 to flags bit 11
@@ -143,7 +143,7 @@ namespace VertexFormat {
     #define PBR_FLAG_USE_GLINT       (1u << 4)
     #define PBR_FLAG_USE_LIGHT       (1u << 5)
     #define PBR_FLAG_GREEDY_MERGED   (1u << 6)
-    #define PBR_FLAG_THIN_CUTOUT_CARD (1u << 7)
+    #define PBR_FLAG_OVERLAY_ALPHA_MASK (1u << 7)
     #define PBR_FLAG_COORD_SHIFT     8u
     #define PBR_FLAG_COORD_MASK      (0x7u << 8u)
     #define PBR_FLAG_COMPACT_VIVID   (1u << 11)

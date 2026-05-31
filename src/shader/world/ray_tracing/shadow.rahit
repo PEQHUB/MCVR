@@ -93,7 +93,6 @@ void main() {
     uint vertexFormat;
     UnpackedVertex v0, v1, v2;
     fetchTriangleVertices(instanceID, geometryID, gl_PrimitiveID, v0, v1, v2, blasOffset, vertexFormat);
-    bool thinCutoutPlant = (v0.flags & PBR_FLAG_THIN_CUTOUT_CARD) != 0u;
 
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     vec2 uv = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
@@ -166,18 +165,6 @@ void main() {
     float alpha = (albedo * colorLayer).a;
     if (isFluidGeometry) {
         alpha = 1.0;
-    }
-
-    if (thinCutoutPlant) {
-        if (alpha < 0.05) {
-            ignoreIntersectionEXT;
-            return;
-        }
-        const float plantShadowOpacity = 0.30;
-        vec3 plantTint = clamp(tint, vec3(0.08), vec3(1.0));
-        shadowRay.throughput *= mix(vec3(1.0), plantTint, plantShadowOpacity);
-        ignoreIntersectionEXT;
-        return;
     }
 
     if (!SIMPLIFY_THIS_RAY) {

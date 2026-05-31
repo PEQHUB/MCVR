@@ -88,10 +88,6 @@ bool hasLight(uint packedData) {
     return (packedData & PBR_FLAG_USE_LIGHT) != 0u;
 }
 
-bool isThinCutoutCard(uint packedData) {
-    return (packedData & PBR_FLAG_THIN_CUTOUT_CARD) != 0u;
-}
-
 bool hasNoHeightSurface(uint packedData) {
     return false;
 }
