@@ -1026,10 +1026,11 @@ void main() {
 
 #if RARSER_THIN_PLANT_PRIMARY_FIX
     if (thinCutoutPlant) {
-        vec3 plantNormal = vec3(0.0, 1.0, 0.0);
-        if (dot(viewDir, plantNormal) < 0.0) {
-            plantNormal = -plantNormal;
-        }
+        vec3 viewPlanar = vec3(viewDir.x, 0.0, viewDir.z);
+        float viewPlanarLen = length(viewPlanar);
+        vec3 plantNormal = viewPlanarLen > 1e-4
+            ? normalize(viewPlanar / viewPlanarLen + vec3(0.0, 0.35, 0.0))
+            : vec3(0.0, 1.0, 0.0);
         normal = plantNormal;
         mat.normal = vec3(0.0, 0.0, 1.0);
         mat.roughness = max(mat.roughness, 0.8);
