@@ -86,9 +86,9 @@ layout(location = 1) rayPayloadInEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
 
 vec3 thinPlantShadowTransmittance(vec3 tint) {
-    const float opacity = 0.25;
     vec3 plantTint = clamp(tint, vec3(0.0), vec3(1.0));
-    return max(mix(vec3(1.0), plantTint, opacity), vec3(0.78));
+    vec3 coloredTransmission = mix(vec3(1.0), plantTint, 0.35);
+    return clamp(coloredTransmission * 0.78, vec3(0.60), vec3(0.86));
 }
 
 void main() {

@@ -187,14 +187,18 @@ vec3 thinPlantRayOrigin(vec3 worldPos, vec3 rayDir) {
     return worldPos + normalize(rayDir) * 0.0015;
 }
 
+vec3 thinPlantAlbedo(vec3 albedo) {
+    return min(clamp(albedo, vec3(0.0), vec3(1.0)), vec3(0.72));
+}
+
 float thinPlantDiffuseFactor(vec3 lightDir) {
     float y = clamp(normalize(lightDir).y, -1.0, 1.0);
     float side = sqrt(max(1.0 - y * y, 0.0));
-    return clamp(0.34 + 0.42 * max(y, 0.0) + 0.16 * side, 0.34, 0.82);
+    return clamp(0.16 + 0.34 * max(y, 0.0) + 0.07 * side, 0.16, 0.57);
 }
 
 vec3 thinPlantDiffuseEval(LabPBRMat mat, vec3 lightDir) {
-    return mat.albedo * (thinPlantDiffuseFactor(lightDir) * INV_PI);
+    return thinPlantAlbedo(mat.albedo) * (thinPlantDiffuseFactor(lightDir) * INV_PI);
 }
 
 vec3 thinPlantDiffuseSample(LabPBRMat mat, out vec3 sampleDir, out float pdf, inout uint seed) {
@@ -205,7 +209,7 @@ vec3 thinPlantDiffuseSample(LabPBRMat mat, out vec3 sampleDir, out float pdf, in
     vec3 localDir = CosineSampleHemisphere(rand(seed), rand(seed));
     sampleDir = normalize(ToWorld(T, B, plantNormal, localDir));
     pdf = max(localDir.z * INV_PI, 1e-6);
-    return mat.albedo * (localDir.z * INV_PI);
+    return thinPlantAlbedo(mat.albedo) * (localDir.z * INV_PI) * 0.65;
 }
 
 // Sample height value from texture based on height source mode
