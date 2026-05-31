@@ -9,6 +9,9 @@
 #ifndef RARSER_SHADER_DISPLACEMENT
 #define RARSER_SHADER_DISPLACEMENT 1
 #endif
+#ifndef RARSER_THIN_PLANT_PRIMARY_FIX
+#define RARSER_THIN_PLANT_PRIMARY_FIX 1
+#endif
 
 #include "../util/disney.glsl"
 #include "../util/random.glsl"
@@ -585,6 +588,10 @@ void main() {
     }
 
     uint packedBlockType = v0.emissiveBlockType;
+    bool thinCutoutPlant = false;
+#if RARSER_THIN_PLANT_PRIMARY_FIX
+    thinCutoutPlant = isBlockGeometry && ((packedBlockType & PBR_PACKED_THIN_CUTOUT_PLANT) != 0u);
+#endif
     uint materialType = (packedBlockType >> 8u) & 0xFFu;
     uint materialClassIdx = 0u;
     bool hasMaterialClass = false;
@@ -640,7 +647,7 @@ void main() {
                                       (displacementMaterialMode != 2u || mc.pomDepth > DISPLACEMENT_MIN_DEPTH);
     bool canDisplace = displacementGlobalEligible && useTexture &&
                        coordinateMode == 0u && !prGetIsHand(mainRay) && !fluidGeometry &&
-                       displacementMaterialAllows;
+                       !thinCutoutPlant && displacementMaterialAllows;
 
     if (canDisplace) {
         vec3 wp0 = vec3(gl_ObjectToWorldEXT * vec4(v0.pos, 1.0));
@@ -1017,11 +1024,23 @@ void main() {
     }
 #endif
 
+#if RARSER_THIN_PLANT_PRIMARY_FIX
+    if (thinCutoutPlant) {
+        vec3 plantNormal = vec3(0.0, 1.0, 0.0);
+        if (dot(viewDir, plantNormal) < 0.0) {
+            plantNormal = -plantNormal;
+        }
+        normal = plantNormal;
+        mat.normal = vec3(0.0, 0.0, 1.0);
+        mat.roughness = max(mat.roughness, 0.8);
+    }
+#endif
+
     // Procedural noise modulation — gated by noiseTarget bits
     // bit 0 = roughness, bit 1 = normal perturbation, bit 2 = metallic, bit 3 = roughness additive only
     // Skip noise when throughput is too low (deep bounces — noise contribution invisible)
     float maxThroughput = max(mainRay.throughput.r, max(mainRay.throughput.g, mainRay.throughput.b));
-    if (matNoiseStrength > 0.001 && matNoiseTarget != 0 && maxThroughput > 0.01) {
+    if (!thinCutoutPlant && matNoiseStrength > 0.001 && matNoiseTarget != 0 && maxThroughput > 0.01) {
         // Noise LOD: reduce octaves with distance, skip normal gradient far away
         int effectiveOctaves = matNoiseOctaves;
         float hitDist = actualHitT;

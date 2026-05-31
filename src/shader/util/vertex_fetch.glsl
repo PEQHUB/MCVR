@@ -52,8 +52,11 @@ UnpackedVertex unpackCompactVertex(PBRTriangleCompact c) {
     );
     v.colorLayerAlpha = float((c.colorPacked >> 24u) & 0xFFu) / 255.0;
     v.albedoEmission = unpackHalf2x16(c.packed1).x;  // lower 16 bits = fp16 emission
-    // Restore emissiveBlockType: bits 0-15 from packed1 upper, bit 16 (vivid) from flags bit 11
-    v.emissiveBlockType = (c.packed1 >> 16u) | (((c.packed0 >> 11u) & 1u) << 16u);
+    // Restore emissiveBlockType: bits 0-15 from packed1 upper, bit 16 (vivid)
+    // from packed0 bit 11, and thin plant bit 31 from compact carrier bit 15.
+    v.emissiveBlockType = (c.packed1 >> 16u) |
+                           (((c.packed0 >> 11u) & 1u) << 16u) |
+                           (((c.packed0 >> 15u) & 1u) << 31u);
     v.glintUV = vec2(0.0);
     v.glintTexture = 0u;
     v.overlayPacked = 0u;

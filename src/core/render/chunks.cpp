@@ -45,13 +45,17 @@ packCompactVertices(const std::vector<vk::VertexFormat::PBRTriangle> &src) {
         auto &s = src[j];
         auto &d = dst[j];
         d.pos = s.pos;
-        // packed0: flags (bits 0-10) | vivid flag (bit 11) | textureID (bits 16-31)
+        // packed0: flags (bits 0-10) | vivid flag (bit 11) |
+        // thin plant carrier (bit 15) | textureID (bits 16-31)
         // Clear USE_GLINT, USE_OVERLAY, and GREEDY_MERGED — compact format zeros those data
         // fields, so leaving the flags set would cause the shader to sample garbage or divide by zero.
         uint32_t flags = s.flags & 0x77FFu; // preserve bits 0-10 + 12-13 (BIOME_TINT) + 14 (BLOCK_GEOMETRY)
         flags &= ~(vk::VertexFormat::PBR_FLAG_USE_GLINT | vk::VertexFormat::PBR_FLAG_USE_OVERLAY |
                     vk::VertexFormat::PBR_FLAG_GREEDY_MERGED);
         if (s.emissiveBlockType & 0x10000u) flags |= vk::VertexFormat::PBR_FLAG_COMPACT_VIVID;
+        if (s.emissiveBlockType & vk::VertexFormat::PBR_PACKED_THIN_CUTOUT_PLANT) {
+            flags |= vk::VertexFormat::PBR_FLAG_COMPACT_THIN_CUTOUT_PLANT;
+        }
         d.packed0 = flags | ((s.textureID & 0xFFFFu) << 16);
         d.textureUV = s.textureUV;
         // colorLayer vec4 → RGBA8

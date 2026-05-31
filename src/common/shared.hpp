@@ -135,6 +135,7 @@ namespace VertexFormat {
     static constexpr uint32_t PBR_FLAG_BIOME_TINT_MASK  = 0x3u << 12u;
     static constexpr uint32_t PBR_FLAG_BLOCK_GEOMETRY   = 1u << 14; // block chunk: use texture array, not bindless atlas
     static constexpr uint32_t PBR_FLAG_FLUID_GEOMETRY   = 1u << 15; // fluid surface: alpha is not a cutout mask
+    static constexpr uint32_t PBR_FLAG_COMPACT_THIN_CUTOUT_PLANT = 1u << 15; // compact-only carrier for emissiveBlockType bit 31
     static constexpr uint32_t PBR_PACKED_THIN_CUTOUT_PLANT = 1u << 31; // emissiveBlockType bit: exact Minecraft plant cards
 #else
     #define PBR_FLAG_USE_NORM        (1u << 0)
@@ -152,6 +153,7 @@ namespace VertexFormat {
     #define PBR_FLAG_BIOME_TINT_MASK  (0x3u << 12u)
     #define PBR_FLAG_BLOCK_GEOMETRY   (1u << 14)
     #define PBR_FLAG_FLUID_GEOMETRY   (1u << 15)
+    #define PBR_FLAG_COMPACT_THIN_CUTOUT_PLANT (1u << 15)
     #define PBR_PACKED_THIN_CUTOUT_PLANT (1u << 31)
 #endif
 
@@ -196,8 +198,8 @@ namespace VertexFormat {
     // albedoEmission to fp16. Entities keep full PBRTriangle.
     struct PBRTriangleCompact {
         T_VEC3 pos;            // 0..11   float32 world position (required by VK AS)
-        T_UINT packed0;        // 12..15  flags:12 | pad:4 | textureID:16
-                               //         flags bits 0-10 = original, bit 11 = vivid (from emissiveBlockType bit 16)
+        T_UINT packed0;        // 12..15  flags/carriers:16 | textureID:16
+                               //         bits 0-10 = flags, 11 = vivid, 15 = thin plant carrier
         T_VEC2 textureUV;      // 16..23  float32 atlas UVs
         T_UINT colorPacked;    // 24..27  R:8 | G:8 | B:8 | A:8
         T_UINT packed1;        // 28..31  albedoEmission_half:16 | emissiveBlockType:16

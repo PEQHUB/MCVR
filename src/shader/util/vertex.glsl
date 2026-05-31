@@ -150,7 +150,9 @@ MaterialVertex toMaterialVertex(PBRTriangleCompact v) {
     outV.albedoEmission = unpackHalf2x16(v.packed1).x;
     outV.lightUV = ivec2(0);
     outV.packedData = (v.packed0 & 0x77FFu) | (((v.packed0 >> 11u) & 1u) << 11u);
-    outV.emissiveBlockType = (v.packed1 >> 16u) | (((v.packed0 >> 11u) & 1u) << 16u);
+    outV.emissiveBlockType = (v.packed1 >> 16u) |
+                              (((v.packed0 >> 11u) & 1u) << 16u) |
+                              (((v.packed0 >> 15u) & 1u) << 31u);
     return outV;
 }
 
