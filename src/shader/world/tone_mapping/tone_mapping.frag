@@ -826,11 +826,10 @@ void main() {
 
     } else {
         // ====================================================================
-        // SDR PIPELINE — convert to BT.709 first, tone-map in display gamut
+        // SDR PIPELINE - convert to BT.709 first, tone-map in display gamut
         // ====================================================================
-        // BT.2020 → BT.709 before tone mapping. Tone mapping in BT.709 keeps
-        // highlight rolloff in the display gamut — no post-tonemap gamut mapping
-        // needed, which was crushing highlight chroma via Oklab soft-clip.
+        // Restores the pre-wide-gamut SDR behavior that matched the live game
+        // better: SDR tone mapping operates in the display gamut, then clamps.
         vec3 workingColor = max(CP_BT2020_TO_BT709 * expColor, vec3(0.0));
 
         // Pre-tonemap saturation in Oklab (BT.709)
@@ -851,7 +850,7 @@ void main() {
             workingColor = max(cpOklabToBt709(lab), vec3(0.0));
         }
 
-        // SDR tonemapping — 9 modes (original numbering preserved)
+        // SDR tonemapping - 9 modes (original numbering preserved)
         vec3 mapped;
         float mode = gExposure.tonemapMode;
         if      (mode < 0.5) mapped = PBRNeutralToneMap(workingColor);       // 0: PBR Neutral
@@ -875,7 +874,7 @@ void main() {
             gExposure.psychoWhiteCurve,
             gExposure.psychoConeExponent);
 
-        // Already in BT.709 — just clamp (no gamut mapping needed)
+        // Already in BT.709 - just clamp.
         mapped = clamp(mapped, vec3(0.0), vec3(1.0));
 
         bool useSrgb = gExposure.sdrTransferFunction > 0.5;

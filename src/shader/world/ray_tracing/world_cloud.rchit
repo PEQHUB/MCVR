@@ -154,6 +154,9 @@ void main() {
     shadowRay.throughput = vec3(1.0);
     shadowRay.seed = mainRay.seed;
     shadowRay.bounceIndex = mainRay.index;
+    shadowRay.originThinBlockType = 0u;
+    shadowRay.originThinColumnHash = 0u;
+    shadowRay.lastThinPlantHitKey = 0u;
 
     traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT,
                 WORLD_MASK, // masks

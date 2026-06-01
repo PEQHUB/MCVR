@@ -85,6 +85,33 @@ layout(push_constant) uniform PushConstant {
 layout(location = 1) rayPayloadInEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
 
+uint thinPlantBlockTypeFromPacked(uint packedBlockType) {
+    return (packedBlockType >> 17u) & 0x3FFFu;
+}
+
+uint thinPlantHashInt(int v, uint salt) {
+    uint x = uint(v) ^ salt;
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    return x ^ (x >> 16u);
+}
+
+ivec3 thinPlantCellFromWorldPos(vec3 cameraRelativeWorldPos) {
+    return ivec3(floor(cameraRelativeWorldPos + vec3(ubo.cameraPos.xyz) + vec3(0.0001)));
+}
+
+uint thinPlantColumnHash(ivec3 cell) {
+    uint h = thinPlantHashInt(cell.x, 0x9e3779b9u) ^ thinPlantHashInt(cell.z, 0x85ebca6bu);
+    return h == 0u ? 1u : h;
+}
+
+uint thinPlantHitKey(ivec3 cell, uint blockType) {
+    uint h = thinPlantColumnHash(cell) ^ thinPlantHashInt(cell.y, 0xc2b2ae35u) ^ (blockType * 0x27d4eb2du);
+    return h == 0u ? 1u : h;
+}
+
 vec3 thinPlantShadowTransmittance(vec3 tint, bool hasMaterialEntry, MaterialClassEntry mc) {
     vec3 plantTint = clamp(tint, vec3(0.0), vec3(1.0));
     float fill = hasMaterialEntry ? clamp(mc.subsurface, 0.0, 1.0) : 0.18;
@@ -212,6 +239,21 @@ void main() {
             ignoreIntersectionEXT;
             return;
         }
+        uint thinBlockType = thinPlantBlockTypeFromPacked(v0.emissiveBlockType);
+        vec3 hitWorldPos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
+        ivec3 hitCell = thinPlantCellFromWorldPos(hitWorldPos);
+        uint hitColumnHash = thinPlantColumnHash(hitCell);
+        if (shadowRay.originThinBlockType == thinBlockType &&
+            shadowRay.originThinColumnHash == hitColumnHash) {
+            ignoreIntersectionEXT;
+            return;
+        }
+        uint hitKey = thinPlantHitKey(hitCell, thinBlockType);
+        if (shadowRay.lastThinPlantHitKey == hitKey) {
+            ignoreIntersectionEXT;
+            return;
+        }
+        shadowRay.lastThinPlantHitKey = hitKey;
         shadowRay.throughput *= thinPlantShadowTransmittance(tint, thinPlantHasMaterialEntry, thinPlantMc);
         ignoreIntersectionEXT;
         return;

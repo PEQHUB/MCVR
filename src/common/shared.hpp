@@ -130,7 +130,7 @@ namespace VertexFormat {
     // Compact format: vivid flag relocated from emissiveBlockType bit 16 to flags bit 11
     static constexpr uint32_t PBR_FLAG_COMPACT_VIVID    = 1u << 11;
     // Biome tint type in bits 12-13: 0=none, 1=grass, 2=foliage, 3=water
-    // Resolved in shader from per-section SSBO — NOT baked into vertex colorLayer
+    // Resolved in shader from per-section SSBO - NOT baked into vertex colorLayer
     static constexpr uint32_t PBR_FLAG_BIOME_TINT_SHIFT = 12u;
     static constexpr uint32_t PBR_FLAG_BIOME_TINT_MASK  = 0x3u << 12u;
     static constexpr uint32_t PBR_FLAG_BLOCK_GEOMETRY   = 1u << 14; // block chunk: use texture array, not bindless atlas
@@ -558,7 +558,7 @@ namespace Data {
         T_FLOAT lumMin;         // Precomputed per-block min luminance [0,1] (linear)
         T_FLOAT lumMax;         // Precomputed per-block max luminance [0,1] (linear)
         T_UINT  autoPBRPacked0; // rMin_u8 | rMax_u8<<8 | center_u8<<16 | spread_u8<<24
-        T_UINT  autoPBRPacked1; // heightGamma_u16 | reserved_u16<<16
+        T_UINT  autoPBRPacked1; // heightGamma_u16 | roughnessBlend_u8<<16 | reserved_u8<<24
     }; // 144 bytes (9 x vec4), std430 aligned
 
 #ifdef __cplusplus

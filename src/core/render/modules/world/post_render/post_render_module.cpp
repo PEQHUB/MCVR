@@ -16,6 +16,8 @@
 PostRenderModule::PostRenderModule() {}
 
 namespace {
+static bool sSharpenerFormatWarningLogged = false;
+
 struct CasPushConstant {
     uint32_t const0[4];
     uint32_t const1[4];
@@ -1020,7 +1022,20 @@ void PostRenderModuleContext::render() {
     worldPostDepthImage->imageLayout() = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     // copy input to output (or apply CAS/RCAS sharpening)
-    if (Renderer::options.sharpenerMode != 0) {
+    const VkFormat sharpenerOutputFormat = postRenderedImage->vkFormat();
+    // CAS/RCAS write through layout(rgba8) storage images. Keep this limited to
+    // the matching UNORM swapchain target; HDR10 and sRGB targets take copy-only.
+    const bool sharpenerFormatOk = sharpenerOutputFormat == VK_FORMAT_R8G8B8A8_UNORM;
+    const bool applySharpener = Renderer::options.sharpenerMode != 0 && sharpenerFormatOk;
+    if (Renderer::options.sharpenerMode != 0 && !sharpenerFormatOk && !sSharpenerFormatWarningLogged) {
+        std::cerr << "PostRender: sharpener disabled for unsupported output format="
+                  << static_cast<int>(sharpenerOutputFormat) << std::endl;
+        sSharpenerFormatWarningLogged = true;
+    } else if (sharpenerFormatOk) {
+        sSharpenerFormatWarningLogged = false;
+    }
+
+    if (applySharpener) {
         VkPipelineStageFlags2 srcStageLdr = 0;
         VkAccessFlags2 srcAccessLdr = 0;
         chooseSrc(ldrImage->imageLayout(),

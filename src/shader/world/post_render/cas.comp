@@ -10,7 +10,7 @@
 #include "ffx_core.h"
 
 layout(set = 0, binding = 0) uniform sampler2D r_input_color;
-layout(set = 0, binding = 1, rgba16) uniform image2D rw_output_color;
+layout(set = 0, binding = 1, rgba8) uniform image2D rw_output_color;
 
 layout(push_constant) uniform CasPushConstant {
     uvec4 const0;

@@ -11,11 +11,107 @@
 #include <sl_dlss_g.h>
 #endif
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
+#include <mutex>
+#include <sstream>
+#include <vector>
 
 static std::ostream &fgCout() { return std::cout << "[FrameGen] "; }
 static std::ostream &fgCerr() { return std::cerr << "[FrameGen ERROR] "; }
+
+namespace {
+struct DlssgCompletionRecord {
+    VkSemaphore fence = VK_NULL_HANDLE;
+    uint64_t value = 0;
+    uint64_t presentSerial = 0;
+    uint32_t frameSlot = UINT32_MAX;
+    bool valid = false;
+    std::string source;
+};
+
+struct DlssgLatencyStats {
+    uint64_t captures = 0;
+    uint64_t captureFailures = 0;
+    uint64_t nullFence = 0;
+    uint64_t zeroValue = 0;
+    uint64_t waitCalls = 0;
+    uint64_t waitSuccess = 0;
+    uint64_t waitFailures = 0;
+    uint64_t waitTimeouts = 0;
+    uint64_t waitNoops = 0;
+    uint64_t waitTotalUs = 0;
+    uint64_t waitMaxUs = 0;
+    uint64_t lastWaitUs = 0;
+    uint64_t lastWaitPresentSerial = 0;
+    uint64_t globalWaitCalls = 0;
+    uint64_t lastPresentSerial = 0;
+    uint64_t lastFenceValue = 0;
+    uintptr_t lastFence = 0;
+    uint32_t lastStatus = 0;
+    uint32_t lastMinWidth = 0;
+    uint32_t lastMaxFrames = 0;
+    uint32_t lastPresented = 0;
+    uint32_t lastCaptureSlot = UINT32_MAX;
+    uint32_t lastWaitSlot = UINT32_MAX;
+    uint32_t lastWaitVkResult = VK_SUCCESS;
+    std::string lastSource = "none";
+    uint32_t lastTagCount = 0;
+    bool lastDepthTagged = false;
+    bool lastMotionVectorsTagged = false;
+    bool lastHudlessTagged = false;
+    uint32_t lastDepthWidth = 0;
+    uint32_t lastDepthHeight = 0;
+    uint32_t lastDepthFormat = 0;
+    uint32_t lastMotionVectorsWidth = 0;
+    uint32_t lastMotionVectorsHeight = 0;
+    uint32_t lastMotionVectorsFormat = 0;
+    uint32_t lastHudlessWidth = 0;
+    uint32_t lastHudlessHeight = 0;
+    uint32_t lastHudlessFormat = 0;
+};
+
+std::mutex gDlssgLatencyMutex;
+std::vector<DlssgCompletionRecord> gDlssgCompletionSlots;
+DlssgLatencyStats gDlssgLatencyStats;
+uint64_t gDlssgPresentSerial = 0;
+
+void ensureCompletionSlotLocked(uint32_t frameSlot) {
+    if (frameSlot == UINT32_MAX) return;
+    if (gDlssgCompletionSlots.size() <= frameSlot) {
+        gDlssgCompletionSlots.resize(static_cast<size_t>(frameSlot) + 1);
+    }
+}
+
+uint32_t validCompletionSlotCountLocked() {
+    uint32_t count = 0;
+    for (const auto &record : gDlssgCompletionSlots) {
+        if (record.valid) count++;
+    }
+    return count;
+}
+
+VkResult waitOnCompletionRecord(const DlssgCompletionRecord &record, VkDevice device,
+                                uint64_t timeoutNs, uint64_t &elapsedUs) {
+    elapsedUs = 0;
+    if (!device || !record.fence || record.value == 0) return VK_SUCCESS;
+
+    VkSemaphoreWaitInfo waitInfo{};
+    waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    waitInfo.semaphoreCount = 1;
+    waitInfo.pSemaphores = &record.fence;
+    waitInfo.pValues = &record.value;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    VkResult result = vkWaitSemaphores(device, &waitInfo, timeoutNs);
+    elapsedUs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count());
+    return result;
+}
+}
 
 #ifdef _WIN32
 /// Map Options::frameGenMode (0=Off, 1=On, 2=Auto) to Streamline enum.
@@ -270,10 +366,26 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
     sl::ResourceTag tags[3] = {};
     sl::Extent extents[3] = {};
     uint32_t tagCount = 0;
+    bool depthTagged = false;
+    bool motionVectorsTagged = false;
+    bool hudlessTagged = false;
+    uint32_t depthWidth = 0;
+    uint32_t depthHeight = 0;
+    uint32_t depthFormat = 0;
+    uint32_t motionVectorsWidth = 0;
+    uint32_t motionVectorsHeight = 0;
+    uint32_t motionVectorsFormat = 0;
+    uint32_t hudlessWidth = 0;
+    uint32_t hudlessHeight = 0;
+    uint32_t hudlessFormat = 0;
 
     // Depth (render resolution)
     if (frameIndex < Renderer::frameGenDepthImages.size() && Renderer::frameGenDepthImages[frameIndex]) {
         auto depthImg = Renderer::frameGenDepthImages[frameIndex];
+        depthTagged = true;
+        depthWidth = depthImg->width();
+        depthHeight = depthImg->height();
+        depthFormat = static_cast<uint32_t>(depthImg->vkFormat());
         fillResource(resources[tagCount], depthImg, static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL));
         extents[tagCount] = {0, 0, depthImg->width(), depthImg->height()};
         tags[tagCount] = sl::ResourceTag(&resources[tagCount], sl::kBufferTypeDepth,
@@ -284,6 +396,10 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
     // Motion Vectors (render resolution)
     if (frameIndex < Renderer::frameGenMotionVectorImages.size() && Renderer::frameGenMotionVectorImages[frameIndex]) {
         auto mvImg = Renderer::frameGenMotionVectorImages[frameIndex];
+        motionVectorsTagged = true;
+        motionVectorsWidth = mvImg->width();
+        motionVectorsHeight = mvImg->height();
+        motionVectorsFormat = static_cast<uint32_t>(mvImg->vkFormat());
         fillResource(resources[tagCount], mvImg, static_cast<uint32_t>(VK_IMAGE_LAYOUT_GENERAL));
         extents[tagCount] = {0, 0, mvImg->width(), mvImg->height()};
         tags[tagCount] = sl::ResourceTag(&resources[tagCount], sl::kBufferTypeMotionVectors,
@@ -296,11 +412,32 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
     // composite fast-path writes worldOutput pixels verbatim to the swapchain, so
     // HUDless == backbuffer for all non-UI pixels. DLSS-G diffs to find UI.
     if (worldOutput) {
+        hudlessTagged = true;
+        hudlessWidth = worldOutput->width();
+        hudlessHeight = worldOutput->height();
+        hudlessFormat = static_cast<uint32_t>(worldOutput->vkFormat());
         fillResource(resources[tagCount], worldOutput);
         extents[tagCount] = {0, 0, worldOutput->width(), worldOutput->height()};
         tags[tagCount] = sl::ResourceTag(&resources[tagCount], sl::kBufferTypeHUDLessColor,
                                           sl::ResourceLifecycle::eValidUntilPresent, &extents[tagCount]);
         tagCount++;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(gDlssgLatencyMutex);
+        gDlssgLatencyStats.lastTagCount = tagCount;
+        gDlssgLatencyStats.lastDepthTagged = depthTagged;
+        gDlssgLatencyStats.lastMotionVectorsTagged = motionVectorsTagged;
+        gDlssgLatencyStats.lastHudlessTagged = hudlessTagged;
+        gDlssgLatencyStats.lastDepthWidth = depthWidth;
+        gDlssgLatencyStats.lastDepthHeight = depthHeight;
+        gDlssgLatencyStats.lastDepthFormat = depthFormat;
+        gDlssgLatencyStats.lastMotionVectorsWidth = motionVectorsWidth;
+        gDlssgLatencyStats.lastMotionVectorsHeight = motionVectorsHeight;
+        gDlssgLatencyStats.lastMotionVectorsFormat = motionVectorsFormat;
+        gDlssgLatencyStats.lastHudlessWidth = hudlessWidth;
+        gDlssgLatencyStats.lastHudlessHeight = hudlessHeight;
+        gDlssgLatencyStats.lastHudlessFormat = hudlessFormat;
     }
 
     if (tagCount > 0) {
@@ -310,6 +447,202 @@ void FrameGenManager::tagFrame(std::shared_ptr<FrameworkContext> context,
         StreamlineContext::tagResources(tags, tagCount, cmdBuf);
     }
 #endif
+}
+
+void FrameGenManager::captureInputCompletion(uint32_t frameSlot, const char *source) {
+#ifdef _WIN32
+    if (!initialized_ || !featureLoaded_ || !StreamlineContext::isDlssGSupported()) return;
+
+    sl::DLSSGState state{};
+    const bool ok = StreamlineContext::getDlssGState(state);
+
+    std::lock_guard<std::mutex> lock(gDlssgLatencyMutex);
+    gDlssgLatencyStats.captures++;
+    gDlssgPresentSerial++;
+    gDlssgLatencyStats.lastPresentSerial = gDlssgPresentSerial;
+    gDlssgLatencyStats.lastCaptureSlot = frameSlot;
+    gDlssgLatencyStats.lastSource = source ? source : "unknown";
+
+    if (!ok) {
+        gDlssgLatencyStats.captureFailures++;
+        return;
+    }
+
+    auto fence = reinterpret_cast<VkSemaphore>(state.inputsProcessingCompletionFence);
+    const uint64_t value = state.lastPresentInputsProcessingCompletionFenceValue;
+    gDlssgLatencyStats.lastStatus = static_cast<uint32_t>(state.status);
+    gDlssgLatencyStats.lastMinWidth = state.minWidthOrHeight;
+    gDlssgLatencyStats.lastMaxFrames = state.numFramesToGenerateMax;
+    gDlssgLatencyStats.lastPresented = state.numFramesActuallyPresented;
+    gDlssgLatencyStats.lastFence = reinterpret_cast<uintptr_t>(state.inputsProcessingCompletionFence);
+    gDlssgLatencyStats.lastFenceValue = value;
+
+    if (!fence) gDlssgLatencyStats.nullFence++;
+    if (value == 0) gDlssgLatencyStats.zeroValue++;
+
+    if (frameSlot != UINT32_MAX && fence && value > 0) {
+        ensureCompletionSlotLocked(frameSlot);
+        gDlssgCompletionSlots[frameSlot] = DlssgCompletionRecord{
+            .fence = fence,
+            .value = value,
+            .presentSerial = gDlssgPresentSerial,
+            .frameSlot = frameSlot,
+            .valid = true,
+            .source = source ? source : "unknown",
+        };
+    }
+#else
+    (void)frameSlot;
+    (void)source;
+#endif
+}
+
+bool FrameGenManager::waitForInputCompletion(uint32_t frameSlot, VkDevice device, uint64_t timeoutNs,
+                                             uint64_t *elapsedUsOut) {
+#ifdef _WIN32
+    DlssgCompletionRecord record{};
+    if (elapsedUsOut) *elapsedUsOut = 0;
+    {
+        std::lock_guard<std::mutex> lock(gDlssgLatencyMutex);
+        gDlssgLatencyStats.waitCalls++;
+        gDlssgLatencyStats.lastWaitSlot = frameSlot;
+        if (frameSlot == UINT32_MAX || frameSlot >= gDlssgCompletionSlots.size() ||
+            !gDlssgCompletionSlots[frameSlot].valid) {
+            gDlssgLatencyStats.waitNoops++;
+            gDlssgLatencyStats.lastWaitUs = 0;
+            gDlssgLatencyStats.lastWaitPresentSerial = 0;
+            gDlssgLatencyStats.lastWaitVkResult = VK_SUCCESS;
+            return true;
+        }
+        record = gDlssgCompletionSlots[frameSlot];
+    }
+
+    uint64_t elapsedUs = 0;
+    const VkResult result = waitOnCompletionRecord(record, device, timeoutNs, elapsedUs);
+    if (elapsedUsOut) *elapsedUsOut = elapsedUs;
+
+    {
+        std::lock_guard<std::mutex> lock(gDlssgLatencyMutex);
+        gDlssgLatencyStats.lastWaitVkResult = static_cast<uint32_t>(result);
+        gDlssgLatencyStats.waitTotalUs += elapsedUs;
+        gDlssgLatencyStats.waitMaxUs = std::max(gDlssgLatencyStats.waitMaxUs, elapsedUs);
+        gDlssgLatencyStats.lastWaitUs = elapsedUs;
+        gDlssgLatencyStats.lastWaitPresentSerial = record.presentSerial;
+        if (result == VK_SUCCESS) {
+            gDlssgLatencyStats.waitSuccess++;
+            if (frameSlot < gDlssgCompletionSlots.size() &&
+                gDlssgCompletionSlots[frameSlot].presentSerial == record.presentSerial) {
+                gDlssgCompletionSlots[frameSlot].valid = false;
+            }
+        } else {
+            gDlssgLatencyStats.waitFailures++;
+            if (result == VK_TIMEOUT) gDlssgLatencyStats.waitTimeouts++;
+        }
+    }
+
+    return result == VK_SUCCESS;
+#else
+    (void)frameSlot;
+    (void)device;
+    (void)timeoutNs;
+    if (elapsedUsOut) *elapsedUsOut = 0;
+    return true;
+#endif
+}
+
+bool FrameGenManager::waitForAllInputCompletions(VkDevice device, uint64_t timeoutNs) {
+#ifdef _WIN32
+    size_t slotCount = 0;
+    {
+        std::lock_guard<std::mutex> lock(gDlssgLatencyMutex);
+        gDlssgLatencyStats.globalWaitCalls++;
+        slotCount = gDlssgCompletionSlots.size();
+    }
+
+    bool allOk = true;
+    for (size_t i = 0; i < slotCount; ++i) {
+        allOk = waitForInputCompletion(static_cast<uint32_t>(i), device, timeoutNs) && allOk;
+    }
+    return allOk;
+#else
+    (void)device;
+    (void)timeoutNs;
+    return true;
+#endif
+}
+
+std::string FrameGenManager::latencyDiagnostics() {
+    std::lock_guard<std::mutex> lock(gDlssgLatencyMutex);
+    std::ostringstream out;
+    const uint64_t waitAvgUs = gDlssgLatencyStats.waitSuccess > 0
+        ? gDlssgLatencyStats.waitTotalUs / gDlssgLatencyStats.waitSuccess
+        : 0;
+    uint64_t oldestPendingSerial = 0;
+    for (const auto &record : gDlssgCompletionSlots) {
+        if (!record.valid) continue;
+        if (oldestPendingSerial == 0 || record.presentSerial < oldestPendingSerial) {
+            oldestPendingSerial = record.presentSerial;
+        }
+    }
+    const uint64_t pendingSerialAge = oldestPendingSerial > 0 &&
+        gDlssgLatencyStats.lastPresentSerial >= oldestPendingSerial
+            ? gDlssgLatencyStats.lastPresentSerial - oldestPendingSerial
+            : 0;
+    out << "dlssgSupported:"
+#ifdef _WIN32
+        << (StreamlineContext::isDlssGSupported() ? 1 : 0)
+#else
+        << 0
+#endif
+        << ",initialized:" << (initialized_ ? 1 : 0)
+        << ",featureLoaded:" << (featureLoaded_ ? 1 : 0)
+        << ",active:" << (active_ ? 1 : 0)
+        << ",frameGenMode:" << currentMode_
+        << ",optionMode:" << Renderer::options.frameGenMode
+        << ",optionEnabled:" << (Renderer::options.frameGenEnabled ? 1 : 0)
+        << ",optionMultiplier:" << Renderer::options.frameGenMultiplier
+        << ",maxFrames:" << maxFrames_
+        << ",queueMode:default"
+        << ",recreateInProgress:" << (recreateInProgress_ ? 1 : 0)
+        << ",recreateGeneration:" << recreateGeneration_
+        << ",completionCaptures:" << gDlssgLatencyStats.captures
+        << ",completionFailures:" << gDlssgLatencyStats.captureFailures
+        << ",completionNullFence:" << gDlssgLatencyStats.nullFence
+        << ",completionZeroValue:" << gDlssgLatencyStats.zeroValue
+        << ",validSlots:" << validCompletionSlotCountLocked()
+        << ",lastStatus:" << gDlssgLatencyStats.lastStatus
+        << ",lastMinWidth:" << gDlssgLatencyStats.lastMinWidth
+        << ",lastMaxFrames:" << gDlssgLatencyStats.lastMaxFrames
+        << ",lastPresented:" << gDlssgLatencyStats.lastPresented
+        << ",lastCaptureSlot:" << gDlssgLatencyStats.lastCaptureSlot
+        << ",lastSource:" << gDlssgLatencyStats.lastSource
+        << ",lastFence:0x" << std::hex << gDlssgLatencyStats.lastFence << std::dec
+        << ",lastFenceValue:" << gDlssgLatencyStats.lastFenceValue
+        << ",waitCalls:" << gDlssgLatencyStats.waitCalls
+        << ",waitSuccess:" << gDlssgLatencyStats.waitSuccess
+        << ",waitFailures:" << gDlssgLatencyStats.waitFailures
+        << ",waitTimeouts:" << gDlssgLatencyStats.waitTimeouts
+        << ",waitNoops:" << gDlssgLatencyStats.waitNoops
+        << ",waitTotalUs:" << gDlssgLatencyStats.waitTotalUs
+        << ",waitAvgUs:" << waitAvgUs
+        << ",waitMaxUs:" << gDlssgLatencyStats.waitMaxUs
+        << ",lastWaitUs:" << gDlssgLatencyStats.lastWaitUs
+        << ",lastWaitSlot:" << gDlssgLatencyStats.lastWaitSlot
+        << ",lastWaitPresentSerial:" << gDlssgLatencyStats.lastWaitPresentSerial
+        << ",lastWaitVkResult:" << gDlssgLatencyStats.lastWaitVkResult
+        << ",globalWaitCalls:" << gDlssgLatencyStats.globalWaitCalls
+        << ",pendingSerialAge:" << pendingSerialAge
+        << ",lastTagCount:" << gDlssgLatencyStats.lastTagCount
+        << ",depthTagged:" << (gDlssgLatencyStats.lastDepthTagged ? 1 : 0)
+        << ",depthSize:" << gDlssgLatencyStats.lastDepthWidth << "x" << gDlssgLatencyStats.lastDepthHeight
+        << ",depthFormat:" << gDlssgLatencyStats.lastDepthFormat
+        << ",mvTagged:" << (gDlssgLatencyStats.lastMotionVectorsTagged ? 1 : 0)
+        << ",mvSize:" << gDlssgLatencyStats.lastMotionVectorsWidth << "x" << gDlssgLatencyStats.lastMotionVectorsHeight
+        << ",mvFormat:" << gDlssgLatencyStats.lastMotionVectorsFormat
+        << ",hudlessTagged:" << (gDlssgLatencyStats.lastHudlessTagged ? 1 : 0)
+        << ",hudlessSize:" << gDlssgLatencyStats.lastHudlessWidth << "x" << gDlssgLatencyStats.lastHudlessHeight
+        << ",hudlessFormat:" << gDlssgLatencyStats.lastHudlessFormat;
+    return out.str();
 }
 
 bool FrameGenManager::isActive() {

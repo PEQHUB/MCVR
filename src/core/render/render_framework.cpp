@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cstdarg>
+#include <cstring>
 #include <thread>
 
 // ── Diagnostic file logger (same pattern as overlay_diag.log) ──
@@ -40,7 +41,7 @@ static constexpr uint64_t kFenceTimeoutNs = 5000000000ULL; // 5 seconds
 namespace FrameTiming {
     using Clock = std::chrono::steady_clock;
     static Clock::time_point frameStart;
-    static float accReflexSleep = 0, accAcquireImage = 0, accFenceWait = 0;
+    static float accReflexSleep = 0, accAcquireImage = 0, accFenceWait = 0, accDlssgWait = 0;
     static float accJavaGap = 0; // time between acquireContext return and submitCommand call
     static float accUpload = 0, accTexFlush = 0, accWorldRender = 0, accUIEnd = 0;
     static float accFuse = 0, accCmdEnd = 0, accQueueSubmit = 0;
@@ -53,7 +54,7 @@ static float accLimiterSleep = 0; // native FPS limiter sleep time
     static bool hasLastFrame = false;
 
 	// Per-frame CSV accumulators (written every frame when perFrameTiming is on)
-	static float pfReflexSleep = 0, pfAcquireImage = 0, pfFenceWait = 0;
+	static float pfReflexSleep = 0, pfAcquireImage = 0, pfFenceWait = 0, pfDlssgWait = 0;
 	static float pfJavaGap = 0;
 	static float pfUpload = 0, pfTexFlush = 0, pfWorldRender = 0, pfUIEnd = 0;
 	static float pfFuse = 0, pfCmdEnd = 0, pfQueueSubmit = 0;
@@ -83,7 +84,7 @@ static void logPerFrame() {
 		std::ofstream f("C:/RadSER/results/per_frame_timing.log", std::ios::app);
 		if (!f.is_open()) return;
 		if (!pfHeaderWritten) {
-			f << "frame,reflexSleep,acquireImg,fenceWait,JAVA,upload,texFlush,worldRender,uiEnd,fuse,cmdEnd,queueSubmit,present,TOTAL,wallClock,gpu,limiterSleep,uploadBytes,uploadRegions\n";
+			f << "frame,reflexSleep,acquireImg,fenceWait,dlssgWait,JAVA,upload,texFlush,worldRender,uiEnd,fuse,cmdEnd,queueSubmit,present,TOTAL,wallClock,gpu,limiterSleep,uploadBytes,uploadRegions\n";
 			pfHeaderWritten = true;
 		}
 		float total = pfReflexSleep + pfAcquireImage + pfFenceWait + pfJavaGap +
@@ -93,6 +94,7 @@ static void logPerFrame() {
 			<< pfReflexSleep << ","
 			<< pfAcquireImage << ","
 			<< pfFenceWait << ","
+			<< pfDlssgWait << ","
 			<< pfJavaGap << ","
 			<< pfUpload << ","
 			<< pfTexFlush << ","
@@ -136,7 +138,7 @@ static void logPerFrame() {
 				}
 			}
 		}
-		pfReflexSleep = pfAcquireImage = pfFenceWait = 0;
+		pfReflexSleep = pfAcquireImage = pfFenceWait = pfDlssgWait = 0;
 		pfJavaGap = 0;
 		accTexFlush += pfTexFlush;
 	pfUpload = pfTexFlush = pfWorldRender = pfUIEnd = 0;
@@ -156,6 +158,7 @@ static void logPerFrame() {
             f << "[FRAME] reflexSleep=" << (accReflexSleep / n)
               << " acquireImg=" << (accAcquireImage / n)
               << " fenceWait=" << (accFenceWait / n)
+              << " dlssgWait=" << (accDlssgWait / n)
               << " JAVA=" << (accJavaGap / n)
               << " upload=" << (accUpload / n)
               << " worldRender=" << (accWorldRender / n)
@@ -172,10 +175,11 @@ static void logPerFrame() {
         std::cout << "[FRAME] JAVA=" << (accJavaGap / n)
                   << " worldRender=" << (accWorldRender / n)
                   << " fenceWait=" << (accFenceWait / n)
+                  << " dlssgWait=" << (accDlssgWait / n)
                   << " present=" << (accPresent / n)
                   << " TOTAL=" << total << "ms"
 << " limiterSleep=" << (accLimiterSleep / n) << "ms" << " maxFps=" << Renderer::options.maxFps << std::endl;
-        accReflexSleep = accAcquireImage = accFenceWait = 0;
+        accReflexSleep = accAcquireImage = accFenceWait = accDlssgWait = 0;
         accJavaGap = 0;
         accUpload = accTexFlush = accWorldRender = accUIEnd = 0;
         accFuse = accCmdEnd = accQueueSubmit = 0;
@@ -629,6 +633,22 @@ void Framework::acquireContext() {
             crashExitWithQueue(fenceResult, "vkWaitForFences failed", device_->mainVkQueue());
         }
     }
+#ifdef _WIN32
+    uint64_t dlssgWaitUs = 0;
+    const bool dlssgWaitOk = FrameGenManager::waitForInputCompletion(
+        imageIndex, device_->vkDevice(), kFenceTimeoutNs, &dlssgWaitUs);
+    const float dlssgWaitMs = static_cast<float>(dlssgWaitUs) * 0.001f;
+    FrameTiming::accDlssgWait += dlssgWaitMs;
+    FrameTiming::pfDlssgWait += dlssgWaitMs;
+    if (!dlssgWaitOk) {
+        renderDiag("DLSS-G input completion wait failed slot=%u; requesting recreate", imageIndex);
+        if (imageAcquiredSemaphore) {
+            recycleSemaphore(imageAcquiredSemaphore);
+        }
+        Renderer::options.needRecreate = true;
+        return;
+    }
+#endif
     FrameTiming::accAcquireImage += FrameTiming::ms(ftAcquire0);
     FrameTiming::pfAcquireImage += FrameTiming::ms(ftAcquire0);
 
@@ -992,6 +1012,11 @@ void Framework::present() {
     renderDiag("  vkQueuePresentKHR -> %d", result);
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentEnd);
+    if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
+        FrameGenManager::captureInputCompletion(
+            currentContext_ ? currentContext_->frameIndex : UINT32_MAX,
+            "standard-present");
+    }
 #endif
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || vk::Window::framebufferResized ||
@@ -1075,6 +1100,14 @@ void Framework::recreate() {
         }
     }
     renderDiag("  BLAS thread paused, waiting device idle...");
+#ifdef _WIN32
+    FrameGenManager::captureInputCompletion(
+        currentContext_ ? currentContext_->frameIndex : currentContextIndex_,
+        "recreate");
+    if (!FrameGenManager::waitForAllInputCompletions(device_->vkDevice(), kFenceTimeoutNs)) {
+        renderDiag("  DLSS-G input completion drain failed before recreate; continuing to device idle");
+    }
+#endif
     waitDeviceIdle();
     renderDiag("  device idle");
 
@@ -1220,6 +1253,17 @@ void Framework::close() {
         presentThread_.reset();
     }
     frameSlotRing_.reset();
+
+#ifdef _WIN32
+    if (device_) {
+        FrameGenManager::captureInputCompletion(
+            currentContext_ ? currentContext_->frameIndex : currentContextIndex_,
+            "close");
+        if (!FrameGenManager::waitForAllInputCompletions(device_->vkDevice(), kFenceTimeoutNs)) {
+            renderDiag("DLSS-G input completion drain failed during close");
+        }
+    }
+#endif
 
     if (running_) { pipeline_->close(); }
     running_ = false;

@@ -62,8 +62,8 @@ static int safeLocalCoord(float worldCoord) {
 // Mask for material-relevant flag bits: USE_TEXTURE, USE_COLOR_LAYER, COORD bits.
 // Excludes per-instance flags (USE_NORM, USE_OVERLAY, USE_GLINT, USE_LIGHT, GREEDY_MERGED)
 // that don't affect material identity.
-// NOTE: Biome tint bits (12-13) are excluded — all grass blocks share the same tintType,
-// and different block types can't merge anyway (different textureID/emissiveBlockType).
+// NOTE: Biome tint bits (12-13) are excluded - all grass blocks share the same tintType,
+// and different block types cannot merge anyway (different textureID/emissiveBlockType).
 static constexpr uint32_t MATERIAL_FLAGS_MASK =
     vk::VertexFormat::PBR_FLAG_USE_TEXTURE |
     vk::VertexFormat::PBR_FLAG_USE_COLOR_LAYER |

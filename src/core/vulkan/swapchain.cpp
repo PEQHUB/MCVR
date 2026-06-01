@@ -186,7 +186,10 @@ void vk::Swapchain::reconstruct() {
     hdrMode_ = HdrMode::None;
     hdrActive_ = false;
     if (Renderer::options.hdrEnabled) {
-        bool preferScRGB = Renderer::options.hdrScrgbMode;
+        bool preferScRGB = false;
+        if (Renderer::options.hdrScrgbMode) {
+            swapchainCerr() << "scRGB requested but currently disabled; falling back to HDR10" << std::endl;
+        }
         auto [hdrFormat, mode] = chooseHDRSurfaceFormat(surfaceFormats, preferScRGB);
         if (mode != HdrMode::None) {
             surfaceFormat_ = hdrFormat;

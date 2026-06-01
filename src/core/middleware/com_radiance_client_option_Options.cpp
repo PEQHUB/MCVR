@@ -884,6 +884,18 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.reflexDirty = true;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssgQueueParallelism(
+    JNIEnv *, jclass, jboolean enabled, jboolean) {
+    const bool wasEnabled = Renderer::options.dlssgQueueParallelism;
+    (void)enabled;
+
+    // Disabled until DLSS-G input resources are decoupled from swapchain slots.
+    Renderer::options.dlssgQueueParallelism = false;
+    if (wasEnabled && Renderer::options.frameGenEnabled) {
+        Renderer::options.needRecreate = true;
+    }
+}
+
 extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_option_Options_nativeIsFrameGenSupported(
     JNIEnv *, jclass) {
     return FrameGenManager::maxFramesToGenerate() > 0 ? JNI_TRUE : JNI_FALSE;

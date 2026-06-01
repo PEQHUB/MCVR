@@ -5,6 +5,7 @@
 #include "core/render/chunks.hpp"
 #include "core/render/entities.hpp"
 #include "core/render/modules/ui_module.hpp"
+#include "core/render/modules/world/frame_gen/frame_gen_manager.hpp"
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/overlay_compositor.hpp"
@@ -423,6 +424,73 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Rende
     }
 
     return env->NewStringUTF(out.str().c_str());
+}
+
+/**
+ * Returns color-pipeline state as a flat CSV string.
+ */
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetColorPipelineDiagnostics(
+    JNIEnv *env, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable() || !Renderer::is_initialized()) {
+        return env->NewStringUTF("rendererUsable:0");
+    }
+
+    auto* renderer = Renderer::try_instance();
+    if (!renderer) return env->NewStringUTF("rendererUsable:0");
+
+    auto framework = renderer->framework();
+    auto swapchain = framework ? framework->swapchain() : nullptr;
+    VkSurfaceFormatKHR surfaceFormat{};
+    bool hdrSwapchain = false;
+    bool hdr10Swapchain = false;
+    bool scRgbSwapchain = false;
+    bool transferSrc = false;
+    if (swapchain) {
+        surfaceFormat = swapchain->vkSurfaceFormat();
+        hdrSwapchain = swapchain->isHDR();
+        hdr10Swapchain = swapchain->isHDR10();
+        scRgbSwapchain = swapchain->isScRGB();
+        transferSrc = swapchain->supportsTransferSrc();
+    }
+
+    std::ostringstream out;
+    out << "rendererUsable:1"
+        << ",hdrOption:" << (Renderer::options.hdrEnabled ? 1 : 0)
+        << ",hdrScrgbRequested:" << (Renderer::options.hdrScrgbMode ? 1 : 0)
+        << ",swapchainHdr:" << (hdrSwapchain ? 1 : 0)
+        << ",swapchainHdr10:" << (hdr10Swapchain ? 1 : 0)
+        << ",swapchainScRgb:" << (scRgbSwapchain ? 1 : 0)
+        << ",swapchainFormat:" << surfaceFormat.format
+        << ",swapchainColorSpace:" << surfaceFormat.colorSpace
+        << ",swapchainTransferSrc:" << (transferSrc ? 1 : 0)
+        << ",sdrTonemapMode:" << Renderer::options.tonemappingMode
+        << ",sdrWorkingSpace:BT709"
+        << ",sdrFinalGamutMap:none"
+        << ",sdrHardClamp:1"
+        << ",sdrPsychoWorkingSpace:BT709"
+        << ",hdrTonemapMode:" << Renderer::options.hdrTonemapMode
+        << ",saturation:" << Renderer::options.saturation
+        << ",saturationAdaptive:" << (Renderer::options.saturationAdaptive ? 1 : 0)
+        << ",sdrTransferFunction:" << Renderer::options.sdrTransferFunction
+        << ",paperWhiteNits:" << Renderer::options.hdrPaperWhiteNits
+        << ",peakNits:" << Renderer::options.hdrPeakNits
+        << ",sharpenerMode:" << Renderer::options.sharpenerMode;
+
+    return env->NewStringUTF(out.str().c_str());
+}
+
+/**
+ * Returns DLSS-G latency diagnostics as a flat CSV string.
+ */
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetDlssgLatencyDiag(
+    JNIEnv *env, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable() || !Renderer::is_initialized()) {
+        return env->NewStringUTF("rendererUsable:0");
+    }
+
+    return env->NewStringUTF(FrameGenManager::latencyDiagnostics().c_str());
 }
 
 /**

@@ -210,6 +210,7 @@ struct Options {
     bool frameGenEnabled = false;        // Master toggle
     uint32_t frameGenMode = 0;           // 0=Off, 1=On, 2=Auto (adaptive MFG)
     uint32_t frameGenMultiplier = 1;     // 1=2x, 2=3x, 3=4x, 4=5x, 5=6x (clamped to hardware max)
+    bool dlssgQueueParallelism = false;  // Guarded off until DLSS-G inputs are decoupled from swapchain slots
 
     // Volumetric clouds
     uint32_t cloudQuality = 3;        // 0=Off, 1=Low, 2=Medium, 3=High, 4=Ultra, 5=Extreme

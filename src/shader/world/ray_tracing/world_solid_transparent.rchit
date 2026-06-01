@@ -183,8 +183,28 @@ layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
 layout(location = 1) rayPayloadEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
 
-vec3 thinPlantRayOrigin(vec3 worldPos, vec3 rayDir) {
-    return worldPos + normalize(rayDir) * 0.0015;
+vec3 thinPlantRayOrigin(vec3 worldPos, vec3 rayDir, vec3 geometricNormal) {
+    vec3 biasNormal = dot(rayDir, geometricNormal) >= 0.0 ? geometricNormal : -geometricNormal;
+    return offset_ray(worldPos, biasNormal);
+}
+
+uint thinPlantBlockTypeFromPacked(uint packedBlockType) {
+    return (packedBlockType >> 17u) & 0x3FFFu;
+}
+
+uint thinPlantHashInt(int v, uint salt) {
+    uint x = uint(v) ^ salt;
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    return x ^ (x >> 16u);
+}
+
+uint thinPlantColumnHash(vec3 cameraRelativeWorldPos) {
+    ivec3 cell = ivec3(floor(cameraRelativeWorldPos + vec3(worldUbo.cameraPos.xyz) + vec3(0.0001)));
+    uint h = thinPlantHashInt(cell.x, 0x9e3779b9u) ^ thinPlantHashInt(cell.z, 0x85ebca6bu);
+    return h == 0u ? 1u : h;
 }
 
 float thinPlantFill(bool hasMaterialEntry, MaterialClassEntry mc) {
@@ -536,8 +556,8 @@ void main() {
     vec3 planeHitWorldPos = worldPos;
     float actualHitT = gl_HitTEXT;
 
-    // Biome tint: shader-side resolution from per-section SSBO (bits 12-13 of flags)
-    // 0=none, 1=grass, 2=foliage, 3=water. Replaces per-vertex colorLayer for biome tints.
+    // Biome tint: shader-side resolution from per-section SSBO (bits 12-13 of flags).
+    // 0=none, 1=grass, 2=foliage, 3=water. Fixed tints use per-vertex colorLayer.
     vec3 colorLayer = vec3(1.0);
     uint biomeTintType = (v0.flags >> PBR_FLAG_BIOME_TINT_SHIFT) & 0x3u;
     if (biomeTintType != 0u) {
@@ -548,7 +568,7 @@ void main() {
             float(packed & 0xFFu) / 255.0
         );
     } else if ((v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u) {
-        // Fixed-color tint (birch/spruce leaves, etc.) — per-vertex colorLayer
+        // Fixed-color tint (birch/spruce leaves, etc.) - per-vertex colorLayer.
         colorLayer = baryCoords.x * v0.colorLayer + baryCoords.y * v1.colorLayer + baryCoords.z * v2.colorLayer;
     }
 
@@ -639,6 +659,8 @@ void main() {
 #if RARSER_THIN_PLANT_PRIMARY_FIX
     thinCutoutPlant = isBlockGeometry && ((packedBlockType & PBR_PACKED_THIN_CUTOUT_PLANT) != 0u);
 #endif
+    uint sourceThinBlockType = thinCutoutPlant ? thinPlantBlockTypeFromPacked(packedBlockType) : 0u;
+    uint sourceThinColumnHash = thinCutoutPlant ? thinPlantColumnHash(worldPos) : 0u;
     uint materialType = (packedBlockType >> 8u) & 0xFFu;
     uint materialClassIdx = 0u;
     bool hasMaterialClass = false;
@@ -909,6 +931,8 @@ void main() {
         vec4 pack3 = vec4(mc.coatRoughness, mc.noiseScale, mc.noiseStrength, 0.0);
         vec4 pack5 = vec4(mc.gamutBoost, mc.noiseMaskThreshold, 0.0, mc.normalStrength);
         vec4 pack6 = vec4(mc.noiseRotation, mc.noiseAspect, mc.noiseLacunarity, mc.noiseContrast);
+        float scalarMaterialRoughness = max(pack0.a * pack0.a, 0.01);
+        float roughnessBlend = clamp(float((mc.autoPBRPacked1 >> 16u) & 0xFFu) / 100.0, 0.0, 1.0);
 
         {
             // Apply F0 override if set; for dielectrics with zero F0, derive from IOR
@@ -936,14 +960,15 @@ void main() {
                 } else if (pack1.y > 0.001) {
                     // Transmissive AutoPBR blocks (slime, glass, ice):
                     // CPU bake was skipped — use material class roughness slider
-                    mat.roughness = max(pack0.a * pack0.a, 0.01);
+                    mat.roughness = scalarMaterialRoughness;
                 }
                 // Non-transmissive AutoPBR blocks (iron, stone, wood):
                 // Roughness from CPU-baked specular (via convertLabPBRMaterial). No override.
             } else {
                 // Non-AutoPBR blocks: material class roughness slider
-                mat.roughness = max(pack0.a * pack0.a, 0.01);
+                mat.roughness = scalarMaterialRoughness;
             }
+            mat.roughness = clamp(mix(mat.roughness, scalarMaterialRoughness, roughnessBlend), 0.01, 1.0);
 
             mat.metallic = pack1.x;
             if (pack1.y >= 0.0) mat.transmission = pack1.y;
@@ -1406,7 +1431,7 @@ void main() {
     vec2 vmfBN = vec2(-1.0); // A/B test: force PCG, disable blue noise
     vec3 sampledLightDir = SampleVMF(mainRay.seed, lightDir, kappa, vmfBN);
     vec3 shadowBiasN = dot(sampledLightDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
-    vec3 shadowRayOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sampledLightDir)
+    vec3 shadowRayOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sampledLightDir, geometricNormal)
                                            : offset_ray(worldPos, shadowBiasN);
 
     bool skipSecondarySunShadow = RT_DEBUG_DISABLE_SECONDARY_SUN_SHADOW && mainRay.index > 0;
@@ -1421,6 +1446,9 @@ void main() {
         shadowRay.hitT = INF_DISTANCE;
         shadowRay.insideBoat = prGetInsideBoat(mainRay) ? 1u : 0u;
         shadowRay.bounceIndex = mainRay.index;
+        shadowRay.originThinBlockType = sourceThinBlockType;
+        shadowRay.originThinColumnHash = sourceThinColumnHash;
+        shadowRay.lastThinPlantHitKey = 0u;
         shadowRay.mediumAbsorption = vec3(0.0);
         shadowRay.mediumEntryT = 0.0;
 
@@ -1637,7 +1665,7 @@ void main() {
                 vec3 toSample = cs.worldPos - worldPos;
                 float sDist = length(toSample);
                 vec3 sDir = toSample / sDist;
-                vec3 shadowOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sDir)
+                vec3 shadowOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sDir, geometricNormal)
                                                     : offset_ray(worldPos, geometricNormal);
 
                 shadowRay.radiance = vec3(0.0);
@@ -1646,6 +1674,9 @@ void main() {
                 shadowRay.hitT = INF_DISTANCE;
                 shadowRay.insideBoat = prGetInsideBoat(mainRay) ? 1u : 0u;
                 shadowRay.bounceIndex = mainRay.index;
+                shadowRay.originThinBlockType = sourceThinBlockType;
+                shadowRay.originThinColumnHash = sourceThinColumnHash;
+                shadowRay.lastThinPlantHitKey = 0u;
 
                 float safeMargin = al.halfExtent + 0.02;
                 float alTMax = sDist - safeMargin;
@@ -1753,7 +1784,7 @@ void main() {
                 vec3 toSample = cs.worldPos - worldPos;
                 float sDist = length(toSample);
                 vec3 sDir = toSample / sDist;
-                vec3 shadowOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sDir)
+                vec3 shadowOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sDir, geometricNormal)
                                                     : offset_ray(worldPos, geometricNormal);
 
                 shadowRay.radiance = vec3(0.0);
@@ -1762,6 +1793,9 @@ void main() {
                 shadowRay.hitT = INF_DISTANCE;
                 shadowRay.insideBoat = prGetInsideBoat(mainRay) ? 1u : 0u;
                 shadowRay.bounceIndex = mainRay.index;
+                shadowRay.originThinBlockType = sourceThinBlockType;
+                shadowRay.originThinColumnHash = sourceThinColumnHash;
+                shadowRay.lastThinPlantHitKey = 0u;
 
                 float safeMargin = al.halfExtent + 0.02;
                 float alTMax = sDist - safeMargin;
@@ -1934,7 +1968,7 @@ void main() {
             vec3 toSample = cs.worldPos - worldPos;
             float sDist = length(toSample);
             vec3 sDir = toSample / sDist;
-            vec3 shadowOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sDir)
+            vec3 shadowOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sDir, geometricNormal)
                                                 : offset_ray(worldPos, geometricNormal);
 
             shadowRay.radiance = vec3(0.0);
@@ -1943,6 +1977,9 @@ void main() {
             shadowRay.hitT = INF_DISTANCE;
             shadowRay.insideBoat = prGetInsideBoat(mainRay) ? 1u : 0u;
             shadowRay.bounceIndex = mainRay.index;
+            shadowRay.originThinBlockType = sourceThinBlockType;
+            shadowRay.originThinColumnHash = sourceThinColumnHash;
+            shadowRay.lastThinPlantHitKey = 0u;
 
             float safeMargin = al.halfExtent + 0.02;
             float alTMax = sDist - safeMargin;
@@ -2184,7 +2221,7 @@ void main() {
         }
     }
 #endif
-    mainRay.origin = thinCutoutPlant ? thinPlantRayOrigin(bounceWorldPos, sampleDir)
+    mainRay.origin = thinCutoutPlant ? thinPlantRayOrigin(bounceWorldPos, sampleDir, geometricNormal)
                                      : offset_ray(bounceWorldPos, bounceOffsetN);
 
     mainRay.direction = sampleDir;

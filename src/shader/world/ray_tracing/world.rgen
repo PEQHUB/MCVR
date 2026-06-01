@@ -792,6 +792,9 @@ void main() {
             // Initialize probe payload (throughput=0 so shadow miss shader is a no-op)
             reflectionProbe.throughput = vec3(0.0);
             reflectionProbe.hitT = INF_DISTANCE;
+            reflectionProbe.originThinBlockType = 0u;
+            reflectionProbe.originThinColumnHash = 0u;
+            reflectionProbe.lastThinPlantHitKey = 0u;
 
             traceRayEXT(topLevelAS,
                 gl_RayFlagsOpaqueEXT,       // skip any-hit, treat all geometry as opaque

@@ -72,10 +72,10 @@ void BlockMesher::emitQuad(std::vector<PBRTriangle>& vertices,
                    | vk::VertexFormat::PBR_FLAG_BLOCK_GEOMETRY;
 
     // Biome tint: encode type in flag bits 12-13 for shader-side resolution.
-    // Overlay is now handled via SpriteRegistry.overlaySprite — no colorLayer hack needed.
+    // Overlay is handled via SpriteRegistry.overlaySprite.
     glm::vec4 color(1.0f);
     if (quad.tintIndex >= 0 && entry.tintColorType <= 2) {
-        // Biome-dependent tint (grass, foliage, water) — shader resolves from SSBO
+        // Biome-dependent tint (grass, foliage, water) - shader resolves from SSBO.
         flags |= (static_cast<uint32_t>(entry.tintColorType + 1) << vk::VertexFormat::PBR_FLAG_BIOME_TINT_SHIFT);
     } else if (quad.tintIndex >= 0 && entry.tintColorType == 3) {
         // Fixed color (birch/spruce leaves, lily pad)
@@ -239,7 +239,7 @@ static void emitFluidFace(std::vector<PBRTriangle>& vertices, std::vector<uint32
                    | vk::VertexFormat::PBR_FLAG_BLOCK_GEOMETRY
                    | vk::VertexFormat::PBR_FLAG_FLUID_GEOMETRY;
 
-    // Biome tint (use override tintType — allows waterlogged blocks to force TINT_WATER)
+    // Biome tint (use override tintType - allows waterlogged blocks to force TINT_WATER).
     if (tintType <= 2) {
         flags |= (static_cast<uint32_t>(tintType + 1) << vk::VertexFormat::PBR_FLAG_BIOME_TINT_SHIFT);
     }
