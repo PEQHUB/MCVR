@@ -55,6 +55,16 @@ const vk::Data::SpriteEntry* SpriteRegistry::getEntry(uint16_t spriteId) const {
     return &entries_[spriteId];
 }
 
+bool SpriteRegistry::updateHeightMetadata(uint16_t spriteId, uint32_t flags, int32_t maskLayer) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (spriteId >= entries_.size()) return false;
+    auto& e = entries_[spriteId];
+    e.flags = flags;
+    e.maskLayer = maskLayer;
+    spriteCount_ = std::max(spriteCount_, static_cast<uint32_t>(spriteId + 1));
+    return true;
+}
+
 void SpriteRegistry::uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device) {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -99,6 +109,14 @@ void SpriteRegistry::uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk
 
 void SpriteRegistry::reset() {
     std::lock_guard<std::mutex> lock(mutex_);
+    entries_.clear();
+    spriteCount_ = 0;
+    ssbo_.reset();
+}
+
+void SpriteRegistry::retire(GarbageCollector& gc) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    gc.collect(ssbo_);
     entries_.clear();
     spriteCount_ = 0;
     ssbo_.reset();

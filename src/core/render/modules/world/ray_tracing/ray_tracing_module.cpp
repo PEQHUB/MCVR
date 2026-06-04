@@ -1,4 +1,4 @@
-#include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
+﻿#include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include <chrono>
 
 #include "core/render/buffers.hpp"
@@ -7,7 +7,6 @@
 #include "core/render/lights.hpp"
 #include "core/render/modules/world/ray_tracing/submodules/atmosphere.hpp"
 #include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
-#include "core/render/modules/world/shader_pack/shader_pack.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/crash_ring_buffer.hpp"
@@ -19,6 +18,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <sstream>
@@ -31,14 +31,16 @@ constexpr int kSharcMaxCapacityExponent = 24;
 constexpr uint32_t kSharcDispatchStableFrameThreshold = 60;
 constexpr uint32_t kSharcMainTraceMaxWarmupFrames = 8;
 constexpr uint32_t kSharcQueryCounterCount = 8;
-constexpr uint32_t kDirectLightCounterCount = 16;
-constexpr uint32_t kRtDebugDisableDirectLighting = 16;
-constexpr bool kForceDisableShaderDisplacementForGpuFaultIsolation = true;
-constexpr bool kAllowUpstreamRtExecutorDispatch = false;
-constexpr bool kAllowDirectLightScaffoldDispatch = false;
+
+bool shaderDisplacementForceDisabled() {
+    const char* value = std::getenv("RADSER_FORCE_DISABLE_SHADER_DISPLACEMENT");
+    if (!value || value[0] == '\0') return false;
+    return value[0] != '0' && value[0] != 'f' && value[0] != 'F' &&
+           value[0] != 'n' && value[0] != 'N';
+}
 
 bool shaderDisplacementRuntimeAllowed() {
-    return !kForceDisableShaderDisplacementForGpuFaultIsolation;
+    return !shaderDisplacementForceDisabled();
 }
 
 int effectiveSharcCapacityExponent() {
@@ -73,51 +75,6 @@ int effectiveSharcQueryMode() {
     return std::clamp(Renderer::options.sharcQueryMode, 0, 2);
 }
 
-uint32_t effectiveDirectLightBackend() {
-    return std::clamp<uint32_t>(Renderer::options.directLightBackend, 0, 2);
-}
-
-bool upstreamRtPackFileExists(const char* relativePath) {
-    return std::filesystem::exists(
-        Renderer::folderPath / "shaders/world/ray_tracing/internal/advanced" / relativePath);
-}
-
-uint32_t upstreamRtPassReadinessMask() {
-    uint32_t mask = 0;
-    const char* passFiles[] = {
-        "primary/primary.rgen",
-        "generate_initial_samples/generate_initial_samples.comp",
-        "visibility/visibility.rgen",
-        "temporal_reuse/temporal_reuse.comp",
-        "spatial_reuse/spatial_reuse.comp",
-        "direct_light/direct_light.rgen",
-        "world/world.rgen",
-    };
-    for (uint32_t i = 0; i < static_cast<uint32_t>(sizeof(passFiles) / sizeof(passFiles[0])); ++i) {
-        if (upstreamRtPackFileExists(passFiles[i])) {
-            mask |= (1u << i);
-        }
-    }
-    return mask;
-}
-
-bool upstreamRtPackReady() {
-    constexpr uint32_t kRequiredPassMask = 0x7fu;
-    return upstreamRtPackFileExists("configs.json") &&
-        (upstreamRtPassReadinessMask() & kRequiredPassMask) == kRequiredPassMask;
-}
-
-bool upstreamDirectLightExecutorPassIncluded(const std::string& name) {
-    return name == "primary" ||
-        name == "precompute_light_neighborhoods" ||
-        name == "generate_initial_samples" ||
-        name == "visibility" ||
-        name == "temporal_reuse" ||
-        name == "spatial_reuse" ||
-        name == "direct_light" ||
-        name == "final_compose";
-}
-
 class ScopedGpuProfile {
 public:
     ScopedGpuProfile(VkCommandBuffer cmd, const char* name) : cmd_(cmd) {
@@ -149,158 +106,8 @@ RayTracingModule::RayTracingModule() {}
 std::string RayTracingModule::diagnosticFeatureTruth() const {
     std::ostringstream out;
     const bool accumulating = Renderer::options.offlineState == 2;
-    const uint32_t directLightBackend = effectiveDirectLightBackend();
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    constexpr bool directLightPipelineCompiled = true;
-#else
-    constexpr bool directLightPipelineCompiled = false;
-#endif
-#ifdef MCVR_ENABLE_RTXDI
-    constexpr bool rtxdiCompiled = true;
-#else
-    constexpr bool rtxdiCompiled = false;
-#endif
-    const bool directLightPipelinePossible = directLightPipelineCompiled && directLightBackend != 0;
-    const bool rtxdiBackendPossible = directLightPipelineCompiled && rtxdiCompiled && directLightBackend == 2;
-    const uint32_t upstreamRtPassMask = upstreamRtPassReadinessMask();
-    const bool upstreamRtReady = upstreamRtPackReady();
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    bool directLightResourcesReady = false;
-    uint32_t directLightReservoirWidth = 0;
-    uint32_t directLightReservoirHeight = 0;
-    uint64_t directLightReservoirPixels = 0;
-    if (!directLightReservoirPingImages_.empty()) {
-        for (const auto& image : directLightReservoirPingImages_) {
-            if (image) {
-                directLightResourcesReady = true;
-                directLightReservoirWidth = image->width();
-                directLightReservoirHeight = image->height();
-                directLightReservoirPixels =
-                    static_cast<uint64_t>(directLightReservoirWidth) * directLightReservoirHeight;
-                break;
-            }
-        }
-    }
-    int directLightLightCount = 0;
-    if (worldPrepare_) {
-        for (const auto& ctx : worldPrepare_->contexts_) {
-            if (ctx) {
-                directLightLightCount = std::max(directLightLightCount, ctx->areaLightCount);
-            }
-        }
-    }
-    const bool upstreamExecutorReady =
-        directLightBackend == 1 &&
-        directLightUpstreamPackRuntimeReady_ &&
-        directLightUpstreamRuntimeResourcesReady_ &&
-        directLightUpstreamPassRuntimeReady_ &&
-        directLightUpstreamShaderCompileReady_ &&
-        directLightUpstreamPipelineReady_ &&
-        directLightUpstreamSbtReady_;
-    const bool upstreamExecutorActive = kAllowUpstreamRtExecutorDispatch && upstreamExecutorReady;
-    const bool directLightScaffoldActive = kAllowDirectLightScaffoldDispatch && directLightBackend == 2;
-#else
-    constexpr bool directLightResourcesReady = false;
-    constexpr uint32_t directLightReservoirWidth = 0;
-    constexpr uint32_t directLightReservoirHeight = 0;
-    constexpr uint64_t directLightReservoirPixels = 0;
-    constexpr int directLightLightCount = 0;
-    constexpr bool upstreamExecutorReady = false;
-    constexpr bool upstreamExecutorActive = false;
-    constexpr bool directLightScaffoldActive = false;
-#endif
-
-    out << "directLightBackend:" << directLightBackend
-        << ",directLightPipelineCompiled:" << (directLightPipelineCompiled ? 1 : 0)
-        << ",rtxdiCompiled:" << (rtxdiCompiled ? 1 : 0)
-        << ",directLightPipelinePossible:" << (directLightPipelinePossible ? 1 : 0)
-        << ",rtxdiBackendPossible:" << (rtxdiBackendPossible ? 1 : 0)
-        << ",directLightPipelineActive:" << ((upstreamExecutorActive || directLightScaffoldActive) ? 1 : 0)
-        << ",directLightVisualOverrideActive:0"
-        << ",directLightScaffoldVisualSubstituteActive:0"
-        << ",directLightRuntimeCompilerReady:1"
-        << ",directLightUpstreamExecutionActive:" << (upstreamExecutorActive ? 1 : 0)
-        << ",directLightUpstreamExecutorReady:" << (upstreamExecutorReady ? 1 : 0)
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-        << ",directLightUpstreamExecutorBlockedNoPassRuntime:" << (directLightUpstreamPassRuntimeReady_ ? 0 : 1)
-        << ",directLightUpstreamExecutorBlockedNoRuntimeDescriptors:" << (directLightUpstreamRuntimeResourcesReady_ ? 0 : 1)
-        << ",directLightUpstreamPackRuntimeReady:" << (directLightUpstreamPackRuntimeReady_ ? 1 : 0)
-        << ",directLightUpstreamRuntimeResourcesReady:" << (directLightUpstreamRuntimeResourcesReady_ ? 1 : 0)
-        << ",directLightUpstreamPassRuntimeReady:" << (directLightUpstreamPassRuntimeReady_ ? 1 : 0)
-        << ",directLightUpstreamShaderCompileReady:" << (directLightUpstreamShaderCompileReady_ ? 1 : 0)
-        << ",directLightUpstreamPipelineReady:" << (directLightUpstreamPipelineReady_ ? 1 : 0)
-        << ",directLightUpstreamSbtReady:" << (directLightUpstreamSbtReady_ ? 1 : 0)
-#else
-        << ",directLightUpstreamExecutorBlockedNoPassRuntime:1"
-        << ",directLightUpstreamExecutorBlockedNoRuntimeDescriptors:1"
-        << ",directLightUpstreamPackRuntimeReady:0"
-        << ",directLightUpstreamRuntimeResourcesReady:0"
-        << ",directLightUpstreamPassRuntimeReady:0"
-        << ",directLightUpstreamShaderCompileReady:0"
-        << ",directLightUpstreamPipelineReady:0"
-        << ",directLightUpstreamSbtReady:0"
-#endif
-        << ",directLightPerfComparisonValid:" << (upstreamExecutorReady ? 1 : 0)
-        << ",directLightUpstreamPackReady:" << (upstreamRtReady ? 1 : 0)
-        << ",directLightUpstreamPassMask:" << upstreamRtPassMask
-        << ",directLightUpstreamPrimaryReady:" << ((upstreamRtPassMask & (1u << 0)) ? 1 : 0)
-        << ",directLightUpstreamInitialReady:" << ((upstreamRtPassMask & (1u << 1)) ? 1 : 0)
-        << ",directLightUpstreamVisibilityReady:" << ((upstreamRtPassMask & (1u << 2)) ? 1 : 0)
-        << ",directLightUpstreamTemporalReady:" << ((upstreamRtPassMask & (1u << 3)) ? 1 : 0)
-        << ",directLightUpstreamSpatialReady:" << ((upstreamRtPassMask & (1u << 4)) ? 1 : 0)
-        << ",directLightUpstreamDirectLightReady:" << ((upstreamRtPassMask & (1u << 5)) ? 1 : 0)
-        << ",directLightUpstreamWorldReady:" << ((upstreamRtPassMask & (1u << 6)) ? 1 : 0)
-        << ",directLightResourcesReady:" << (directLightResourcesReady ? 1 : 0)
-        << ",directLightReservoirWidth:" << directLightReservoirWidth
-        << ",directLightReservoirHeight:" << directLightReservoirHeight
-        << ",directLightReservoirPixels:" << directLightReservoirPixels
-        << ",directLightLightCount:" << directLightLightCount
-        << ",directLightEmissiveChunks:0"
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-        << ",directLightPrimaryPipelineReady:" << (directLightPrimaryPipeline_ != VK_NULL_HANDLE ? 1 : 0)
-        << ",directLightInitialPipelineReady:" << (directLightInitialPipeline_ != VK_NULL_HANDLE ? 1 : 0)
-        << ",directLightUtilityPipelineReady:" << (directLightUtilityPipeline_ != VK_NULL_HANDLE ? 1 : 0)
-        << ",directLightExternalized:0"
-        << ",directLightPrimarySurfacePixels:" << directLightLastCounters_[0]
-        << ",directLightValidReservoirs:" << directLightLastCounters_[1]
-        << ",directLightTemporalReused:" << directLightLastCounters_[2]
-        << ",directLightSpatialTaps:" << directLightLastCounters_[3]
-        << ",directLightVisibilityRays:" << directLightLastCounters_[4]
-        << ",directLightDepthHits:" << directLightLastCounters_[5]
-        << ",directLightShadeValidPixels:" << directLightLastCounters_[6]
-        << ",directLightDirectionalCandidates:" << directLightLastCounters_[7]
-        << ",directLightDirectionalVisibilityRays:" << directLightLastCounters_[8]
-        << ",directLightDirectionalUnoccluded:" << directLightLastCounters_[9]
-        << ",directLightAreaTilePixels:" << directLightLastCounters_[10]
-        << ",directLightAreaCandidates:" << directLightLastCounters_[11]
-        << ",directLightAreaVisibilityRays:" << directLightLastCounters_[12]
-        << ",directLightAreaUnoccluded:" << directLightLastCounters_[13]
-        << ",directLightOutputPixels:" << directLightLastCounters_[14]
-        << ",directLightNonzeroOutputPixels:" << directLightLastCounters_[15]
-#else
-        << ",directLightPrimaryPipelineReady:0"
-        << ",directLightInitialPipelineReady:0"
-        << ",directLightUtilityPipelineReady:0"
-        << ",directLightExternalized:0"
-        << ",directLightPrimarySurfacePixels:0"
-        << ",directLightValidReservoirs:0"
-        << ",directLightTemporalReused:0"
-        << ",directLightSpatialTaps:0"
-        << ",directLightVisibilityRays:0"
-        << ",directLightDepthHits:0"
-        << ",directLightShadeValidPixels:0"
-        << ",directLightDirectionalCandidates:0"
-        << ",directLightDirectionalVisibilityRays:0"
-        << ",directLightDirectionalUnoccluded:0"
-        << ",directLightAreaTilePixels:0"
-        << ",directLightAreaCandidates:0"
-        << ",directLightAreaVisibilityRays:0"
-        << ",directLightAreaUnoccluded:0"
-        << ",directLightOutputPixels:0"
-        << ",directLightNonzeroOutputPixels:0"
-#endif
-        << ",sharcOption:" << (Renderer::options.sharcEnabled ? 1 : 0)
-        << ",offlineAccumulating:" << (accumulating ? 1 : 0);
+    out << "offlineAccumulating:" << (accumulating ? 1 : 0)
+        << ",sharcOption:" << (Renderer::options.sharcEnabled ? 1 : 0);
 
 #ifdef MCVR_ENABLE_SHARC
     constexpr bool sharcCompiled = true;
@@ -468,13 +275,6 @@ void RayTracingModule::init(std::shared_ptr<Framework> framework, std::shared_pt
     sharcCandidateThroughputImages_.resize(size);
     sharcCandidatePrefixRadianceFlagsImages_.resize(size);
     sharcQueryCounterBuffers_.resize(size);
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    directLightPrimarySurfaceImages_.resize(size);
-    directLightReservoirPingImages_.resize(size);
-    directLightReservoirPongImages_.resize(size);
-    directLightOutputImages_.resize(size);
-    directLightCounterBuffers_.resize(size);
-#endif
 
     atmosphere_ = Atmosphere::create(framework, shared_from_this());
     worldPrepare_ = WorldPrepare::create(framework, shared_from_this());
@@ -545,20 +345,6 @@ bool RayTracingModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::D
     transparencyLayerOpacityImages_[frameIndex] = images[27];
     transparencyLayerMvecsImages_[frameIndex] = images[28];
 
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    auto ensureUpstreamImage =
-        [&](std::vector<std::shared_ptr<vk::DeviceLocalImage>> &target, VkFormat format) {
-            auto &img = target[frameIndex];
-            if (!img || img->width() != width || img->height() != height) {
-                img = vk::DeviceLocalImage::create(
-                    framework->device(), framework->vma(), false, width, height, 1, format,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-                        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-            }
-        };
-    ensureUpstreamImage(upstreamFogImages_, VK_FORMAT_R16G16B16A16_SFLOAT);
-    ensureUpstreamImage(upstreamFirstHitRefractionImages_, VK_FORMAT_R16G16B16A16_SFLOAT);
-#endif
 
     // Publish depth and motion vectors for frame generation resource tagging
     if (Renderer::frameGenDepthImages.size() <= frameIndex) {
@@ -567,26 +353,6 @@ bool RayTracingModule::setOrCreateOutputImages(std::vector<std::shared_ptr<vk::D
     }
     Renderer::frameGenDepthImages[frameIndex] = linearDepthImages_[frameIndex];
     Renderer::frameGenMotionVectorImages[frameIndex] = motionVectorImages_[frameIndex];
-
-    // Create reservoir images for ReSTIR DI (only once, shared across frames)
-    if (Renderer::options.restirEnabled) {
-        if (!reservoirImages_[0]) {
-            for (int r = 0; r < 2; r++) {
-                reservoirImages_[r] = vk::DeviceLocalImage::create(
-                    framework->device(), framework->vma(), false, width, height, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-            }
-        }
-
-        // Create bounce ReSTIR DI reservoir images (per-bounce temporal reuse, bounces 1-3)
-        if (!bounceReservoirImages_[0]) {
-            for (int b = 0; b < 3; b++) {
-                bounceReservoirImages_[b] = vk::DeviceLocalImage::create(
-                    framework->device(), framework->vma(), false, width, height, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-            }
-        }
-    }
 
 #ifdef MCVR_ENABLE_SHARC_QUERY_PASS
     auto ensureCandidateImage =
@@ -648,13 +414,6 @@ void RayTracingModule::build() {
     initImages();
     initPipeline();
     initSBT();
-    initSpatialPipeline();
-    initClusterPipeline();
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    initDirectLightPipeline();
-    initUpstreamDirectLightRuntime();
-    initUpstreamDirectLightDescriptorTables();
-#endif
 #if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_BUFFERS)
     sharcCapacity_ = effectiveSharcCapacity();
     if (Renderer::options.sharcEnabled) {
@@ -673,7 +432,7 @@ void RayTracingModule::build() {
     initAccumulationPipeline();
 
     // Initialize blue noise buffers (Owen-scrambled Sobol + spatial scrambling tile)
-    // Upload immediately via important-upload path (synchronous staging→device before first RT dispatch)
+    // Upload immediately via important-upload path (synchronous stagingâ†’device before first RT dispatch)
     blueNoise_ = std::make_shared<BlueNoise>(framework->device(), framework->vma());
 
     for (int i = 0; i < size; i++) {
@@ -703,13 +462,6 @@ void RayTracingModule::bindTexture(std::shared_ptr<vk::Sampler> sampler,
         if (rayTracingDescriptorTables_[i] != nullptr)
             rayTracingDescriptorTables_[i]->bindSamplerImage(sampler, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                                              0, 0, index);
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-        if (i < static_cast<int>(directLightUpstreamDescriptorTables_.size()) &&
-            directLightUpstreamDescriptorTables_[i] != nullptr) {
-            directLightUpstreamDescriptorTables_[i]->bindSamplerImage(
-                sampler, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 0, index);
-        }
-#endif
     }
 }
 
@@ -723,7 +475,7 @@ void RayTracingModule::initAccumulationPipeline() {
     std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
     accumShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/accumulate_comp.spv").string());
     if (!accumShader_) {
-        std::cerr << "[Offline] Failed to load accumulate_comp.spv — accumulation disabled" << std::endl;
+        std::cerr << "[Offline] Failed to load accumulate_comp.spv â€” accumulation disabled" << std::endl;
         return;
     }
 
@@ -787,7 +539,7 @@ void RayTracingModule::initAccumulationPipeline() {
     // --- Emission compose pipeline (DLSS-RR: subtract emission before, add after) ---
     auto emissionShader = vk::Shader::create(device, (shaderPath / "world/ray_tracing/emission_compose_comp.spv").string());
     if (!emissionShader) {
-        std::cerr << "[Offline] Failed to load emission_compose_comp.spv — emission preservation disabled" << std::endl;
+        std::cerr << "[Offline] Failed to load emission_compose_comp.spv â€” emission preservation disabled" << std::endl;
         return;
     }
 
@@ -837,28 +589,6 @@ void RayTracingModule::preClose() {
     auto framework = framework_.lock();
     if (framework) {
         VkDevice dev = framework->device()->vkDevice();
-        if (spatialPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, spatialPipeline_, nullptr);
-        if (spatialPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, spatialPipelineLayout_, nullptr);
-        if (spatialDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, spatialDescSetLayout_, nullptr);
-        if (spatialDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, spatialDescPool_, nullptr);
-        if (clusterPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, clusterPipeline_, nullptr);
-        if (clusterPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, clusterPipelineLayout_, nullptr);
-        if (clusterDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, clusterDescSetLayout_, nullptr);
-        if (clusterDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, clusterDescPool_, nullptr);
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-        if (directLightPrimaryPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, directLightPrimaryPipeline_, nullptr);
-        if (directLightPrimaryPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, directLightPrimaryPipelineLayout_, nullptr);
-        if (directLightPrimaryDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, directLightPrimaryDescSetLayout_, nullptr);
-        if (directLightPrimaryDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, directLightPrimaryDescPool_, nullptr);
-        if (directLightInitialPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, directLightInitialPipeline_, nullptr);
-        if (directLightInitialPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, directLightInitialPipelineLayout_, nullptr);
-        if (directLightInitialDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, directLightInitialDescSetLayout_, nullptr);
-        if (directLightInitialDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, directLightInitialDescPool_, nullptr);
-        if (directLightUtilityPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, directLightUtilityPipeline_, nullptr);
-        if (directLightUtilityPipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, directLightUtilityPipelineLayout_, nullptr);
-        if (directLightUtilityDescSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, directLightUtilityDescSetLayout_, nullptr);
-        if (directLightUtilityDescPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, directLightUtilityDescPool_, nullptr);
-#endif
         if (sharcResolvePipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, sharcResolvePipeline_, nullptr);
         if (sharcResolvePipelineLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(dev, sharcResolvePipelineLayout_, nullptr);
         if (sharcQueryPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(dev, sharcQueryPipeline_, nullptr);
@@ -938,6 +668,14 @@ void RayTracingModule::initDescriptorTables() {
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
                 })
+                .defineDescriptorLayoutSetBinding({
+                    .binding = 6, // block sprite LabPBR flag sampler2DArray
+                    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                                  VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
+                                  VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
+                })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
                 .beginDescriptorLayoutSet() // set 1
@@ -997,34 +735,19 @@ void RayTracingModule::initDescriptorTables() {
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 8, // binding 8: area light SSBO
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 9, // binding 9: tile light buffer (light clustering)
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 10, // binding 10: Blender PBR texture mapping (cold path)
+                })                .defineDescriptorLayoutSetBinding({
+                    .binding = 10, // binding 10: per-section biome color buffer
                     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     .descriptorCount = 1,
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 11, // binding 11: Material class mapping (unified material system)
+                })                .defineDescriptorLayoutSetBinding({
+                    .binding = 11, // binding 11: texture-primary AutoPBR scalar rules
                     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     .descriptorCount = 1,
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
+                })                .defineDescriptorLayoutSetBinding({
                     .binding = 13, // binding 13: SpriteRegistry SSBO (texture array metadata)
                     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                     .descriptorCount = 1,
@@ -1188,20 +911,6 @@ void RayTracingModule::initDescriptorTables() {
                                   VK_SHADER_STAGE_FRAGMENT_BIT,
                 })
                 .defineDescriptorLayoutSetBinding({
-                    .binding = 14, // binding 14: reservoirCurrentImage (ReSTIR DI write)
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
-                                  VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 15, // binding 15: reservoirPreviousImage (ReSTIR DI read)
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
-                                  VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
                     .binding = 16, // binding 16: diffuseRayDirHitDistImage (DLSS-RR guide)
                     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                     .descriptorCount = 1,
@@ -1212,24 +921,6 @@ void RayTracingModule::initDescriptorTables() {
                     .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                     .descriptorCount = 1,
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 18, // binding 18: bounceReservoirImage1 (bounce 1 ReSTIR DI)
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 19, // binding 19: bounceReservoirImage2 (bounce 2 ReSTIR DI)
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
-                })
-                .defineDescriptorLayoutSetBinding({
-                    .binding = 20, // binding 20: bounceReservoirImage3 (bounce 3 ReSTIR DI)
-                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                    .descriptorCount = 1,
-                    .stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
                 })
                 .defineDescriptorLayoutSetBinding({
                     .binding = 21, // binding 21: reflectionMvImage (DLSS-RR specular reflection MVs)
@@ -1618,16 +1309,9 @@ void RayTracingModule::initImages() {
         if (sharcCandidatePrefixRadianceFlagsImages_[i])
             imageBindings.push_back({sharcCandidatePrefixRadianceFlagsImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 37});
 #endif
-
-        // ReSTIR DI reservoir images (initial binding, rebound each frame in render)
-        if (reservoirImages_[0]) {
-            imageBindings.push_back({reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL, 3, 14});
-            imageBindings.push_back({reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL, 3, 15});
-        }
-
         rayTracingDescriptorTables_[i]->bindImages(imageBindings);
 
-        // Energy compensation LUT (set 2, binding 4) — sampler image, stays individual
+        // Energy compensation LUT (set 2, binding 4) â€” sampler image, stays individual
         if (energyLUT_ && energyLUTSampler_) {
             rayTracingDescriptorTables_[i]->bindSamplerImageForShader(energyLUTSampler_, energyLUT_, 2, 4);
         }
@@ -1666,7 +1350,7 @@ void RayTracingModule::initPipeline() {
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_solid_transparent_rchit.spv").string());
     worldSolidTransparentNoDisplacementClosestHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_solid_transparent_no_displacement_rchit.spv").string());
-    const bool displacementRequested = Renderer::options.pomEnabled && worldSolidTransparentClosestHitShader_;
+    const bool displacementRequested = Renderer::options.displacementEnabled && worldSolidTransparentClosestHitShader_;
     const bool useShaderDisplacement = displacementRequested && shaderDisplacementRuntimeAllowed();
     auto activeWorldSolidTransparentClosestHitShader =
         useShaderDisplacement
@@ -1676,10 +1360,11 @@ void RayTracingModule::initPipeline() {
         activeWorldSolidTransparentClosestHitShader = worldSolidTransparentClosestHitShader_;
     }
     RadianceLogger::log("RayTracing", "INFO",
-                        "World closest-hit variant: %s (displacementRequested=%d displacementRuntimeAllowed=%d noDisplacementShader=%d)",
+                        "World closest-hit variant: %s (displacementRequested=%d displacementRuntimeAllowed=%d displacementForceDisabled=%d noDisplacementShader=%d)",
                         useShaderDisplacement ? "displacement" : "no_displacement",
                         displacementRequested ? 1 : 0,
                         shaderDisplacementRuntimeAllowed() ? 1 : 0,
+                        shaderDisplacementForceDisabled() ? 1 : 0,
                         worldSolidTransparentNoDisplacementClosestHitShader_ ? 1 : 0);
     worldNoReflectClosestHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_no_reflect_rchit.spv").string());
@@ -1790,1410 +1475,6 @@ void RayTracingModule::initSBT() {
     }
 }
 
-void RayTracingModule::initSpatialPipeline() {
-    auto framework = framework_.lock();
-    if (!framework) return;
-    auto device = framework->device();
-    VkDevice dev = device->vkDevice();
-    uint32_t size = framework->swapchain()->imageCount();
-
-    // Load compute shader
-    std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
-    spatialShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/restir_spatial_comp.spv").string());
-    if (!spatialShader_) {
-        std::cerr << "[ReSTIR] Failed to load restir_spatial_comp.spv" << std::endl;
-        return;
-    }
-
-    // Descriptor set layout: 4 storage images
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-        {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-    };
-    VkDescriptorSetLayoutCreateInfo layoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutInfo.bindingCount = (uint32_t)bindings.size();
-    layoutInfo.pBindings = bindings.data();
-    vkCreateDescriptorSetLayout(dev, &layoutInfo, nullptr, &spatialDescSetLayout_);
-
-    // Pipeline layout with push constant (6 int32s = 24 bytes)
-    VkPushConstantRange pushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 24};
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &spatialDescSetLayout_;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
-    vkCreatePipelineLayout(dev, &pipelineLayoutInfo, nullptr, &spatialPipelineLayout_);
-
-    // Compute pipeline
-    VkComputePipelineCreateInfo pipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipelineInfo.stage.module = spatialShader_->vkShaderModule();
-    pipelineInfo.stage.pName = "main";
-    pipelineInfo.layout = spatialPipelineLayout_;
-    vkCreateComputePipelines(dev, device->pipelineCache(), 1, &pipelineInfo, nullptr, &spatialPipeline_);
-
-    // Descriptor pool
-    VkDescriptorPoolSize poolSizes[] = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4 * size},
-    };
-    VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    poolInfo.maxSets = size;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = poolSizes;
-    vkCreateDescriptorPool(dev, &poolInfo, nullptr, &spatialDescPool_);
-
-    // Allocate descriptor sets
-    std::vector<VkDescriptorSetLayout> layouts(size, spatialDescSetLayout_);
-    VkDescriptorSetAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    allocInfo.descriptorPool = spatialDescPool_;
-    allocInfo.descriptorSetCount = size;
-    allocInfo.pSetLayouts = layouts.data();
-    spatialDescSets_.resize(size);
-    vkAllocateDescriptorSets(dev, &allocInfo, spatialDescSets_.data());
-}
-
-void RayTracingModule::initClusterPipeline() {
-    auto framework = framework_.lock();
-    if (!framework) return;
-    auto device = framework->device();
-    VkDevice dev = device->vkDevice();
-    uint32_t size = framework->swapchain()->imageCount();
-
-    // Load compute shader
-    std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
-    clusterShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/light_clustering_comp.spv").string());
-    if (!clusterShader_) {
-        std::cerr << "[Clustering] Failed to load light_clustering_comp.spv" << std::endl;
-        return;
-    }
-
-    // Descriptor set layout: 2 storage buffers (area lights + tile buffer)
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-    };
-    VkDescriptorSetLayoutCreateInfo layoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutInfo.bindingCount = (uint32_t)bindings.size();
-    layoutInfo.pBindings = bindings.data();
-    vkCreateDescriptorSetLayout(dev, &layoutInfo, nullptr, &clusterDescSetLayout_);
-
-    // Pipeline layout with push constant (width, height, lightCount, maxPerTile, mat4 vpCameraRel)
-    VkPushConstantRange pushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 80}; // 16 bytes ints + 64 bytes mat4
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &clusterDescSetLayout_;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
-    vkCreatePipelineLayout(dev, &pipelineLayoutInfo, nullptr, &clusterPipelineLayout_);
-
-    // Compute pipeline
-    VkComputePipelineCreateInfo pipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipelineInfo.stage.module = clusterShader_->vkShaderModule();
-    pipelineInfo.stage.pName = "main";
-    pipelineInfo.layout = clusterPipelineLayout_;
-    vkCreateComputePipelines(dev, device->pipelineCache(), 1, &pipelineInfo, nullptr, &clusterPipeline_);
-
-    // Descriptor pool
-    VkDescriptorPoolSize poolSize = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * size};
-    VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    poolInfo.maxSets = size;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
-    vkCreateDescriptorPool(dev, &poolInfo, nullptr, &clusterDescPool_);
-
-    // Allocate descriptor sets
-    std::vector<VkDescriptorSetLayout> clusterLayouts(size, clusterDescSetLayout_);
-    VkDescriptorSetAllocateInfo clusterAllocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    clusterAllocInfo.descriptorPool = clusterDescPool_;
-    clusterAllocInfo.descriptorSetCount = size;
-    clusterAllocInfo.pSetLayouts = clusterLayouts.data();
-    clusterDescSets_.resize(size);
-    vkAllocateDescriptorSets(dev, &clusterAllocInfo, clusterDescSets_.data());
-
-    // Create tile light buffer (will be resized per-frame if needed)
-    // Initial size based on common resolution
-    int tilesX = (1920 + TILE_SIZE - 1) / TILE_SIZE;
-    int tilesY = (1080 + TILE_SIZE - 1) / TILE_SIZE;
-    int totalTiles = tilesX * tilesY;
-    size_t bufferSize = totalTiles * (1 + MAX_LIGHTS_PER_TILE) * sizeof(uint32_t);
-    tileLightBuffer_ = vk::DeviceLocalBuffer::create(
-        framework->vma(), device, bufferSize,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-}
-
-void RayTracingModule::initDirectLightPipeline() {
-#ifndef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    return;
-#else
-    auto framework = framework_.lock();
-    if (!framework) return;
-    auto device = framework->device();
-    VkDevice dev = device->vkDevice();
-    uint32_t size = framework->swapchain()->imageCount();
-
-    if (directLightPrimaryPipeline_ != VK_NULL_HANDLE) {
-        vkDestroyPipeline(dev, directLightPrimaryPipeline_, nullptr);
-        directLightPrimaryPipeline_ = VK_NULL_HANDLE;
-    }
-    if (directLightPrimaryPipelineLayout_ != VK_NULL_HANDLE) {
-        vkDestroyPipelineLayout(dev, directLightPrimaryPipelineLayout_, nullptr);
-        directLightPrimaryPipelineLayout_ = VK_NULL_HANDLE;
-    }
-    if (directLightPrimaryDescSetLayout_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(dev, directLightPrimaryDescSetLayout_, nullptr);
-        directLightPrimaryDescSetLayout_ = VK_NULL_HANDLE;
-    }
-    if (directLightPrimaryDescPool_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(dev, directLightPrimaryDescPool_, nullptr);
-        directLightPrimaryDescPool_ = VK_NULL_HANDLE;
-    }
-    if (directLightInitialPipeline_ != VK_NULL_HANDLE) {
-        vkDestroyPipeline(dev, directLightInitialPipeline_, nullptr);
-        directLightInitialPipeline_ = VK_NULL_HANDLE;
-    }
-    if (directLightInitialPipelineLayout_ != VK_NULL_HANDLE) {
-        vkDestroyPipelineLayout(dev, directLightInitialPipelineLayout_, nullptr);
-        directLightInitialPipelineLayout_ = VK_NULL_HANDLE;
-    }
-    if (directLightInitialDescSetLayout_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(dev, directLightInitialDescSetLayout_, nullptr);
-        directLightInitialDescSetLayout_ = VK_NULL_HANDLE;
-    }
-    if (directLightInitialDescPool_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(dev, directLightInitialDescPool_, nullptr);
-        directLightInitialDescPool_ = VK_NULL_HANDLE;
-    }
-    if (directLightUtilityPipeline_ != VK_NULL_HANDLE) {
-        vkDestroyPipeline(dev, directLightUtilityPipeline_, nullptr);
-        directLightUtilityPipeline_ = VK_NULL_HANDLE;
-    }
-    if (directLightUtilityPipelineLayout_ != VK_NULL_HANDLE) {
-        vkDestroyPipelineLayout(dev, directLightUtilityPipelineLayout_, nullptr);
-        directLightUtilityPipelineLayout_ = VK_NULL_HANDLE;
-    }
-    if (directLightUtilityDescSetLayout_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(dev, directLightUtilityDescSetLayout_, nullptr);
-        directLightUtilityDescSetLayout_ = VK_NULL_HANDLE;
-    }
-    if (directLightUtilityDescPool_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(dev, directLightUtilityDescPool_, nullptr);
-        directLightUtilityDescPool_ = VK_NULL_HANDLE;
-    }
-
-    RadianceLogger::log("RayTracing", "INFO", "Direct-light primary pipeline create start");
-    g_crashRing.record("DirectLight:primaryPipeline:create:start");
-    std::filesystem::path shaderPath = Renderer::folderPath / "shaders";
-    directLightPrimaryShader_ =
-        vk::Shader::create(device, (shaderPath / "world/ray_tracing/direct_light_primary_comp.spv").string());
-    if (!directLightPrimaryShader_) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light primary shader load failed");
-        g_crashRing.record("DirectLight:primaryPipeline:create:missingShader");
-        return;
-    }
-
-    std::vector<VkDescriptorSetLayoutBinding> bindings = {
-        {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-    };
-    VkDescriptorSetLayoutCreateInfo layoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-    layoutInfo.pBindings = bindings.data();
-    VkResult layoutResult = vkCreateDescriptorSetLayout(dev, &layoutInfo, nullptr, &directLightPrimaryDescSetLayout_);
-    if (layoutResult != VK_SUCCESS) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light primary descriptor layout failed result=%d",
-                            static_cast<int>(layoutResult));
-        g_crashRing.record("DirectLight:primaryPipeline:create:layoutFailed");
-        return;
-    }
-
-    VkPushConstantRange pushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int32_t) * 2};
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &directLightPrimaryDescSetLayout_;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
-    VkResult pipelineLayoutResult =
-        vkCreatePipelineLayout(dev, &pipelineLayoutInfo, nullptr, &directLightPrimaryPipelineLayout_);
-    if (pipelineLayoutResult != VK_SUCCESS) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light primary pipeline layout failed result=%d",
-                            static_cast<int>(pipelineLayoutResult));
-        g_crashRing.record("DirectLight:primaryPipeline:create:pipelineLayoutFailed");
-        return;
-    }
-
-    VkComputePipelineCreateInfo pipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipelineInfo.stage.module = directLightPrimaryShader_->vkShaderModule();
-    pipelineInfo.stage.pName = "main";
-    pipelineInfo.layout = directLightPrimaryPipelineLayout_;
-    VkResult pipelineResult = vkCreateComputePipelines(dev, device->pipelineCache(), 1, &pipelineInfo, nullptr,
-                                                       &directLightPrimaryPipeline_);
-    if (pipelineResult != VK_SUCCESS) {
-        directLightPrimaryPipeline_ = VK_NULL_HANDLE;
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light primary pipeline create done ok=0 result=%d",
-                            static_cast<int>(pipelineResult));
-        g_crashRing.record("DirectLight:primaryPipeline:create:failed");
-        return;
-    }
-
-    VkDescriptorPoolSize poolSizes[] = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4u * size},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, size},
-    };
-    VkDescriptorPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    poolInfo.maxSets = size;
-    poolInfo.poolSizeCount = 2;
-    poolInfo.pPoolSizes = poolSizes;
-    VkResult poolResult = vkCreateDescriptorPool(dev, &poolInfo, nullptr, &directLightPrimaryDescPool_);
-    if (poolResult != VK_SUCCESS) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light primary descriptor pool failed result=%d",
-                            static_cast<int>(poolResult));
-        g_crashRing.record("DirectLight:primaryPipeline:create:poolFailed");
-        return;
-    }
-
-    std::vector<VkDescriptorSetLayout> layouts(size, directLightPrimaryDescSetLayout_);
-    VkDescriptorSetAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    allocInfo.descriptorPool = directLightPrimaryDescPool_;
-    allocInfo.descriptorSetCount = size;
-    allocInfo.pSetLayouts = layouts.data();
-    directLightPrimaryDescSets_.resize(size);
-    VkResult allocResult = vkAllocateDescriptorSets(dev, &allocInfo, directLightPrimaryDescSets_.data());
-    if (allocResult != VK_SUCCESS) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light primary descriptor alloc failed result=%d",
-                            static_cast<int>(allocResult));
-        g_crashRing.record("DirectLight:primaryPipeline:create:allocFailed");
-        return;
-    }
-
-    RadianceLogger::log("RayTracing", "INFO", "Direct-light primary pipeline create done ok=1 sets=%u", size);
-    g_crashRing.record("DirectLight:primaryPipeline:create:done");
-
-    RadianceLogger::log("RayTracing", "INFO", "Direct-light initial pipeline create start");
-    g_crashRing.record("DirectLight:initialPipeline:create:start");
-    directLightInitialShader_ =
-        vk::Shader::create(device, (shaderPath / "world/ray_tracing/direct_light_initial_comp.spv").string());
-    if (!directLightInitialShader_) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light initial shader load failed");
-        g_crashRing.record("DirectLight:initialPipeline:create:missingShader");
-        return;
-    }
-
-    std::vector<VkDescriptorSetLayoutBinding> initialBindings = {
-        {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {8, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {11, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {12, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-    };
-    VkDescriptorSetLayoutCreateInfo initialLayoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    initialLayoutInfo.bindingCount = static_cast<uint32_t>(initialBindings.size());
-    initialLayoutInfo.pBindings = initialBindings.data();
-    VkResult initialLayoutResult =
-        vkCreateDescriptorSetLayout(dev, &initialLayoutInfo, nullptr, &directLightInitialDescSetLayout_);
-    if (initialLayoutResult != VK_SUCCESS) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light initial descriptor layout failed result=%d",
-                            static_cast<int>(initialLayoutResult));
-        g_crashRing.record("DirectLight:initialPipeline:create:layoutFailed");
-        return;
-    }
-
-    VkPipelineLayoutCreateInfo initialPipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    initialPipelineLayoutInfo.setLayoutCount = 1;
-    initialPipelineLayoutInfo.pSetLayouts = &directLightInitialDescSetLayout_;
-    initialPipelineLayoutInfo.pushConstantRangeCount = 1;
-    initialPipelineLayoutInfo.pPushConstantRanges = &pushRange;
-    VkResult initialPipelineLayoutResult =
-        vkCreatePipelineLayout(dev, &initialPipelineLayoutInfo, nullptr, &directLightInitialPipelineLayout_);
-    if (initialPipelineLayoutResult != VK_SUCCESS) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light initial pipeline layout failed result=%d",
-                            static_cast<int>(initialPipelineLayoutResult));
-        g_crashRing.record("DirectLight:initialPipeline:create:pipelineLayoutFailed");
-        return;
-    }
-
-    VkComputePipelineCreateInfo initialPipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    initialPipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    initialPipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    initialPipelineInfo.stage.module = directLightInitialShader_->vkShaderModule();
-    initialPipelineInfo.stage.pName = "main";
-    initialPipelineInfo.layout = directLightInitialPipelineLayout_;
-    VkResult initialPipelineResult = vkCreateComputePipelines(dev, device->pipelineCache(), 1, &initialPipelineInfo,
-                                                              nullptr, &directLightInitialPipeline_);
-    if (initialPipelineResult != VK_SUCCESS) {
-        directLightInitialPipeline_ = VK_NULL_HANDLE;
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light initial pipeline create done ok=0 result=%d",
-                            static_cast<int>(initialPipelineResult));
-        g_crashRing.record("DirectLight:initialPipeline:create:failed");
-        return;
-    }
-
-    VkDescriptorPoolSize initialPoolSizes[] = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 7u * size},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3u * size},
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2u * size},
-        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, size},
-    };
-    VkDescriptorPoolCreateInfo initialPoolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    initialPoolInfo.maxSets = size;
-    initialPoolInfo.poolSizeCount = 4;
-    initialPoolInfo.pPoolSizes = initialPoolSizes;
-    VkResult initialPoolResult = vkCreateDescriptorPool(dev, &initialPoolInfo, nullptr, &directLightInitialDescPool_);
-    if (initialPoolResult != VK_SUCCESS) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light initial descriptor pool failed result=%d",
-                            static_cast<int>(initialPoolResult));
-        g_crashRing.record("DirectLight:initialPipeline:create:poolFailed");
-        return;
-    }
-
-    std::vector<VkDescriptorSetLayout> initialLayouts(size, directLightInitialDescSetLayout_);
-    VkDescriptorSetAllocateInfo initialAllocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    initialAllocInfo.descriptorPool = directLightInitialDescPool_;
-    initialAllocInfo.descriptorSetCount = size;
-    initialAllocInfo.pSetLayouts = initialLayouts.data();
-    directLightInitialDescSets_.resize(size);
-    VkResult initialAllocResult =
-        vkAllocateDescriptorSets(dev, &initialAllocInfo, directLightInitialDescSets_.data());
-    if (initialAllocResult != VK_SUCCESS) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light initial descriptor alloc failed result=%d",
-                            static_cast<int>(initialAllocResult));
-        g_crashRing.record("DirectLight:initialPipeline:create:allocFailed");
-        return;
-    }
-
-    RadianceLogger::log("RayTracing", "INFO", "Direct-light initial pipeline create done ok=1 sets=%u", size);
-    g_crashRing.record("DirectLight:initialPipeline:create:done");
-
-    RadianceLogger::log("RayTracing", "INFO", "Direct-light utility pipeline create start");
-    g_crashRing.record("DirectLight:utilityPipeline:create:start");
-    directLightUtilityShader_ =
-        vk::Shader::create(device, (shaderPath / "world/ray_tracing/direct_light_reservoir_comp.spv").string());
-    if (!directLightUtilityShader_) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light utility shader load failed");
-        g_crashRing.record("DirectLight:utilityPipeline:create:missingShader");
-        return;
-    }
-
-    std::vector<VkDescriptorSetLayoutBinding> utilityBindings = {
-        {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-    };
-    VkDescriptorSetLayoutCreateInfo utilityLayoutInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    utilityLayoutInfo.bindingCount = static_cast<uint32_t>(utilityBindings.size());
-    utilityLayoutInfo.pBindings = utilityBindings.data();
-    VkResult utilityLayoutResult =
-        vkCreateDescriptorSetLayout(dev, &utilityLayoutInfo, nullptr, &directLightUtilityDescSetLayout_);
-    if (utilityLayoutResult != VK_SUCCESS) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light utility descriptor layout failed result=%d",
-                            static_cast<int>(utilityLayoutResult));
-        g_crashRing.record("DirectLight:utilityPipeline:create:layoutFailed");
-        return;
-    }
-
-    VkPushConstantRange utilityPushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(int32_t) * 4};
-    VkPipelineLayoutCreateInfo utilityPipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    utilityPipelineLayoutInfo.setLayoutCount = 1;
-    utilityPipelineLayoutInfo.pSetLayouts = &directLightUtilityDescSetLayout_;
-    utilityPipelineLayoutInfo.pushConstantRangeCount = 1;
-    utilityPipelineLayoutInfo.pPushConstantRanges = &utilityPushRange;
-    VkResult utilityPipelineLayoutResult =
-        vkCreatePipelineLayout(dev, &utilityPipelineLayoutInfo, nullptr, &directLightUtilityPipelineLayout_);
-    if (utilityPipelineLayoutResult != VK_SUCCESS) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light utility pipeline layout failed result=%d",
-                            static_cast<int>(utilityPipelineLayoutResult));
-        g_crashRing.record("DirectLight:utilityPipeline:create:pipelineLayoutFailed");
-        return;
-    }
-
-    VkComputePipelineCreateInfo utilityPipelineInfo = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    utilityPipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
-    utilityPipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    utilityPipelineInfo.stage.module = directLightUtilityShader_->vkShaderModule();
-    utilityPipelineInfo.stage.pName = "main";
-    utilityPipelineInfo.layout = directLightUtilityPipelineLayout_;
-    VkResult utilityPipelineResult = vkCreateComputePipelines(dev, device->pipelineCache(), 1, &utilityPipelineInfo,
-                                                              nullptr, &directLightUtilityPipeline_);
-    if (utilityPipelineResult != VK_SUCCESS) {
-        directLightUtilityPipeline_ = VK_NULL_HANDLE;
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light utility pipeline create done ok=0 result=%d",
-                            static_cast<int>(utilityPipelineResult));
-        g_crashRing.record("DirectLight:utilityPipeline:create:failed");
-        return;
-    }
-
-    constexpr uint32_t kDirectLightUtilityPasses = 4;
-    VkDescriptorPoolSize utilityPoolSizes[] = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4u * size * kDirectLightUtilityPasses},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, size * kDirectLightUtilityPasses},
-    };
-    VkDescriptorPoolCreateInfo utilityPoolInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    utilityPoolInfo.maxSets = size * kDirectLightUtilityPasses;
-    utilityPoolInfo.poolSizeCount = 2;
-    utilityPoolInfo.pPoolSizes = utilityPoolSizes;
-    VkResult utilityPoolResult = vkCreateDescriptorPool(dev, &utilityPoolInfo, nullptr, &directLightUtilityDescPool_);
-    if (utilityPoolResult != VK_SUCCESS) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light utility descriptor pool failed result=%d",
-                            static_cast<int>(utilityPoolResult));
-        g_crashRing.record("DirectLight:utilityPipeline:create:poolFailed");
-        return;
-    }
-
-    std::vector<VkDescriptorSetLayout> utilityLayouts(size * kDirectLightUtilityPasses, directLightUtilityDescSetLayout_);
-    VkDescriptorSetAllocateInfo utilityAllocInfo = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    utilityAllocInfo.descriptorPool = directLightUtilityDescPool_;
-    utilityAllocInfo.descriptorSetCount = static_cast<uint32_t>(utilityLayouts.size());
-    utilityAllocInfo.pSetLayouts = utilityLayouts.data();
-    directLightUtilityDescSets_.resize(utilityLayouts.size());
-    VkResult utilityAllocResult =
-        vkAllocateDescriptorSets(dev, &utilityAllocInfo, directLightUtilityDescSets_.data());
-    if (utilityAllocResult != VK_SUCCESS) {
-        RadianceLogger::log("RayTracing", "ERROR", "Direct-light utility descriptor alloc failed result=%d",
-                            static_cast<int>(utilityAllocResult));
-        g_crashRing.record("DirectLight:utilityPipeline:create:allocFailed");
-        return;
-    }
-
-    RadianceLogger::log("RayTracing", "INFO", "Direct-light utility pipeline create done ok=1 sets=%u",
-                        static_cast<uint32_t>(utilityLayouts.size()));
-    g_crashRing.record("DirectLight:utilityPipeline:create:done");
-#endif
-}
-
-void RayTracingModule::initUpstreamDirectLightRuntime() {
-#ifndef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    return;
-#else
-    directLightUpstreamPackRuntimeReady_ = false;
-    directLightUpstreamRuntimeResourcesReady_ = false;
-    directLightUpstreamPassRuntimeReady_ = false;
-    directLightUpstreamShaderCompileReady_ = false;
-    directLightUpstreamPipelineReady_ = false;
-    directLightUpstreamSbtReady_ = false;
-    directLightUpstreamRuntimeError_.clear();
-
-    auto framework = framework_.lock();
-    if (!framework) {
-        directLightUpstreamRuntimeError_ = "framework unavailable";
-        return;
-    }
-
-    try {
-        directLightUpstreamShaderPack_ = std::make_shared<ShaderPack>(framework);
-        ShaderPack::BuildConfig config;
-        config.shaderPackPath =
-            (Renderer::folderPath / "shaders/world/ray_tracing/internal/advanced").string();
-        config.shouldUseSharc = false;
-        config.language = "en_us";
-        config.staticAttributes.emplace(
-            "render_pipeline.module.ray_tracing.attribute.cloud_mode",
-            "render_pipeline.module.ray_tracing.attribute.cloud_mode.vanilla");
-        config.staticAttributes.emplace(
-            "render_pipeline.module.ray_tracing.attribute.volumetric_light_mode",
-            "render_pipeline.module.ray_tracing.attribute.volumetric_light_mode.vanilla");
-
-        std::string error;
-        if (!directLightUpstreamShaderPack_->initialize(config, error)) {
-            directLightUpstreamShaderPack_.reset();
-            directLightUpstreamRuntimeError_ = error;
-            RadianceLogger::log("RayTracing", "ERROR",
-                                "Upstream RT shader-pack runtime init failed: %s",
-                                error.c_str());
-            return;
-        }
-        directLightUpstreamPackRuntimeReady_ = true;
-
-        const auto& pack = directLightUpstreamShaderPack_->shaderPack();
-        const char* requiredPasses[] = {
-            "primary",
-            "precompute_light_neighborhoods",
-            "generate_initial_samples",
-            "visibility",
-            "temporal_reuse",
-            "spatial_reuse",
-            "direct_light",
-            "final_compose",
-        };
-        uint32_t foundMask = 0;
-        for (const auto& passConfig : pack.passes) {
-            std::string name;
-            switch (passConfig.type) {
-                case ShaderPackLoader::PassConfig::Type::RayTracing:
-                    name = passConfig.rayTracing.name;
-                    break;
-                case ShaderPackLoader::PassConfig::Type::Compute:
-                    name = passConfig.compute.name;
-                    break;
-                case ShaderPackLoader::PassConfig::Type::FullScreen:
-                    name = passConfig.fullScreen.name;
-                    break;
-                case ShaderPackLoader::PassConfig::Type::Render:
-                    name = passConfig.render.name;
-                    break;
-            }
-            for (uint32_t i = 0; i < static_cast<uint32_t>(std::size(requiredPasses)); ++i) {
-                if (name == requiredPasses[i]) {
-                    foundMask |= (1u << i);
-                    break;
-                }
-            }
-        }
-        directLightUpstreamPassRuntimeReady_ =
-            foundMask == ((1u << static_cast<uint32_t>(std::size(requiredPasses))) - 1u);
-        if (!directLightUpstreamPassRuntimeReady_) {
-            directLightUpstreamRuntimeError_ =
-                "missing required upstream pass runtime mask=" + std::to_string(foundMask);
-            RadianceLogger::log("RayTracing", "ERROR",
-                                "Upstream RT pass runtime incomplete mask=%u",
-                                foundMask);
-            return;
-        }
-
-        RadianceLogger::log(
-            "RayTracing", "INFO",
-            "Upstream RT shader-pack runtime ready passes=%zu textures=%zu buffers=%zu",
-            pack.passes.size(), pack.textures.size(), pack.buffers.size());
-    } catch (const std::exception& e) {
-        directLightUpstreamShaderPack_.reset();
-        directLightUpstreamRuntimeError_ = e.what();
-        RadianceLogger::log("RayTracing", "ERROR",
-                            "Upstream RT shader-pack runtime exception: %s",
-                            e.what());
-    } catch (...) {
-        directLightUpstreamShaderPack_.reset();
-        directLightUpstreamRuntimeError_ = "unknown exception";
-        RadianceLogger::log("RayTracing", "ERROR",
-                            "Upstream RT shader-pack runtime unknown exception");
-    }
-#endif
-}
-
-void RayTracingModule::refreshUpstreamDirectLightRuntime(uint32_t frameIndex) {
-#ifndef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    (void)frameIndex;
-    return;
-#else
-    if (effectiveDirectLightBackend() != 1) { return; }
-    if (!directLightUpstreamShaderPack_) {
-        initUpstreamDirectLightRuntime();
-    }
-    if (!directLightUpstreamShaderPack_ || !directLightUpstreamPassRuntimeReady_) { return; }
-    if (frameIndex >= hdrNoisyOutputImages_.size() || !hdrNoisyOutputImages_[frameIndex]) { return; }
-
-    try {
-        auto image = hdrNoisyOutputImages_[frameIndex];
-        renderDiag("UpstreamRT runtime refresh begin frame=%u size=%ux%u", frameIndex, image->width(), image->height());
-        g_crashRing.record("UpstreamRT:runtimeRefresh:start");
-        auto expressionVariables = upstreamDirectLightExpressionVariables();
-        bool hasRenderWidth = false;
-        bool hasRenderHeight = false;
-        for (auto &variable : expressionVariables) {
-            if (variable.name == "RENDER_WIDTH") {
-                variable.value = static_cast<double>(image->width());
-                hasRenderWidth = true;
-            } else if (variable.name == "RENDER_HEIGHT") {
-                variable.value = static_cast<double>(image->height());
-                hasRenderHeight = true;
-            }
-        }
-        if (!hasRenderWidth) {
-            expressionVariables.push_back({.name = "RENDER_WIDTH", .value = static_cast<double>(image->width())});
-        }
-        if (!hasRenderHeight) {
-            expressionVariables.push_back({.name = "RENDER_HEIGHT", .value = static_cast<double>(image->height())});
-        }
-        g_crashRing.record("UpstreamRT:runtimeRefresh:variables");
-        directLightUpstreamShaderPack_->setRuntimeResourceExpressionVariables(std::move(expressionVariables));
-        g_crashRing.record("UpstreamRT:runtimeRefresh:ensure:start");
-        directLightUpstreamShaderPack_->ensureRuntimeResources(image->width(), image->height());
-        g_crashRing.record("UpstreamRT:runtimeRefresh:ensure:done");
-        directLightUpstreamRuntimeResourcesReady_ =
-            directLightUpstreamShaderPack_->runtimeResourcesReady();
-        if (directLightUpstreamRuntimeResourcesReady_ &&
-            frameIndex < directLightUpstreamDescriptorTables_.size() &&
-            directLightUpstreamDescriptorTables_[frameIndex]) {
-            g_crashRing.record("UpstreamRT:runtimeRefresh:bind:start");
-            directLightUpstreamShaderPack_->bindRuntimeResources(
-                directLightUpstreamDescriptorTables_[frameIndex], 5, frameIndex);
-            g_crashRing.record("UpstreamRT:runtimeRefresh:bind:done");
-        }
-        renderDiag("UpstreamRT runtime refresh end ready=%d", directLightUpstreamRuntimeResourcesReady_ ? 1 : 0);
-    } catch (const std::exception& e) {
-        directLightUpstreamRuntimeResourcesReady_ = false;
-        directLightUpstreamShaderCompileReady_ = false;
-        directLightUpstreamRuntimeError_ = e.what();
-        RadianceLogger::log("RayTracing", "ERROR",
-                            "Upstream RT runtime resource refresh failed: %s",
-                            e.what());
-    } catch (...) {
-        directLightUpstreamRuntimeResourcesReady_ = false;
-        directLightUpstreamShaderCompileReady_ = false;
-        directLightUpstreamRuntimeError_ = "unknown exception";
-        RadianceLogger::log("RayTracing", "ERROR",
-                            "Upstream RT runtime resource refresh unknown exception");
-    }
-#endif
-}
-
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-std::vector<ExpressionEvaluator::Variable> RayTracingModule::upstreamDirectLightExpressionVariables() const {
-    std::vector<ExpressionEvaluator::Variable> variables;
-    const uint32_t renderWidth = hdrNoisyOutputImages_.empty() || !hdrNoisyOutputImages_[0]
-        ? 0u
-        : hdrNoisyOutputImages_[0]->width();
-    const uint32_t renderHeight = hdrNoisyOutputImages_.empty() || !hdrNoisyOutputImages_[0]
-        ? 0u
-        : hdrNoisyOutputImages_[0]->height();
-    variables.push_back({.name = "RENDER_WIDTH", .value = static_cast<double>(renderWidth)});
-    variables.push_back({.name = "RENDER_HEIGHT", .value = static_cast<double>(renderHeight)});
-    auto world = Renderer::instance().world();
-    auto chunks = world == nullptr ? nullptr : world->chunks();
-    if (chunks != nullptr) {
-        variables.push_back({.name = "CHUNK_NUM", .value = static_cast<double>(chunks->chunks().size())});
-    }
-    return variables;
-}
-
-double RayTracingModule::evaluateUpstreamDirectLightNumericExpression(
-    const std::string &expression,
-    const ShaderPack::ExecutionVariables &variables) {
-    if (!directLightUpstreamShaderPack_) { return 1.0; }
-    return directLightUpstreamShaderPack_->evaluateNumericExpression(
-        ShaderPackLoader::Stage::RayTracing, expression, variables,
-        upstreamDirectLightExpressionVariables(), true);
-}
-
-std::optional<std::reference_wrapper<ShaderPackLoader::VariableConfig>>
-RayTracingModule::findUpstreamDirectLightExecutionVariableConfig(std::string_view name) {
-    auto iter = directLightUpstreamExecutionVariableConfigs_.find(std::string(name));
-    if (iter != directLightUpstreamExecutionVariableConfigs_.end()) { return std::ref(iter->second); }
-    return std::nullopt;
-}
-
-std::optional<std::reference_wrapper<ShaderPack::RuntimeTexture>>
-RayTracingModule::findUpstreamDirectLightRuntimeTexture(std::string_view name) {
-    if (!directLightUpstreamShaderPack_) { return std::nullopt; }
-    return directLightUpstreamShaderPack_->findRuntimeTexture(name);
-}
-
-std::optional<std::reference_wrapper<ShaderPack::RuntimeBuffer>>
-RayTracingModule::findUpstreamDirectLightRuntimeBuffer(std::string_view name) {
-    if (!directLightUpstreamShaderPack_) { return std::nullopt; }
-    return directLightUpstreamShaderPack_->findRuntimeBuffer(name);
-}
-
-std::shared_ptr<vk::DeviceLocalImage> RayTracingModule::findUpstreamDirectLightTargetImage(
-    const std::string &target,
-    uint32_t frameIndex) {
-    if (target == TARGET_RADIANCE) return hdrNoisyOutputImages_[frameIndex];
-    if (target == TARGET_DIFFUSE_ALBEDO_METALLIC) return diffuseAlbedoImages_[frameIndex];
-    if (target == TARGET_SPECULAR_ALBEDO) return specularAlbedoImages_[frameIndex];
-    if (target == TARGET_NORMAL_ROUGHNESS) return normalRoughnessImages_[frameIndex];
-    if (target == TARGET_MOTION_VECTOR) return motionVectorImages_[frameIndex];
-    if (target == TARGET_LINEAR_DEPTH) return linearDepthImages_[frameIndex];
-    if (target == TARGET_SPECULAR_HIT_DEPTH) return specularHitDepthImages_[frameIndex];
-    if (target == TARGET_FIRST_HIT_DEPTH) return firstHitDepthImages_[frameIndex];
-    if (target == TARGET_FIRST_HIT_DIFFUSE_DIRECT_LIGHT) return firstHitDiffuseDirectLightImages_[frameIndex];
-    if (target == TARGET_FIRST_HIT_DIFFUSE_INDIRECT_LIGHT) return firstHitDiffuseIndirectLightImages_[frameIndex];
-    if (target == TARGET_FIRST_HIT_SPECULAR) return firstHitSpecularImages_[frameIndex];
-    if (target == TARGET_FIRST_HIT_CLEAR) return firstHitClearImages_[frameIndex];
-    if (target == TARGET_FIRST_HIT_BASE_EMISSION) return firstHitBaseEmissionImages_[frameIndex];
-    if (target == TARGET_FOG_IMAGE) return upstreamFogImages_[frameIndex];
-    if (target == TARGET_FIRST_HIT_REFRACTION) return upstreamFirstHitRefractionImages_[frameIndex];
-    if (auto runtimeTexture = findUpstreamDirectLightRuntimeTexture(target); runtimeTexture.has_value()) {
-        if (runtimeTexture->get().config.imported) { return nullptr; }
-        return directLightUpstreamShaderPack_->findRuntimeVKTexture(runtimeTexture->get(), frameIndex);
-    }
-    return nullptr;
-}
-
-void RayTracingModule::initUpstreamDirectLightDescriptorTables() {
-    if (!directLightUpstreamShaderPack_ || !directLightUpstreamPackRuntimeReady_) { return; }
-    auto framework = framework_.lock();
-    if (!framework) { return; }
-    const uint32_t size = framework->swapchain()->imageCount();
-    directLightUpstreamDescriptorTables_.resize(size);
-    constexpr VkShaderStageFlags allStages =
-        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
-        VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
-        VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT |
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-
-    for (uint32_t i = 0; i < size; ++i) {
-        vk::DescriptorTableBuilder builder;
-        auto &set0 = builder.beginDescriptorLayoutSet();
-        auto &set0Bindings = set0.beginDescriptorLayoutSetBinding();
-        set0Bindings.defineDescriptorLayoutSetBinding({
-            .binding = 0,
-            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 4096,
-            .stageFlags = allStages,
-        });
-        set0Bindings.endDescriptorLayoutSetBinding();
-        set0.endDescriptorLayoutSet();
-
-        auto &set1 = builder.beginDescriptorLayoutSet();
-        auto &set1Bindings = set1.beginDescriptorLayoutSetBinding();
-        set1Bindings
-            .defineDescriptorLayoutSetBinding({0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1,
-                                               VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
-                                               nullptr})
-            .defineDescriptorLayoutSetBinding({1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages, nullptr})
-            .defineDescriptorLayoutSetBinding({2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages, nullptr})
-            .defineDescriptorLayoutSetBinding({3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages, nullptr})
-            .defineDescriptorLayoutSetBinding({4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages, nullptr})
-            .defineDescriptorLayoutSetBinding({5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages, nullptr})
-            .defineDescriptorLayoutSetBinding({6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages, nullptr})
-            .defineDescriptorLayoutSetBinding({7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages, nullptr})
-            .defineDescriptorLayoutSetBinding({8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages, nullptr})
-            .defineDescriptorLayoutSetBinding({9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages, nullptr});
-        set1Bindings.endDescriptorLayoutSetBinding();
-        set1.endDescriptorLayoutSet();
-
-        auto &set2 = builder.beginDescriptorLayoutSet();
-        auto &set2Bindings = set2.beginDescriptorLayoutSetBinding();
-        set2Bindings
-            .defineDescriptorLayoutSetBinding({0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, allStages, nullptr})
-            .defineDescriptorLayoutSetBinding({1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, allStages, nullptr})
-            .defineDescriptorLayoutSetBinding({2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, allStages, nullptr});
-        set2Bindings.endDescriptorLayoutSetBinding();
-        set2.endDescriptorLayoutSet();
-
-        auto &set3 = builder.beginDescriptorLayoutSet();
-        auto &set3Bindings = set3.beginDescriptorLayoutSetBinding();
-        for (uint32_t binding = 0; binding < 15; ++binding) {
-            set3Bindings.defineDescriptorLayoutSetBinding({
-                .binding = binding,
-                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                .descriptorCount = 1,
-                .stageFlags = allStages,
-            });
-        }
-        set3Bindings.endDescriptorLayoutSetBinding();
-        set3.endDescriptorLayoutSet();
-
-        auto &set4 = builder.beginDescriptorLayoutSet();
-        auto &set4Bindings = set4.beginDescriptorLayoutSetBinding();
-        for (uint32_t binding = 0; binding < 5; ++binding) {
-            set4Bindings.defineDescriptorLayoutSetBinding({
-                .binding = binding,
-                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                .descriptorCount = 1,
-                .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT,
-            });
-        }
-        set4Bindings.endDescriptorLayoutSetBinding();
-        set4.endDescriptorLayoutSet();
-
-        directLightUpstreamShaderPack_->defineRuntimeResourceDescriptorSet(builder, allStages, allStages, allStages);
-        directLightUpstreamShaderPack_->defineExecutionDescriptorSet(
-            builder, ShaderPackLoader::Stage::RayTracing, allStages);
-
-        directLightUpstreamDescriptorTables_[i] = builder.build(framework->device());
-        auto table = directLightUpstreamDescriptorTables_[i];
-        table->bindImage(hdrNoisyOutputImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 0);
-        table->bindImage(diffuseAlbedoImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 1);
-        table->bindImage(specularAlbedoImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 2);
-        table->bindImage(normalRoughnessImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 3);
-        table->bindImage(motionVectorImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 4);
-        table->bindImage(linearDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 5);
-        table->bindImage(specularHitDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 6);
-        table->bindImage(firstHitDepthImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 7);
-        table->bindImage(firstHitDiffuseDirectLightImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 8);
-        table->bindImage(firstHitDiffuseIndirectLightImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 9);
-        table->bindImage(firstHitSpecularImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 10);
-        table->bindImage(firstHitClearImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 11);
-        table->bindImage(firstHitBaseEmissionImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 12);
-        table->bindImage(upstreamFogImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 13);
-        table->bindImage(upstreamFirstHitRefractionImages_[i], VK_IMAGE_LAYOUT_GENERAL, 3, 14);
-    }
-
-    // Upstream descriptor tables are created lazily after Minecraft has usually
-    // published its bindless texture atlas. Replay existing texture bindings so
-    // upstream set 0 matches the legacy RT descriptor tables before any dispatch.
-    Renderer::instance().textures()->bindAllTextures();
-    RadianceLogger::log("RayTracing", "INFO",
-                        "Upstream RT descriptor tables ready frames=%u texturesReplayed=1",
-                        size);
-}
-
-void RayTracingModule::collectUpstreamDirectLightRayTracingRequests(
-    RayTracingPass &pass,
-    std::vector<ShaderPack::ShaderCreateInfo> &requests) {
-    pass.missShaders.clear();
-    pass.hitShaderGroups.clear();
-    pass.hitGroupNameToIndex.clear();
-    pass.shadowHitGroupIndex = 0;
-    pass.fallbackHitGroupIndex = 0;
-    pass.missGroupCount = 0;
-    pass.hitGroupCount = 0;
-    pass.isSharcUpdatePass = false;
-    pass.querySharcEnabled = false;
-    pass.missRequestCount_ = pass.config.missShaders.size();
-    pass.hitRequestCount_ = 0;
-    pass.rayGenRequestCount_ = 1;
-    pass.sharcRequestCount_ = 0;
-    pass.hitAssignments_.clear();
-
-    const uint32_t executionSet = directLightUpstreamShaderPack_->executionSet(5u);
-    for (const auto &miss : pass.config.missShaders) {
-        requests.push_back({
-            .path = miss.shaderPath,
-            .stage = VK_SHADER_STAGE_MISS_BIT_KHR,
-            .definitions = pass.config.definitions,
-            .executionStage = ShaderPackLoader::Stage::RayTracing,
-            .executionSet = executionSet,
-        });
-    }
-
-    pass.hitShaderGroups.resize(pass.config.hitGroups.size());
-    for (size_t groupIndex = 0; groupIndex < pass.config.hitGroups.size(); ++groupIndex) {
-        const auto &groupConfig = pass.config.hitGroups[groupIndex];
-        HitShaderGroup group;
-        group.name = groupConfig.name;
-        group.type = groupConfig.type;
-        if (groupConfig.closestHit.has_value()) {
-            requests.push_back({
-                .path = *groupConfig.closestHit,
-                .stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
-                .definitions = pass.config.definitions,
-                .executionStage = ShaderPackLoader::Stage::RayTracing,
-                .executionSet = executionSet,
-            });
-            pass.hitAssignments_.push_back({groupIndex, 0});
-            pass.hitRequestCount_++;
-        }
-        if (groupConfig.anyHit.has_value()) {
-            requests.push_back({
-                .path = *groupConfig.anyHit,
-                .stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
-                .definitions = pass.config.definitions,
-                .executionStage = ShaderPackLoader::Stage::RayTracing,
-                .executionSet = executionSet,
-            });
-            pass.hitAssignments_.push_back({groupIndex, 1});
-            pass.hitRequestCount_++;
-        }
-        if (groupConfig.intersection.has_value()) {
-            requests.push_back({
-                .path = *groupConfig.intersection,
-                .stage = VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
-                .definitions = pass.config.definitions,
-                .executionStage = ShaderPackLoader::Stage::RayTracing,
-                .executionSet = executionSet,
-            });
-            pass.hitAssignments_.push_back({groupIndex, 2});
-            pass.hitRequestCount_++;
-        }
-        pass.hitShaderGroups[groupIndex] = std::move(group);
-        pass.hitGroupNameToIndex[pass.hitShaderGroups[groupIndex].name] = static_cast<uint32_t>(groupIndex);
-        if (pass.hitShaderGroups[groupIndex].name == pass.config.defaultHitGroupName) {
-            pass.fallbackHitGroupIndex = static_cast<uint32_t>(groupIndex);
-        }
-        if (pass.hitShaderGroups[groupIndex].name == "shadow") {
-            pass.shadowHitGroupIndex = static_cast<uint32_t>(groupIndex);
-        }
-    }
-
-    requests.push_back({
-        .path = pass.config.rayGenShaderPath,
-        .stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
-        .definitions = pass.config.definitions,
-        .executionStage = ShaderPackLoader::Stage::RayTracing,
-        .executionSet = executionSet,
-    });
-}
-
-void RayTracingModule::collectUpstreamDirectLightComputeRequests(
-    const ComputePass &pass,
-    std::vector<ShaderPack::ShaderCreateInfo> &requests) {
-    requests.push_back({
-        .path = pass.config.computeShaderPath,
-        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-        .definitions = pass.config.definitions,
-        .executionStage = ShaderPackLoader::Stage::RayTracing,
-        .executionSet = directLightUpstreamShaderPack_->executionSet(5u),
-    });
-}
-
-void RayTracingModule::buildUpstreamDirectLightRayTracingPass(
-    RayTracingPass &pass,
-    std::shared_ptr<vk::Device> device,
-    const std::vector<std::shared_ptr<vk::Shader>> &compiledShaders,
-    size_t &shaderOffset) {
-    auto framework = framework_.lock();
-    if (!framework) { return; }
-    for (size_t i = 0; i < pass.missRequestCount_; ++i) {
-        pass.missShaders.push_back({
-            .name = pass.config.missShaders[i].name,
-            .index = static_cast<uint32_t>(i),
-            .shader = compiledShaders[shaderOffset + i],
-        });
-    }
-    shaderOffset += pass.missRequestCount_;
-    for (size_t i = 0; i < pass.hitRequestCount_; ++i) {
-        auto &group = pass.hitShaderGroups[pass.hitAssignments_[i].groupIndex];
-        switch (pass.hitAssignments_[i].shaderType) {
-            case 0: group.closestHitShader = compiledShaders[shaderOffset + i]; break;
-            case 1: group.anyHitShader = compiledShaders[shaderOffset + i]; break;
-            case 2: group.intersectionShader = compiledShaders[shaderOffset + i]; break;
-            default: break;
-        }
-    }
-    shaderOffset += pass.hitRequestCount_;
-    if (pass.hitGroupNameToIndex.find("shadow") == pass.hitGroupNameToIndex.end()) {
-        pass.shadowHitGroupIndex = pass.fallbackHitGroupIndex;
-    }
-    pass.hitGroupCount = static_cast<uint32_t>(pass.hitShaderGroups.size());
-    pass.missGroupCount = static_cast<uint32_t>(pass.missShaders.size());
-    pass.rayGenQueryShader = compiledShaders[shaderOffset++];
-    pass.rayGenUpdateShader = pass.rayGenQueryShader;
-
-    vk::RayTracingPipelineBuilder builder;
-    auto &stageBuilder = builder.beginShaderStage();
-    uint32_t stageIndex = 0;
-    stageBuilder.defineShaderStage(pass.rayGenQueryShader, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
-    stageIndex++;
-    std::vector<uint32_t> missStageIndices;
-    for (const auto &missShader : pass.missShaders) {
-        missStageIndices.push_back(stageIndex);
-        stageBuilder.defineShaderStage(missShader.shader, VK_SHADER_STAGE_MISS_BIT_KHR);
-        stageIndex++;
-    }
-    struct HitStageIndices {
-        VkRayTracingShaderGroupTypeKHR type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
-        uint32_t closestHit = VK_SHADER_UNUSED_KHR;
-        uint32_t anyHit = VK_SHADER_UNUSED_KHR;
-        uint32_t intersection = VK_SHADER_UNUSED_KHR;
-    };
-    std::vector<HitStageIndices> hitStageIndices;
-    for (const auto &group : pass.hitShaderGroups) {
-        HitStageIndices indices;
-        indices.type = group.type;
-        if (group.closestHitShader) {
-            indices.closestHit = stageIndex;
-            stageBuilder.defineShaderStage(group.closestHitShader, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR);
-            stageIndex++;
-        }
-        if (group.anyHitShader) {
-            indices.anyHit = stageIndex;
-            stageBuilder.defineShaderStage(group.anyHitShader, VK_SHADER_STAGE_ANY_HIT_BIT_KHR);
-            stageIndex++;
-        }
-        if (group.intersectionShader) {
-            indices.intersection = stageIndex;
-            stageBuilder.defineShaderStage(group.intersectionShader, VK_SHADER_STAGE_INTERSECTION_BIT_KHR);
-            stageIndex++;
-        }
-        hitStageIndices.push_back(indices);
-    }
-    stageBuilder.endShaderStage();
-
-    auto &groupBuilder = builder.beginShaderGroup();
-    groupBuilder.defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 0, VK_SHADER_UNUSED_KHR,
-                                   VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR);
-    for (uint32_t missStageIndex : missStageIndices) {
-        groupBuilder.defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, missStageIndex,
-                                       VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR, VK_SHADER_UNUSED_KHR);
-    }
-    for (const auto &indices : hitStageIndices) {
-        groupBuilder.defineShaderGroup(indices.type, VK_SHADER_UNUSED_KHR, indices.closestHit, indices.anyHit,
-                                       indices.intersection);
-    }
-    groupBuilder.endShaderGroup();
-
-    pass.queryPipeline = builder.definePipelineLayout(directLightUpstreamDescriptorTables_[0]).build(device);
-    pass.updatePipeline = pass.queryPipeline;
-    const uint32_t frameCount = framework->swapchain()->imageCount();
-    pass.querySbts.resize(frameCount);
-    for (uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex) {
-        pass.querySbts[frameIndex] = vk::SBT::create(
-            framework->physicalDevice(), device, framework->vma(),
-            pass.queryPipeline, pass.missGroupCount, pass.hitGroupCount);
-    }
-}
-
-void RayTracingModule::buildUpstreamDirectLightComputePass(
-    ComputePass &pass,
-    std::shared_ptr<vk::Device> device,
-    const std::vector<std::shared_ptr<vk::Shader>> &compiledShaders,
-    size_t &shaderOffset) {
-    pass.computeShader = compiledShaders[shaderOffset++];
-    pass.pipeline = vk::ComputePipelineBuilder{}
-        .defineShader(pass.computeShader)
-        .definePipelineLayout(directLightUpstreamDescriptorTables_[0])
-        .build(device);
-}
-
-void RayTracingModule::uploadUpstreamDirectLightStaticSbts(std::shared_ptr<vk::Device> device) {
-    auto framework = framework_.lock();
-    if (!framework) { return; }
-    auto commandPool = vk::CommandPool::create(framework->physicalDevice(), device);
-    auto commandBuffer = vk::CommandBuffer::create(device, commandPool);
-    commandBuffer->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-    for (auto &passVariant : directLightUpstreamPasses_) {
-        if (auto pass = std::get_if<std::shared_ptr<RayTracingPass>>(&passVariant)) {
-            (void) pass;
-        }
-    }
-    commandBuffer->end()->submitMainQueueIndividual(device);
-    vkQueueWaitIdle(device->mainVkQueue());
-}
-
-void RayTracingModule::initUpstreamDirectLightPipelines() {
-    if (!directLightUpstreamShaderPack_ || !directLightUpstreamPassRuntimeReady_ ||
-        directLightUpstreamDescriptorTables_.empty() || !directLightUpstreamDescriptorTables_[0]) {
-        return;
-    }
-    auto framework = framework_.lock();
-    if (!framework) { return; }
-    auto device = framework->device();
-    directLightUpstreamShaderCompileReady_ = false;
-    directLightUpstreamPipelineReady_ = false;
-    directLightUpstreamSbtReady_ = false;
-    directLightUpstreamPasses_.clear();
-    directLightUpstreamPassNameToPass_.clear();
-    directLightUpstreamExecutionVariableConfigs_.clear();
-    directLightUpstreamGlobalVariables_.clear();
-    directLightUpstreamShaderPack_->copyStageExecutionState(
-        ShaderPackLoader::Stage::RayTracing,
-        directLightUpstreamExecutionVariableConfigs_,
-        directLightUpstreamGlobalVariables_);
-    directLightUpstreamGlobalVariables_["ADV_TRANS_LUT_READY"] = "true";
-
-    size_t executionBufferSize =
-        directLightUpstreamShaderPack_->shaderPack().rayTracingExecution.variables.size() * sizeof(float);
-    std::vector<ShaderPack::ShaderCreateInfo> requests;
-    size_t skippedInactivePasses = 0;
-    for (const auto &passConfig : directLightUpstreamShaderPack_->shaderPack().passes) {
-        if (passConfig.stage != ShaderPackLoader::Stage::RayTracing) { continue; }
-        switch (passConfig.type) {
-            case ShaderPackLoader::PassConfig::Type::RayTracing: {
-                if (!upstreamDirectLightExecutorPassIncluded(passConfig.rayTracing.name)) {
-                    skippedInactivePasses++;
-                    break;
-                }
-                auto pass = std::make_shared<RayTracingPass>();
-                pass->config = passConfig.rayTracing;
-                pass->querySharcEnabled = false;
-                pass->isSharcUpdatePass = false;
-                pass->executionBuffer = ShaderPack::createPassExecutionBuffer(
-                    device, framework->vma(), executionBufferSize);
-                collectUpstreamDirectLightRayTracingRequests(*pass, requests);
-                directLightUpstreamPasses_.push_back(pass);
-                directLightUpstreamPassNameToPass_.emplace(pass->config.name, pass);
-                break;
-            }
-            case ShaderPackLoader::PassConfig::Type::Compute: {
-                if (!upstreamDirectLightExecutorPassIncluded(passConfig.compute.name)) {
-                    skippedInactivePasses++;
-                    break;
-                }
-                auto pass = std::make_shared<ComputePass>();
-                pass->config = passConfig.compute;
-                pass->executionBuffer = ShaderPack::createPassExecutionBuffer(
-                    device, framework->vma(), executionBufferSize);
-                collectUpstreamDirectLightComputeRequests(*pass, requests);
-                directLightUpstreamPasses_.push_back(pass);
-                directLightUpstreamPassNameToPass_.emplace(pass->config.name, pass);
-                break;
-            }
-            default:
-                break;
-        }
-    }
-
-    try {
-        RadianceLogger::log("RayTracing", "INFO",
-                            "Upstream RT executor compile start selectedPasses=%zu skippedPasses=%zu shaderRequests=%zu",
-                            directLightUpstreamPasses_.size(), skippedInactivePasses, requests.size());
-        renderDiag("UpstreamRT pipeline compile start selectedPasses=%zu skippedPasses=%zu shaderRequests=%zu",
-                   directLightUpstreamPasses_.size(), skippedInactivePasses, requests.size());
-        g_crashRing.record("UpstreamRT:pipeline:compile:start");
-        auto shaders = directLightUpstreamShaderPack_->createShaders(device, requests);
-        g_crashRing.record("UpstreamRT:pipeline:compile:done");
-        renderDiag("UpstreamRT pipeline compile done shaders=%zu", shaders.size());
-        directLightUpstreamShaderCompileReady_ = !shaders.empty() || requests.empty();
-        size_t shaderOffset = 0;
-        for (auto &passVariant : directLightUpstreamPasses_) {
-            if (auto pass = std::get_if<std::shared_ptr<RayTracingPass>>(&passVariant)) {
-                const std::string tag = "UpstreamRT:buildRT:" + (*pass)->config.name;
-                g_crashRing.record(tag.c_str());
-                renderDiag("UpstreamRT build RT pass=%s", (*pass)->config.name.c_str());
-                buildUpstreamDirectLightRayTracingPass(**pass, device, shaders, shaderOffset);
-                renderDiag("UpstreamRT build RT pass done=%s", (*pass)->config.name.c_str());
-            } else if (auto pass = std::get_if<std::shared_ptr<ComputePass>>(&passVariant)) {
-                const std::string tag = "UpstreamRT:buildC:" + (*pass)->config.name;
-                g_crashRing.record(tag.c_str());
-                renderDiag("UpstreamRT build compute pass=%s", (*pass)->config.name.c_str());
-                buildUpstreamDirectLightComputePass(**pass, device, shaders, shaderOffset);
-                renderDiag("UpstreamRT build compute pass done=%s", (*pass)->config.name.c_str());
-            }
-        }
-        directLightUpstreamPipelineReady_ = shaderOffset == shaders.size() && !directLightUpstreamPasses_.empty();
-        g_crashRing.record("UpstreamRT:pipeline:sbtUpload:start");
-        renderDiag("UpstreamRT static SBT upload start");
-        uploadUpstreamDirectLightStaticSbts(device);
-        g_crashRing.record("UpstreamRT:pipeline:sbtUpload:done");
-        renderDiag("UpstreamRT static SBT upload done");
-        directLightUpstreamSbtReady_ = directLightUpstreamPipelineReady_;
-        RadianceLogger::log("RayTracing", "INFO",
-                            "Upstream RT executor pipelines ready passes=%zu shaders=%zu",
-                            directLightUpstreamPasses_.size(), shaders.size());
-    } catch (const std::exception &e) {
-        directLightUpstreamRuntimeError_ = e.what();
-        directLightUpstreamShaderCompileReady_ = false;
-        directLightUpstreamPipelineReady_ = false;
-        directLightUpstreamSbtReady_ = false;
-        RadianceLogger::log("RayTracing", "ERROR", "Upstream RT executor pipeline build failed: %s", e.what());
-    }
-}
-
-static const char *upstreamPassProfileName(const std::string &name) {
-    if (name == "primary") return "RT.Upstream.Primary";
-    if (name == "precompute_light_neighborhoods") return "RT.Upstream.PrecomputeLightNeighborhoods";
-    if (name == "generate_initial_samples") return "RT.Upstream.Initial";
-    if (name == "visibility") return "RT.Upstream.Visibility";
-    if (name == "temporal_reuse") return "RT.Upstream.Temporal";
-    if (name == "spatial_reuse") return "RT.Upstream.Spatial";
-    if (name == "direct_light") return "RT.Upstream.DirectLight";
-    if (name == "final_compose") return "RT.Upstream.FinalCompose";
-    if (name == "volumetric_light_clear") return "RT.Upstream.VolumetricLightClear";
-    if (name == "cont_reflection") return "RT.Upstream.ContinuousReflection";
-    if (name == "cont_refraction") return "RT.Upstream.ContinuousRefraction";
-    return "RT.Upstream.Pass";
-}
-
-void RayTracingModule::renderUpstreamDirectLightRayTracingPass(
-    RayTracingPass &pass,
-    RayTracingModuleContext &context,
-    const ShaderPack::ExecutionVariables &variables) {
-    auto frameworkContext = context.frameworkContext.lock();
-    auto worldCommandBuffer = frameworkContext->worldCommandBuffer;
-    const uint32_t frameIndex = frameworkContext->frameIndex;
-    if (!context.worldPrepareContext || !context.worldPrepareContext->tlas ||
-        frameIndex >= pass.querySbts.size() || !pass.querySbts[frameIndex] ||
-        !pass.queryPipeline || !context.directLightUpstreamDescriptorTable) {
-        return;
-    }
-
-    auto hitGroupIndex = [&](const char *name, uint32_t fallback) {
-        auto iter = pass.hitGroupNameToIndex.find(name);
-        return iter == pass.hitGroupNameToIndex.end() ? fallback : iter->second;
-    };
-    const uint32_t defaultHit = pass.fallbackHitGroupIndex;
-    const uint32_t shadowHit = hitGroupIndex("shadow", defaultHit);
-    const uint32_t cloudsHit = hitGroupIndex("clouds", defaultHit);
-    const uint32_t waterHit = hitGroupIndex("water_mask", defaultHit);
-    const uint32_t portalHit = hitGroupIndex("end_portal", defaultHit);
-    const uint32_t gatewayHit = hitGroupIndex("end_gateway", defaultHit);
-    const uint32_t noReflectHit = hitGroupIndex("world_no_reflect", defaultHit);
-    std::vector<uint32_t> hitIndices;
-    hitIndices.reserve(context.worldPrepareContext->lastGeometryTypes_.size());
-    for (auto typeIndex : context.worldPrepareContext->lastGeometryTypes_) {
-        switch (static_cast<World::GeometryTypes>(typeIndex)) {
-            case World::GeometryTypes::SHADOW: hitIndices.push_back(shadowHit); break;
-            case World::GeometryTypes::WORLD_NO_REFLECT: hitIndices.push_back(noReflectHit); break;
-            case World::GeometryTypes::WORLD_CLOUD: hitIndices.push_back(cloudsHit); break;
-            case World::GeometryTypes::BOAT_WATER_MASK: hitIndices.push_back(waterHit); break;
-            case World::GeometryTypes::END_PORTAL: hitIndices.push_back(portalHit); break;
-            case World::GeometryTypes::END_GATE_WAY: hitIndices.push_back(gatewayHit); break;
-            default: hitIndices.push_back(defaultHit); break;
-        }
-    }
-    if (!hitIndices.empty()) {
-        pass.querySbts[frameIndex]->setupHitSBT(hitIndices);
-    }
-
-    auto evalDim = [&](const std::string &expression) {
-        double value = evaluateUpstreamDirectLightNumericExpression(expression, variables);
-        return static_cast<uint32_t>(std::max(1.0, std::ceil(value)));
-    };
-    const uint32_t traceWidth = evalDim(pass.config.width);
-    const uint32_t traceHeight = evalDim(pass.config.height);
-    const uint32_t traceDepth = evalDim(pass.config.depth);
-
-    worldCommandBuffer->barriersMemory({{
-        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-    }});
-    worldCommandBuffer->bindDescriptorTable(context.directLightUpstreamDescriptorTable,
-                                            VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR)
-        ->bindRTPipeline(pass.queryPipeline)
-        ->raytracing(pass.querySbts[frameIndex], traceWidth, traceHeight, traceDepth);
-}
-
-void RayTracingModule::renderUpstreamDirectLightComputePass(
-    ComputePass &pass,
-    RayTracingModuleContext &context,
-    const ShaderPack::ExecutionVariables &variables) {
-    auto frameworkContext = context.frameworkContext.lock();
-    auto worldCommandBuffer = frameworkContext->worldCommandBuffer;
-    if (!pass.pipeline || !context.directLightUpstreamDescriptorTable) { return; }
-    auto evalDim = [&](const std::string &expression) {
-        double value = evaluateUpstreamDirectLightNumericExpression(expression, variables);
-        return static_cast<uint32_t>(std::max(1.0, std::ceil(value)));
-    };
-    const uint32_t gx = evalDim(pass.config.gx);
-    const uint32_t gy = evalDim(pass.config.gy);
-    const uint32_t gz = evalDim(pass.config.gz);
-    worldCommandBuffer->barriersMemory({{
-        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-    }});
-    worldCommandBuffer->bindDescriptorTable(context.directLightUpstreamDescriptorTable,
-                                            VK_PIPELINE_BIND_POINT_COMPUTE)
-        ->bindComputePipeline(pass.pipeline);
-    vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), gx, gy, gz);
-}
-
-bool RayTracingModule::renderUpstreamDirectLight(RayTracingModuleContext &context) {
-    if (effectiveDirectLightBackend() != 1 || !directLightUpstreamShaderPack_ ||
-        !directLightUpstreamPackRuntimeReady_ || !directLightUpstreamPassRuntimeReady_ ||
-        !context.directLightUpstreamDescriptorTable) {
-        return false;
-    }
-    auto frameworkContext = context.frameworkContext.lock();
-    if (!frameworkContext) { return false; }
-    refreshUpstreamDirectLightRuntime(frameworkContext->frameIndex);
-    if (!directLightUpstreamRuntimeResourcesReady_) { return false; }
-    if (!directLightUpstreamPipelineReady_ || !directLightUpstreamSbtReady_) {
-        RadianceLogger::log("RayTracing", "INFO", "Upstream RT executor lazy pipeline init start");
-        g_crashRing.record("UpstreamRT:pipelineLazy:start");
-        initUpstreamDirectLightPipelines();
-        g_crashRing.record("UpstreamRT:pipelineLazy:done");
-        RadianceLogger::log("RayTracing", "INFO",
-                            "Upstream RT executor lazy pipeline init done shader=%d pipeline=%d sbt=%d",
-                            directLightUpstreamShaderCompileReady_ ? 1 : 0,
-                            directLightUpstreamPipelineReady_ ? 1 : 0,
-                            directLightUpstreamSbtReady_ ? 1 : 0);
-    }
-    if (!directLightUpstreamShaderCompileReady_ ||
-        !directLightUpstreamPipelineReady_ ||
-        !directLightUpstreamSbtReady_) {
-        return false;
-    }
-    auto buffers = Renderer::instance().buffers();
-    auto world = Renderer::instance().world();
-    auto chunks = world ? world->chunks() : nullptr;
-    auto table = context.directLightUpstreamDescriptorTable;
-    table->bindBuffer(buffers->worldUniformBuffer(), 2, 0);
-    table->bindBuffer(buffers->lastWorldUniformBuffer(), 2, 1);
-    table->bindBuffer(buffers->skyUniformBuffer(), 2, 2);
-    if (context.worldPrepareContext && context.worldPrepareContext->tlas) {
-        table->bindAS(context.worldPrepareContext->tlas, 1, 0);
-        table->bindBuffer(context.worldPrepareContext->blasOffsetsBuffer, 1, 1);
-        table->bindBuffer(context.worldPrepareContext->indexBufferAddr, 1, 2);
-        table->bindBuffer(context.worldPrepareContext->lastIndexBufferAddr, 1, 3);
-        table->bindBuffer(context.worldPrepareContext->vertexBufferAddr, 1, 4);
-        table->bindBuffer(context.worldPrepareContext->vertexBufferAddr, 1, 5);
-        table->bindBuffer(context.worldPrepareContext->lastVertexBufferAddr, 1, 6);
-        table->bindBuffer(buffers->textureMappingBuffer(), 1, 7);
-        table->bindBuffer(context.worldPrepareContext->lastObjToWorldMat, 1, 8);
-        if (chunks && chunks->chunkPackedData()) {
-            table->bindBuffer(chunks->chunkPackedData(), 1, 9);
-        } else {
-            table->bindBuffer(context.worldPrepareContext->blasOffsetsBuffer, 1, 9);
-        }
-    }
-
-    uint32_t brdfFlags = 0;
-    if (Renderer::options.multiScatterGGX) { brdfFlags |= 128u; }
-    if (Renderer::options.eonDiffuse) { brdfFlags |= 256u; }
-    directLightUpstreamGlobalVariables_["RADIANCE_BRDF_FLAGS"] = std::to_string(brdfFlags);
-    directLightUpstreamGlobalVariables_["ADV_TRANS_LUT_READY"] = "true";
-
-    ShaderPack::ExecutionVariables variables;
-    for (const auto &[name, value] : directLightUpstreamGlobalVariables_) {
-        auto config = findUpstreamDirectLightExecutionVariableConfig(name);
-        variables.emplace(name, ShaderPack::ExecutionVariable{
-            .name = name,
-            .value = value,
-            .type = config.has_value() ? config->get().type : "",
-        });
-    }
-
-    auto executePass = [&](const std::string &passName, ShaderPack::ExecutionVariables &passVariables) {
-        auto iter = directLightUpstreamPassNameToPass_.find(passName);
-        if (iter == directLightUpstreamPassNameToPass_.end()) {
-            static std::unordered_set<std::string> loggedMissingPasses;
-            if (loggedMissingPasses.insert(passName).second) {
-                RadianceLogger::log("RayTracing", "INFO",
-                                    "Upstream RT executor skipping unsupported pass %s",
-                                    passName.c_str());
-            }
-            return;
-        }
-        const std::string crashBegin = "UpstreamRT:pass:" + passName + ":begin";
-        g_crashRing.record(crashBegin.c_str());
-        ScopedGpuProfile profile(frameworkContext->worldCommandBuffer->vkCommandBuffer(),
-                                 upstreamPassProfileName(passName));
-        std::visit([&](auto &pass) {
-            if (pass->executionBuffer) {
-                directLightUpstreamShaderPack_->uploadExecutionBuffer(
-                    ShaderPackLoader::Stage::RayTracing, pass->executionBuffer, passVariables,
-                    frameworkContext->worldCommandBuffer, table,
-                    directLightUpstreamShaderPack_->executionSet(5u),
-                    frameworkContext->framework.lock()->physicalDevice()->mainQueueIndex(),
-                    VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-            }
-            using T = std::decay_t<decltype(pass)>;
-            if constexpr (std::is_same_v<T, std::shared_ptr<RayTracingPass>>) {
-                renderUpstreamDirectLightRayTracingPass(*pass, context, passVariables);
-            } else if constexpr (std::is_same_v<T, std::shared_ptr<ComputePass>>) {
-                renderUpstreamDirectLightComputePass(*pass, context, passVariables);
-            }
-        }, iter->second);
-        profile.close();
-        const std::string crashEnd = "UpstreamRT:pass:" + passName + ":end";
-        g_crashRing.record(crashEnd.c_str());
-    };
-
-    try {
-        directLightUpstreamShaderPack_->executeCommands(
-            ShaderPackLoader::Stage::RayTracing,
-            directLightUpstreamShaderPack_->execution(ShaderPackLoader::Stage::RayTracing).commands,
-            variables,
-            upstreamDirectLightExpressionVariables(),
-            true,
-            1u << 16,
-            executePass);
-        for (auto &[name, value] : directLightUpstreamGlobalVariables_) {
-            auto iter = variables.find(name);
-            if (iter != variables.end()) { value = iter->second.value; }
-        }
-        return true;
-    } catch (const std::exception &e) {
-        directLightUpstreamRuntimeError_ = e.what();
-        RadianceLogger::log("RayTracing", "ERROR", "Upstream RT executor dispatch failed: %s", e.what());
-        return false;
-    }
-}
-#endif
-
 void RayTracingModule::initSharcBuffers() {
     auto framework = framework_.lock();
     if (!framework) return;
@@ -3236,7 +1517,7 @@ void RayTracingModule::initSharcUpdatePipeline() {
         std::cerr << "[SHARC] Failed to load sharc_update_rgen.spv" << std::endl;
         return;
     }
-    const bool displacementRequested = Renderer::options.pomEnabled && worldSolidTransparentClosestHitShader_;
+    const bool displacementRequested = Renderer::options.displacementEnabled && worldSolidTransparentClosestHitShader_;
     const bool useShaderDisplacement = displacementRequested && shaderDisplacementRuntimeAllowed();
     auto activeWorldSolidTransparentClosestHitShader =
         useShaderDisplacement
@@ -3246,10 +1527,11 @@ void RayTracingModule::initSharcUpdatePipeline() {
         activeWorldSolidTransparentClosestHitShader = worldSolidTransparentClosestHitShader_;
     }
     RadianceLogger::log("RayTracing", "INFO",
-                        "SHARC closest-hit variant: %s (displacementRequested=%d displacementRuntimeAllowed=%d noDisplacementShader=%d)",
+                        "SHARC closest-hit variant: %s (displacementRequested=%d displacementRuntimeAllowed=%d displacementForceDisabled=%d noDisplacementShader=%d)",
                         useShaderDisplacement ? "displacement" : "no_displacement",
                         displacementRequested ? 1 : 0,
                         shaderDisplacementRuntimeAllowed() ? 1 : 0,
+                        shaderDisplacementForceDisabled() ? 1 : 0,
                         worldSolidTransparentNoDisplacementClosestHitShader_ ? 1 : 0);
 
     // Build update RT pipeline with same CHS/AHS/miss shaders as main pipeline
@@ -3351,8 +1633,8 @@ void RayTracingModule::initSharcResolvePipeline() {
         return;
     }
 
-    // Pipeline layout with push constant only (no descriptor sets — uses BDA)
-    VkPushConstantRange pushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 76}; // 19 fields × 4 bytes (with uint64_t alignment)
+    // Pipeline layout with push constant only (no descriptor sets â€” uses BDA)
+    VkPushConstantRange pushRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 76}; // 19 fields Ã— 4 bytes (with uint64_t alignment)
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pipelineLayoutInfo.setLayoutCount = 0;
     pipelineLayoutInfo.pSetLayouts = nullptr;
@@ -3517,10 +1799,6 @@ RayTracingModuleContext::RayTracingModuleContext(std::shared_ptr<FrameworkContex
     : WorldModuleContext(frameworkContext, worldPipelineContext),
       rayTracingModule(rayTracingModule),
       rayTracingDescriptorTable(rayTracingModule->rayTracingDescriptorTables_[frameworkContext->frameIndex]),
-      directLightUpstreamDescriptorTable(
-          frameworkContext->frameIndex < rayTracingModule->directLightUpstreamDescriptorTables_.size()
-              ? rayTracingModule->directLightUpstreamDescriptorTables_[frameworkContext->frameIndex]
-              : nullptr),
       sbt(rayTracingModule->sbts_[frameworkContext->frameIndex]),
       sharcUpdateSbt(frameworkContext->frameIndex < rayTracingModule->sharcUpdateSbts_.size()
                      ? rayTracingModule->sharcUpdateSbts_[frameworkContext->frameIndex] : nullptr),
@@ -3570,10 +1848,9 @@ void RayTracingModuleContext::render() {
         renderDiag("RT worldPrepare begin");
         g_crashRing.record("RT:worldPrepare");
         worldPrepareContext->render();
-        renderDiag("RT worldPrepare end tlas=%d instances=%u lights=%d",
+        renderDiag("RT worldPrepare end tlas=%d instances=%u",
                    (int)(worldPrepareContext->tlas != nullptr),
-                   worldPrepareContext->prevTlasInstanceCount_,
-                   worldPrepareContext->areaLightCount);
+                   worldPrepareContext->prevTlasInstanceCount_);
     }
     if (ctx0) ctx0->worldCommandBuffer->endLabel();
 
@@ -3591,66 +1868,6 @@ void RayTracingModuleContext::render() {
 
     auto module = rayTracingModule.lock();
     if (!module) return;
-
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    const uint32_t directLightBackend = effectiveDirectLightBackend();
-    const bool upstreamDirectLightActive = kAllowUpstreamRtExecutorDispatch && directLightBackend == 1;
-    const bool directLightPipelineActive = kAllowDirectLightScaffoldDispatch && directLightBackend == 2;
-    bool directLightExternalActive = false;
-    if (directLightPipelineActive) {
-        const uint32_t frameIdx = context->frameIndex;
-        const uint32_t width = hdrNoisyOutputImage->width();
-        const uint32_t height = hdrNoisyOutputImage->height();
-        auto ensureDirectLightImage = [&](std::vector<std::shared_ptr<vk::DeviceLocalImage>>& target) {
-            if (frameIdx >= target.size()) return;
-            auto& image = target[frameIdx];
-            if (!image || image->width() != width || image->height() != height) {
-                image = vk::DeviceLocalImage::create(
-                    framework->device(), framework->vma(), false, width, height, 1,
-                    VK_FORMAT_R32G32B32A32_SFLOAT,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-            }
-        };
-
-        ensureDirectLightImage(module->directLightPrimarySurfaceImages_);
-        ensureDirectLightImage(module->directLightReservoirPingImages_);
-        ensureDirectLightImage(module->directLightReservoirPongImages_);
-        ensureDirectLightImage(module->directLightOutputImages_);
-        if (frameIdx < module->directLightCounterBuffers_.size()
-            && !module->directLightCounterBuffers_[frameIdx]) {
-            module->directLightCounterBuffers_[frameIdx] = vk::HostVisibleBuffer::create(
-                framework->vma(), framework->device(), kDirectLightCounterCount * sizeof(uint32_t),
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        }
-        module->refreshUpstreamDirectLightRuntime(frameIdx);
-        // Backend 1 is reserved for upstream parity. The old compute scaffold is
-        // diagnostics-only and must not replace legacy direct lighting; doing so
-        // drops the real RT sun/shadow path and makes visual comparisons invalid.
-        directLightExternalActive = false && directLightBackend == 1
-            && module->directLightInitialPipeline_ != VK_NULL_HANDLE
-            && frameIdx < module->directLightInitialDescSets_.size()
-            && frameIdx < module->directLightPrimarySurfaceImages_.size()
-            && frameIdx < module->directLightReservoirPingImages_.size()
-            && frameIdx < module->directLightOutputImages_.size()
-            && frameIdx < module->directLightCounterBuffers_.size()
-            && module->directLightPrimarySurfaceImages_[frameIdx]
-            && module->directLightReservoirPingImages_[frameIdx]
-            && module->directLightOutputImages_[frameIdx]
-            && module->directLightCounterBuffers_[frameIdx]
-            && firstHitDiffuseDirectLightImage != nullptr
-            && frameIdx < module->positionViewSpaceImages_.size()
-            && module->positionViewSpaceImages_[frameIdx] != nullptr
-            && diffuseAlbedoImage != nullptr
-            && worldPrepareContext->tlas != nullptr
-            && worldPrepareContext->areaLightBuffer != nullptr
-            && module->tileLightBuffer_ != nullptr;
-    }
-#else
-    constexpr uint32_t directLightBackend = 0;
-    constexpr bool upstreamDirectLightActive = false;
-    constexpr bool directLightPipelineActive = false;
-    constexpr bool directLightExternalActive = false;
-#endif
 
     renderDiag("RT descriptors begin");
     g_crashRing.record("RT:descriptors");
@@ -3680,27 +1897,24 @@ void RayTracingModuleContext::render() {
         {worldPrepareContext->lastIndexBufferAddr,   1,  5},
         {worldPrepareContext->lastObjToWorldMat,     1,  6},
         {buffers->textureMappingBuffer(),            1,  7},
-        {worldPrepareContext->areaLightBuffer,       1,  8},
         {worldBuffer,                                2,  0},
         {buffers->lastWorldUniformBuffer(),          2,  1},
         {buffers->skyUniformBuffer(),                2,  2},
     };
-    if (module->tileLightBuffer_) {
-        bufferBindings.push_back({module->tileLightBuffer_, 1, 9});
-    }
     // Per-section biome colors for shader-side tinting
     if (worldPrepareContext->biomeColorBuffer) {
         bufferBindings.push_back({worldPrepareContext->biomeColorBuffer, 1, 10});
     }
-    // Always bind Material Class Mapping buffer (may be real data or dummy)
-    auto mcBuffer = buffers->materialClassMappingBuffer();
-    if (mcBuffer) {
-        bufferBindings.push_back({mcBuffer, 1, 11});
-    }
     // SpriteRegistry SSBO for texture array metadata
     auto spriteRegBuffer = Renderer::textureSystem.registry().getBuffer();
+    const VkBuffer spriteRegistryBuffer = spriteRegBuffer ? spriteRegBuffer->vkBuffer() : VK_NULL_HANDLE;
     if (spriteRegBuffer) {
         bufferBindings.push_back({spriteRegBuffer, 1, 13});
+    }
+    auto textureRuleBuffer = Renderer::textureSystem.textureRules().getBuffer();
+    const VkBuffer textureRuleVkBuffer = textureRuleBuffer ? textureRuleBuffer->vkBuffer() : VK_NULL_HANDLE;
+    if (textureRuleBuffer) {
+        bufferBindings.push_back({textureRuleBuffer, 1, 11});
     }
     // Blue noise buffers (already uploaded at init time via queueImportantWorldUpload)
     if (module->blueNoise_) {
@@ -3709,37 +1923,9 @@ void RayTracingModuleContext::render() {
     }
     rayTracingDescriptorTable->bindBufferBatch(bufferBindings);
 
-    // Batch per-frame image rebindings (ReSTIR reservoirs, bounce reservoirs)
+    // Batch per-frame optional image rebindings.
     using IB = vk::DescriptorTable::ImageBinding;
     std::vector<IB> frameImageBindings;
-
-    // ReSTIR DI: reservoir image binding
-    // Binding 14 = CHS write (temporal output)
-    // Binding 15 = CHS read (previous frame source)
-    if (module->reservoirImages_[0]) {
-        bool spatialEnabled = Renderer::options.restirEnabled && Renderer::options.restirSpatialEnabled && module->spatialPipeline_ != VK_NULL_HANDLE;
-        if (spatialEnabled) {
-            // Spatial path: CHS writes [0], spatial transforms [0]->[1], next CHS reads [1]
-            // No self-aliasing: CHS reads [1] and writes [0]
-            frameImageBindings.push_back({module->reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL, 3, 14});
-            frameImageBindings.push_back({module->reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL, 3, 15});
-        } else {
-            // No spatial: ping-pong to prevent read-write race on same image
-            uint32_t frameIdx = context->frameIndex;
-            int writeIdx = frameIdx & 1;
-            int readIdx  = 1 - writeIdx;
-            frameImageBindings.push_back({module->reservoirImages_[writeIdx], VK_IMAGE_LAYOUT_GENERAL, 3, 14});
-            frameImageBindings.push_back({module->reservoirImages_[readIdx],  VK_IMAGE_LAYOUT_GENERAL, 3, 15});
-        }
-    }
-
-    // Bounce ReSTIR DI: per-bounce reservoir images (bindings 18-20)
-    for (int b = 0; b < 3; b++) {
-        if (module->bounceReservoirImages_[b]) {
-            frameImageBindings.push_back(
-                {module->bounceReservoirImages_[b], VK_IMAGE_LAYOUT_GENERAL, 3, static_cast<uint32_t>(18 + b)});
-        }
-    }
 #ifdef MCVR_ENABLE_SHARC_QUERY_PASS
     if (context->frameIndex < module->sharcCandidatePosHitTImages_.size()
         && module->sharcCandidatePosHitTImages_[context->frameIndex]) {
@@ -3778,10 +1964,13 @@ void RayTracingModuleContext::render() {
     const bool hasSpec = specInfo && specInfo->image && specInfo->sampler;
     const auto* normInfo = texArrayMgr.getArray(texSystem.blockNormalArrayId());
     const bool hasNorm = normInfo && normInfo->image && normInfo->sampler;
+    const auto* flagInfo = texArrayMgr.getArray(texSystem.blockFlagArrayId());
+    const bool hasFlag = flagInfo && flagInfo->image && flagInfo->sampler;
 
     const VkImageView albedoView = hasAlbedo ? albedoInfo->image->vkImageView() : VK_NULL_HANDLE;
     const VkImageView specView = hasSpec ? specInfo->image->vkImageView() : VK_NULL_HANDLE;
     const VkImageView normView = hasNorm ? normInfo->image->vkImageView() : VK_NULL_HANDLE;
+    const VkImageView flagView = hasFlag ? flagInfo->image->vkImageView() : VK_NULL_HANDLE;
 
     auto bindBlockTextureArrays = [&](const std::shared_ptr<vk::DescriptorTable>& table) {
         if (!table) return;
@@ -3797,22 +1986,41 @@ void RayTracingModuleContext::render() {
             table->bindSamplerImage(normInfo->sampler, normInfo->image,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 5, 0);
         }
+        if (hasFlag) {
+            table->bindSamplerImage(flagInfo->sampler, flagInfo->image,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 6, 0);
+        }
+    };
+    auto bindSpriteRegistry = [&](const std::shared_ptr<vk::DescriptorTable>& table) {
+        if (!table || !spriteRegBuffer) return;
+        table->bindBuffer(spriteRegBuffer, 1, 13);
+    };
+    auto bindTextureRules = [&](const std::shared_ptr<vk::DescriptorTable>& table) {
+        if (!table || !textureRuleBuffer) return;
+        table->bindBuffer(textureRuleBuffer, 1, 11);
     };
 
     const bool textureDescriptorGenerationChanged =
         textureGeneration != module->lastTextureDescriptorRefreshGeneration_ ||
         albedoView != module->lastAlbedoTextureView_ ||
         specView != module->lastSpecularTextureView_ ||
-        normView != module->lastNormalTextureView_;
+        normView != module->lastNormalTextureView_ ||
+        flagView != module->lastFlagTextureView_ ||
+        spriteRegistryBuffer != module->lastSpriteRegistryBuffer_ ||
+        textureRuleVkBuffer != module->lastTextureRuleBuffer_;
 
     if (textureDescriptorGenerationChanged) {
         for (auto& table : module->rayTracingDescriptorTables_) {
             bindBlockTextureArrays(table);
+            bindSpriteRegistry(table);
+            bindTextureRules(table);
         }
         RadianceLogger::log(
             "TextureDescriptors", "INFO",
             "refresh-all gen=%llu frame=%u tables=%zu albedoId=%u image=0x%llx view=0x%llx sampler=0x%llx "
-            "specId=%u image=0x%llx view=0x%llx sampler=0x%llx normId=%u image=0x%llx view=0x%llx sampler=0x%llx",
+            "specId=%u image=0x%llx view=0x%llx sampler=0x%llx normId=%u image=0x%llx view=0x%llx sampler=0x%llx "
+            "flagId=%u image=0x%llx view=0x%llx sampler=0x%llx "
+            "spriteRegistry=0x%llx",
             static_cast<unsigned long long>(textureGeneration),
             context->frameIndex,
             module->rayTracingDescriptorTables_.size(),
@@ -3827,13 +2035,22 @@ void RayTracingModuleContext::render() {
             texSystem.blockNormalArrayId(),
             hasNorm ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(normInfo->image->vkImage())) : 0ull,
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(normView)),
-            hasNorm ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(normInfo->sampler->vkSamper())) : 0ull);
+            hasNorm ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(normInfo->sampler->vkSamper())) : 0ull,
+            texSystem.blockFlagArrayId(),
+            hasFlag ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(flagInfo->image->vkImage())) : 0ull,
+            static_cast<unsigned long long>(vk::DebugUtils::objectHandle(flagView)),
+            hasFlag ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(flagInfo->sampler->vkSamper())) : 0ull,
+            static_cast<unsigned long long>(vk::DebugUtils::objectHandle(spriteRegistryBuffer)));
         module->lastTextureDescriptorRefreshGeneration_ = textureGeneration;
         module->lastAlbedoTextureView_ = albedoView;
         module->lastSpecularTextureView_ = specView;
         module->lastNormalTextureView_ = normView;
+        module->lastFlagTextureView_ = flagView;
+        module->lastSpriteRegistryBuffer_ = spriteRegistryBuffer;
+        module->lastTextureRuleBuffer_ = textureRuleVkBuffer;
     } else {
         bindBlockTextureArrays(rayTracingDescriptorTable);
+        bindTextureRules(rayTracingDescriptorTable);
     }
     textureProfile.close();
     worldCommandBuffer->endLabel();
@@ -3858,7 +2075,7 @@ void RayTracingModuleContext::render() {
 #ifdef MCVR_ENABLE_SHARC_QUERY_PASS
         module->initSharcQueryPipeline();
 #endif
-        // Refresh ALL contexts' stale SBT pointers — were nullptr at construction time
+        // Refresh ALL contexts' stale SBT pointers â€” were nullptr at construction time
         for (size_t ci = 0; ci < module->contexts_.size(); ci++) {
             auto rtCtx = std::static_pointer_cast<RayTracingModuleContext>(module->contexts_[ci]);
             if (ci < module->sharcUpdateSbts_.size()) {
@@ -3956,16 +2173,11 @@ void RayTracingModuleContext::render() {
         ? static_cast<int>(Renderer::options.offlineBounces)
         : static_cast<int>(Renderer::options.rayBounces);
     pushConstant.flags = (Renderer::options.simplifiedIndirect ? 1 : 0)
-                       | (Renderer::options.areaLightsEnabled ? 2 : 0)
-                       | (Renderer::options.restirEnabled ? 4 : 0)
-                       | (Renderer::options.restirSimplifiedBRDF ? 8 : 0)
-                       | (Renderer::options.restirBounceEnabled ? 16 : 0)
 #if defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY)
                        | (sharcMainTraceQueryActive ? 32 : 0)
 #elif defined(MCVR_ENABLE_SHARC) && defined(MCVR_ENABLE_SHARC_QUERY_PASS)
                        | (sharcQueryPassActive ? 32 : 0)
 #endif
-                       | (Renderer::options.noiseLOD ? 64 : 0)
                        | (Renderer::options.multiScatterGGX ? 128 : 0)
                        | (Renderer::options.eonDiffuse ? 256 : 0)
                        | (Renderer::options.beerLawShadows ? 512 : 0)
@@ -3975,33 +2187,26 @@ void RayTracingModuleContext::render() {
                        | ((framework->device()->hasSER() && Renderer::options.serEnabled) ? 8192 : 0)
                        | ((framework->device()->hasSER() && Renderer::options.serEnabled && Renderer::options.serHintsEnabled) ? 16384 : 0)
                        | (Renderer::options.entityNormalsEnabled ? 32768 : 0);
-    pushConstant.areaLightCount = worldPrepareContext->areaLightCount;
-    pushConstant.shadowSoftness = Renderer::options.shadowSoftness;
-    pushConstant.risCandidates = Renderer::options.restirCandidates;
-    pushConstant.temporalMClamp = Renderer::options.restirTemporalMClamp;
-    pushConstant.wClamp = Renderer::options.restirWClamp;
-    // Fixed pre-exposure compresses HDR radiance into fp16-friendly range for DLSS-RR.
-    // Must be CONSTANT across frames — varying pre-exposure contaminates DLSS-RR's temporal
-    // history (accumulated at different scales) and causes visible brightness oscillation.
-    // 0.1 maps Minecraft's typical luminance range into fp16's sweet spot:
-    //   Sun/lava (1000) → 100, torch (500) → 50, dark cave (0.01) → 0.001
-    // DLSS-RR undoes it via InExposureScale = 1/0.1 = 10.
-    // Only apply when DLSS-RR is active (denoiserMode == 1).
-    pushConstant.preExposure = (Renderer::options.denoiserMode == 1) ? 0.1f : 1.0f;
-
-    // Shader displacement is temporarily forced off at runtime to isolate NVIDIA DMA page faults
-    // from the full SHARC refactor path without changing the user's saved option.
-    const bool displacementActive = Renderer::options.pomEnabled && shaderDisplacementRuntimeAllowed();
-    pushConstant.pomHeightScale  = displacementActive ? Renderer::options.pomHeightScale : 0.0f;
-    pushConstant.pomSteps        = Renderer::options.pomSteps;
-    pushConstant.pomRefinement   = Renderer::options.pomRefinement;
-    pushConstant.pomFadeDistance = Renderer::options.pomFadeDistance;
-
-    // Color expansion
-    pushConstant.colorExpansion = Renderer::options.colorExpansion;
+    pushConstant.reservedLighting0 = 0;
+    pushConstant.reservedLighting1 = 0.0f;
+    pushConstant.reservedLighting2 = 0;
+    pushConstant.reservedLighting3 = 0;
+    pushConstant.reservedLighting4 = 0;
+    // Keep the DLSS-RR path scene-referred. Earlier builds pre-exposed DLSS-D input
+    // by 0.1 while leaving NGX exposure scale at 1.0, so RR history/output could drift
+    // away from the histogram/tone-mapper scale and bloom into white while standing still.
+    pushConstant.preExposure = 1.0f;
+    // Shader displacement follows the user's saved option. Keep the runtime gate in place so
+    // crash isolation can force the no-displacement variant during targeted repro work.
+    const bool displacementActive = Renderer::options.displacementEnabled && shaderDisplacementRuntimeAllowed();
+    pushConstant.displacementDepthScale = displacementActive ? Renderer::options.displacementDepthScale : 0.0f;
+    pushConstant.displacementPrimarySteps = Renderer::options.displacementPrimarySteps;
+    pushConstant.displacementRefinementSteps = Renderer::options.displacementRefinementSteps;
+    pushConstant.displacementFadeDistanceBlocks = Renderer::options.displacementFadeDistanceBlocks;
     pushConstant.blueNoiseFrame = context->frameIndex;
-    pushConstant.rtDebugFlags = Renderer::options.rtDebugFlags
-        | (directLightExternalActive ? kRtDebugDisableDirectLighting : 0u);
+    pushConstant.reservedPc0 = 0;
+    pushConstant.reservedAddr = 0;
+    pushConstant.rtDebugFlags = Renderer::options.rtDebugFlags;
     pushConstant.handInstanceCount = worldPrepareContext->handInstanceCount;
     pushConstant.sharcQueryMode = sharcQueryPassActive ? sharcQueryMode : 0;
     pushConstant.sharcQueryReserved = 0;
@@ -4013,16 +2218,18 @@ void RayTracingModuleContext::render() {
         if (curFrame - lastPCLog >= 60) {
             lastPCLog = curFrame;
             RadianceLogger::log("RayTracing", "INFO",
-                "pushConst: bounces=%d flags=0x%x rtDebug=0x%x handInst=%u lights=%d shadowSoft=%.2f sharcQuery=%d sharcQueryPass=%d sharcQueryMode=%d sharcFrame=%u sharcWarmup=%u sharcMode=%d displacementEnabled=%d displacementRequested=%d displacementQuality=%u displacementDepth=%.4f displacementSteps=%d displacementRefinement=%d displacementFade=%.0f",
+                "pushConst: bounces=%d flags=0x%x rtDebug=0x%x handInst=%u sharcQuery=%d sharcQueryPass=%d sharcQueryMode=%d sharcFrame=%u sharcWarmup=%u sharcMode=%d displacementActive=%d displacementOption=%d displacementRuntimeAllowed=%d displacementForceDisabled=%d displacementQuality=%u displacementDepth=%.4f displacementSteps=%d displacementRefinement=%d displacementFade=%.0f",
                 pushConstant.numRayBounces, pushConstant.flags, pushConstant.rtDebugFlags,
-                pushConstant.handInstanceCount, pushConstant.areaLightCount,
-                pushConstant.shadowSoftness, sharcMainTraceQueryActive ? 1 : 0,
+                pushConstant.handInstanceCount, sharcMainTraceQueryActive ? 1 : 0,
                 sharcQueryPassActive ? 1 : 0, pushConstant.sharcQueryMode,
                 module->sharcFrameIndex_, sharcMainTraceWarmupFrames,
                 MCVR_SHARC_MAIN_TRACE_QUERY_MODE, displacementActive ? 1 : 0,
-                Renderer::options.pomEnabled ? 1 : 0,
-                Renderer::options.displacementQuality, pushConstant.pomHeightScale,
-                pushConstant.pomSteps, pushConstant.pomRefinement, pushConstant.pomFadeDistance);
+                Renderer::options.displacementEnabled ? 1 : 0,
+                shaderDisplacementRuntimeAllowed() ? 1 : 0,
+                shaderDisplacementForceDisabled() ? 1 : 0,
+                Renderer::options.displacementQuality, pushConstant.displacementDepthScale,
+                pushConstant.displacementPrimarySteps, pushConstant.displacementRefinementSteps,
+                pushConstant.displacementFadeDistanceBlocks);
         }
     }
 
@@ -4052,7 +2259,7 @@ void RayTracingModuleContext::render() {
 
     // Offline accumulation
     // offlineDenoised: 0=Raw Fast (RR on), 1=Raw Accurate (RR off), 2=Denoised (epoch-based DLSS-RR)
-    // Bit 1 (disableRR): auto-set by preset — Raw Accurate forces RR off
+    // Bit 1 (disableRR): auto-set by preset â€” Raw Accurate forces RR off
     bool disableRR = Renderer::options.offlineDisableRR
                      || Renderer::options.offlineDenoised == 1;
     pushConstant.offlineFlags = (accumulating ? 1 : 0)
@@ -4067,18 +2274,14 @@ void RayTracingModuleContext::render() {
     pushConstant.aperture = dofEnabled ? effectiveAperture : 0.0f;
     pushConstant.focalDistance = Renderer::options.offlineFocalDistance;
 
-    // Pre-exposure locked to 1.0 during accumulation (all presets).
-    // Gives full fp16 precision for the Welford accumulator input (DLSS output at
-    // scene-referred scale). DLSS-RR exposure params are neutral (§3.7: not supported),
-    // so output stays in the same pre-exposed space as input — consistent with histogram.
+    // Pre-exposure is already neutral; keep accumulation explicitly scene-referred.
     // All modes disable temporal reuse (each frame is independent).
     if (accumulating) {
         pushConstant.preExposure = 1.0f;
-        pushConstant.temporalMClamp = 0;
     }
 
     // Material SSBO BDA: pass buffer address via push constant (avoids descriptor lookup overhead)
-    pushConstant.materialClassAddr = mcBuffer ? mcBuffer->bufferAddress() : 0;
+    pushConstant.reservedAddr = 0;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), rayTracingDescriptorTable->vkPipelineLayout(),
                        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
@@ -4143,20 +2346,6 @@ void RayTracingModuleContext::render() {
         addBarrier(module->sharcCandidatePrefixRadianceFlagsImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
     }
 #endif
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    if (directLightPipelineActive && context->frameIndex < module->directLightPrimarySurfaceImages_.size()) {
-        addBarrier(module->directLightPrimarySurfaceImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
-        addBarrier(module->directLightReservoirPingImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
-        addBarrier(module->directLightReservoirPongImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
-        addBarrier(module->directLightOutputImages_[context->frameIndex], VK_IMAGE_LAYOUT_GENERAL);
-    }
-#endif
-    addBarrier(module->reservoirImages_[0], VK_IMAGE_LAYOUT_GENERAL);
-    addBarrier(module->reservoirImages_[1], VK_IMAGE_LAYOUT_GENERAL);
-    for (int b = 0; b < 3; b++) {
-        addBarrier(module->bounceReservoirImages_[b], VK_IMAGE_LAYOUT_GENERAL);
-    }
-    addBarrier(atmosphereContext->atmCubeMapImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     if (!barriers.empty()) {
         renderDiag("RT imageBarriers begin count=%u", static_cast<unsigned>(barriers.size()));
@@ -4187,98 +2376,8 @@ void RayTracingModuleContext::render() {
     }
 #endif
 
-    // Light clustering compute pass — DISABLED: contribution-sorted global list replaces tile clustering.
-    // Tile buffer stays allocated (descriptor layout unchanged); CHS reads tileCount=0 → global fallback.
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    if (directLightPipelineActive && context->frameIndex < module->directLightCounterBuffers_.size()
-        && module->directLightCounterBuffers_[context->frameIndex]) {
-        auto counterBuffer = module->directLightCounterBuffers_[context->frameIndex];
-        counterBuffer->downloadFromBuffer();
-        if (counterBuffer->mappedPtr()) {
-            std::memcpy(module->directLightLastCounters_, counterBuffer->mappedPtr(),
-                        kDirectLightCounterCount * sizeof(uint32_t));
-        }
-        vkCmdFillBuffer(worldCommandBuffer->vkCommandBuffer(), counterBuffer->vkBuffer(), 0,
-                        kDirectLightCounterCount * sizeof(uint32_t), 0);
-        VkMemoryBarrier counterClearBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        counterClearBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        counterClearBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(worldCommandBuffer->vkCommandBuffer(),
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 1, &counterClearBarrier, 0, nullptr, 0, nullptr);
-    } else if (!directLightPipelineActive) {
-        std::fill_n(module->directLightLastCounters_, kDirectLightCounterCount, 0);
-    }
-#endif
-
-    if (false && Renderer::options.restirEnabled && Renderer::options.areaLightsEnabled
-        && module->clusterPipeline_ != VK_NULL_HANDLE && module->tileLightBuffer_
-        && worldPrepareContext->areaLightCount > 0) {
-        VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
-        uint32_t frameIdx = context->frameIndex;
-
-        int w = hdrNoisyOutputImage->width();
-        int h = hdrNoisyOutputImage->height();
-        int tilesX = (w + RayTracingModule::TILE_SIZE - 1) / RayTracingModule::TILE_SIZE;
-        int tilesY = (h + RayTracingModule::TILE_SIZE - 1) / RayTracingModule::TILE_SIZE;
-        int totalTiles = tilesX * tilesY;
-
-        // Resize tile buffer if needed
-        size_t requiredSize = totalTiles * (1 + RayTracingModule::MAX_LIGHTS_PER_TILE) * sizeof(uint32_t);
-        if (module->tileLightBuffer_->size() < requiredSize) {
-            module->tileLightBuffer_ = vk::DeviceLocalBuffer::create(
-                framework->vma(), framework->device(), requiredSize,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            rayTracingDescriptorTable->bindBuffer(module->tileLightBuffer_, 1, 9);
-        }
-
-        // Update cluster descriptor set bindings
-        VkDescriptorBufferInfo lightBufInfo = {worldPrepareContext->areaLightBuffer->vkBuffer(), 0, VK_WHOLE_SIZE};
-        VkDescriptorBufferInfo tileBufInfo = {module->tileLightBuffer_->vkBuffer(), 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet writes[2] = {};
-        writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        writes[0].dstSet = module->clusterDescSets_[frameIdx];
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[0].pBufferInfo = &lightBufInfo;
-        writes[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        writes[1].dstSet = module->clusterDescSets_[frameIdx];
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[1].pBufferInfo = &tileBufInfo;
-        vkUpdateDescriptorSets(framework->device()->vkDevice(), 2, writes, 0, nullptr);
-
-        // Compute view-proj matrix for camera-relative positions (rotation only, no translation)
-        auto worldUBO = static_cast<vk::Data::WorldUBO *>(buffers->worldUniformBuffer()->mappedPtr());
-        glm::mat4 viewRot = glm::mat4(glm::mat3(worldUBO->cameraViewMat));
-        glm::mat4 vpCameraRel = worldUBO->cameraProjMat * viewRot;
-
-        struct {
-            int32_t width, height, lightCount, maxPerTile;
-            glm::mat4 vpCameraRel;
-        } clusterPC = {w, h, worldPrepareContext->areaLightCount, RayTracingModule::MAX_LIGHTS_PER_TILE, vpCameraRel};
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->clusterPipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->clusterPipelineLayout_,
-            0, 1, &module->clusterDescSets_[frameIdx], 0, nullptr);
-        vkCmdPushConstants(cmd, module->clusterPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
-            0, sizeof(clusterPC), &clusterPC);
-        vkCmdDispatch(cmd, totalTiles, 1, 1);
-
-        // Barrier: compute writes → RT reads
-        VkMemoryBarrier clusterBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        clusterBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        clusterBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            0, 1, &clusterBarrier, 0, nullptr, 0, nullptr);
-    }
-
-#ifdef MCVR_ENABLE_SHARC
+    // Light clustering compute pass â€” DISABLED: contribution-sorted global list replaces tile clustering.
+    // Tile buffer stays allocated (descriptor layout unchanged); CHS reads tileCount=0 â†’ global fallback.
 #ifdef MCVR_ENABLE_SHARC_BUFFERS
     // Reset SHARC buffers when disabled so re-enable starts fresh (prevents stale cache artifacts)
     if (!Renderer::options.sharcEnabled && module->sharcBuffersInitialized_) {
@@ -4385,7 +2484,7 @@ void RayTracingModuleContext::render() {
         g_crashRing.record("SHARC:updateDispatch:start");
 
         RayTracingPushConstant updatePC = pushConstant;
-        updatePC.flags &= ~(4 | 16); // Clear ReSTIR and ReSTIR bounce; keep area lights.
+        updatePC.flags &= ~(4 | 16);
         vkCmdPushConstants(cmd, rayTracingDescriptorTable->vkPipelineLayout(),
                            VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
@@ -4482,21 +2581,7 @@ void RayTracingModuleContext::render() {
     }
 #endif
 #endif
-#endif // MCVR_ENABLE_SHARC
 
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    if (upstreamDirectLightActive) {
-        renderDiag("RT upstream executor begin");
-        g_crashRing.record("RT:upstreamExecutor");
-        if (module->renderUpstreamDirectLight(*this)) {
-            renderDiag("RT upstream executor end");
-            g_crashRing.record("RT:upstreamExecutor:done");
-            return;
-        }
-        renderDiag("RT upstream executor unavailable fallback=legacy");
-        g_crashRing.record("RT:upstreamExecutor:fallbackLegacy");
-    }
-#endif
 
     // Re-push RT push constants (may have been invalidated by compute pipeline bind above)
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), rayTracingDescriptorTable->vkPipelineLayout(),
@@ -4505,7 +2590,7 @@ void RayTracingModuleContext::render() {
                            VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
                        0, sizeof(RayTracingPushConstant), &pushConstant);
 
-    // Pass 3: Main Render (existing RT dispatch — now queries SHARC cache on bounces >= 1)
+    // Pass 3: Main Render (existing RT dispatch â€” now queries SHARC cache on bounces >= 1)
     worldCommandBuffer->beginLabel("RT:MainTrace", 1.0f, 0.2f, 0.2f);
     ScopedGpuProfile mainTraceProfile(profileCmd, "RT.MainTrace");
     GpuDiag::checkpoint(worldCommandBuffer->vkCommandBuffer(), GpuDiag::RT_DISPATCH_MAIN);
@@ -4518,349 +2603,6 @@ void RayTracingModuleContext::render() {
     mainTraceProfile.close();
     worldCommandBuffer->endLabel(); // end MainTrace
 
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    bool directLightInitialRan = false;
-    if (directLightPipelineActive
-        && module->directLightPrimaryPipeline_ != VK_NULL_HANDLE
-        && context->frameIndex < module->directLightPrimaryDescSets_.size()
-        && context->frameIndex < module->directLightPrimarySurfaceImages_.size()
-        && context->frameIndex < module->directLightCounterBuffers_.size()
-        && module->directLightPrimarySurfaceImages_[context->frameIndex]
-        && module->directLightCounterBuffers_[context->frameIndex]) {
-        worldCommandBuffer->beginLabel("RT:Primary Surface Capture", 0.25f, 0.55f, 1.0f);
-        ScopedGpuProfile primaryProfile(profileCmd, "RT.Primary");
-        VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
-        uint32_t frameIdx = context->frameIndex;
-        g_crashRing.record("DirectLight:primaryDispatch:start");
-
-        VkMemoryBarrier prePrimaryBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        prePrimaryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        prePrimaryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 1, &prePrimaryBarrier, 0, nullptr, 0, nullptr);
-
-        VkDescriptorSet primarySet = module->directLightPrimaryDescSets_[frameIdx];
-        auto addPrimaryImg = [&](uint32_t binding, const std::shared_ptr<vk::DeviceLocalImage>& img,
-                                 std::vector<VkWriteDescriptorSet>& writes,
-                                 std::vector<std::unique_ptr<VkDescriptorImageInfo>>& infos) {
-            auto info = std::make_unique<VkDescriptorImageInfo>();
-            info->imageView = img->vkImageView(0);
-            info->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-            info->sampler = VK_NULL_HANDLE;
-            writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, primarySet, binding, 0, 1,
-                             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info.get(), nullptr, nullptr});
-            infos.push_back(std::move(info));
-        };
-
-        std::vector<VkWriteDescriptorSet> primaryWrites;
-        std::vector<std::unique_ptr<VkDescriptorImageInfo>> primaryInfos;
-        addPrimaryImg(0, module->positionViewSpaceImages_[frameIdx], primaryWrites, primaryInfos);
-        addPrimaryImg(1, normalRoughnessImage, primaryWrites, primaryInfos);
-        addPrimaryImg(2, linearDepthImage, primaryWrites, primaryInfos);
-        addPrimaryImg(3, module->directLightPrimarySurfaceImages_[frameIdx], primaryWrites, primaryInfos);
-        VkDescriptorBufferInfo counterInfo{
-            module->directLightCounterBuffers_[frameIdx]->vkBuffer(), 0,
-            module->directLightCounterBuffers_[frameIdx]->size()};
-        primaryWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, primarySet, 4, 0, 1,
-                                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &counterInfo, nullptr});
-        vkUpdateDescriptorSets(framework->device()->vkDevice(),
-            static_cast<uint32_t>(primaryWrites.size()), primaryWrites.data(), 0, nullptr);
-
-        struct DirectLightPrimaryPushConstant {
-            int32_t width;
-            int32_t height;
-        } primaryPC = {
-            static_cast<int32_t>(hdrNoisyOutputImage->width()),
-            static_cast<int32_t>(hdrNoisyOutputImage->height()),
-        };
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->directLightPrimaryPipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->directLightPrimaryPipelineLayout_,
-            0, 1, &primarySet, 0, nullptr);
-        vkCmdPushConstants(cmd, module->directLightPrimaryPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
-            0, sizeof(primaryPC), &primaryPC);
-        vkCmdDispatch(cmd,
-            (hdrNoisyOutputImage->width() + 7) / 8,
-            (hdrNoisyOutputImage->height() + 7) / 8,
-            1);
-
-        VkMemoryBarrier postPrimaryBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        postPrimaryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        postPrimaryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            0, 1, &postPrimaryBarrier, 0, nullptr, 0, nullptr);
-
-        g_crashRing.record("DirectLight:primaryDispatch:done");
-        primaryProfile.close();
-        worldCommandBuffer->endLabel();
-    } else if (directLightPipelineActive) {
-        auto runDirectLightBoundaryPass = [&](const char* label, const char* profileName,
-                                              float r, float g, float b) {
-            worldCommandBuffer->beginLabel(label, r, g, b);
-            ScopedGpuProfile profile(profileCmd, profileName);
-            profile.close();
-            worldCommandBuffer->endLabel();
-        };
-        runDirectLightBoundaryPass("RT:Primary Surface Unavailable", "RT.Primary", 0.25f, 0.55f, 1.0f);
-    }
-
-    if (directLightExternalActive) {
-        if (module->directLightInitialPipeline_ != VK_NULL_HANDLE
-            && context->frameIndex < module->directLightInitialDescSets_.size()
-            && context->frameIndex < module->directLightPrimarySurfaceImages_.size()
-            && context->frameIndex < module->directLightReservoirPingImages_.size()
-            && context->frameIndex < module->directLightOutputImages_.size()
-            && context->frameIndex < module->directLightCounterBuffers_.size()
-            && module->directLightPrimarySurfaceImages_[context->frameIndex]
-            && module->directLightReservoirPingImages_[context->frameIndex]
-            && module->directLightOutputImages_[context->frameIndex]
-            && module->directLightCounterBuffers_[context->frameIndex]) {
-            worldCommandBuffer->beginLabel("RT:DirectLight Initial", 0.1f, 0.7f, 0.4f);
-            ScopedGpuProfile initialProfile(profileCmd, "RT.DirectLight.Initial");
-            VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
-            uint32_t frameIdx = context->frameIndex;
-            g_crashRing.record("DirectLight:initialDispatch:start");
-
-            VkMemoryBarrier preInitialBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            preInitialBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            preInitialBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0, 1, &preInitialBarrier, 0, nullptr, 0, nullptr);
-
-            VkDescriptorSet initialSet = module->directLightInitialDescSets_[frameIdx];
-            auto addInitialImg = [&](uint32_t binding, const std::shared_ptr<vk::DeviceLocalImage>& img,
-                                     std::vector<VkWriteDescriptorSet>& writes,
-                                     std::vector<std::unique_ptr<VkDescriptorImageInfo>>& infos) {
-                auto info = std::make_unique<VkDescriptorImageInfo>();
-                info->imageView = img->vkImageView(0);
-                info->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-                info->sampler = VK_NULL_HANDLE;
-                writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, initialSet, binding, 0, 1,
-                                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info.get(), nullptr, nullptr});
-                infos.push_back(std::move(info));
-            };
-
-            std::vector<VkWriteDescriptorSet> initialWrites;
-            std::vector<std::unique_ptr<VkDescriptorImageInfo>> initialInfos;
-            addInitialImg(0, module->directLightPrimarySurfaceImages_[frameIdx], initialWrites, initialInfos);
-            addInitialImg(1, firstHitDiffuseDirectLightImage, initialWrites, initialInfos);
-            addInitialImg(2, directLightDepthImage, initialWrites, initialInfos);
-            addInitialImg(3, module->directLightReservoirPingImages_[frameIdx], initialWrites, initialInfos);
-            addInitialImg(4, module->directLightOutputImages_[frameIdx], initialWrites, initialInfos);
-            addInitialImg(6, module->positionViewSpaceImages_[frameIdx], initialWrites, initialInfos);
-            addInitialImg(7, diffuseAlbedoImage, initialWrites, initialInfos);
-            VkDescriptorBufferInfo initialCounterInfo{
-                module->directLightCounterBuffers_[frameIdx]->vkBuffer(), 0,
-                module->directLightCounterBuffers_[frameIdx]->size()};
-            initialWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, initialSet, 5, 0, 1,
-                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &initialCounterInfo, nullptr});
-            VkWriteDescriptorSetAccelerationStructureKHR initialAsInfo{
-                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
-            initialAsInfo.accelerationStructureCount = 1;
-            initialAsInfo.pAccelerationStructures = &worldPrepareContext->tlas->tlas();
-            initialWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &initialAsInfo, initialSet, 8, 0, 1,
-                                     VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, nullptr, nullptr, nullptr});
-            VkDescriptorBufferInfo initialAreaLightInfo{
-                worldPrepareContext->areaLightBuffer->vkBuffer(), 0, VK_WHOLE_SIZE};
-            initialWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, initialSet, 9, 0, 1,
-                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &initialAreaLightInfo, nullptr});
-            VkDescriptorBufferInfo initialTileLightInfo{
-                module->tileLightBuffer_->vkBuffer(), 0, VK_WHOLE_SIZE};
-            initialWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, initialSet, 10, 0, 1,
-                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &initialTileLightInfo, nullptr});
-            VkDescriptorBufferInfo initialWorldInfo{worldBuffer->vkBuffer(), 0, VK_WHOLE_SIZE};
-            initialWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, initialSet, 11, 0, 1,
-                                     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &initialWorldInfo, nullptr});
-            VkDescriptorBufferInfo initialSkyInfo{buffers->skyUniformBuffer()->vkBuffer(), 0, VK_WHOLE_SIZE};
-            initialWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, initialSet, 12, 0, 1,
-                                     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &initialSkyInfo, nullptr});
-            vkUpdateDescriptorSets(framework->device()->vkDevice(),
-                static_cast<uint32_t>(initialWrites.size()), initialWrites.data(), 0, nullptr);
-
-            struct DirectLightInitialPushConstant {
-                int32_t width;
-                int32_t height;
-                int32_t areaLightCount;
-                int32_t maxLightsPerTile;
-                float shadowSoftness;
-                int32_t maxAreaLightSamples;
-            } initialPC = {
-                static_cast<int32_t>(hdrNoisyOutputImage->width()),
-                static_cast<int32_t>(hdrNoisyOutputImage->height()),
-                worldPrepareContext->areaLightCount,
-                RayTracingModule::MAX_LIGHTS_PER_TILE,
-                Renderer::options.shadowSoftness,
-                std::min(Renderer::options.restirCandidates, 8),
-            };
-
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->directLightInitialPipeline_);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->directLightInitialPipelineLayout_,
-                0, 1, &initialSet, 0, nullptr);
-            vkCmdPushConstants(cmd, module->directLightInitialPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                0, sizeof(initialPC), &initialPC);
-            vkCmdDispatch(cmd,
-                (hdrNoisyOutputImage->width() + 7) / 8,
-                (hdrNoisyOutputImage->height() + 7) / 8,
-                1);
-
-            VkMemoryBarrier postInitialBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            postInitialBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            postInitialBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-                    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                0, 1, &postInitialBarrier, 0, nullptr, 0, nullptr);
-
-            directLightInitialRan = true;
-            g_crashRing.record("DirectLight:initialDispatch:done");
-            initialProfile.close();
-            worldCommandBuffer->endLabel();
-        }
-
-        auto runDirectLightUtilityPass = [&](uint32_t utilityPass, int mode, const char* label, const char* profileName,
-                                             const std::shared_ptr<vk::DeviceLocalImage>& input,
-                                             const std::shared_ptr<vk::DeviceLocalImage>& output,
-                                             float r, float g, float b) -> bool {
-            constexpr uint32_t kDirectLightUtilityPasses = 4;
-            if (module->directLightUtilityPipeline_ == VK_NULL_HANDLE
-                || context->frameIndex >= module->directLightCounterBuffers_.size()
-                || context->frameIndex >= module->directLightUtilityDescSets_.size() / kDirectLightUtilityPasses
-                || context->frameIndex >= module->directLightOutputImages_.size()
-                || !input || !output || !module->directLightOutputImages_[context->frameIndex]
-                || !module->directLightCounterBuffers_[context->frameIndex]) {
-                return false;
-            }
-
-            worldCommandBuffer->beginLabel(label, r, g, b);
-            ScopedGpuProfile utilityProfile(profileCmd, profileName);
-            VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
-            uint32_t frameIdx = context->frameIndex;
-            const std::string crashBase = std::string("DirectLight:") + profileName;
-            const std::string crashStart = crashBase + ":start";
-            g_crashRing.record(crashStart.c_str());
-
-            VkMemoryBarrier preUtilityBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            preUtilityBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            preUtilityBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0, 1, &preUtilityBarrier, 0, nullptr, 0, nullptr);
-
-            VkDescriptorSet utilitySet =
-                module->directLightUtilityDescSets_[frameIdx * kDirectLightUtilityPasses + utilityPass];
-            auto addUtilityImg = [&](uint32_t binding, const std::shared_ptr<vk::DeviceLocalImage>& img,
-                                     std::vector<VkWriteDescriptorSet>& writes,
-                                     std::vector<std::unique_ptr<VkDescriptorImageInfo>>& infos) {
-                auto info = std::make_unique<VkDescriptorImageInfo>();
-                info->imageView = img->vkImageView(0);
-                info->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-                info->sampler = VK_NULL_HANDLE;
-                writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, utilitySet, binding, 0, 1,
-                                 VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info.get(), nullptr, nullptr});
-                infos.push_back(std::move(info));
-            };
-
-            std::vector<VkWriteDescriptorSet> utilityWrites;
-            std::vector<std::unique_ptr<VkDescriptorImageInfo>> utilityInfos;
-            addUtilityImg(0, input, utilityWrites, utilityInfos);
-            addUtilityImg(1, output, utilityWrites, utilityInfos);
-            addUtilityImg(2, module->directLightOutputImages_[frameIdx], utilityWrites, utilityInfos);
-            addUtilityImg(4, firstHitDiffuseDirectLightImage, utilityWrites, utilityInfos);
-            VkDescriptorBufferInfo utilityCounterInfo{
-                module->directLightCounterBuffers_[frameIdx]->vkBuffer(), 0,
-                module->directLightCounterBuffers_[frameIdx]->size()};
-            utilityWrites.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, utilitySet, 3, 0, 1,
-                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &utilityCounterInfo, nullptr});
-            vkUpdateDescriptorSets(framework->device()->vkDevice(),
-                static_cast<uint32_t>(utilityWrites.size()), utilityWrites.data(), 0, nullptr);
-
-            struct DirectLightUtilityPushConstant {
-                int32_t width;
-                int32_t height;
-                int32_t mode;
-                int32_t pad0;
-            } utilityPC = {
-                static_cast<int32_t>(hdrNoisyOutputImage->width()),
-                static_cast<int32_t>(hdrNoisyOutputImage->height()),
-                mode,
-                0,
-            };
-
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->directLightUtilityPipeline_);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->directLightUtilityPipelineLayout_,
-                0, 1, &utilitySet, 0, nullptr);
-            vkCmdPushConstants(cmd, module->directLightUtilityPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
-                0, sizeof(utilityPC), &utilityPC);
-            vkCmdDispatch(cmd,
-                (hdrNoisyOutputImage->width() + 7) / 8,
-                (hdrNoisyOutputImage->height() + 7) / 8,
-                1);
-
-            VkMemoryBarrier postUtilityBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            postUtilityBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            postUtilityBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-                    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                0, 1, &postUtilityBarrier, 0, nullptr, 0, nullptr);
-
-            const std::string crashDone = crashBase + ":done";
-            g_crashRing.record(crashDone.c_str());
-            utilityProfile.close();
-            worldCommandBuffer->endLabel();
-            return true;
-        };
-
-        bool directLightUtilityRan = false;
-        if (directLightInitialRan
-            && context->frameIndex < module->directLightReservoirPingImages_.size()
-            && context->frameIndex < module->directLightReservoirPongImages_.size()
-            && module->directLightReservoirPingImages_[context->frameIndex]
-            && module->directLightReservoirPongImages_[context->frameIndex]) {
-            uint32_t frameIdx = context->frameIndex;
-            bool temporalRan = runDirectLightUtilityPass(0, 1, "RT:DirectLight Temporal", "RT.DirectLight.Temporal",
-                module->directLightReservoirPingImages_[frameIdx],
-                module->directLightReservoirPongImages_[frameIdx], 0.1f, 0.75f, 0.55f);
-            bool spatialRan = runDirectLightUtilityPass(1, 2, "RT:DirectLight Spatial", "RT.DirectLight.Spatial",
-                module->directLightReservoirPongImages_[frameIdx],
-                module->directLightReservoirPingImages_[frameIdx], 0.1f, 0.8f, 0.7f);
-            bool visibilityRan = runDirectLightUtilityPass(2, 3, "RT:DirectLight Visibility", "RT.DirectLight.Visibility",
-                module->directLightReservoirPingImages_[frameIdx],
-                module->directLightReservoirPongImages_[frameIdx], 0.9f, 0.75f, 0.25f);
-            bool shadeRan = runDirectLightUtilityPass(3, 4, "RT:DirectLight Shade", "RT.DirectLight.Shade",
-                module->directLightReservoirPongImages_[frameIdx],
-                module->directLightReservoirPingImages_[frameIdx], 0.95f, 0.55f, 0.2f);
-            directLightUtilityRan = temporalRan && spatialRan && visibilityRan && shadeRan;
-        }
-
-        auto runDirectLightBoundaryPass = [&](const char* label, const char* profileName,
-                                              float r, float g, float b) {
-            worldCommandBuffer->beginLabel(label, r, g, b);
-            ScopedGpuProfile profile(profileCmd, profileName);
-            profile.close();
-            worldCommandBuffer->endLabel();
-        };
-        if (!directLightInitialRan) {
-            runDirectLightBoundaryPass("RT:DirectLight Initial Skeleton", "RT.DirectLight.Initial", 0.1f, 0.7f, 0.4f);
-        }
-        if (!directLightUtilityRan) {
-            runDirectLightBoundaryPass("RT:DirectLight Temporal Skeleton", "RT.DirectLight.Temporal", 0.1f, 0.75f, 0.55f);
-            runDirectLightBoundaryPass("RT:DirectLight Spatial Skeleton", "RT.DirectLight.Spatial", 0.1f, 0.8f, 0.7f);
-            runDirectLightBoundaryPass("RT:DirectLight Visibility Skeleton", "RT.DirectLight.Visibility", 0.9f, 0.75f, 0.25f);
-            runDirectLightBoundaryPass("RT:DirectLight Shade Skeleton", "RT.DirectLight.Shade", 0.95f, 0.55f, 0.2f);
-        }
-    }
-#endif
 
 #ifdef MCVR_ENABLE_SHARC_QUERY_PASS
     if (sharcQueryPassActive) {
@@ -4956,83 +2698,6 @@ void RayTracingModuleContext::render() {
         worldCommandBuffer->endLabel();
     }
 #endif
-
-    // Spatial reuse compute pass (when ReSTIR and spatial reuse are both enabled)
-    if (Renderer::options.restirEnabled && Renderer::options.restirSpatialEnabled && module->spatialPipeline_ != VK_NULL_HANDLE
-        && module->reservoirImages_[0] && module->reservoirImages_[1]) {
-        worldCommandBuffer->beginLabel("RT:ReSTIR Spatial", 0.2f, 0.8f, 0.8f);
-        ScopedGpuProfile restirSpatialProfile(profileCmd, "RT.ReSTIRSpatial");
-        VkCommandBuffer cmd = worldCommandBuffer->vkCommandBuffer();
-        GpuDiag::checkpoint(cmd, GpuDiag::RESTIR_SPATIAL);
-
-        // Barrier: RT shader writes → compute shader reads
-        VkMemoryBarrier spatialBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        spatialBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        spatialBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 1, &spatialBarrier, 0, nullptr, 0, nullptr);
-
-        // Update spatial descriptor set with current frame's images
-        uint32_t frameIdx = context->frameIndex;
-        VkDescriptorSet spatialSet = module->spatialDescSets_[frameIdx];
-
-        auto addSpatialImg = [&](uint32_t binding, const std::shared_ptr<vk::DeviceLocalImage>& img,
-                                 std::vector<VkWriteDescriptorSet>& writes,
-                                 std::vector<std::unique_ptr<VkDescriptorImageInfo>>& infos) {
-            auto info = std::make_unique<VkDescriptorImageInfo>();
-            info->imageView = img->vkImageView(0);
-            info->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-            info->sampler = VK_NULL_HANDLE;
-            writes.push_back({VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, spatialSet, binding, 0, 1,
-                             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info.get(), nullptr, nullptr});
-            infos.push_back(std::move(info));
-        };
-
-        std::vector<VkWriteDescriptorSet> spatialWrites;
-        std::vector<std::unique_ptr<VkDescriptorImageInfo>> spatialInfos;
-        // Spatial reads CHS temporal output [0], writes spatial output [1]
-        addSpatialImg(0, module->reservoirImages_[0], spatialWrites, spatialInfos);
-        addSpatialImg(1, module->reservoirImages_[1], spatialWrites, spatialInfos);
-        addSpatialImg(2, normalRoughnessImage, spatialWrites, spatialInfos);
-        addSpatialImg(3, linearDepthImage, spatialWrites, spatialInfos);
-
-        vkUpdateDescriptorSets(framework->device()->vkDevice(),
-            (uint32_t)spatialWrites.size(), spatialWrites.data(), 0, nullptr);
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->spatialPipeline_);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, module->spatialPipelineLayout_,
-            0, 1, &spatialSet, 0, nullptr);
-
-        struct { int32_t width, height, spatialTaps, spatialRadius, temporalMClamp, wClamp; } spatialPC = {
-            (int32_t)hdrNoisyOutputImage->width(),
-            (int32_t)hdrNoisyOutputImage->height(),
-            Renderer::options.restirSpatialTaps,
-            Renderer::options.restirSpatialRadius,
-            Renderer::options.restirTemporalMClamp,
-            Renderer::options.restirWClamp
-        };
-        vkCmdPushConstants(cmd, module->spatialPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
-            0, sizeof(spatialPC), &spatialPC);
-
-        vkCmdDispatch(cmd,
-            (hdrNoisyOutputImage->width() + 15) / 16,
-            (hdrNoisyOutputImage->height() + 15) / 16,
-            1);
-
-        // Barrier: compute writes → next stage reads
-        VkMemoryBarrier postSpatialBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        postSpatialBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        postSpatialBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            0, 1, &postSpatialBarrier, 0, nullptr, 0, nullptr);
-        restirSpatialProfile.close();
-        worldCommandBuffer->endLabel(); // end ReSTIR Spatial
-    }
-
     // Offline accumulation: Welford running average into RGBA32F buffer
     // Raw Fast (0) and Raw Slow (1) accumulate here; DLSS-D (2) accumulates in DLSS module
     if (accumulating && Renderer::accumPipelineReady && Renderer::options.offlineDenoised != 2) {
@@ -5040,7 +2705,7 @@ void RayTracingModuleContext::render() {
         uint32_t frameIdx = context->frameIndex;
         ScopedGpuProfile offlineAccumProfile(profileCmd, "RT.OfflineAccum");
 
-        // Barrier: RT output → compute read
+        // Barrier: RT output â†’ compute read
         VkMemoryBarrier accumBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         accumBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         accumBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
@@ -5049,7 +2714,7 @@ void RayTracingModuleContext::render() {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0, 1, &accumBarrier, 0, nullptr, 0, nullptr);
 
-        // Update descriptor set (only when images change — typically once at init)
+        // Update descriptor set (only when images change â€” typically once at init)
         VkDescriptorSet accumSet = Renderer::accumDescSets[frameIdx];
         VkDescriptorImageInfo accumImgInfo{VK_NULL_HANDLE, Renderer::accumBufferImage->vkImageView(0), VK_IMAGE_LAYOUT_GENERAL};
         VkDescriptorImageInfo noisyImgInfo{VK_NULL_HANDLE, hdrNoisyOutputImage->vkImageView(0), VK_IMAGE_LAYOUT_GENERAL};
@@ -5070,7 +2735,7 @@ void RayTracingModuleContext::render() {
             (hdrNoisyOutputImage->height() + 7) / 8,
             1);
 
-        // Barrier: compute write → blit read
+        // Barrier: compute write â†’ blit read
         VkMemoryBarrier postAccumBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         postAccumBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         postAccumBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -5090,7 +2755,7 @@ void RayTracingModuleContext::render() {
             hdrNoisyOutputImage->vkImage(), VK_IMAGE_LAYOUT_GENERAL,
             1, &accumBlit, VK_FILTER_NEAREST);
 
-        // Barrier: blit write → next stage read
+        // Barrier: blit write â†’ next stage read
         VkMemoryBarrier postBlitBarrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         postBlitBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         postBlitBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
@@ -5107,5 +2772,5 @@ void RayTracingModuleContext::render() {
     renderDiag("RT end");
     g_crashRing.record("RT:end");
 
-    // (P4 removed — DLSS temporal mode replaced by DLSS-D Converge with per-frame reset)
+    // (P4 removed â€” DLSS temporal mode replaced by DLSS-D Converge with per-frame reset)
 }

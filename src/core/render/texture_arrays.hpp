@@ -9,6 +9,7 @@
 #include <vector>
 
 class Framework;
+class GarbageCollector;
 
 /// Manages sampler2DArray images for the sprite-based texture system.
 /// Each array is a single VkImage with N layers at uniform WxW resolution.
@@ -44,7 +45,7 @@ class TextureArrayManager {
 		size_t pixelSize);
 
 	struct DirtyLayers {
-		std::vector<uint32_t> albedo, specular, normal;
+		std::vector<uint32_t> albedo, specular, normal, flag;
 	};
 
 	/// Flush all staged uploads to the GPU and return dirty layer info.
@@ -57,6 +58,7 @@ class TextureArrayManager {
 		uint32_t albedoId = UINT32_MAX,
 		uint32_t specId = UINT32_MAX,
 		uint32_t normId = UINT32_MAX,
+		uint32_t flagId = UINT32_MAX,
 		size_t maxBytes = 0);
 
     /// Only for uncompressed formats (RGBA8). BC7 mips must be pre-computed on CPU.
@@ -71,6 +73,9 @@ class TextureArrayManager {
 
     /// Reset all arrays (resource reload).
     void reset();
+
+    /// Retire GPU resources through the frame GC, then reset CPU bookkeeping.
+    void retire(GarbageCollector& gc);
 
     /// Compute mip level count for a given sprite size.
     static uint32_t computeMipLevels(uint32_t spriteSize);

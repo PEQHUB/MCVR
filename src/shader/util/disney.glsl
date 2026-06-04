@@ -207,12 +207,25 @@ void sampleFONEnergy(float NdotV, float r, out float E, out float E_avg) {
 // brdfFlags: push constant flags (0 = original behavior, no enhancements)
 // ============================================================================
 
+void ApplyAnisotropicRotation(float rotation, inout vec3 T, inout vec3 B) {
+    float angle = fract(rotation) * 6.28318530718;
+    float c = cos(angle);
+    float s = sin(angle);
+    vec3 baseT = T;
+    vec3 baseB = B;
+    T = baseT * c + baseB * s;
+    B = -baseT * s + baseB * c;
+}
+
 vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFlags) {
     pdf = 0.0;
     vec3 f = vec3(0.0);
 
     vec3 T, B;
     Onb(N, T, B);
+    if (mat.anisotropicRotation != 0.0) {
+        ApplyAnisotropicRotation(mat.anisotropicRotation, T, B);
+    }
 
     vec3 localV = ToLocal(T, B, N, V);
     vec3 localL = ToLocal(T, B, N, L);
@@ -229,7 +242,7 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFl
     if (localH.z < 0.0) localH = -localH;
 
     // Anisotropic roughness (Disney 2015 parameterization)
-    float a = max(mat.roughness, 1e-4);
+    float a = max(max(mat.roughness, mat.refractionRoughness * mat.transmission), 1e-4);
     float aspect = sqrt(1.0 - 0.9 * mat.anisotropic);
     float ax = max(a / aspect, 1e-4);
     float ay = max(a * aspect, 1e-4);
@@ -246,7 +259,7 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFl
     float dielectricPr = dielectricWeight * Luminance(mix(mat.f0, vec3(1.0), schlickWeight));
     float metalPr = metalWeight * Luminance(mix(mat.albedo, vec3(1.0), schlickWeight));
     float glassPr = glassWeight;
-    float coatPr = mat.coatWeight * 0.25;
+    float coatPr = mat.coatWeight * mat.coatMask * 0.25;
 
     float invTotalWeight = 1.0 / (diffPr + dielectricPr + metalPr + glassPr + coatPr + 1e-5);
     diffPr *= invTotalWeight;
@@ -339,7 +352,8 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFl
             float lum = Luminance(mat.albedo);
             vec3 Ctint = lum > 0.0 ? mat.albedo / lum : vec3(1.0);
             vec3 Csheen = mix(vec3(1.0), Ctint, mat.sheenTint);
-            f += mat.sheenWeight * Csheen * FH * dielectricWeight;
+            float sheenRough = mix(1.0, 0.45, clamp(mat.sheenRoughness, 0.0, 1.0));
+            f += mat.sheenWeight * Csheen * FH * sheenRough * dielectricWeight;
         }
     }
 
@@ -417,7 +431,10 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFl
 
             tmpPdf = G1 * max(0.0, VDotH) * D * jacobian / localV.z;
 
-            vec3 transColor = pow(mat.albedo, vec3(0.5)) * (1.0 - F) * D * G2 * abs(dot(localV, localH)) * jacobian *
+            bool thinGlass = (mat.materialModeFlags & 0x3u) == 1u;
+            float absorptionPath = thinGlass ? mat.thickness : mat.thickness * max(mat.absorptionDistance, 0.01);
+            vec3 beerTint = exp(-max(mat.absorption, vec3(0.0)) * absorptionPath);
+            vec3 transColor = pow(mat.albedo, vec3(0.5)) * beerTint * (1.0 - F) * D * G2 * abs(dot(localV, localH)) * jacobian *
                               (eta * eta) / abs(localL.z * localV.z);
 
             f += transColor * glassWeight;
@@ -425,27 +442,29 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFl
         }
     }
 
-    // Coat lobe (GGX clearcoat, fixed IOR 1.5 -> F0 = 0.04, isotropic)
+    // Coat lobe (GGX clearcoat, configurable IOR/tint/mask, isotropic)
     if (coatPr > 0.0 && reflect) {
         float ca = max(mat.coatRoughness * mat.coatRoughness, 1e-4);
         float D = GTR2Aniso(localH.z, localH.x, localH.y, ca, ca);
         float G1 = SmithGAniso(abs(localV.z), localV.x, localV.y, ca, ca);
         float G2 = G1 * SmithGAniso(abs(localL.z), localL.x, localL.y, ca, ca);
         float FH = SchlickWeight(VDotH);
-        float F = mix(0.04, 1.0, FH);
+        float coatF0 = pow((mat.coatIor - 1.0) / max(mat.coatIor + 1.0, 1e-4), 2.0);
+        float F = mix(coatF0, 1.0, FH);
 
-        vec3 coatSpec = vec3(mat.coatWeight * F * D * G2 / (4.0 * abs(localL.z) * abs(localV.z)));
+        float coatWeight = mat.coatWeight * mat.coatMask;
+        vec3 coatSpec = mat.coatTint * (coatWeight * F * D * G2 / (4.0 * abs(localL.z) * abs(localV.z)));
 
-        // Multi-scatter compensation for coat (achromatic, F0=0.04)
+        // Multi-scatter compensation for coat
         if (msGGX) {
             float coatE_o, coatE_avg;
             sampleGGXEnergy(abs(localV.z), ca, coatE_o, coatE_avg);
             float coatE_i, dummy;
             sampleGGXEnergy(abs(localL.z), ca, coatE_i, dummy);
-            float coatF_avg = (20.0 / 21.0) * 0.04 + (1.0 / 21.0);
+            float coatF_avg = (20.0 / 21.0) * coatF0 + (1.0 / 21.0);
             float coatF_ms = (coatF_avg * coatE_avg) / max(1.0 - coatF_avg * (1.0 - coatE_avg), 1e-5);
             float coat_fms = (1.0 - coatE_o) * (1.0 - coatE_i) / max(PI * (1.0 - coatE_avg), 1e-5);
-            coatSpec += vec3(mat.coatWeight * coatF_ms * coat_fms);
+            coatSpec += mat.coatTint * (coatWeight * coatF_ms * coat_fms);
         }
 
         f += coatSpec;
@@ -465,6 +484,9 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
     pdf = 0.0;
     vec3 T, B;
     Onb(N, T, B);
+    if (mat.anisotropicRotation != 0.0) {
+        ApplyAnisotropicRotation(mat.anisotropicRotation, T, B);
+    }
 
     vec3 localV = ToLocal(T, B, N, V);
     // When xi >= 0, use pre-generated samples (blue noise on primary hit); otherwise PCG
@@ -473,7 +495,7 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
     float r3 = (xi.z >= 0.0) ? xi.z : rand(seed);
 
     // Anisotropic roughness
-    float a = max(mat.roughness, 1e-4);
+    float a = max(max(mat.roughness, mat.refractionRoughness * mat.transmission), 1e-4);
     float aspect = sqrt(1.0 - 0.9 * mat.anisotropic);
     float ax = max(a / aspect, 1e-4);
     float ay = max(a * aspect, 1e-4);
@@ -487,7 +509,7 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
     float dielectricPr = dielectricWeight * Luminance(mix(mat.f0, vec3(1.0), schlickWeight));
     float metalPr = metalWeight * Luminance(mix(mat.albedo, vec3(1.0), schlickWeight));
     float glassPr = glassWeight;
-    float coatPr = mat.coatWeight * 0.25;
+    float coatPr = mat.coatWeight * mat.coatMask * 0.25;
 
     float invTotalWeight = 1.0 / (diffPr + dielectricPr + metalPr + glassPr + coatPr + 1e-5);
     diffPr *= invTotalWeight;

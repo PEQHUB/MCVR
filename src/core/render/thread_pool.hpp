@@ -15,7 +15,7 @@
 #include "core/vulkan/debug_utils.hpp"
 
 /**
- * Simple thread pool for CPU-bound work (chunk building, greedy meshing, OMM baking).
+ * Simple thread pool for CPU-bound work.
  * Workers stay alive for the lifetime of the pool. Work is submitted via submit() or
  * parallelFor(). Thread count defaults to hardware_concurrency() - 2 (leave headroom
  * for the render thread and Java/Minecraft thread).

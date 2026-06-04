@@ -7,7 +7,6 @@ endif(WIN32)
 
 file(GLOB_RECURSE GLSL_SHADERS CONFIGURE_DEPENDS "*.vert" "*.frag" "*.rgen" "*.rmiss" "*.rchit" "*.rahit" "*.rint" "*.comp")
 file(GLOB_RECURSE GLSL_DEPENDS CONFIGURE_DEPENDS "../common/*.hpp" "../common/*.glsl" "util/*.glsl")
-list(FILTER GLSL_SHADERS EXCLUDE REGEX "/world/ray_tracing/internal/")
 
 set(SPIRV_OUTPUT_PATH "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 file(MAKE_DIRECTORY ${SPIRV_OUTPUT_PATH})
@@ -40,19 +39,6 @@ if (MCVR_ENABLE_SHARC AND MCVR_SHARC_MAIN_TRACE_QUERY_MODE_ID GREATER 0)
 else()
     message(STATUS "SHARC main-trace cache query: OFF")
 endif()
-if (MCVR_ENABLE_DIRECT_LIGHT_PIPELINE)
-    list(APPEND SHADER_FLAGS "-DRADIANCE_DIRECT_LIGHT_PIPELINE=1")
-    message(STATUS "Experimental split direct-light pipeline shaders: ON")
-else()
-    message(STATUS "Experimental split direct-light pipeline shaders: OFF")
-endif()
-if (MCVR_ENABLE_RTXDI)
-    list(APPEND SHADER_FLAGS "-DRADIANCE_RTXDI_BACKEND=1")
-    message(STATUS "Experimental RTXDI shader backend: ON")
-else()
-    message(STATUS "Experimental RTXDI shader backend: OFF")
-endif()
-
 foreach(GLSL_SHADER ${GLSL_SHADERS})
     file(RELATIVE_PATH REL_PATH "${CMAKE_CURRENT_SOURCE_DIR}" "${GLSL_SHADER}")
     get_filename_component(REL_DIR "${REL_PATH}" DIRECTORY)
@@ -114,18 +100,6 @@ install(
     DESTINATION "${MCVR_INSTALL_LIB_DIR}/shaders/util"
     FILES_MATCHING PATTERN "*.glsl"
 )
-
-set(UPSTREAM_RT_PACK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/world/ray_tracing/internal")
-if(EXISTS "${UPSTREAM_RT_PACK_DIR}/advanced/configs.json")
-    install(
-        DIRECTORY "${UPSTREAM_RT_PACK_DIR}/"
-        DESTINATION "${MCVR_INSTALL_BIN_DIR}/res/world/ray_tracing/internal"
-    )
-    install(
-        DIRECTORY "${UPSTREAM_RT_PACK_DIR}/"
-        DESTINATION "${MCVR_INSTALL_LIB_DIR}/shaders/world/ray_tracing/internal"
-    )
-endif()
 
 if(WIN32 AND MCVR_SHADER_DEBUG_INFO)
     find_program(SPIRV_DIS spirv-dis.exe HINTS "$ENV{VULKAN_SDK}/Bin")

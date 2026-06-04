@@ -31,7 +31,6 @@ Buffers::Buffers(std::shared_ptr<Framework> framework) {
     lastWorldUniformBuffer_.resize(size);
     skyUniformBuffer_.resize(size);
     textureMappingBuffer_.resize(size);
-    materialClassMappingBuffer_.resize(size);
     exposureDataBuffer_.resize(size);
     lightMapUniformBuffer_.resize(size);
 }
@@ -419,46 +418,6 @@ void Buffers::setAndUploadTextureMappingBuffer(vk::Data::TextureMapping &mapping
     textureMappingBuffer_[context->frameIndex]->uploadToBuffer(&mapping);
 }
 
-void Buffers::setAndUploadMaterialClassMappingBuffer(vk::Data::MaterialClassMapping &mapping) {
-    auto framework = Renderer::instance().framework();
-    auto context = framework->safeAcquireCurrentContext();
-    auto vma = framework->vma();
-    auto device = framework->device();
-
-    if (materialClassMappingBuffer_[context->frameIndex] == nullptr) {
-        materialClassMappingBuffer_[context->frameIndex] =
-            vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::MaterialClassMapping),
-                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-    }
-
-    if (Renderer::options.loggingEnabled) {
-        uint32_t inheritCount = 0;
-        uint32_t offCount = 0;
-        uint32_t customCount = 0;
-        uint32_t selfShadowCount = 0;
-        for (const auto& entry : mapping.entries) {
-            uint32_t mode = (entry.pomPacked0 >> 3u) & 0x3u;
-            if (mode == 1u) {
-                offCount++;
-            } else if (mode == 2u) {
-                customCount++;
-            } else {
-                inheritCount++;
-            }
-            if ((entry.pomPacked0 & (1u << 28u)) != 0u) {
-                selfShadowCount++;
-            }
-        }
-        buffersCout() << "Material displacement modes: inherit=" << inheritCount
-                      << " off=" << offCount
-                      << " custom=" << customCount
-                      << " selfShadow=" << selfShadowCount << std::endl;
-    }
-
-    materialClassMappingBuffer_[context->frameIndex]->uploadToBuffer(&mapping);
-}
-
 void Buffers::setAndUploadExposureDataBuffer(vk::Data::ExposureData &exposureData) {
     auto framework = Renderer::instance().framework();
     auto context = framework->safeAcquireCurrentContext();
@@ -562,46 +521,6 @@ std::shared_ptr<vk::HostVisibleBuffer> Buffers::textureMappingBuffer() {
     } else {
         return nullptr;
     }
-}
-
-std::shared_ptr<vk::HostVisibleBuffer> Buffers::materialClassMappingBuffer() {
-    auto framework = Renderer::instance().framework();
-    auto context = framework->safeAcquireCurrentContext();
-
-    // Always return a valid buffer — create with GENERIC defaults if never uploaded.
-    // CRITICAL: must be full MaterialClassMapping size (MAX_MATERIAL_CLASSES entries), not single entry,
-    // because setAndUploadMaterialClassMappingBuffer skips creation if non-null
-    // and uploadToBuffer copies min(src, buffer.size_) bytes.
-    if (!materialClassMappingBuffer_[context->frameIndex]) {
-        auto vma = framework->vma();
-        auto device = framework->device();
-        materialClassMappingBuffer_[context->frameIndex] =
-            vk::HostVisibleBuffer::create(vma, device, sizeof(vk::Data::MaterialClassMapping),
-                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-        // Zero-init all entries, then set safe defaults
-        vk::Data::MaterialClassMapping dummy{};
-        for (int i = 0; i < vk::Data::MAX_MATERIAL_CLASSES; i++) {
-            dummy.entries[i].f0 = {0.04f, 0.04f, 0.04f};
-            dummy.entries[i].roughness = 0.5f;
-            dummy.entries[i].metallic = 0.0f;
-            dummy.entries[i].transmission = -1.0f; // keep LabPBR
-            dummy.entries[i].ior = 1.5f;
-            dummy.entries[i].subsurface = 0.0f;
-            dummy.entries[i].pomPacked0 = 0;
-            dummy.entries[i].pomPacked1 = 100 | (10 << 24);  // normalClamp=100, heightContrast=10
-            dummy.entries[i].pomPacked2 = (100 << 8) | (100 << 16);  // remapMax=100, offset=100
-            dummy.entries[i].pomDepth = 0.0f;
-            dummy.entries[i].flags = 0; // no override
-            dummy.entries[i].lumMin = 0.0f;
-            dummy.entries[i].lumMax = 1.0f;  // avoid division by zero
-            dummy.entries[i].autoPBRPacked0 = 0;
-            dummy.entries[i].autoPBRPacked1 = 0;
-        }
-        materialClassMappingBuffer_[context->frameIndex]->uploadToBuffer(&dummy);
-    }
-
-    return materialClassMappingBuffer_[context->frameIndex];
 }
 
 std::shared_ptr<vk::HostVisibleBuffer> Buffers::exposureDataBuffer() {

@@ -532,6 +532,20 @@ void *vk::DeviceLocalBuffer::mappedPtr() {
     return mappedPtr_;
 }
 
+bool vk::DeviceLocalBuffer::isValid() const {
+    if (size_ == 0 || buffer_ == VK_NULL_HANDLE || allocation_ == VK_NULL_HANDLE) {
+        return false;
+    }
+    if (persistStaging_ &&
+        (stagingBuffer_ == VK_NULL_HANDLE || stagingAllocation_ == VK_NULL_HANDLE || mappedPtr_ == nullptr)) {
+        return false;
+    }
+    if ((bufferUsage_ & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) && bufferAddress_ == 0) {
+        return false;
+    }
+    return true;
+}
+
 VkDeviceAddress &vk::DeviceLocalBuffer::bufferAddress() {
     if (!(bufferUsage_ & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)) {
         bufferCerr() << "VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT not specified when try to get bufferAddress"

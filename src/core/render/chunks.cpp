@@ -1,19 +1,13 @@
 #include "core/render/chunks.hpp"
 
-#include "core/render/block_mesher.hpp"
 #include "core/render/buffers.hpp"
 #include "core/render/crash_ring_buffer.hpp"
-#include "core/render/greedy_mesher.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
-#include "core/render/textures.hpp"
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/modules/world/ray_tracing/submodules/world_prepare.hpp"
 #include "core/vulkan/debug_utils.hpp"
-#ifdef MCVR_ENABLE_OMM
-#include "core/render/omm_baker.hpp"
-#endif
 
 #include <algorithm>
 #include <cassert>
@@ -24,74 +18,6 @@
 #include <mutex>
 #include <set>
 
-#include <glm/gtc/packing.hpp>
-
-static void destroyOmmGeometryData(std::vector<ChunkBuildData::OMMGeometryData> &ommGeometryData) {
-    for (auto &gd : ommGeometryData) {
-        if (gd.micromap != VK_NULL_HANDLE && gd.device) {
-            vkDestroyMicromapEXT(gd.device->vkDevice(), gd.micromap, nullptr);
-            gd.micromap = VK_NULL_HANDLE;
-        }
-    }
-}
-
-// Convert full PBRTriangle vertices to compact 32-byte format.
-// Drops norm, postBase, lightPacked, glintUV/glintTexture, overlayPacked.
-// Compresses colorLayer to RGBA8, albedoEmission to fp16.
-static std::vector<vk::VertexFormat::PBRTriangleCompact>
-packCompactVertices(const std::vector<vk::VertexFormat::PBRTriangle> &src) {
-    std::vector<vk::VertexFormat::PBRTriangleCompact> dst(src.size());
-    for (size_t j = 0; j < src.size(); j++) {
-        auto &s = src[j];
-        auto &d = dst[j];
-        d.pos = s.pos;
-        // packed0: flags (bits 0-10) | vivid flag (bit 11) |
-        // thin plant carrier (bit 15) | textureID (bits 16-31)
-        // Clear USE_GLINT, USE_OVERLAY, and GREEDY_MERGED — compact format zeros those data
-        // fields, so leaving the flags set would cause the shader to sample garbage or divide by zero.
-        uint32_t flags = s.flags & 0x77FFu; // preserve bits 0-10 + 12-13 (BIOME_TINT) + 14 (BLOCK_GEOMETRY)
-        flags &= ~(vk::VertexFormat::PBR_FLAG_USE_GLINT | vk::VertexFormat::PBR_FLAG_USE_OVERLAY |
-                    vk::VertexFormat::PBR_FLAG_GREEDY_MERGED);
-        if (s.emissiveBlockType & 0x10000u) flags |= vk::VertexFormat::PBR_FLAG_COMPACT_VIVID;
-        if (s.emissiveBlockType & vk::VertexFormat::PBR_PACKED_THIN_CUTOUT_PLANT) {
-            flags |= vk::VertexFormat::PBR_FLAG_COMPACT_THIN_CUTOUT_PLANT;
-        }
-        d.packed0 = flags | ((s.textureID & 0xFFFFu) << 16);
-        d.textureUV = s.textureUV;
-        // colorLayer vec4 → RGBA8
-        uint8_t r = static_cast<uint8_t>(glm::clamp(s.colorLayer.r * 255.0f, 0.0f, 255.0f));
-        uint8_t g = static_cast<uint8_t>(glm::clamp(s.colorLayer.g * 255.0f, 0.0f, 255.0f));
-        uint8_t b = static_cast<uint8_t>(glm::clamp(s.colorLayer.b * 255.0f, 0.0f, 255.0f));
-        uint8_t a = static_cast<uint8_t>(glm::clamp(s.colorLayer.a * 255.0f, 0.0f, 255.0f));
-        d.colorPacked = uint32_t(r) | (uint32_t(g) << 8) | (uint32_t(b) << 16) | (uint32_t(a) << 24);
-        // packed1: albedoEmission as fp16 (lower 16) | emissiveBlockType bits 0-15 (upper 16)
-        uint32_t halfEmission = glm::packHalf2x16(glm::vec2(s.albedoEmission, 0.0f)) & 0xFFFFu;
-        d.packed1 = halfEmission | ((s.emissiveBlockType & 0xFFFFu) << 16);
-    }
-    return dst;
-}
-
-// Convert full PBRTriangle vertices to lossless 64-byte format.
-// Drops only dead fields: norm, postBase, lightPacked.
-// All shader-read fields preserved at full precision — bit-identical output.
-static std::vector<vk::VertexFormat::PBRTriangleLossless>
-packLosslessVertices(const std::vector<vk::VertexFormat::PBRTriangle> &src) {
-    std::vector<vk::VertexFormat::PBRTriangleLossless> dst(src.size());
-    for (size_t j = 0; j < src.size(); j++) {
-        auto &s = src[j];
-        auto &d = dst[j];
-        d.pos = s.pos;
-        d.flags = s.flags;
-        d.colorLayer = s.colorLayer;
-        d.textureUV = s.textureUV;
-        d.glintUV = s.glintUV;
-        d.albedoEmission = s.albedoEmission;
-        d.emissiveBlockType = s.emissiveBlockType;
-        d.textureID_glint = (s.textureID & 0xFFFFu) | ((s.glintTexture & 0xFFFFu) << 16);
-        d.overlayPacked = s.overlayPacked;
-    }
-    return dst;
-}
 
 ChunkBuildData::ChunkBuildData(int64_t id,
                                int x,
@@ -118,390 +44,112 @@ ChunkBuildData::ChunkBuildData(int64_t id,
       blas(nullptr),
       blasBuilder(nullptr) {}
 
-ChunkBuildData::~ChunkBuildData() {
-    destroyOmmGeometryData(ommGeometryData);
-}
+ChunkBuildData::~ChunkBuildData() = default;
 
-ChunkOmmResources::~ChunkOmmResources() {
-    destroyOmmGeometryData(ommGeometryData);
-}
-
-void ChunkBuildData::build(bool allowMicromapBake, bool skipOMM, glm::vec3 cameraPos) {
-    prepareCPU(allowMicromapBake, skipOMM, cameraPos);
+void ChunkBuildData::build() {
+    prepareCPU();
     uploadGPU();
 }
 
-// ---- CPU PHASE: greedy meshing, OMM classification/baking, tessellation ----
+// ---- CPU PHASE: count full triangle geometry ----
 // No Vulkan or VMA calls. Safe to call from worker threads.
-void ChunkBuildData::prepareCPU(bool allowMicromapBake, bool skipOMM, glm::vec3 cameraPos) {
-    auto textures = Renderer::instance().textures();
-    auto device = Renderer::instance().framework()->device();
-    bool useOMM = !skipOMM && device->hasOMM() && Renderer::options.ommEnabled && textures != nullptr;
-
-#ifdef MCVR_ENABLE_OMM
-    // Thread-local OMM baker (one per thread, SDK is not thread-safe per instance)
-    static thread_local std::unique_ptr<OMMBaker> tlBaker;
-    if (useOMM && !tlBaker) {
-        tlBaker = std::make_unique<OMMBaker>();
-    }
-#endif
-
-    ommGeometryData.resize(geometryCount);
-    ommCpuResults.resize(geometryCount);
-
-    // Greedy meshing: merge coplanar block faces for WORLD_SOLID (50-70% triangle reduction)
-    if (Renderer::options.greedyMeshingEnabled) {
-        for (int i = 0; i < geometryCount; i++) {
-            if (geometryTypes[i] == World::WORLD_SOLID) {
-                auto merged = GreedyMesher::merge(vertices[i], indices[i]);
-                vertices[i] = std::move(merged.vertices);
-                indices[i] = std::move(merged.indices);
-            }
-        }
-    }
-
-    // Full 96-byte PBRTriangle — lossless format has struct layout issues.
-    // Block vs entity is identified via PBR_FLAG_BLOCK_GEOMETRY in vertex flags.
-    vertexFormat = 0;
-
-    // CPU-only OMM classification: compute per-triangle opacity indices without VMA/Vulkan calls.
-    // Results stored in ommCpuResults[], consumed by uploadGPU().
-
+void ChunkBuildData::prepareCPU() {
+    allVertexCount = 0;
+    allIndexCount = 0;
     for (int i = 0; i < geometryCount; i++) {
-        auto &cr = ommCpuResults[i];
-
-        if (useOMM && geometryTypes[i] == World::WORLD_TRANSPARENT) {
-#ifdef MCVR_ENABLE_OMM
-            cr.isTransparentOMM = true;
-            uint32_t numTriangles = static_cast<uint32_t>(indices[i].size()) / 3;
-
-            if (!allowMicromapBake) {
-                // Phase 1 fallback: special indices only
-                cr.ommIndices.resize(numTriangles);
-                for (uint32_t t = 0; t < numTriangles; t++) {
-                    uint32_t vertIdx = indices[i][t * 3];
-                    uint32_t texId = vertices[i][vertIdx].textureID;
-                    auto alphaClass = textures->getTextureAlphaClass(texId);
-                    switch (alphaClass) {
-                        case Textures::AlphaClass::FULLY_OPAQUE:
-                            cr.ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT;
-                            break;
-                        default:
-                            cr.ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
-                            break;
-                    }
-                }
-            } else {
-                // Phase 2: full per-micro-triangle baking (CPU-only computation)
-                std::map<uint32_t, std::vector<uint32_t>> texGroups;
-                for (uint32_t t = 0; t < numTriangles; t++) {
-                    uint32_t vertIdx = indices[i][t * 3];
-                    uint32_t texId = vertices[i][vertIdx].textureID;
-                    texGroups[texId].push_back(t);
-                }
-
-                cr.ommIndices.assign(numTriangles, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT);
-                std::map<uint64_t, uint32_t> descHistMap, indexHistMap;
-
-                for (auto &[texId, triList] : texGroups) {
-                    const auto *alphaData = textures->getTextureAlphaData(texId);
-                    if (!alphaData || alphaData->alpha.empty()) {
-                        for (uint32_t t : triList) {
-                            auto alphaClass = textures->getTextureAlphaClass(texId);
-                            cr.ommIndices[t] = (alphaClass == Textures::AlphaClass::FULLY_OPAQUE)
-                                ? VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT
-                                : VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
-                        }
-                        continue;
-                    }
-
-                    auto alphaClass = textures->getTextureAlphaClass(texId);
-                    if (alphaClass == Textures::AlphaClass::FULLY_TRANSPARENT) {
-                        for (uint32_t t : triList) {
-                            cr.ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
-                        }
-                        continue;
-                    }
-
-                    std::vector<uint32_t> localIndices;
-                    localIndices.reserve(triList.size() * 3);
-                    for (uint32_t t : triList) {
-                        localIndices.push_back(indices[i][t * 3 + 0]);
-                        localIndices.push_back(indices[i][t * 3 + 1]);
-                        localIndices.push_back(indices[i][t * 3 + 2]);
-                    }
-
-                    OMMBaker::BakeInput input{};
-                    input.alphaData = alphaData->alpha.data();
-                    input.texWidth = alphaData->width;
-                    input.texHeight = alphaData->height;
-                    input.uvData = &vertices[i][0].textureUV;
-                    input.uvStrideBytes = sizeof(vk::VertexFormat::PBRTriangle);
-                    input.indexData = localIndices.data();
-                    input.indexCount = static_cast<uint32_t>(localIndices.size());
-                    input.alphaCutoff = 0.05f;
-                    input.maxSubdivisionLevel = Renderer::options.ommBakerLevel;
-
-                    OMMBaker::BakeResult result;
-                    if (tlBaker && tlBaker->bake(input, result)) {
-                        cr.bakingDone = true;
-                        uint32_t baseOffset = static_cast<uint32_t>(cr.mergedArrayData.size());
-                        uint32_t baseDescIndex = static_cast<uint32_t>(cr.mergedDescs.size());
-
-                        cr.mergedArrayData.insert(cr.mergedArrayData.end(), result.arrayData.begin(), result.arrayData.end());
-                        for (uint32_t d = 0; d < result.descArrayCount; d++) {
-                            VkMicromapTriangleEXT desc{};
-                            desc.dataOffset = result.descOffsets[d] + baseOffset;
-                            desc.subdivisionLevel = result.descSubdivisionLevels[d];
-                            desc.format = result.descFormats[d];
-                            cr.mergedDescs.push_back(desc);
-                        }
-                        for (uint32_t li = 0; li < triList.size(); li++) {
-                            int32_t idx = result.indexBuffer[li];
-                            cr.ommIndices[triList[li]] = (idx >= 0) ? idx + static_cast<int32_t>(baseDescIndex) : idx;
-                        }
-                        for (auto &uc : result.descArrayHistogram) {
-                            descHistMap[(static_cast<uint64_t>(uc.subdivisionLevel) << 16) | uc.format] += uc.count;
-                        }
-                        for (auto &uc : result.indexHistogram) {
-                            indexHistMap[(static_cast<uint64_t>(uc.subdivisionLevel) << 16) | uc.format] += uc.count;
-                        }
-                    } else {
-                        for (uint32_t t : triList) {
-                            cr.ommIndices[t] = VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
-                        }
-                    }
-                }
-
-                // Convert histograms to Vulkan structs (CPU data, no Vulkan calls)
-                for (auto &[key, count] : descHistMap) {
-                    VkMicromapUsageEXT usage{};
-                    usage.count = count;
-                    usage.subdivisionLevel = static_cast<uint32_t>(key >> 16);
-                    usage.format = static_cast<uint32_t>(key & 0xFFFF);
-                    cr.descHistogram.push_back(usage);
-                }
-                for (auto &[key, count] : indexHistMap) {
-                    VkMicromapUsageEXT usage{};
-                    usage.count = count;
-                    usage.subdivisionLevel = static_cast<uint32_t>(key >> 16);
-                    usage.format = static_cast<uint32_t>(key & 0xFFFF);
-                    cr.indexHistogram.push_back(usage);
-                }
-            }
-#endif
-        } else if (useOMM) {
-            // WORLD_SOLID with OMM enabled: all-opaque special indices
-            cr.isOpaqueOMM = true;
-            uint32_t numTriangles = static_cast<uint32_t>(indices[i].size()) / 3;
-            cr.ommIndices.assign(numTriangles, VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT);
-        }
+        allVertexCount += static_cast<uint32_t>(vertices[i].size());
+        allIndexCount += static_cast<uint32_t>(indices[i].size());
     }
-
 }
-
 // ---- GPU PHASE: VMA allocation, staging uploads, BLAS builder setup ----
 // Must run on render thread (single-threaded Vulkan access).
 void ChunkBuildData::uploadGPU() {
+    uploadValid = true;
+    vertexBuffers.clear();
+    indexBuffers.clear();
+
     auto framework = Renderer::instance().framework();
     auto vma = framework->vma();
     auto device = framework->device();
     auto physicalDevice = framework->physicalDevice();
 
-    // Pack vertices into the selected format before uploading
-    std::vector<std::vector<vk::VertexFormat::PBRTriangleCompact>> compactVerts;
-    std::vector<std::vector<vk::VertexFormat::PBRTriangleLossless>> losslessVerts;
-    if (vertexFormat == 1) {
-        compactVerts.resize(geometryCount);
-        for (int i = 0; i < geometryCount; i++)
-            compactVerts[i] = packCompactVertices(vertices[i]);
-    } else if (vertexFormat == 2) {
-        losslessVerts.resize(geometryCount);
-        for (int i = 0; i < geometryCount; i++)
-            losslessVerts[i] = packLosslessVertices(vertices[i]);
-    }
+    auto failUpload = [&](const char *what, int geometryIndex, VkDeviceSize bytes) {
+        uploadValid = false;
+        std::cerr << "[ChunkBuildData] Dropping chunk build after GPU upload failure: id=" << id
+                  << " geometry=" << geometryIndex
+                  << " resource=" << what
+                  << " bytes=" << bytes
+                  << " vertices=" << allVertexCount
+                  << " indices=" << allIndexCount << std::endl;
+        vertexBuffers.clear();
+        indexBuffers.clear();
+        blas.reset();
+        blasBuilder.reset();
+    };
 
-    // Create vertex/index buffers from final geometry (post-mesh, post-tessellation)
+    auto requireBuffer = [&](const std::shared_ptr<vk::DeviceLocalBuffer> &buffer,
+                             const char *what,
+                             int geometryIndex,
+                             VkDeviceSize bytes) -> bool {
+        if (!buffer || !buffer->isValid()) {
+            failUpload(what, geometryIndex, bytes);
+            return false;
+        }
+        return true;
+    };
+
     for (int i = 0; i < geometryCount; i++) {
-        VkDeviceSize bufSize;
-        const void *bufData;
-        if (vertexFormat == 1) {
-            bufSize = compactVerts[i].size() * sizeof(vk::VertexFormat::PBRTriangleCompact);
-            bufData = compactVerts[i].data();
-        } else if (vertexFormat == 2) {
-            bufSize = losslessVerts[i].size() * sizeof(vk::VertexFormat::PBRTriangleLossless);
-            bufData = losslessVerts[i].data();
-        } else {
-            bufSize = vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle);
-            bufData = vertices[i].data();
+        VkDeviceSize vertexBufferSize = vertices[i].size() * sizeof(vk::VertexFormat::PBRTriangle);
+        if (vertexBufferSize == 0 || indices[i].empty()) {
+            vertexBuffers.push_back(nullptr);
+            indexBuffers.push_back(nullptr);
+            continue;
         }
 
-        auto vertexBuffer =
-            vk::DeviceLocalBuffer::create(vma, device, true, bufSize,
-                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        vertexBuffer->uploadToStagingBuffer(const_cast<void *>(bufData));
+        auto vertexBuffer = vk::DeviceLocalBuffer::create(
+            vma, device, true, vertexBufferSize,
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        if (!requireBuffer(vertexBuffer, "vertex", i, vertexBufferSize)) return;
+        vertexBuffer->uploadToStagingBuffer(vertices[i].data());
         vertexBuffers.push_back(vertexBuffer);
 
-        auto indexBuffer =
-            vk::DeviceLocalBuffer::create(vma, device, true, indices[i].size() * sizeof(uint32_t),
-                                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                                              VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        VkDeviceSize indexBufferSize = indices[i].size() * sizeof(uint32_t);
+        auto indexBuffer = vk::DeviceLocalBuffer::create(
+            vma, device, true, indexBufferSize,
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        if (!requireBuffer(indexBuffer, "index", i, indexBufferSize)) return;
         indexBuffer->uploadToStagingBuffer(indices[i].data());
         indexBuffers.push_back(indexBuffer);
-
-        // Upload OMM data from CPU results
-        auto &cr = ommCpuResults[i];
-        if (cr.isTransparentOMM || cr.isOpaqueOMM) {
-            auto ommIdxBuffer = vk::DeviceLocalBuffer::create(
-                vma, device, true, cr.ommIndices.size() * sizeof(int32_t),
-                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                    VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
-            ommIdxBuffer->uploadToStagingBuffer(cr.ommIndices.data());
-            ommIndexBuffers.push_back(ommIdxBuffer);
-
-            // Phase 2 OMM: create micromap from baked data
-            if (cr.bakingDone && !cr.mergedDescs.empty()) {
-                auto &gd = ommGeometryData[i];
-                gd.arrayBuffer = vk::DeviceLocalBuffer::create(
-                    vma, device, true, cr.mergedArrayData.size(),
-                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                        VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
-                gd.arrayBuffer->uploadToStagingBuffer(cr.mergedArrayData.data());
-
-                gd.descBuffer = vk::DeviceLocalBuffer::create(
-                    vma, device, true, cr.mergedDescs.size() * sizeof(VkMicromapTriangleEXT),
-                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-                        VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT);
-                gd.descBuffer->uploadToStagingBuffer(cr.mergedDescs.data());
-
-                gd.descHistogram = std::move(cr.descHistogram);
-                gd.indexHistogram = std::move(cr.indexHistogram);
-
-                VkMicromapBuildInfoEXT buildInfo{};
-                buildInfo.sType = VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT;
-                buildInfo.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
-                buildInfo.mode = VK_BUILD_MICROMAP_MODE_BUILD_EXT;
-                buildInfo.usageCountsCount = static_cast<uint32_t>(gd.descHistogram.size());
-                buildInfo.pUsageCounts = gd.descHistogram.data();
-
-                VkMicromapBuildSizesInfoEXT sizeInfo{};
-                sizeInfo.sType = VK_STRUCTURE_TYPE_MICROMAP_BUILD_SIZES_INFO_EXT;
-                vkGetMicromapBuildSizesEXT(device->vkDevice(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-                                           &buildInfo, &sizeInfo);
-
-                VkDeviceSize micromapSize = (sizeInfo.micromapSize + 255) & ~255ULL;
-                gd.micromapBuffer = vk::DeviceLocalBuffer::create(
-                    vma, device, micromapSize,
-                    VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-
-                if (sizeInfo.buildScratchSize > 0) {
-                    VkDeviceSize scratchSize = (sizeInfo.buildScratchSize + 255) & ~255ULL;
-                    gd.micromapScratchBuffer = vk::DeviceLocalBuffer::create(
-                        vma, device, scratchSize,
-                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-                }
-
-                VkMicromapCreateInfoEXT createInfo{};
-                createInfo.sType = VK_STRUCTURE_TYPE_MICROMAP_CREATE_INFO_EXT;
-                createInfo.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT;
-                createInfo.size = sizeInfo.micromapSize;
-                createInfo.buffer = gd.micromapBuffer->vkBuffer();
-                createInfo.offset = 0;
-                vkCreateMicromapEXT(device->vkDevice(), &createInfo, nullptr, &gd.micromap);
-                gd.device = device;
-                gd.hasMicromap = true;
-            }
-        } else {
-            ommIndexBuffers.push_back(nullptr);
-        }
     }
-
-    // Free CPU-side OMM results now that they're uploaded
-    ommCpuResults.clear();
-    ommCpuResults.shrink_to_fit();
 
     blasBuilder = vk::BLASBuilder::create();
     auto blasGeometryBuilder = blasBuilder->beginGeometries();
-
-    // Lambda: define BLAS geometry with correct vertex stride template
-    auto defineGeom = [&](int i, bool isOpaque, uint32_t numVerts, uint32_t numIndices) {
-        if (vertexFormat == 1) {
-            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangleCompact>(
-                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque);
-        } else if (vertexFormat == 2) {
-            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangleLossless>(
-                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque);
-        } else {
-            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangle>(
-                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque);
-        }
-    };
-    auto defineGeomOMM = [&](int i, bool isOpaque, uint32_t numVerts, uint32_t numIndices,
-                             VkDeviceAddress ommAddr, uint32_t numTris) {
-        if (vertexFormat == 1) {
-            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangleCompact>(
-                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris);
-        } else if (vertexFormat == 2) {
-            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangleLossless>(
-                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris);
-        } else {
-            blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangle>(
-                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris);
-        }
-    };
-    auto defineGeomMicromap = [&](int i, bool isOpaque, uint32_t numVerts, uint32_t numIndices,
-                                  VkDeviceAddress ommAddr, uint32_t numTris,
-                                  VkMicromapEXT mm, const VkMicromapUsageEXT *uc, uint32_t ucc) {
-        if (vertexFormat == 1) {
-            blasGeometryBuilder->defineTriangleGeomrtryWithMicromap<vk::VertexFormat::PBRTriangleCompact>(
-                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris, mm, uc, ucc);
-        } else if (vertexFormat == 2) {
-            blasGeometryBuilder->defineTriangleGeomrtryWithMicromap<vk::VertexFormat::PBRTriangleLossless>(
-                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris, mm, uc, ucc);
-        } else {
-            blasGeometryBuilder->defineTriangleGeomrtryWithMicromap<vk::VertexFormat::PBRTriangle>(
-                vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris, mm, uc, ucc);
-        }
-    };
-
     for (int i = 0; i < geometryCount; i++) {
         bool isOpaque = geometryTypes[i] == World::WORLD_SOLID;
         uint32_t indexCount = static_cast<uint32_t>(indices[i].size());
-        uint32_t vertCount = static_cast<uint32_t>(vertices[i].size());
+        uint32_t vertexCount = static_cast<uint32_t>(vertices[i].size());
 
         if (indexCount == 0) {
             blasGeometryBuilder->definePlaceholderGeometry();
             continue;
         }
 
-        if (ommIndexBuffers[i] != nullptr) {
-            uint32_t numTriangles = indexCount / 3;
-            if (ommGeometryData[i].hasMicromap) {
-                defineGeomMicromap(i, isOpaque, vertCount, indexCount,
-                    ommIndexBuffers[i]->bufferAddress(), numTriangles,
-                    ommGeometryData[i].micromap,
-                    ommGeometryData[i].indexHistogram.data(),
-                    static_cast<uint32_t>(ommGeometryData[i].indexHistogram.size()));
-            } else {
-                defineGeomOMM(i, isOpaque, vertCount, indexCount,
-                    ommIndexBuffers[i]->bufferAddress(), numTriangles);
-            }
-        } else {
-            defineGeom(i, isOpaque, vertCount, indexCount);
-        }
+        blasGeometryBuilder->defineTriangleGeomrtry<vk::VertexFormat::PBRTriangle>(
+            vertexBuffers[i], vertexCount, indexBuffers[i], indexCount, isOpaque);
     }
     blasGeometryBuilder->endGeometries();
     blas = blasBuilder->defineBuildProperty(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR)
                ->querySizeInfo(device)
                ->allocateBuffers(physicalDevice, device, vma)
                ->build(device);
-
+    if (!blas || !blas->blasBuffer() || !blas->blasBuffer()->isValid()) {
+        failUpload("blas", -1, 0);
+    }
 }
-
 void ChunkBuildData::releaseHostGeometry() {
     for (auto &v : vertices) {
         v.clear();
@@ -522,11 +170,6 @@ void ChunkBuildData::releaseHostGeometry() {
 void ChunkBuildData::releaseStagingBuffers() {
     for (auto &vb : vertexBuffers) { if (vb) vb->releaseStagingBuffer(); }
     for (auto &ib : indexBuffers) { if (ib) ib->releaseStagingBuffer(); }
-    for (auto &ob : ommIndexBuffers) { if (ob) ob->releaseStagingBuffer(); }
-    for (auto &gd : ommGeometryData) {
-        if (gd.arrayBuffer) gd.arrayBuffer->releaseStagingBuffer();
-        if (gd.descBuffer) gd.descBuffer->releaseStagingBuffer();
-    }
 }
 
 ChunkBuildDataBatch::ChunkBuildDataBatch(uint32_t maxBatchSize,
@@ -557,12 +200,19 @@ ChunkBuildDataBatch::ChunkBuildDataBatch(uint32_t maxBatchSize,
     // prepareCPU() has zero Vulkan/VMA calls — safe for concurrent execution.
     // SharedState in parallelFor lives on the heap to prevent use-after-free.
     Renderer::threadPool.parallelFor(static_cast<uint32_t>(count), [&](uint32_t i) {
-        batchData[i]->prepareCPU(true, false, cameraPos);
+        batchData[i]->prepareCPU();
     });
 
     for (size_t i = 0; i < count; i++) {
         batchData[i]->uploadGPU();
     }
+    batchData.erase(std::remove_if(batchData.begin(), batchData.end(),
+        [](const std::shared_ptr<ChunkBuildData> &data) {
+            if (!data || data->uploadValid) return false;
+            data->releaseHostGeometry();
+            data->releaseStagingBuffers();
+            return true;
+        }), batchData.end());
 }
 
 ChunkBuildDataBatch::~ChunkBuildDataBatch() {
@@ -632,8 +282,8 @@ void ChunkBuildScheduler::integrateCompleted() {
         chunkPackedData_->uploadToBuffer(&data, sizeof(ChunkPackedData),
                                          cbd->id * sizeof(ChunkPackedData));
 
-        // Release ChunkBuildData slot to free scratch/OMM/displacement buffers
-        // that were NOT transferred to Chunk1 (blasBuilder, ommGeometryData, etc.).
+        // Release ChunkBuildData slot to free scratch geometry buffers
+        // that were NOT transferred to Chunk1 (blasBuilder.).
         // Only clear if slot still points to this build (a newer build may have replaced it).
         if (cbd->id < static_cast<int64_t>(chunkBuildDatas_.size()) &&
             chunkBuildDatas_[cbd->id] == cbd) {
@@ -679,8 +329,8 @@ void ChunkBuildScheduler::blasThreadLoop() {
     auto secondaryQueueIndex = physicalDevice->secondaryQueueIndex();
 
     // Pre-allocate cmd pool — sole owner, no mutex needed.
-    constexpr uint32_t MAX_IN_FLIGHT = 12;
-    for (uint32_t i = 0; i < MAX_IN_FLIGHT; i++) {
+    const uint32_t maxInFlight = Renderer::options.displacementEnabled ? 2u : 12u;
+    for (uint32_t i = 0; i < maxInFlight; i++) {
         cmdPool_.push(vk::CommandBuffer::create(device, asyncPool));
     }
 
@@ -708,7 +358,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
             diagLog.open(diagPath, std::ios::trunc);
             if (diagLog.is_open()) {
                 diagLog << "BLAS_DIAG_START timelineInit=" << blasTimelineCounter_
-                        << " maxInFlight=" << MAX_IN_FLIGHT
+                        << " maxInFlight=" << maxInFlight
                         << " path=" << diagPath.string() << std::endl;
                 diagLog.flush();
             }
@@ -797,6 +447,12 @@ void ChunkBuildScheduler::blasThreadLoop() {
                         auto buf = vk::DeviceLocalBuffer::create(vma, device, false, compSz,
                             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR|VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                             0, VMA_MEMORY_USAGE_GPU_ONLY);
+                        if (!buf || !buf->isValid()) {
+                            totalOrig += origSz;
+                            totalComp += origSz;
+                            totalN++;
+                            continue;
+                        }
                         VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
                         ci.buffer = buf->vkBuffer(); ci.size = compSz; ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
                         VkAccelerationStructureKHR as;
@@ -902,7 +558,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
             hasWork = !inputQueue_.empty();
         }
 
-        if (hasWork && inFlight_.size() < MAX_IN_FLIGHT && !cmdPool_.empty()) {
+        if (hasWork && inFlight_.size() < maxInFlight && !cmdPool_.empty()) {
             // Dequeue batch — dynamic size based on GPU headroom
             std::vector<std::shared_ptr<ChunkBuildData>> batch;
             {
@@ -926,13 +582,37 @@ void ChunkBuildScheduler::blasThreadLoop() {
 // DIAGNOSTIC: sequential prepareCPU to avoid parallelFor deadlock
             for (uint32_t i = 0; i < static_cast<uint32_t>(batch.size()); i++) {
                 if (diagLog.is_open()) { diagLog << diagTs() << " prepareCPU_item iter=" << diagIter << " i=" << i << " id=" << batch[i]->id << " geo=" << batch[i]->geometryCount << std::endl; diagLog.flush(); }
-                batch[i]->prepareCPU(true, false, cameraPos);
+                batch[i]->prepareCPU();
                 if (diagLog.is_open()) { diagLog << diagTs() << " prepareCPU_item_done iter=" << diagIter << " i=" << i << std::endl; diagLog.flush(); }
             }
             if (diagLog.is_open()) { diagLog << diagTs() << " PREPARE_CPU_END iter=" << diagIter << std::endl; diagLog.flush(); }
                 // GPU upload (sequential — VMA alloc + staging)
                             if (diagLog.is_open()) { diagLog << diagTs() << " UPLOAD_GPU_BEGIN iter=" << diagIter << std::endl; diagLog.flush(); }
 for (auto &cbd : batch) cbd->uploadGPU();
+                batch.erase(std::remove_if(batch.begin(), batch.end(),
+                    [&](const std::shared_ptr<ChunkBuildData> &data) {
+                        if (!data || data->uploadValid) return false;
+                        if (diagLog.is_open()) {
+                            diagLog << diagTs() << " DROP_UPLOAD_FAILED iter=" << diagIter
+                                    << " id=" << (data ? data->id : -1)
+                                    << " vertices=" << (data ? data->allVertexCount : 0)
+                                    << " indices=" << (data ? data->allIndexCount : 0)
+                                    << std::endl;
+                            diagLog.flush();
+                        }
+                        if (data) {
+                            data->releaseHostGeometry();
+                            data->releaseStagingBuffers();
+                        }
+                        return true;
+                    }), batch.end());
+                if (batch.empty()) {
+                    if (diagLog.is_open()) {
+                        diagLog << diagTs() << " DROP_EMPTY_BATCH_AFTER_UPLOAD iter=" << diagIter << std::endl;
+                        diagLog.flush();
+                    }
+                    continue;
+                }
             if (diagLog.is_open()) { diagLog << diagTs() << " UPLOAD_GPU_END iter=" << diagIter << std::endl; diagLog.flush(); }
 
                 // Release CPU-side geometry data — staging buffers hold the copy for GPU transfer.
@@ -946,11 +626,9 @@ for (auto &cbd : batch) cbd->uploadGPU();
                 cmd->begin();
                 for (auto &cbd : batch) {
                     for (int i = 0; i < cbd->geometryCount; i++) {
+                        if (!cbd->vertexBuffers[i] || !cbd->indexBuffers[i]) continue;
                         cbd->vertexBuffers[i]->uploadToBuffer(cmd);
                         cbd->indexBuffers[i]->uploadToBuffer(cmd);
-                        if (cbd->ommIndexBuffers[i]) cbd->ommIndexBuffers[i]->uploadToBuffer(cmd);
-                        auto &gd = cbd->ommGeometryData[i];
-                        if (gd.hasMicromap) { gd.arrayBuffer->uploadToBuffer(cmd); gd.descBuffer->uploadToBuffer(cmd); }
                     }
                 }
 
@@ -958,55 +636,18 @@ for (auto &cbd : batch) cbd->uploadGPU();
                 std::vector<vk::CommandBuffer::BufferMemoryBarrier> barriers;
                 for (auto &cbd : batch) {
                     for (int i = 0; i < cbd->geometryCount; i++) {
-                        VkPipelineStageFlags2 dst = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
-                        if (cbd->ommGeometryData[i].hasMicromap) dst |= VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT;
+                        if (!cbd->vertexBuffers[i] || !cbd->indexBuffers[i]) continue;
                         auto bar = [&](std::shared_ptr<vk::DeviceLocalBuffer> &b) {
                             barriers.push_back({VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                                VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT, dst,
+                                VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                                 VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
                                 secondaryQueueIndex, secondaryQueueIndex, b});
                         };
                         bar(cbd->vertexBuffers[i]); bar(cbd->indexBuffers[i]);
-                        if (cbd->ommIndexBuffers[i]) bar(cbd->ommIndexBuffers[i]);
-                        if (cbd->ommGeometryData[i].hasMicromap) {
-                            auto mm = VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT;
-                            barriers.push_back({VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
-                                mm, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
-                                secondaryQueueIndex, secondaryQueueIndex, cbd->ommGeometryData[i].arrayBuffer});
-                            barriers.push_back({VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
-                                mm, VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT,
-                                secondaryQueueIndex, secondaryQueueIndex, cbd->ommGeometryData[i].descBuffer});
-                        }
                     }
                 }
                 cmd->barriersBufferImage(barriers, {});
-
-                // Micromaps
-                bool anyMM = false;
-                for (auto &cbd : batch) {
-                    for (int i = 0; i < cbd->geometryCount; i++) {
-                        auto &gd = cbd->ommGeometryData[i];
-                        if (!gd.hasMicromap) continue;
-                        anyMM = true;
-                        VkMicromapBuildInfoEXT bi{VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT};
-                        bi.type = VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT; bi.flags = VK_BUILD_MICROMAP_PREFER_FAST_TRACE_BIT_EXT;
-                        bi.mode = VK_BUILD_MICROMAP_MODE_BUILD_EXT; bi.dstMicromap = gd.micromap;
-                        bi.data.deviceAddress = gd.arrayBuffer->bufferAddress();
-                        bi.triangleArray.deviceAddress = gd.descBuffer->bufferAddress();
-                        bi.triangleArrayStride = sizeof(VkMicromapTriangleEXT);
-                        bi.usageCountsCount = static_cast<uint32_t>(gd.descHistogram.size());
-                        bi.pUsageCounts = gd.descHistogram.data();
-                        if (gd.micromapScratchBuffer) bi.scratchData.deviceAddress = gd.micromapScratchBuffer->bufferAddress();
-                        vkCmdBuildMicromapsEXT(cmd->vkCommandBuffer(), 1, &bi);
-                    }
-                }
-                if (anyMM) {
-                    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-                    mb.srcStageMask = VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT; mb.srcAccessMask = VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT;
-                    mb.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR; mb.dstAccessMask = VK_ACCESS_2_MICROMAP_READ_BIT_EXT;
-                    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.memoryBarrierCount = 1; dep.pMemoryBarriers = &mb;
-                    vkCmdPipelineBarrier2(cmd->vkCommandBuffer(), &dep);
-                }
 
                 // BLAS builds
                 std::vector<std::shared_ptr<vk::BLASBuilder>> builders;
@@ -1176,10 +817,8 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
 
     if (chunkBuildData->version > blasVersion) {
         blasVersion = chunkBuildData->version;
-        vertexFormat = chunkBuildData->vertexFormat;
 
         gc.collect(blas);
-        // GC the pre-compaction BLAS (from BLAS thread) — GPU TLAS may still reference it
         if (chunkBuildData->preCompactionBlas) gc.collect(chunkBuildData->preCompactionBlas);
         blas = chunkBuildData->blas;
         blasGeneration++;
@@ -1191,13 +830,6 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
         gc.collect(indexBuffers);
         indexBuffers = std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
             std::move(chunkBuildData->indexBuffers));
-
-        gc.collect(ommResources);
-        ommResources = ChunkOmmResources::create();
-        ommResources->ommIndexBuffers = std::move(chunkBuildData->ommIndexBuffers);
-        ommResources->ommGeometryData = std::move(chunkBuildData->ommGeometryData);
-        chunkBuildData->ommIndexBuffers.clear();
-        chunkBuildData->ommGeometryData.clear();
     } else {
         gc.collect(chunkBuildData->blas);
         if (chunkBuildData->preCompactionBlas) gc.collect(chunkBuildData->preCompactionBlas);
@@ -1207,15 +839,6 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
 
         gc.collect(std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
             std::move(chunkBuildData->indexBuffers)));
-
-        if (!chunkBuildData->ommIndexBuffers.empty() || !chunkBuildData->ommGeometryData.empty()) {
-            auto discardedOmm = ChunkOmmResources::create();
-            discardedOmm->ommIndexBuffers = std::move(chunkBuildData->ommIndexBuffers);
-            discardedOmm->ommGeometryData = std::move(chunkBuildData->ommGeometryData);
-            chunkBuildData->ommIndexBuffers.clear();
-            chunkBuildData->ommGeometryData.clear();
-            gc.collect(discardedOmm);
-        }
     }
 
     allVertexCount = chunkBuildData->allVertexCount;
@@ -1226,9 +849,7 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
     biomeFoliageColor = chunkBuildData->biomeFoliageColor;
     biomeWaterColor = chunkBuildData->biomeWaterColor;
     textureGeneration = chunkBuildData->textureGeneration;
-    // CPU vertex/index data kept alive in ChunkBuildData (releaseHostGeometry disabled)
 }
-
 void Chunk1::invalidate() {
     auto framework = Renderer::instance().framework();
     auto &gc = framework->gc();
@@ -1247,8 +868,6 @@ void Chunk1::invalidate() {
     gc.collect(indexBuffers);
     indexBuffers = nullptr;
 
-    gc.collect(ommResources);
-    ommResources = nullptr;
 }
 
 std::shared_ptr<ChunkRenderData> Chunk1::tryGetValid() {
@@ -1259,7 +878,6 @@ std::shared_ptr<ChunkRenderData> Chunk1::tryGetValid() {
     ret->blas = blas;
     ret->vertexBuffers = vertexBuffers;
     ret->indexBuffers = indexBuffers;
-    ret->ommResources = ommResources;
     ret->allVertexCount = allVertexCount;
     ret->allIndexCount = allIndexCount;
     ret->geometryCount = geometryCount;
@@ -1359,7 +977,7 @@ void Chunks::invalidateChunk(int id) {
     if (id < 0 || id >= static_cast<int>(chunks_.size())) return;
     chunks_[id]->invalidate();
 
-    // Release ChunkBuildData to free scratch/OMM buffers for out-of-range chunks
+    // Release ChunkBuildData to free scratch buffers for out-of-range chunks
     if (id < static_cast<int>(chunkBuildDatas_.size())) {
         chunkBuildDatas_[id] = nullptr;
     }
@@ -1377,12 +995,25 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
     if (currentTextureGeneration != 0 && task.textureGeneration != currentTextureGeneration) {
         static int sStaleCount = 0;
         sStaleCount++;
+        bool hasVisibleChunk = false;
+        {
+            std::unique_lock<std::recursive_mutex> lock(mutex_);
+            hasVisibleChunk = task.id >= 0 &&
+                task.id < static_cast<int64_t>(chunks_.size()) &&
+                chunks_[task.id] &&
+                chunks_[task.id]->blas;
+        }
         if (sStaleCount <= 5 || sStaleCount % 1000 == 0) {
-            std::cerr << "[Chunks] Accepting stale Java-meshed chunk build (stale texture): taskGen="
+            std::cerr << "[Chunks] "
+                      << (hasVisibleChunk ? "Dropping" : "Accepting")
+                      << " stale Java-meshed chunk build (stale texture): taskGen="
                       << task.textureGeneration << " currentGen=" << currentTextureGeneration
                       << " chunk=" << task.id << " staleCount=" << sStaleCount << std::endl;
         }
-        // Do NOT reject -- geometry must stay visible even with stale material data.
+        if (hasVisibleChunk) {
+            // Preserve the existing visible chunk until a current-generation rebuild arrives.
+            return;
+        }
     }
 
     uint32_t allVertexCount = 0, allIndexCount = 0;
@@ -1441,101 +1072,6 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
     }
 }
 
-void Chunks::queueBlockStateBuild(ChunkBuildTaskV2 task) {
-    uint64_t currentTextureGeneration = Renderer::textureSystem.generation();
-    if (currentTextureGeneration != 0 && task.textureGeneration != currentTextureGeneration) {
-        static int sStaleCount = 0;
-        sStaleCount++;
-        if (sStaleCount <= 5 || sStaleCount % 1000 == 0) {
-            std::cerr << "[Chunks] Accepting stale block-state chunk build (stale texture): taskGen="
-                      << task.textureGeneration << " currentGen=" << currentTextureGeneration
-                      << " modelGen=" << Renderer::blockModelTable.generation()
-                      << " chunk=(" << task.x << "," << task.y << "," << task.z << ")"
-                      << " staleCount=" << sStaleCount << std::endl;
-        }
-        // Do NOT reject -- geometry must stay visible even with stale material data.
-    }
-
-    if (!Renderer::blockModelTable.isLoaded()) {
-        // Model table not ready — can't mesh in C++
-        return;
-    }
-
-    // Build mesher input from task data
-    BlockMesher::SectionInput input;
-    std::memcpy(input.blockStates, task.blockStates, sizeof(input.blockStates));
-    std::memcpy(input.biomes, task.biomes, sizeof(input.biomes));
-    std::memcpy(input.neighborStates, task.neighborStates, sizeof(input.neighborStates));
-    input.originX = task.x;
-    input.originY = task.y;
-    input.originZ = task.z;
-    input.blockAtlasTextureId = task.blockAtlasTextureId;
-
-    // C++ meshing — generates identical PBRTriangle output
-    auto meshOutput = BlockMesher::mesh(input, Renderer::blockModelTable);
-
-    // Build geometry arrays matching the existing ChunkBuildData format
-    std::vector<World::GeometryTypes> geometryTypes;
-    std::vector<std::vector<vk::VertexFormat::PBRTriangle>> vertices;
-    std::vector<std::vector<uint32_t>> indices;
-    uint32_t allVertexCount = 0, allIndexCount = 0;
-
-    if (!meshOutput.solidVertices.empty()) {
-        geometryTypes.push_back(World::WORLD_SOLID);
-        allVertexCount += static_cast<uint32_t>(meshOutput.solidVertices.size());
-        allIndexCount += static_cast<uint32_t>(meshOutput.solidIndices.size());
-        vertices.push_back(std::move(meshOutput.solidVertices));
-        indices.push_back(std::move(meshOutput.solidIndices));
-    }
-    if (!meshOutput.cutoutVertices.empty()) {
-        geometryTypes.push_back(World::WORLD_TRANSPARENT);
-        allVertexCount += static_cast<uint32_t>(meshOutput.cutoutVertices.size());
-        allIndexCount += static_cast<uint32_t>(meshOutput.cutoutIndices.size());
-        vertices.push_back(std::move(meshOutput.cutoutVertices));
-        indices.push_back(std::move(meshOutput.cutoutIndices));
-    }
-    if (!meshOutput.translucentVertices.empty()) {
-        geometryTypes.push_back(World::WORLD_TRANSPARENT);
-        allVertexCount += static_cast<uint32_t>(meshOutput.translucentVertices.size());
-        allIndexCount += static_cast<uint32_t>(meshOutput.translucentIndices.size());
-        vertices.push_back(std::move(meshOutput.translucentVertices));
-        indices.push_back(std::move(meshOutput.translucentIndices));
-    }
-
-    if (geometryTypes.empty()) {
-        // Empty section (all air) — invalidate
-        invalidateChunk(task.id);
-        return;
-    }
-
-    auto framework = Renderer::instance().framework();
-
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
-    if (task.id < 0 || task.id >= static_cast<int64_t>(chunks_.size())) return;
-
-    int geomCount = static_cast<int>(geometryTypes.size());
-    auto chunkBuildData = ChunkBuildData::create(
-        task.id, task.x, task.y, task.z, chunks_[task.id]->latestVersion++,
-        allVertexCount, allIndexCount, geomCount,
-        std::move(geometryTypes), std::move(vertices), std::move(indices));
-    chunkBuildData->textureGeneration = task.textureGeneration;
-    chunkBuildData->biomeGrassColor = task.biomeGrassColor;
-    chunkBuildData->biomeFoliageColor = task.biomeFoliageColor;
-    chunkBuildData->biomeWaterColor = task.biomeWaterColor;
-
-    chunkBuildDatas_[task.id] = chunkBuildData;
-    glm::vec3 camPos = Renderer::instance().world()
-        ? glm::vec3(Renderer::instance().world()->getCameraPos()) : glm::vec3(0);
-    if (chunkBuildScheduler_) {
-        chunkBuildScheduler_->enqueue(chunkBuildData, camPos, task.isImportant);
-    }
-
-    // Set chunk lights
-    if (!meshOutput.lights.empty()) {
-        setChunkLights(task.id, meshOutput.lights);
-    }
-}
-
 uint32_t Chunks::getInputQueueSize() {
     if (!chunkBuildScheduler_) return 0;
     return chunkBuildScheduler_->getInputQueueSize();
@@ -1546,63 +1082,6 @@ bool Chunks::isChunkReady(int64_t id) {
     if (id < 0 || id >= static_cast<int64_t>(chunks_.size())) return false;
     auto chunkRenderData = chunks_[id]->tryGetValid();
     return chunkRenderData->blas != nullptr;
-}
-
-void Chunks::setChunkLights(int64_t id, const std::vector<ChunkLightEntry> &lights) {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
-    if (id >= 0 && id < static_cast<int64_t>(chunks_.size()) && chunks_[id]) {
-        chunks_[id]->lightSources = lights;
-    }
-}
-
-void Chunks::ensureCapacity(uint32_t totalSlots) {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
-    if (totalSlots <= chunks_.size()) return;
-
-    auto framework = Renderer::instance().framework();
-    auto vma = framework->vma();
-    auto device = framework->device();
-
-    uint32_t oldSize = static_cast<uint32_t>(chunks_.size());
-    chunks_.resize(totalSlots);
-    chunkBuildDatas_.resize(totalSlots);
-
-    for (uint32_t i = oldSize; i < totalSlots; i++) {
-        chunks_[i] = Chunk1::create();
-        chunkBuildDatas_[i] = nullptr;
-    }
-
-    // Reallocate chunkPackedData SSBO to fit new size
-    auto newPackedData = vk::HostVisibleBuffer::create(
-        vma, device, totalSlots * sizeof(ChunkPackedData),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-    // Copy existing data
-    if (chunkPackedData_ && oldSize > 0) {
-        std::memcpy(newPackedData->mappedPtr(), chunkPackedData_->mappedPtr(),
-                    oldSize * sizeof(ChunkPackedData));
-    }
-    // Zero new entries
-    std::memset(static_cast<uint8_t*>(newPackedData->mappedPtr()) + oldSize * sizeof(ChunkPackedData),
-                0, (totalSlots - oldSize) * sizeof(ChunkPackedData));
-    chunkPackedData_ = newPackedData;
-
-    std::cout << "[ExtendedRD] Chunk array grown: " << oldSize << " -> " << totalSlots << std::endl;
-}
-
-void Chunks::submitExtendedBuild(uint32_t extId, std::shared_ptr<ChunkBuildData> cbd) {
-    std::unique_lock<std::recursive_mutex> lock(mutex_);
-
-    // Grow array if needed
-    if (extId >= chunks_.size()) {
-        ensureCapacity(extId + 256); // Grow in batches of 256
-    }
-
-    chunkBuildDatas_[extId] = cbd;
-    glm::vec3 camPos = Renderer::instance().world()
-        ? glm::vec3(Renderer::instance().world()->getCameraPos()) : glm::vec3(0);
-    if (chunkBuildScheduler_) {
-        chunkBuildScheduler_->enqueue(cbd, camPos, false);
-    }
 }
 
 void Chunks::close() {

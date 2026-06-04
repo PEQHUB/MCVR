@@ -23,27 +23,14 @@ struct EngineConfig {
     uint32_t upscalerResOverride = 99;  // Manual resolution scale override (only when quality = Custom)
 
     // --- rayTracing ---
-    bool areaLightsEnabled = false;  // Enable area light evaluation in RT shaders
     bool eonDiffuse = true;  // EON diffuse BRDF (replaces Lambertian)
-    bool greedyMeshingEnabled = false;  // Disabled: unsafe across native block and Java atlas geometry
     bool multiScatterGGX = true;  // Multi-scatter GGX energy compensation (Kulla-Conty)
-    bool noiseLOD = true;  // Noise-based LOD for distant surfaces
-    uint32_t ommBakerLevel = 4;  // OMM subdivision level (higher = more precise, more memory)
-    bool ommEnabled = false;  // Opacity Micro-Maps for alpha-tested geometry
-    bool pomEnabled = false;  // Enable parallax occlusion mapping
-    float pomFadeDistance = 64.0f;  // POM fade distance in blocks
-    float pomHeightScale = 0.15f;  // Parallax occlusion mapping height scale
-    uint32_t pomRefinement = 4;  // POM binary search refinement steps
-    uint32_t pomSteps = 32;  // POM max ray march steps
+    bool pomEnabled = false;  // Enable height-field geometry displacement
+    float pomFadeDistance = 64.0f;  // Height-field fade distance in blocks
+    float pomHeightScale = 0.15f;  // Height-field depth scale
+    uint32_t pomRefinement = 4;  // Height-field surface refinement steps
+    uint32_t pomSteps = 32;  // Height-field primary trace steps
     uint32_t rayBounces = 12;  // Maximum ray bounce depth
-    bool restirBounceEnabled = true;  // ReSTIR bounce light resampling
-    uint32_t restirCandidates = 8;  // RIS candidate count for ReSTIR
-    bool restirEnabled = true;  // ReSTIR Direct Illumination
-    bool restirSimplifiedBRDF = false;  // Simplified BRDF for ReSTIR evaluation
-    uint32_t restirSpatialRadius = 16;  // Spatial reuse radius in pixels for ReSTIR DI
-    uint32_t restirSpatialTaps = 3;  // Number of spatial neighbor taps for ReSTIR DI
-    uint32_t restirTemporalMClamp = 20;  // Temporal M-clamping for ReSTIR
-    uint32_t restirWClamp = 100;  // W-clamping for ReSTIR
     bool serEnabled = true;  // Shader Execution Reordering (NV hardware feature)
     bool serHintsEnabled = true;  // SER coherence hints for material sorting
     float shadowSoftness = 0.5f;  // Shadow penumbra softness
@@ -65,7 +52,6 @@ struct EngineConfig {
     // --- toneMapping ---
     float Lwhite = 4.0f;  // White point luminance for Reinhard-style operators
     float casSharpness = 0.5f;  // CAS/RCAS sharpening intensity
-    float colorExpansion = 1.0f;  // Gamut expansion strength
     bool psychoEnabled = true;  // Enable PsychoV psychophysical tone mapping
     float psychoPeakSDR = 1.0f;  // PsychoV SDR peak brightness multiplier
     float saturation = 1.3f;  // Post-tonemap color saturation
@@ -113,16 +99,11 @@ struct EngineConfig {
 
     // --- displacement ---
     uint32_t displacementQuality = 0;  // Displacement mapping quality (0=off, 1=DDA, 2=Tessellation, 3=Hybrid, 4=CLAS)
-    float tessFarDist = 64.0f;  // Distance for quarter tessellation (blocks)
-    uint32_t tessMaxLevel = 4;  // Maximum tessellation subdivision level
-    float tessMidDist = 16.0f;  // Distance for half tessellation (blocks)
-    float tessNearDist = 4.0f;  // Distance for full tessellation (blocks)
 
     // --- chunks ---
     uint32_t chunkBuildingBatchSize = 6;  // Chunks per BLAS build batch
     uint32_t chunkBuildingTotalBatches = 6;  // Maximum concurrent BLAS build batches
     float chunkCullDistance = 384.0f;  // Distance beyond which chunks are culled from TLAS
-    float chunkLodDistance = 160.0f;  // Distance at which chunks switch to lower LOD
 
     // --- debug ---
     int diagFlags = 0;  // Per-subsystem diagnostic flags bitmask
@@ -145,8 +126,6 @@ inline void validateConfig(EngineConfig& cfg) {
     if (cfg.dlssQuality > 4) cfg.dlssQuality = 4;
     if (cfg.upscalerResOverride < 33) cfg.upscalerResOverride = 33;
     if (cfg.upscalerResOverride > 100) cfg.upscalerResOverride = 100;
-    if (cfg.ommBakerLevel < 1) cfg.ommBakerLevel = 1;
-    if (cfg.ommBakerLevel > 8) cfg.ommBakerLevel = 8;
     if (cfg.pomFadeDistance < 8.0f) cfg.pomFadeDistance = 8.0f;
     if (cfg.pomFadeDistance > 256.0f) cfg.pomFadeDistance = 256.0f;
     if (cfg.pomHeightScale < 0.0f) cfg.pomHeightScale = 0.0f;
@@ -157,16 +136,6 @@ inline void validateConfig(EngineConfig& cfg) {
     if (cfg.pomSteps > 128) cfg.pomSteps = 128;
     if (cfg.rayBounces < 1) cfg.rayBounces = 1;
     if (cfg.rayBounces > 12) cfg.rayBounces = 12;
-    if (cfg.restirCandidates < 1) cfg.restirCandidates = 1;
-    if (cfg.restirCandidates > 32) cfg.restirCandidates = 32;
-    if (cfg.restirSpatialRadius < 1) cfg.restirSpatialRadius = 1;
-    if (cfg.restirSpatialRadius > 64) cfg.restirSpatialRadius = 64;
-    if (cfg.restirSpatialTaps < 0) cfg.restirSpatialTaps = 0;
-    if (cfg.restirSpatialTaps > 8) cfg.restirSpatialTaps = 8;
-    if (cfg.restirTemporalMClamp < 0) cfg.restirTemporalMClamp = 0;
-    if (cfg.restirTemporalMClamp > 100) cfg.restirTemporalMClamp = 100;
-    if (cfg.restirWClamp < 0) cfg.restirWClamp = 0;
-    if (cfg.restirWClamp > 1000) cfg.restirWClamp = 1000;
     if (cfg.shadowSoftness < 0.0f) cfg.shadowSoftness = 0.0f;
     if (cfg.shadowSoftness > 2.0f) cfg.shadowSoftness = 2.0f;
     if (cfg.sharcRoughnessThreshold < 0.0f) cfg.sharcRoughnessThreshold = 0.0f;
@@ -191,8 +160,6 @@ inline void validateConfig(EngineConfig& cfg) {
     if (cfg.Lwhite > 20.0f) cfg.Lwhite = 20.0f;
     if (cfg.casSharpness < 0.0f) cfg.casSharpness = 0.0f;
     if (cfg.casSharpness > 1.0f) cfg.casSharpness = 1.0f;
-    if (cfg.colorExpansion < 0.0f) cfg.colorExpansion = 0.0f;
-    if (cfg.colorExpansion > 2.0f) cfg.colorExpansion = 2.0f;
     if (cfg.psychoPeakSDR < 0.5f) cfg.psychoPeakSDR = 0.5f;
     if (cfg.psychoPeakSDR > 3.0f) cfg.psychoPeakSDR = 3.0f;
     if (cfg.saturation < 0.0f) cfg.saturation = 0.0f;
@@ -215,8 +182,6 @@ inline void validateConfig(EngineConfig& cfg) {
     if (cfg.chunkBuildingTotalBatches > 32) cfg.chunkBuildingTotalBatches = 32;
     if (cfg.chunkCullDistance < 64.0f) cfg.chunkCullDistance = 64.0f;
     if (cfg.chunkCullDistance > 2048.0f) cfg.chunkCullDistance = 2048.0f;
-    if (cfg.chunkLodDistance < 32.0f) cfg.chunkLodDistance = 32.0f;
-    if (cfg.chunkLodDistance > 512.0f) cfg.chunkLodDistance = 512.0f;
 }
 
 enum class ConfigKey {
@@ -228,27 +193,14 @@ enum class ConfigKey {
     UPSCALER_MODE,
     UPSCALER_QUALITY,
     UPSCALER_RES_OVERRIDE,
-    AREA_LIGHTS_ENABLED,
     EON_DIFFUSE,
-    GREEDY_MESHING_ENABLED,
     MULTI_SCATTER_GGX,
-    NOISE_LOD,
-    OMM_BAKER_LEVEL,
-    OMM_ENABLED,
     POM_ENABLED,
     POM_FADE_DISTANCE,
     POM_HEIGHT_SCALE,
     POM_REFINEMENT,
     POM_STEPS,
     RAY_BOUNCES,
-    RESTIR_BOUNCE_ENABLED,
-    RESTIR_CANDIDATES,
-    RESTIR_ENABLED,
-    RESTIR_SIMPLIFIED_BRDF,
-    RESTIR_SPATIAL_RADIUS,
-    RESTIR_SPATIAL_TAPS,
-    RESTIR_TEMPORAL_M_CLAMP,
-    RESTIR_W_CLAMP,
     SER_ENABLED,
     SER_HINTS_ENABLED,
     SHADOW_SOFTNESS,
@@ -266,7 +218,6 @@ enum class ConfigKey {
     SCENE_CHANGE_THRESHOLD,
     LWHITE,
     CAS_SHARPNESS,
-    COLOR_EXPANSION,
     PSYCHO_ENABLED,
     PSYCHO_PEAK_SDR,
     SATURATION,
@@ -304,14 +255,9 @@ enum class ConfigKey {
     OFFLINE_DLSS_EPOCH_LENGTH,
     OFFLINE_FOCAL_DISTANCE,
     DISPLACEMENT_QUALITY,
-    TESS_FAR_DIST,
-    TESS_MAX_LEVEL,
-    TESS_MID_DIST,
-    TESS_NEAR_DIST,
     CHUNK_BUILDING_BATCH_SIZE,
     CHUNK_BUILDING_TOTAL_BATCHES,
     CHUNK_CULL_DISTANCE,
-    CHUNK_LOD_DISTANCE,
     DIAG_FLAGS,
     DIAG_LEVEL,
     GPU_DIAGNOSTICS,

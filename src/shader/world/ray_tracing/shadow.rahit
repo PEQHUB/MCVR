@@ -11,6 +11,7 @@
 #include "../util/util.glsl"
 #include "common/shared.hpp"
 #include "../util/colorspace.glsl"
+#include "../util/texture_rules.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
@@ -38,7 +39,6 @@ layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
 };
 
 #include "../util/vertex_fetch.glsl"
-#include "../util/material_properties.glsl"
 
 layout(set = 2, binding = 0) uniform Uniform {
     WorldUBO ubo;
@@ -49,34 +49,40 @@ layout(set = 2, binding = 0) uniform Uniform {
 layout(push_constant) uniform PushConstant {
     int numRayBounces;
     int flags;
-    int areaLightCount;
-    float shadowSoftness;
-    int risCandidates;
-    int temporalMClamp;
-    int wClamp;
+    int reservedLighting0;
+    float reservedLighting1;
+    int reservedLighting2;
+    int reservedLighting3;
+    int reservedLighting4;
     float preExposure;
-    float pomHeightScale;
-    int pomSteps;
-    int pomRefinement;
-    float pomFadeDistance;
-    float colorExpansion;
+    float displacementDepthScale;
+    int displacementPrimarySteps;
+    int displacementRefinementSteps;
+    float displacementFadeDistanceBlocks;
     uint blueNoiseFrame;
     uint rtDebugFlags;
     uint handInstanceCount;
-    uint64_t _sharcBDA0, _sharcBDA1, _sharcBDA2;
-    float _sharcPad0, _sharcPad1, _sharcPad2, _sharcPad3;
-    uint _sharcPad4;
-    float _sharcPad5;
-    uint _sharcPad6;
-    float _sharcPad7;
-    int _sharcPad8, _sharcPad9;
-    int _sharcQueryModePad, _sharcQueryReservedPad;
+    uint reservedPc0;
+    uint64_t sharcHashEntries;
+    uint64_t sharcAccumulation;
+    uint64_t sharcResolved;
+    float sharcCameraX;
+    float sharcCameraY;
+    float sharcCameraZ;
+    float sharcSceneScale;
+    uint sharcCapacity;
+    float sharcRadianceScale;
+    uint sharcFrameIndex;
+    float sharcRoughnessThreshold;
+    int sharcUpdateBlockSize;
+    int sharcUpdateBounces;
+    int sharcQueryMode;
+    int sharcQueryReserved;
     int offlineFlags;
     int accumFrameCount;
     float aperture;
     float focalDistance;
-    // Material SSBO BDA
-    uint64_t materialClassAddr;
+    uint64_t reservedAddr;
 } pc;
 #define SIMPLIFIED_INDIRECT ((pc.flags & 1) != 0)
 #define SIMPLIFY_THIS_RAY (SIMPLIFIED_INDIRECT && shadowRay.bounceIndex > 1)
@@ -112,10 +118,10 @@ uint thinPlantHitKey(ivec3 cell, uint blockType) {
     return h == 0u ? 1u : h;
 }
 
-vec3 thinPlantShadowTransmittance(vec3 tint, bool hasMaterialEntry, MaterialClassEntry mc) {
+vec3 thinPlantShadowTransmittance(vec3 tint) {
     vec3 plantTint = clamp(tint, vec3(0.0), vec3(1.0));
-    float fill = hasMaterialEntry ? clamp(mc.subsurface, 0.0, 1.0) : 0.18;
-    float shadowStrength = hasMaterialEntry ? clamp(mc.normalStrength, 0.0, 2.0) : 1.0;
+    float fill = 0.18;
+    float shadowStrength = 1.0;
     vec3 coloredTransmission = mix(vec3(1.0), plantTint, clamp(fill * 0.55, 0.0, 0.75));
     float transmission = clamp(1.0 - shadowStrength * 0.28, 0.28, 0.95);
     return clamp(coloredTransmission * transmission, vec3(0.25), vec3(0.95));
@@ -158,17 +164,13 @@ void main() {
             // Block geometry: texture array sampling via SpriteRegistry
             uint spriteId = textureID;
 
-            if ((v0.flags & PBR_FLAG_GREEDY_MERGED) != 0u) {
-                textureUV = fract(textureUV);
-            }
-
             albedo = fetchBlockAlbedoLod(spriteId, textureUV, ubo.animTick, 0.0);
 
             if (!SIMPLIFY_THIS_RAY) {
                 specular = fetchBlockSpecularLod(spriteId, textureUV, 0.0);
             }
 
-            flags = ivec4(0); // flag arrays not yet in texture array system
+            flags = fetchBlockFlagLod(spriteId, textureUV, 0.0);
         } else {
             // Entity geometry: legacy atlas sampling via textures[]
             albedo = texture(textures[nonuniformEXT(textureID)], textureUV);
@@ -224,15 +226,7 @@ void main() {
 
     tint = CS_BT709_TO_BT2020 * tint;  // BT.709 -> BT.2020 working space
     uint packedBlockType = v0.emissiveBlockType;
-    uint materialType = (packedBlockType >> 8u) & 0xFFu;
-    MaterialClassEntry thinPlantMc;
-    bool thinPlantHasMaterialEntry = false;
-    if (materialType > 0u && pc.materialClassAddr != 0) {
-        uint thinPlantMatIdx = materialType - 1u;
-        MaterialClassBufferRef matBuf = MaterialClassBufferRef(pc.materialClassAddr);
-        thinPlantMc = matBuf.materialClassMapping.entries[thinPlantMatIdx];
-        thinPlantHasMaterialEntry = true;
-    }
+
     bool thinCutoutPlant = isBlockGeometry && ((v0.emissiveBlockType & PBR_PACKED_THIN_CUTOUT_PLANT) != 0u);
     if (thinCutoutPlant) {
         if (alpha < 0.05) {
@@ -254,7 +248,7 @@ void main() {
             return;
         }
         shadowRay.lastThinPlantHitKey = hitKey;
-        shadowRay.throughput *= thinPlantShadowTransmittance(tint, thinPlantHasMaterialEntry, thinPlantMc);
+        shadowRay.throughput *= thinPlantShadowTransmittance(tint);
         ignoreIntersectionEXT;
         return;
     }
@@ -263,43 +257,13 @@ void main() {
     // which is equivalent to alpha < (1.0 - 1e-6)
     bool hasTransmission;
     if (SIMPLIFY_THIS_RAY) {
-        hasTransmission = isFluidGeometry || alpha < 0.95;
+        hasTransmission = isFluidGeometry || alpha < 0.95 ||
+            (isBlockGeometry && textureRuleHasTransmission(textureID));
     } else {
         LabPBRMat mat = convertLabPBRMaterial(albedo * colorLayer, specular, normalVal);
-        // Material override: vertex materialType → mask texture → SSBO lookup
-        uint packedBlockType = v0.emissiveBlockType;
-        uint materialType = (packedBlockType >> 8u) & 0xFFu;
-        uint shadowMatIdx = 0u;
-        bool shadowHasMat = false;
-        if (materialType > 0u) {
-            shadowMatIdx = materialType - 1u;
-            shadowHasMat = true;
-        } else if (!isBlockGeometry) {
-            // Entity fallback: per-texel mask texture (only valid for bindless textureID)
-            int maskTexID = mapping.entries[textureID].maskTexture;
-            if (maskTexID >= 0) {
-                shadowMatIdx = uint(texture(textures[nonuniformEXT(maskTexID)], uv).r * 255.0 + 0.5);
-                shadowHasMat = (shadowMatIdx < 160u);
-            }
+        if (isBlockGeometry) {
+            applyTextureRule(textureID, mat);
         }
-        if (shadowHasMat && pc.materialClassAddr != 0) {
-            MaterialClassBufferRef matBuf = MaterialClassBufferRef(pc.materialClassAddr);
-            MaterialClassEntry mc = matBuf.materialClassMapping.entries[shadowMatIdx];
-
-            // Override transmission from material slider
-            if (mc.transmission >= 0.0) {
-                mat.transmission = mc.transmission;
-            }
-
-            // Roughness modulates shadow color: smooth glass = clear colored shadow,
-            // rough glass = scattered/dimmer (frosty)
-            // Ground truth: no roughness tint hack — Beer's Law handles absorption correctly
-            if (mat.transmission > 0.0 && !BEER_LAW_SHADOWS) {
-                float matRoughness = mc.roughness * mc.roughness;  // perceptual -> GGX alpha
-                tint = mix(tint, vec3(1.0), clamp(matRoughness * 2.0, 0.0, 1.0));
-            }
-        }
-
         hasTransmission = mat.transmission > 0.0;
     }
 

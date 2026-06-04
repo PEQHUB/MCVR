@@ -1,4 +1,5 @@
 #include "core/render/texture_arrays.hpp"
+#include "core/render/render_framework.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -232,6 +233,7 @@ TextureArrayManager::DirtyLayers TextureArrayManager::flushUploads(
 	uint32_t albedoId,
 	uint32_t specId,
 	uint32_t normId,
+	uint32_t flagId,
 	size_t maxBytes) {
 	DirtyLayers dirty;
 
@@ -316,6 +318,7 @@ TextureArrayManager::DirtyLayers TextureArrayManager::flushUploads(
 		if (upload.arrayId == albedoId) dirty.albedo.push_back(upload.layer);
 		else if (upload.arrayId == specId) dirty.specular.push_back(upload.layer);
 		else if (upload.arrayId == normId) dirty.normal.push_back(upload.layer);
+		else if (upload.arrayId == flagId) dirty.flag.push_back(upload.layer);
 	}
 
 	return dirty;
@@ -405,6 +408,23 @@ std::vector<std::shared_ptr<vk::HostVisibleBuffer>> TextureArrayManager::takeSta
 
 void TextureArrayManager::reset() {
     std::lock_guard<std::mutex> lock(mutex_);
+    arrays_.clear();
+    stagedUploads_.clear();
+    currentFrameStagingBuffers_.clear();
+    nextArrayId_ = 0;
+}
+
+void TextureArrayManager::retire(GarbageCollector& gc) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (auto& [id, info] : arrays_) {
+        gc.collect(info.image);
+        gc.collect(info.sampler);
+    }
+    for (auto& staging : currentFrameStagingBuffers_) {
+        gc.collect(staging);
+    }
+
     arrays_.clear();
     stagedUploads_.clear();
     currentFrameStagingBuffers_.clear();

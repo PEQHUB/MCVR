@@ -101,15 +101,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativ
     }});
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetAreaLightsEnabled(
-    JNIEnv*, jclass, jboolean value, jboolean /*write*/) {
-    bool captured = static_cast<bool>(value);
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.areaLightsEnabled = captured;
-        engine::notifyConfigChange(engine::ConfigKey::AREA_LIGHTS_ENABLED);
-    }});
-}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetEonDiffuse(
     JNIEnv*, jclass, jboolean value, jboolean /*write*/) {
@@ -121,15 +112,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativ
     }});
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetGreedyMeshingEnabled(
-    JNIEnv*, jclass, jboolean, jboolean /*write*/) {
-    bool captured = false;
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.greedyMeshingEnabled = captured;
-        engine::notifyConfigChange(engine::ConfigKey::GREEDY_MESHING_ENABLED);
-    }});
-}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetMultiScatterGGX(
     JNIEnv*, jclass, jboolean value, jboolean /*write*/) {
@@ -141,37 +123,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativ
     }});
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetNoiseLOD(
-    JNIEnv*, jclass, jboolean value, jboolean /*write*/) {
-    bool captured = static_cast<bool>(value);
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.noiseLOD = captured;
-        engine::notifyConfigChange(engine::ConfigKey::NOISE_LOD);
-    }});
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetOmmBakerLevel(
-    JNIEnv*, jclass, jint value, jboolean /*write*/) {
-    uint32_t captured = std::clamp(static_cast<uint32_t>(value), static_cast<uint32_t>(1), static_cast<uint32_t>(8));
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.ommBakerLevel = captured;
-        engine::notifyConfigChange(engine::ConfigKey::OMM_BAKER_LEVEL);
-    }});
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetOmmEnabled(
-    JNIEnv*, jclass, jboolean value, jboolean /*write*/) {
-    bool captured = static_cast<bool>(value);
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.ommEnabled = captured;
-        cfg.needRecreate = true;
-        engine::onConfigSideEffect(engine::ConfigKey::OMM_ENABLED);
-        engine::notifyConfigChange(engine::ConfigKey::OMM_ENABLED);
-    }});
-}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetPomEnabled(
     JNIEnv*, jclass, jboolean value, jboolean /*write*/) {
@@ -233,85 +186,13 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativ
     }});
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetRestirBounceEnabled(
-    JNIEnv*, jclass, jboolean value, jboolean /*write*/) {
-    bool captured = static_cast<bool>(value);
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.restirBounceEnabled = captured;
-        engine::notifyConfigChange(engine::ConfigKey::RESTIR_BOUNCE_ENABLED);
-    }});
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetRestirCandidates(
-    JNIEnv*, jclass, jint value, jboolean /*write*/) {
-    uint32_t captured = std::clamp(static_cast<uint32_t>(value), static_cast<uint32_t>(1), static_cast<uint32_t>(32));
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.restirCandidates = captured;
-        engine::notifyConfigChange(engine::ConfigKey::RESTIR_CANDIDATES);
-    }});
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetRestirEnabled(
-    JNIEnv*, jclass, jboolean value, jboolean /*write*/) {
-    bool captured = static_cast<bool>(value);
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.restirEnabled = captured;
-        engine::notifyConfigChange(engine::ConfigKey::RESTIR_ENABLED);
-    }});
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetRestirSimplifiedBRDF(
-    JNIEnv*, jclass, jboolean value, jboolean /*write*/) {
-    bool captured = static_cast<bool>(value);
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.restirSimplifiedBRDF = captured;
-        engine::notifyConfigChange(engine::ConfigKey::RESTIR_SIMPLIFIED_BRDF);
-    }});
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetRestirSpatialRadius(
-    JNIEnv*, jclass, jint value, jboolean /*write*/) {
-    uint32_t captured = std::clamp(static_cast<uint32_t>(value), static_cast<uint32_t>(1), static_cast<uint32_t>(64));
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.restirSpatialRadius = captured;
-        engine::notifyConfigChange(engine::ConfigKey::RESTIR_SPATIAL_RADIUS);
-    }});
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetRestirSpatialTaps(
-    JNIEnv*, jclass, jint value, jboolean /*write*/) {
-    uint32_t captured = std::clamp(static_cast<uint32_t>(value), static_cast<uint32_t>(0), static_cast<uint32_t>(8));
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.restirSpatialTaps = captured;
-        engine::notifyConfigChange(engine::ConfigKey::RESTIR_SPATIAL_TAPS);
-    }});
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetRestirTemporalMClamp(
-    JNIEnv*, jclass, jint value, jboolean /*write*/) {
-    uint32_t captured = std::clamp(static_cast<uint32_t>(value), static_cast<uint32_t>(0), static_cast<uint32_t>(100));
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.restirTemporalMClamp = captured;
-        engine::notifyConfigChange(engine::ConfigKey::RESTIR_TEMPORAL_M_CLAMP);
-    }});
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetRestirWClamp(
-    JNIEnv*, jclass, jint value, jboolean /*write*/) {
-    uint32_t captured = std::clamp(static_cast<uint32_t>(value), static_cast<uint32_t>(0), static_cast<uint32_t>(1000));
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.restirWClamp = captured;
-        engine::notifyConfigChange(engine::ConfigKey::RESTIR_W_CLAMP);
-    }});
-}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetSerEnabled(
     JNIEnv*, jclass, jboolean value, jboolean /*write*/) {
@@ -483,15 +364,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativ
     }});
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetColorExpansion(
-    JNIEnv*, jclass, jint value, jboolean /*write*/) {
-    float captured = std::clamp(static_cast<float>(value) / 100.0f, 0.0f, 2.0f);
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.colorExpansion = captured;
-        engine::notifyConfigChange(engine::ConfigKey::COLOR_EXPANSION);
-    }});
-}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetPsychoEnabled(
     JNIEnv*, jclass, jboolean value, jboolean /*write*/) {
@@ -863,45 +735,9 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativ
     }});
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetTessFarDist(
-    JNIEnv*, jclass, jfloat value, jboolean /*write*/) {
-    float captured = value;
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.tessFarDist = captured;
-        engine::notifyConfigChange(engine::ConfigKey::TESS_FAR_DIST);
-    }});
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetTessMaxLevel(
-    JNIEnv*, jclass, jint value, jboolean /*write*/) {
-    uint32_t captured = static_cast<uint32_t>(value);
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.tessMaxLevel = captured;
-        engine::notifyConfigChange(engine::ConfigKey::TESS_MAX_LEVEL);
-    }});
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetTessMidDist(
-    JNIEnv*, jclass, jfloat value, jboolean /*write*/) {
-    float captured = value;
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.tessMidDist = captured;
-        engine::notifyConfigChange(engine::ConfigKey::TESS_MID_DIST);
-    }});
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetTessNearDist(
-    JNIEnv*, jclass, jfloat value, jboolean /*write*/) {
-    float captured = value;
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.tessNearDist = captured;
-        engine::notifyConfigChange(engine::ConfigKey::TESS_NEAR_DIST);
-    }});
-}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetChunkBuildingBatchSize(
     JNIEnv*, jclass, jint value, jboolean /*write*/) {
@@ -933,15 +769,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativ
     }});
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetChunkLodDistance(
-    JNIEnv*, jclass, jfloat value, jboolean /*write*/) {
-    float captured = std::clamp(value, 32.0f, 512.0f);
-    engine::activeBridge().post(engine::CmdConfigPatch{[captured]() {
-        auto& cfg = engine::activeConfig();
-        cfg.chunkLodDistance = captured;
-        engine::notifyConfigChange(engine::ConfigKey::CHUNK_LOD_DISTANCE);
-    }});
-}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_v2_bridge_ConfigBridge_nativeSetDiagFlags(
     JNIEnv*, jclass, jint value, jboolean /*write*/) {

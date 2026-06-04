@@ -9,7 +9,6 @@
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_EXT_shader_16bit_storage : enable
 #extension GL_EXT_control_flow_attributes : require
-#extension GL_EXT_opacity_micromap : require
 
 // SHARC compile-time gate: controlled by CMake MCVR_ENABLE_SHARC option.
 #ifndef SHARC_COMPILE_ENABLE
@@ -50,22 +49,20 @@ layout(set = 2, binding = 2) uniform SkyUniform {
 layout(push_constant) uniform PushConstant {
     int numRayBounces;
     int flags;
-    int areaLightCount;
-    float shadowSoftness;
-    int risCandidates;
-    int temporalMClamp;
-    int wClamp;
+    int reservedLighting0;
+    float reservedLighting1;
+    int reservedLighting2;
+    int reservedLighting3;
+    int reservedLighting4;
     float preExposure;
-    float pomHeightScale;
-    int pomSteps;
-    int pomRefinement;
-    float pomFadeDistance;
-    // Color expansion
-    float colorExpansion;
+    float displacementDepthScale;
+    int displacementPrimarySteps;
+    int displacementRefinementSteps;
+    float displacementFadeDistanceBlocks;
     uint blueNoiseFrame;
     uint rtDebugFlags;
     uint handInstanceCount;
-    // SHARC fields
+    uint reservedPc0;
     uint64_t sharcHashEntries;
     uint64_t sharcAccumulation;
     uint64_t sharcResolved;
@@ -79,6 +76,13 @@ layout(push_constant) uniform PushConstant {
     float sharcRoughnessThreshold;
     int sharcUpdateBlockSize;
     int sharcUpdateBounces;
+    int sharcQueryMode;
+    int sharcQueryReserved;
+    int offlineFlags;
+    int accumFrameCount;
+    float aperture;
+    float focalDistance;
+    uint64_t reservedAddr;
 } pc;
 
 layout(location = 0) rayPayloadEXT PrimaryRay mainRay;
@@ -245,7 +249,6 @@ void main() {
         }
 
         uint bounceFlags = rayFlags;
-        bounceFlags |= gl_RayFlagsForceOpacityMicromap2StateEXT;
 
         traceRayEXT(topLevelAS, bounceFlags, bounceMask, 1, 1, 0,
                     mainRay.origin, 0.0, mainRay.direction, len, 0);

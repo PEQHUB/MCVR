@@ -399,17 +399,10 @@ void ToneMappingModuleContext::render() {
         descriptorTable->bindSamplerImageForShader(module->emissionSampler_, emissionImage, 0, 3);
     }
 
-    // Bind render-res HDR for histogram metering (DLSS input, before upscaling).
-    // When DLSS-RR is active, its neural network may attenuate extreme HDR values,
-    // weakening the iris cap. Metering from the pre-DLSS image gives accurate brightness.
-    auto &renderResImages = Renderer::renderResHdrImages;
-    std::shared_ptr<vk::DeviceLocalImage> renderResHdrImage;
-    if (frameIdx < renderResImages.size() && renderResImages[frameIdx]) {
-        renderResHdrImage = renderResImages[frameIdx];
-    } else {
-        renderResHdrImage = hdrImage;  // fallback: DLSS off → hdrImage IS render res
-    }
-    descriptorTable->bindSamplerImageForShader(module->renderResHdrSampler_, renderResHdrImage, 0, 4);
+    // Meter the same HDR image that tone_mapping.frag displays. DLSS-D/RR is temporal
+    // and can change reconstructed luminance, so exposure must adapt to the displayed signal.
+    std::shared_ptr<vk::DeviceLocalImage> meteringHdrImage = hdrImage;
+    descriptorTable->bindSamplerImageForShader(module->renderResHdrSampler_, meteringHdrImage, 0, 4);
 
     std::vector<vk::CommandBuffer::ImageMemoryBarrier> imageBarriers = {
         {
@@ -458,18 +451,18 @@ void ToneMappingModuleContext::render() {
         });
     }
 
-    // Add barrier for render-res HDR image (DLSS/NRD wrote it, histogram reads it)
-    if (renderResHdrImage && renderResHdrImage != hdrImage) {
+    // Add barrier for a distinct metering image if future modes bind one.
+    if (meteringHdrImage && meteringHdrImage != hdrImage) {
         imageBarriers.push_back({
             .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
             .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
             .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-            .oldLayout = renderResHdrImage->imageLayout(),
+            .oldLayout = meteringHdrImage->imageLayout(),
             .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .srcQueueFamilyIndex = mainQueueIndex,
             .dstQueueFamilyIndex = mainQueueIndex,
-            .image = renderResHdrImage,
+            .image = meteringHdrImage,
             .subresourceRange = vk::wholeColorSubresourceRange,
         });
     }
@@ -487,8 +480,8 @@ void ToneMappingModuleContext::render() {
         imageBarriers);
     hdrImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (emissionImage) emissionImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (renderResHdrImage && renderResHdrImage != hdrImage)
-        renderResHdrImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (meteringHdrImage && meteringHdrImage != hdrImage)
+        meteringHdrImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 #ifdef USE_AMD
     ldrImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
@@ -579,12 +572,9 @@ void ToneMappingModuleContext::render() {
     pc.tonemapParam5 = Renderer::options.tonemapParams[5];
     pc.tonemapParam6 = Renderer::options.tonemapParams[6];
     pc.tonemapParam7 = Renderer::options.tonemapParams[7];
-    // RT pre-exposure — push constant layout parity with hist/exposure shaders.
-    // Currently unused by shaders (histogram meters raw pre-exposed values; auto-exposure
-    // cancels preExposure naturally). Kept for potential future diagnostic use.
-    float rtPreExposure = (Renderer::options.denoiserMode == 1) ? 0.1f : 1.0f;
-    if (Renderer::options.offlineState == 2) rtPreExposure = 1.0f;
-    pc.preExposure = rtPreExposure;
+    // RT/DLSS-D is scene-referred; keep push constant layout parity with hist/exposure
+    // shaders while preserving a neutral scale for diagnostics/future shader use.
+    pc.preExposure = 1.0f;
     pc.highlightWeight = Renderer::options.highlightWeight;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
@@ -594,10 +584,9 @@ void ToneMappingModuleContext::render() {
     worldCommandBuffer->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)
         ->bindComputePipeline(module->histPipeline_);
 
-    // Dispatch histogram at render-res dimensions (binding 4 = render-res HDR for metering).
-    // hist.comp uses textureSize(uHdrRenderRes) for bounds, so dispatch must cover the render-res image.
-    uint32_t histW = renderResHdrImage->width();
-    uint32_t histH = renderResHdrImage->height();
+    // Dispatch histogram over the displayed HDR source bound at binding 4.
+    uint32_t histW = meteringHdrImage->width();
+    uint32_t histH = meteringHdrImage->height();
     uint32_t groupX = (histW + 16 - 1) / 16;
     uint32_t groupY = (histH + 16 - 1) / 16;
     vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), groupX, groupY, 1);

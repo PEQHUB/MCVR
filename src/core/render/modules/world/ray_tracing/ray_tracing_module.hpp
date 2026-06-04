@@ -1,9 +1,8 @@
-#pragma once
+﻿#pragma once
 
 #include "common/shared.hpp"
 #include "common/singleton.hpp"
 #include "core/all_extern.hpp"
-#include "core/render/modules/world/shader_pack/shader_pack.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
 #include "core/render/modules/world/world_module.hpp"
@@ -19,57 +18,44 @@ class Atmosphere;
 class AtmosphereContext;
 class WorldPrepare;
 class WorldPrepareContext;
-class ShaderPack;
-
-#include <optional>
-#include <unordered_map>
-#include <variant>
 
 struct RayTracingPushConstant {
     int numRayBounces;
-    int flags;           // bit 0: simplified indirect, bit 1: area lights enabled
-                         // bit 2: restir, bit 3: simplified BRDF, bit 4: restir bounce
-                         // bit 5: SHARC enabled, bit 6: noise LOD
-                         // bit 7: multi-scatter GGX, bit 8: EON diffuse
-    int areaLightCount;  // number of active area lights this frame
-    float shadowSoftness;
-    int risCandidates;   // total RIS candidates per pixel
-    int temporalMClamp;  // temporal reservoir M clamp (used as float in shader)
-    int wClamp;          // importance weight W clamp (used as float in shader)
-    float preExposure;   // pre-exposure multiplier for DLSS-RR normalization
-    // Shader displacement fields (fields 8-11, 16 bytes)
-    float pomHeightScale;        // 0 = disabled, else depth scale (0.01-0.50)
-    int   pomSteps;              // linear search steps (8-512)
-    int   pomRefinement;         // binary refinement iterations (0-8)
-    float pomFadeDistance;       // distance in blocks to fade displacement out (8-256)
-    // Color expansion (offset 48)
-    float colorExpansion;        // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
-    uint32_t blueNoiseFrame;     // monotonic frame counter for blue noise temporal offset
-    uint32_t rtDebugFlags;       // transient RT.MainTrace floor sweep flags
-    uint32_t handInstanceCount;  // active HAND TLAS instances; skips empty full-screen hand pass
-    // SHARC fields: buffer device addresses + grid params
-    uint64_t sharcHashEntries;   // BDA of hash entry buffer
-    uint64_t sharcAccumulation;  // BDA of accumulation buffer
-    uint64_t sharcResolved;      // BDA of resolved radiance buffer
-    float sharcCameraX;          // camera world position for LOD grid
+    int flags;
+    int reservedLighting0;
+    float reservedLighting1;
+    int reservedLighting2;
+    int reservedLighting3;
+    int reservedLighting4;
+    float preExposure;
+    float displacementDepthScale;
+    int displacementPrimarySteps;
+    int displacementRefinementSteps;
+    float displacementFadeDistanceBlocks;
+    uint32_t blueNoiseFrame;
+    uint32_t rtDebugFlags;
+    uint32_t handInstanceCount;
+    uint32_t reservedPc0;
+    uint64_t sharcHashEntries;
+    uint64_t sharcAccumulation;
+    uint64_t sharcResolved;
+    float sharcCameraX;
     float sharcCameraY;
     float sharcCameraZ;
-    float sharcSceneScale;       // scene scale for voxel sizing (default 4.0)
-    uint32_t sharcCapacity;      // hash map capacity (2^21 = 2M entries)
-    float sharcRadianceScale;    // quantization scale for accumulation atomics
-    uint32_t sharcFrameIndex;    // frame counter for resolve
-    float sharcRoughnessThreshold; // min roughness for cache query (0=all, 1=diffuse only)
-    int sharcUpdateBlockSize;      // sparse update NxN block size (2-8)
-    int sharcUpdateBounces;        // max bounces in SHARC update pass (2-8)
-    int sharcQueryMode;            // 0=off, 1=observe, 2=active isolated query pass
-    int sharcQueryReserved;        // keep materialClassAddr 8-byte aligned
-    // Offline accumulation fields
-    int offlineFlags;              // bit 0: accumulating, bit 1: disable RR, bit 2: disable clamp
-    int accumFrameCount;           // frame index for jitter sequence during accumulation
-    float aperture;                // thin lens aperture radius (0 = pinhole)
-    float focalDistance;           // focal distance in blocks
-    // Material SSBO BDA — avoids descriptor lookup for material reads
-    uint64_t materialClassAddr;    // BDA of MaterialClassMapping buffer
+    float sharcSceneScale;
+    uint32_t sharcCapacity;
+    float sharcRadianceScale;
+    uint32_t sharcFrameIndex;
+    float sharcRoughnessThreshold;
+    int sharcUpdateBlockSize;
+    int sharcUpdateBounces;
+    int sharcQueryMode;
+    int sharcQueryReserved;
+    int offlineFlags;
+    int accumFrameCount;
+    float aperture;
+    float focalDistance;
+    uint64_t reservedAddr;
 };
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {
@@ -127,52 +113,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     void initImages();
     void initPipeline();
     void initSBT();
-    void initSpatialPipeline();
-    void initClusterPipeline();
-    void initDirectLightPipeline();
-    void initUpstreamDirectLightRuntime();
-    void refreshUpstreamDirectLightRuntime(uint32_t frameIndex);
-    void initUpstreamDirectLightDescriptorTables();
-    void initUpstreamDirectLightPipelines();
-    bool renderUpstreamDirectLight(RayTracingModuleContext &context);
-    std::vector<ExpressionEvaluator::Variable> upstreamDirectLightExpressionVariables() const;
-    double evaluateUpstreamDirectLightNumericExpression(
-        const std::string &expression,
-        const ShaderPack::ExecutionVariables &variables);
-    std::optional<std::reference_wrapper<ShaderPackLoader::VariableConfig>>
-    findUpstreamDirectLightExecutionVariableConfig(std::string_view name);
-    std::shared_ptr<vk::DeviceLocalImage> findUpstreamDirectLightTargetImage(
-        const std::string &target,
-        uint32_t frameIndex);
-    std::optional<std::reference_wrapper<ShaderPack::RuntimeTexture>>
-    findUpstreamDirectLightRuntimeTexture(std::string_view name);
-    std::optional<std::reference_wrapper<ShaderPack::RuntimeBuffer>>
-    findUpstreamDirectLightRuntimeBuffer(std::string_view name);
-    void collectUpstreamDirectLightRayTracingRequests(
-        RayTracingPass &pass,
-        std::vector<ShaderPack::ShaderCreateInfo> &requests);
-    void collectUpstreamDirectLightComputeRequests(
-        const ComputePass &pass,
-        std::vector<ShaderPack::ShaderCreateInfo> &requests);
-    void buildUpstreamDirectLightRayTracingPass(
-        RayTracingPass &pass,
-        std::shared_ptr<vk::Device> device,
-        const std::vector<std::shared_ptr<vk::Shader>> &compiledShaders,
-        size_t &shaderOffset);
-    void buildUpstreamDirectLightComputePass(
-        ComputePass &pass,
-        std::shared_ptr<vk::Device> device,
-        const std::vector<std::shared_ptr<vk::Shader>> &compiledShaders,
-        size_t &shaderOffset);
-    void renderUpstreamDirectLightRayTracingPass(
-        RayTracingPass &pass,
-        RayTracingModuleContext &context,
-        const ShaderPack::ExecutionVariables &variables);
-    void renderUpstreamDirectLightComputePass(
-        ComputePass &pass,
-        RayTracingModuleContext &context,
-        const ShaderPack::ExecutionVariables &variables);
-    void uploadUpstreamDirectLightStaticSbts(std::shared_ptr<vk::Device> device);
     void initSharcBuffers();
     void initSharcUpdatePipeline();
     void initSharcResolvePipeline();
@@ -229,6 +169,9 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     VkImageView lastAlbedoTextureView_ = VK_NULL_HANDLE;
     VkImageView lastSpecularTextureView_ = VK_NULL_HANDLE;
     VkImageView lastNormalTextureView_ = VK_NULL_HANDLE;
+    VkImageView lastFlagTextureView_ = VK_NULL_HANDLE;
+    VkBuffer lastSpriteRegistryBuffer_ = VK_NULL_HANDLE;
+    VkBuffer lastTextureRuleBuffer_ = VK_NULL_HANDLE;
 
     uint32_t numRayBounces_ = 4;
     bool useJitter_ = true;
@@ -274,76 +217,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidateThroughputImages_;
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidatePrefixRadianceFlagsImages_;
 
-#ifdef MCVR_ENABLE_DIRECT_LIGHT_PIPELINE
-    // Private direct-light split resources. These stay internal until a backend proves useful.
-    std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightPrimarySurfaceImages_;
-    std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightReservoirPingImages_;
-    std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightReservoirPongImages_;
-    std::vector<std::shared_ptr<vk::DeviceLocalImage>> directLightOutputImages_;
-    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> directLightCounterBuffers_;
-    uint32_t directLightLastCounters_[16] = {};
-    VkPipeline directLightPrimaryPipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout directLightPrimaryPipelineLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout directLightPrimaryDescSetLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool directLightPrimaryDescPool_ = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSet> directLightPrimaryDescSets_;
-    std::shared_ptr<vk::Shader> directLightPrimaryShader_;
-    VkPipeline directLightInitialPipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout directLightInitialPipelineLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout directLightInitialDescSetLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool directLightInitialDescPool_ = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSet> directLightInitialDescSets_;
-    std::shared_ptr<vk::Shader> directLightInitialShader_;
-    VkPipeline directLightUtilityPipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout directLightUtilityPipelineLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout directLightUtilityDescSetLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool directLightUtilityDescPool_ = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSet> directLightUtilityDescSets_;
-    std::shared_ptr<vk::Shader> directLightUtilityShader_;
-    std::shared_ptr<ShaderPack> directLightUpstreamShaderPack_;
-    using UpstreamExecutionVariable = ShaderPack::ExecutionVariable;
-    using UpstreamExecutionVariables = ShaderPack::ExecutionVariables;
-    using UpstreamPassVariant = std::variant<std::shared_ptr<RayTracingPass>, std::shared_ptr<ComputePass>>;
-    std::vector<std::shared_ptr<vk::DescriptorTable>> directLightUpstreamDescriptorTables_;
-    std::vector<UpstreamPassVariant> directLightUpstreamPasses_;
-    std::unordered_map<std::string, UpstreamPassVariant> directLightUpstreamPassNameToPass_;
-    std::unordered_map<std::string, ShaderPackLoader::VariableConfig> directLightUpstreamExecutionVariableConfigs_;
-    std::unordered_map<std::string, std::string> directLightUpstreamGlobalVariables_;
-    bool directLightUpstreamPackRuntimeReady_ = false;
-    bool directLightUpstreamRuntimeResourcesReady_ = false;
-    bool directLightUpstreamPassRuntimeReady_ = false;
-    bool directLightUpstreamShaderCompileReady_ = false;
-    bool directLightUpstreamPipelineReady_ = false;
-    bool directLightUpstreamSbtReady_ = false;
-    std::string directLightUpstreamRuntimeError_;
-#endif
-
-    // ReSTIR DI reservoir images (fixed roles)
-    // [0] = temporal output (CHS writes), [1] = spatial output (compute writes)
-    std::shared_ptr<vk::DeviceLocalImage> reservoirImages_[2];
-
-    // Bounce ReSTIR DI reservoir images (per-bounce temporal reuse)
-    // [0] = bounce 1, [1] = bounce 2, [2] = bounce 3
-    std::shared_ptr<vk::DeviceLocalImage> bounceReservoirImages_[3];
-
-    // Spatial reuse compute pipeline
-    VkPipeline spatialPipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout spatialPipelineLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout spatialDescSetLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool spatialDescPool_ = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSet> spatialDescSets_;
-    std::shared_ptr<vk::Shader> spatialShader_;
-
-    // Light clustering compute pipeline
-    VkPipeline clusterPipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout clusterPipelineLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout clusterDescSetLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool clusterDescPool_ = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSet> clusterDescSets_;
-    std::shared_ptr<vk::Shader> clusterShader_;
-    std::shared_ptr<vk::DeviceLocalBuffer> tileLightBuffer_;
-    static constexpr int TILE_SIZE = 16;
-    static constexpr int MAX_LIGHTS_PER_TILE = 512;
 
     // SHARC radiance cache
     uint32_t sharcCapacity_ = 1u << 21; // dynamic: 2^exponent entries
@@ -406,7 +279,6 @@ struct RayTracingModuleContext : public WorldModuleContext, SharedObject<RayTrac
 
     // ray tracing
     std::shared_ptr<vk::DescriptorTable> rayTracingDescriptorTable;
-    std::shared_ptr<vk::DescriptorTable> directLightUpstreamDescriptorTable;
     std::shared_ptr<vk::SBT> sbt;
     std::shared_ptr<vk::SBT> sharcUpdateSbt;  // SHARC update pipeline SBT
 

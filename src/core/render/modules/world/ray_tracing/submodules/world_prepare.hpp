@@ -13,7 +13,6 @@ class Framework;
 class FrameworkContext;
 class RayTracingModule;
 struct RayTracingModuleContext;
-struct ChunkOmmResources;
 
 struct WorldPrepareContext;
 
@@ -69,7 +68,6 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         // Keep vertex/index buffers alive — RT shader reads them via BDA from SSBO
         std::vector<std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>> vertexBuffers;
         std::vector<std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>> indexBuffers;
-        std::vector<std::shared_ptr<ChunkOmmResources>> ommResources;
     };
     TlasBlasSnapshot prevBlasSnapshot_;
 
@@ -114,8 +112,6 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         std::vector<uint64_t> idxBufAddrs;
         std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
         std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
-        std::shared_ptr<ChunkOmmResources> ommResources;
-        uint8_t vertexFormat = 0; // 0=full, 1=compact, 2=lossless
         // Per-section biome colors (packed 0x00RRGGBB) for shader-side tinting
         uint32_t biomeGrassColor = 0x91BD59;
         uint32_t biomeFoliageColor = 0x77AB2F;
@@ -139,8 +135,6 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     VkDeviceSize lastIndexBufferAddrCapacity_ = 0;
     VkDeviceSize lastObjToWorldMatCapacity_ = 0;
 
-    std::shared_ptr<vk::DeviceLocalBuffer> areaLightBuffer;
-    int areaLightCount = 0;
     uint32_t handInstanceCount = 0;
 
     // Per-instance biome colors for shader-side tinting (binding 10)

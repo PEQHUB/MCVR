@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/render/sprite_registry.hpp"
+#include "core/render/texture_rule_registry.hpp"
 #include "core/render/texture_arrays.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
@@ -69,9 +70,10 @@ class TextureSystem {
     /// Pixels are RGBA8, in the same order as the sprite table.
     void receiveSpritePixels(const uint8_t* data, uint32_t totalBytes);
 
-    /// Receive concatenated specular + normal pixel data for all sprites (sorted order).
+    /// Receive concatenated specular + normal + flag pixel data for all sprites (sorted order).
     /// Each buffer is count * (spriteSize * spriteSize * 4) bytes, RGBA8 UNORM.
     void receiveAuxPixels(const uint8_t* specularData, const uint8_t* normalData,
+                          const uint8_t* flagData,
                           uint32_t totalBytesPerType);
 
     /// Receive bulk animation frame data for all animated sprites.
@@ -121,16 +123,22 @@ class TextureSystem {
     /// Access underlying managers for descriptor binding.
     TextureArrayManager& arrayManager() { return arrayManager_; }
     SpriteRegistry& registry() { return registry_; }
+    TextureRuleRegistry& textureRules() { return textureRules_; }
+    bool updateSpriteHeightMetadata(uint32_t spriteId, uint32_t flags, int32_t maskLayer,
+                                    std::shared_ptr<vk::VMA> vma,
+                                    std::shared_ptr<vk::Device> device);
 
     /// Get texture array IDs (for descriptor binding).
     uint32_t blockAlbedoArrayId() const { return blockAlbedoArrayId_.load(std::memory_order_acquire); }
     uint32_t blockSpecularArrayId() const { return blockSpecularArrayId_.load(std::memory_order_acquire); }
     uint32_t blockNormalArrayId() const { return blockNormalArrayId_.load(std::memory_order_acquire); }
-
+    uint32_t blockFlagArrayId() const { return blockFlagArrayId_.load(std::memory_order_acquire); }
     /// Reset on resource reload.
     void reset();
 
   private:
+    void retireGpuResourcesLocked(std::shared_ptr<vk::Device> device, const char* reason);
+
     // Sprite metadata (sorted by identifier, spriteId = index)
     std::vector<SpriteMetadata> sprites_;
     std::vector<SpriteBounds> spriteBounds_;
@@ -142,12 +150,14 @@ class TextureSystem {
     // Frame-0 pixel data for all sprites (concatenated, RGBA8)
     std::vector<uint8_t> spritePixels_;
 
-    // Auxiliary pixel data (specular + normal, concatenated per sprite, RGBA8)
+    // Auxiliary pixel data (specular + normal + flags, concatenated per sprite, RGBA8)
     std::vector<uint8_t> specularPixels_;
     std::vector<uint8_t> normalPixels_;
+    std::vector<uint8_t> flagPixels_;
     std::vector<uint64_t> albedoChecksums_;
     std::vector<uint64_t> specularChecksums_;
     std::vector<uint64_t> normalChecksums_;
+    std::vector<uint64_t> flagChecksums_;
     // Animation: per-sprite frame data (RGBA pixels per frame)
     struct AnimEntry {
         uint16_t spriteId;
@@ -160,12 +170,15 @@ class TextureSystem {
     // GPU resources (owned)
     TextureArrayManager arrayManager_;
     SpriteRegistry registry_;
+    TextureRuleRegistry textureRules_;
     std::atomic<uint32_t> blockAlbedoArrayId_{UINT32_MAX};
     std::atomic<uint32_t> blockSpecularArrayId_{UINT32_MAX};
     std::atomic<uint32_t> blockNormalArrayId_{UINT32_MAX};
+    std::atomic<uint32_t> blockFlagArrayId_{UINT32_MAX};
     bool albedoMipsInitialized_ = false;
     bool specMipsInitialized_ = false;
     bool normMipsInitialized_ = false;
+    bool flagMipsInitialized_ = false;
 
     std::atomic<bool> finalized_{false};
     std::atomic<uint64_t> generation_{0};

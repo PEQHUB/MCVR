@@ -6,11 +6,11 @@
 
 #include <filesystem>
 
-#include "core/render/block_model_table.hpp"
-#include "core/render/block_state_registry.hpp"
 #include "core/render/gpu_profiler.hpp"
 #include "core/render/texture_system.hpp"
 #include "core/render/thread_pool.hpp"
+
+#include <array>
 
 class Textures;
 class Framework;
@@ -27,9 +27,6 @@ struct Options {
     uint32_t upscalerQuality = 0;
     uint32_t denoiserMode = 1;
     uint32_t rayBounces = 16;
-    bool ommEnabled = false; // Opacity Micro Maps (disabled by default until Phase 1 validated)
-    uint32_t ommBakerLevel = 4; // OMM baker max subdivision level (1-8)
-    bool greedyMeshingEnabled = false; // Disabled: unsafe across native block and Java atlas geometry
     bool simplifiedIndirect = false; // Skip detail textures on indirect bounces + simplify shadow AHS
     bool outputScale2x = false;     // Render world at 2x display resolution, FSR1 EASU downscale
     bool reflexEnabled = false;     // NVIDIA Reflex low-latency mode (VK_NV_low_latency2)
@@ -42,10 +39,7 @@ struct Options {
     uint32_t chunkBuildingBatchSize = 6;
     uint32_t chunkBuildingTotalBatches = 6;
     float chunkCullDistance = 384.0f;  // Max chunk distance in blocks (64-1024), chunks beyond are excluded from TLAS
-    float chunkLodDistance = 160.0f;  // LOD boundary in blocks (64-512): ≤ = lossless 64B vertex, > = compact 32B
-    uint32_t extendedRenderDistance = 0; // Extra chunks beyond Java's RD, loaded from disk (0=disabled, max 64)
     float megaMergeDistance = 0.0f;  // Beyond this distance (blocks), chunks are merged into mega-BLASes (0=disabled)
-    static constexpr uint32_t ommBatchCap = 2; // Max chunks per GPU batch when OMM active (prevents TDR)
     uint32_t tonemappingMode = 1; // 0 = PBR Neutral, 1 = Reinhard Extended
     float minExposure = 1e-7f;         // Minimum exposure clamp (lowered for physical sun ~100k lux)
     float maxExposure = 2.0f;           // Max dark adaptation — caves stay dark, shadow detail visible
@@ -63,7 +57,6 @@ struct Options {
     float highlightWeight = 0.5f;      // Highlight-weighted metering (0.0-1.0, 0=uniform, 1=full highlight bias)
     float saturation = 1.3f;           // Saturation/Vibrance boost (0.0 to 2.0)
     bool saturationAdaptive = false;   // Adaptive saturation: brightness+chroma-dependent (Special K style)
-    bool noiseLOD = true;              // Noise quality LOD: reduce octaves with distance, skip gradient far away
     bool multiScatterGGX = true;       // Kulla-Conty multi-scatter GGX energy compensation (flag bit 7)
     bool eonDiffuse = true;            // EON energy-preserving diffuse BRDF, replaces Disney diffuse (flag bit 8)
 
@@ -97,61 +90,6 @@ struct Options {
     float hdrPaperWhiteNits = 203.0f;     // ITU-R BT.2408 reference white
     float hdrUiBrightnessNits = 100.0f;   // UI brightness in HDR mode (50–300 nits)
 
-    // Area lights
-    bool areaLightsEnabled = true;
-    bool restirEnabled = true;            // ReSTIR DI temporal reuse for area lights
-    float perBlockTemperatureK[50] = {}; // Per-type temperature override in Kelvin. 0 = use LIGHT_DEFS default.
-    float areaLightIntensity = 1.0f;      // Global multiplier [0.0 - 5.0]
-    float areaLightRange = 128.0f;        // Max cull distance [8 - 512]
-    float shadowSoftness = 1.0f;          // Shadow softness multiplier [0.0 - 2.0]
-    float colorExpansion = 1.0f;          // Per-block vivid color chroma boost [0.0 - 2.0] (1.0 = neutral)
-
-    // ReSTIR DI tuning
-    int restirCandidates = 32;            // Total RIS candidates per pixel [8 - 64]
-    int restirTemporalMClamp = 20;        // Temporal reservoir M clamp [5 - 50]
-    int restirWClamp = 30;                // Importance weight W clamp [10 - 200]
-    int restirSpatialTaps = 5;            // Spatial neighbor taps [1 - 10]
-    int restirSpatialRadius = 30;         // Spatial search radius in pixels [5 - 60]
-
-    // ReSTIR DI performance
-    bool restirSimplifiedBRDF = false;    // Lambertian instead of Disney for area lights
-    bool restirSpatialEnabled = false;    // Enable spatial reuse compute pass
-    bool restirBounceEnabled = false;     // Enable ReSTIR on indirect bounces (1-3)
-    uint32_t directLightBackend = 0;       // 0=Legacy, 1=UpstreamReSTIR, 2=RTXDI; non-legacy is gated off by default
-
-    float perBlockIntensity[50] = {       // Per-block intensity multiplier, indexed by LightTypeId
-        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-    };
-    float perBlockScale[50] = {          // Per-block halfExtent scale multiplier (1.0 = 100%)
-        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-    };
-    float perBlockYOffset[50] = {        // Per-block additive Y offset in blocks (all baked into LIGHT_DEFS)
-    };
-    float perBlockColorR[50] = {         // Per-block color R (0-1), sentinel -1 = use LIGHT_DEFS
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-    };
-    float perBlockColorG[50] = {
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-    };
-    float perBlockColorB[50] = {
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-    };
-    int blockLightMode[50] = {};         // Per-block light mode: 0=Auto, 1=ForceAreaLight, 2=ForceEmissive
-
     // SER: Shader Execution Reordering
     // Disabled by default: Minecraft's material uniformity means SER overhead exceeds coherence gain.
     // Profiled 2026-03-25: SER ON harms perf vs OFF. Keep option for future re-evaluation.
@@ -171,19 +109,14 @@ struct Options {
     int sharcCapacityExponent = 21;          // Cache capacity = 2^N entries (20-24)
     int sharcQueryMode = 0;                  // 0=Off, 1=Observe counters, 2=Active early termination
 
-    // Material-owned shader displacement (old field names retained as compatibility shims)
-    bool  pomEnabled      = false;
-    float pomHeightScale  = 0.05f;  // Tile-local depth scale (0.01–0.50)
-    int   pomSteps        = 32;     // Primary trace steps (8–512)
-    int   pomRefinement   = 4;      // Binary refinement iterations (0–8)
-    float pomFadeDistance = 64.0f;  // Distance in blocks to fade displacement out (8–256)
+    // Cube-block height-field geometry displacement.
+    bool  displacementEnabled            = false;
+    float displacementDepthScale         = 0.05f;  // Tile-local depth scale (0.01-0.50)
+    int   displacementPrimarySteps       = 32;     // Primary trace budget (8-512)
+    int   displacementRefinementSteps    = 4;      // Surface refinement iterations (0-8)
+    float displacementFadeDistanceBlocks = 64.0f;  // Distance in blocks to fade displacement out (8-256)
 
-    // Ignored legacy compatibility knobs from the removed geometry displacement path.
     uint32_t displacementQuality = 2;  // UI preset: 1=Low,2=Balanced,3=High,4=Ultra
-    uint32_t tessMaxLevel = 16;
-    float tessNearDist  = 32.0f;
-    float tessMidDist   = 96.0f;
-    float tessFarDist   = 192.0f;
 
     // Offline accumulation mode
     uint32_t offlineState = 0;       // 0=NORMAL, 1=FREE, 2=ACCUMULATING
@@ -276,9 +209,6 @@ class Renderer : public Singleton<Renderer> {
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> renderResHdrImages;  // DLSS input (render-res HDR), read by tone mapping histogram
     static GpuProfiler gpuProfiler;
     static ThreadPool threadPool;
-    static BlockModelTable blockModelTable;
-    static BlockStateRegistry blockStateRegistry;
-    static std::string worldRegionPath; // Path to saves/<world>/region/ for Anvil reader
     static TextureSystem textureSystem;
 
     // Frame Generation: images set by pipeline modules, read by render_framework for SL tagging

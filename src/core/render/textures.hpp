@@ -14,22 +14,6 @@ class ImageBufferCache;
 
 class Textures : public SharedObject<Textures> {
   public:
-    // 0 = FULLY_OPAQUE, 1 = FULLY_TRANSPARENT, 2 = MIXED
-    enum class AlphaClass : int32_t { FULLY_OPAQUE = 0, FULLY_TRANSPARENT = 1, MIXED = 2 };
-
-    struct TextureAlphaData {
-        std::vector<uint8_t> alpha; // single-channel, 1 byte per texel
-        uint32_t width = 0;
-        uint32_t height = 0;
-        bool animated = false; // true if re-uploaded (animation frame change)
-    };
-
-    struct TextureRGBAData {
-        std::vector<uint8_t> rgba; // 4 bytes per texel (R,G,B,A)
-        uint32_t width = 0;
-        uint32_t height = 0;
-    };
-
     Textures(std::shared_ptr<Framework> framework);
 
     void reset();
@@ -59,13 +43,6 @@ class Textures : public SharedObject<Textures> {
     void bindAllTextures();
     void destroyTexture(uint32_t id);
 
-    void setTextureAlphaClass(uint32_t id, AlphaClass alphaClass);
-    AlphaClass getTextureAlphaClass(uint32_t id) const;
-
-    const TextureAlphaData *getTextureAlphaData(uint32_t id) const;
-
-    const TextureRGBAData *getTextureRGBAData(uint32_t id) const;
-
   private:
     std::map<uint32_t, std::shared_ptr<vk::DeviceLocalImage>> textures_;
     std::map<uint32_t, std::shared_ptr<vk::Sampler>> samplers;
@@ -76,9 +53,6 @@ class Textures : public SharedObject<Textures> {
     std::map<uint32_t, std::shared_ptr<ImageBufferCache>> caches_;
     std::shared_ptr<std::map<uint32_t, std::vector<VkBufferImageCopy>>> uploadQueue_;
 
-    std::map<uint32_t, AlphaClass> textureAlphaClass_;
-    std::map<uint32_t, TextureAlphaData> textureAlphaData_;
-    std::map<uint32_t, TextureRGBAData> textureRGBAData_;
 };
 
 class ImageBufferCache : public SharedObject<ImageBufferCache> {

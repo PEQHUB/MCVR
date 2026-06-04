@@ -1,13 +1,17 @@
 #include "core/render/texture_system.hpp"
 #include "core/render/renderer.hpp"
 #include "core/render/render_framework.hpp"
+#include "core/render/chunks.hpp"
+#include "core/render/world.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <cmath>
 #include <sstream>
+#include <utility>
 
 const TextureSystem::SpriteBounds TextureSystem::DEFAULT_BOUNDS = {0.0f, 1.0f, 0.0f, 1.0f};
 
@@ -21,6 +25,57 @@ uint64_t fnv1a64(const uint8_t* data, size_t size) {
     return hash;
 }
 
+}
+
+void TextureSystem::retireGpuResourcesLocked(std::shared_ptr<vk::Device> device, const char* reason) {
+    auto* renderer = Renderer::try_instance();
+    auto framework = renderer ? renderer->framework() : nullptr;
+
+    std::shared_ptr<ChunkBuildScheduler> scheduler;
+    bool schedulerPaused = false;
+    if (renderer && renderer->world() && renderer->world()->chunks()) {
+        scheduler = renderer->world()->chunks()->chunkBuildScheduler();
+    }
+
+    if (scheduler) {
+        schedulerPaused = scheduler->pause(std::chrono::milliseconds(5000));
+        if (!schedulerPaused) {
+            std::cerr << "[TextureSystem] WARNING: BLAS scheduler did not pause before "
+                      << reason << "; preserving old texture resources through GC anyway"
+                      << std::endl;
+        }
+    }
+
+    if (framework && framework->device()) {
+        vkDeviceWaitIdle(framework->device()->vkDevice());
+    } else if (device) {
+        vkDeviceWaitIdle(device->vkDevice());
+    }
+
+    if (framework) {
+        auto& gc = framework->gc();
+        arrayManager_.retire(gc);
+        registry_.retire(gc);
+        textureRules_.retire(gc);
+    } else {
+        arrayManager_.reset();
+        registry_.reset();
+        textureRules_.reset();
+    }
+
+    blockAlbedoArrayId_ = UINT32_MAX;
+    blockSpecularArrayId_ = UINT32_MAX;
+    blockNormalArrayId_ = UINT32_MAX;
+    blockFlagArrayId_ = UINT32_MAX;
+    albedoMipsInitialized_ = false;
+    specMipsInitialized_ = false;
+    normMipsInitialized_ = false;
+    flagMipsInitialized_ = false;
+    finalized_ = false;
+
+    if (scheduler && schedulerPaused) {
+        scheduler->resume();
+    }
 }
 
 void TextureSystem::receiveSpriteTable(const SpriteMetadata* table, uint32_t count,
@@ -88,12 +143,14 @@ void TextureSystem::receiveSpritePixels(const uint8_t* data, uint32_t totalBytes
 }
 
 void TextureSystem::receiveAuxPixels(const uint8_t* specularData, const uint8_t* normalData,
-                                      uint32_t totalBytesPerType) {
+                                      const uint8_t* flagData, uint32_t totalBytesPerType) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (specularData && totalBytesPerType > 0)
         specularPixels_.assign(specularData, specularData + totalBytesPerType);
     if (normalData && totalBytesPerType > 0)
         normalPixels_.assign(normalData, normalData + totalBytesPerType);
+    if (flagData && totalBytesPerType > 0)
+        flagPixels_.assign(flagData, flagData + totalBytesPerType);
     std::cout << "[TextureSystem] Received aux pixels: "
               << (totalBytesPerType / 1024) << " KB each" << std::endl;
 }
@@ -174,23 +231,13 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         return;
     }
 
-    // Handle re-initialization (F3+T reload): destroy old arrays before creating new ones
+    // Handle re-initialization (F3+T reload): retire old arrays before creating new ones.
     if (finalized_) {
-        std::cout << "[TextureSystem] Re-initializing (destroying old arrays)" << std::endl;
-        // Wait for ALL GPU work across all queues and all frames in flight.
+        std::cout << "[TextureSystem] Re-initializing (retiring old arrays)" << std::endl;
+        // Wait all queues and keep old arrays/SSBO alive through frame GC.
         // Without this, in-flight command buffers still reference old texture arrays
         // via descriptors — destroying them causes GPU access violation (exit -805306369).
-        auto framework = Renderer::instance().framework();
-        vkDeviceWaitIdle(framework->device()->vkDevice());
-        arrayManager_.reset();
-        registry_.reset();
-        blockAlbedoArrayId_ = UINT32_MAX;
-        blockSpecularArrayId_ = UINT32_MAX;
-        blockNormalArrayId_ = UINT32_MAX;
-        albedoMipsInitialized_ = false;
-        specMipsInitialized_ = false;
-        normMipsInitialized_ = false;
-        finalized_ = false;
+        retireGpuResourcesLocked(device, "texture reinitialization");
     }
 
     uint32_t count = static_cast<uint32_t>(sprites_.size());
@@ -241,6 +288,7 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     albedoChecksums_.assign(count, 0);
     specularChecksums_.assign(count, 0);
     normalChecksums_.assign(count, 0);
+    flagChecksums_.assign(count, 0);
     for (uint32_t i = 0; i < count; i++) {
         // For animated sprites, prefer frame 0 from animation data (more reliable)
         const uint8_t* frameData = nullptr;
@@ -302,7 +350,24 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         std::cout << "[TextureSystem] Staged " << count << " normal layers" << std::endl;
     }
 
-    // Build SpriteRegistry SSBO entries
+    // Create block flag texture array (UNORM raw LabPBR flag bytes)
+    if (!flagPixels_.empty()) {
+        blockFlagArrayId_ = arrayManager_.createArray(
+            vma, device, spriteSize, count,
+            VK_FORMAT_R8G8B8A8_UNORM, true /* generateMips */);
+        for (uint32_t i = 0; i < count; i++) {
+            size_t pixelOffset = static_cast<size_t>(i) * bytesPerSprite;
+            if (pixelOffset + bytesPerSprite <= flagPixels_.size()) {
+                const uint8_t* layer = flagPixels_.data() + pixelOffset;
+                arrayManager_.stageLayerPixels(blockFlagArrayId_, i, 0,
+                    layer, bytesPerSprite);
+                flagChecksums_[i] = fnv1a64(layer, bytesPerSprite);
+            }
+        }
+        std::cout << "[TextureSystem] Staged " << count << " flag layers" << std::endl;
+    }
+
+    // Build SpriteRegistry SSBO entries. Authored normal alpha remains shader metadata only.
     registry_.reset();
     for (uint32_t i = 0; i < count; i++) {
         auto& meta = sprites_[i];
@@ -330,12 +395,17 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         }
         flags |= (meta.padding &
             (vk::Data::SPRITE_FLAG_SPEC_SOURCE_MASK | vk::Data::SPRITE_FLAG_NORMAL_SOURCE_MASK));
+        uint32_t normalSource =
+            (flags >> vk::Data::SPRITE_FLAG_NORMAL_SOURCE_SHIFT) & vk::Data::SPRITE_FLAG_SOURCE_MASK;
+        bool authoredHeightSource =
+            normalSource == vk::Data::SPRITE_SOURCE_PACK_AUTHORED ||
+            normalSource == vk::Data::SPRITE_SOURCE_USER_CUSTOM;
 
         // All sprites get a layer in aux arrays (defaults for missing)
         int32_t specLayer = (blockSpecularArrayId_ != UINT32_MAX) ? static_cast<int32_t>(i) : -1;
         int32_t normLayer = (blockNormalArrayId_ != UINT32_MAX) ? static_cast<int32_t>(i) : -1;
         int32_t heightRangePacked = -1;
-        if ((flags & vk::Data::SPRITE_FLAG_HAS_HEIGHT) != 0 && normLayer >= 0) {
+        if ((flags & vk::Data::SPRITE_FLAG_HAS_HEIGHT) != 0 && authoredHeightSource && normLayer >= 0) {
             size_t pixelOffset = static_cast<size_t>(i) * bytesPerSprite;
             if (pixelOffset + bytesPerSprite <= normalPixels_.size()) {
                 const uint8_t* layer = normalPixels_.data() + pixelOffset;
@@ -375,6 +445,7 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     }
 
     registry_.uploadSSBO(vma, device);
+    textureRules_.uploadRules(nullptr, 0, vma, device);
 
     // Free CPU pixel data (no longer needed after staging)
     spritePixels_.clear();
@@ -383,6 +454,8 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     specularPixels_.shrink_to_fit();
     normalPixels_.clear();
     normalPixels_.shrink_to_fit();
+    flagPixels_.clear();
+    flagPixels_.shrink_to_fit();
 
     finalized_ = true;
 
@@ -395,7 +468,8 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         diag << "Animated: " << animEntries_.size() << std::endl;
         diag << "Array IDs: albedo=" << blockAlbedoArrayId_
              << ", specular=" << blockSpecularArrayId_
-             << ", normal=" << blockNormalArrayId_ << std::endl;
+             << ", normal=" << blockNormalArrayId_
+             << ", flag=" << blockFlagArrayId_ << std::endl;
         diag << std::endl;
 
         for (uint32_t i = 0; i < std::min(count, 20u); i++) {
@@ -489,7 +563,7 @@ void TextureSystem::flushPendingUploads(std::shared_ptr<vk::VMA> vma,
 	// Flush all staged uploads (snapshot-and-process: mutex held only ~1us)
 	auto dirty = arrayManager_.flushUploads(
 		vma, device, cmdBuffer,
-		blockAlbedoArrayId_, blockSpecularArrayId_, blockNormalArrayId_);
+		blockAlbedoArrayId_, blockSpecularArrayId_, blockNormalArrayId_, blockFlagArrayId_);
     // Route staging buffers through GarbageCollector for proper lifetime management.
     // GC keeps resources alive for imageCount*3 frames (matching all other GPU resources).
     for (auto& buf : arrayManager_.takeStagingBuffers()) {
@@ -514,6 +588,7 @@ void TextureSystem::flushPendingUploads(std::shared_ptr<vk::VMA> vma,
     mipgen(blockAlbedoArrayId_, dirty.albedo, albedoMipsInitialized_);
     mipgen(blockSpecularArrayId_, dirty.specular, specMipsInitialized_);
     mipgen(blockNormalArrayId_, dirty.normal, normMipsInitialized_);
+    mipgen(blockFlagArrayId_, dirty.flag, flagMipsInitialized_);
 }
 
 const TextureSystem::SpriteBounds& TextureSystem::getSpriteBounds(uint16_t spriteId) const {
@@ -521,6 +596,17 @@ const TextureSystem::SpriteBounds& TextureSystem::getSpriteBounds(uint16_t sprit
         return spriteBounds_[spriteId];
     }
     return DEFAULT_BOUNDS;
+}
+
+bool TextureSystem::updateSpriteHeightMetadata(uint32_t spriteId, uint32_t flags, int32_t maskLayer,
+                                               std::shared_ptr<vk::VMA> vma,
+                                               std::shared_ptr<vk::Device> device) {
+    if (!isFinalized() || spriteId >= spriteCount() || !vma || !device) return false;
+    if (!registry_.updateHeightMetadata(static_cast<uint16_t>(spriteId), flags, maskLayer)) {
+        return false;
+    }
+    registry_.uploadSSBO(std::move(vma), std::move(device));
+    return true;
 }
 
 std::string TextureSystem::statusString() const {
@@ -536,7 +622,8 @@ std::string TextureSystem::statusString() const {
         << ",animated:" << animEntries_.size()
         << ",albedoArray:" << blockAlbedoArrayId_
         << ",specularArray:" << blockSpecularArrayId_
-        << ",normalArray:" << blockNormalArrayId_;
+        << ",normalArray:" << blockNormalArrayId_
+        << ",flagArray:" << blockFlagArrayId_;
     return out.str();
 }
 
@@ -552,11 +639,13 @@ bool TextureSystem::dumpDebug(const std::string& path, uint32_t limit) const {
         << " finalized=" << finalized_
         << " sprites=" << count
         << " atlas=" << atlasWidth_ << "x" << atlasHeight_
-        << " layerSize=" << layerSize_ << "\n";
+        << " layerSize=" << layerSize_
+        << "\n";
     out << "arrays albedo=" << blockAlbedoArrayId_
         << " specular=" << blockSpecularArrayId_
-        << " normal=" << blockNormalArrayId_ << "\n";
-    out << "spriteId,atlasX,atlasY,width,height,frames,flags,specLayer,normalLayer,overlaySprite,heightRange,albedoHash,specHash,normalHash\n";
+        << " normal=" << blockNormalArrayId_
+        << " flag=" << blockFlagArrayId_ << "\n";
+    out << "spriteId,atlasX,atlasY,width,height,frames,flags,specLayer,normalLayer,overlaySprite,heightRange,albedoHash,specHash,normalHash,flagHash\n";
 
     for (uint32_t i = 0; i < n; i++) {
         const auto& m = sprites_[i];
@@ -574,7 +663,8 @@ bool TextureSystem::dumpDebug(const std::string& path, uint32_t limit) const {
             << (se ? se->maskLayer : -1) << ','
             << (i < albedoChecksums_.size() ? albedoChecksums_[i] : 0) << ','
             << (i < specularChecksums_.size() ? specularChecksums_[i] : 0) << ','
-            << (i < normalChecksums_.size() ? normalChecksums_[i] : 0)
+            << (i < normalChecksums_.size() ? normalChecksums_[i] : 0) << ','
+            << (i < flagChecksums_.size() ? flagChecksums_[i] : 0)
             << "\n";
     }
     return true;
@@ -588,22 +678,16 @@ void TextureSystem::reset() {
     spritePixels_.clear();
     specularPixels_.clear();
     normalPixels_.clear();
+    flagPixels_.clear();
     albedoChecksums_.clear();
     specularChecksums_.clear();
     normalChecksums_.clear();
+    flagChecksums_.clear();
     atlasWidth_ = 0;
     atlasHeight_ = 0;
     layerSize_ = 0;
     animEntries_.clear();
-    arrayManager_.reset();
-    registry_.reset();
-    blockAlbedoArrayId_ = UINT32_MAX;
-    blockSpecularArrayId_ = UINT32_MAX;
-    blockNormalArrayId_ = UINT32_MAX;
-    albedoMipsInitialized_ = false;
-    specMipsInitialized_ = false;
-    normMipsInitialized_ = false;
-    finalized_ = false;
+    retireGpuResourcesLocked(nullptr, "texture reset");
 
     std::cout << "[TextureSystem] Reset." << std::endl;
 }

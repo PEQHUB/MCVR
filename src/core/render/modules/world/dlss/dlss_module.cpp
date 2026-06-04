@@ -875,10 +875,9 @@ void DLSSModuleContext::render() {
             auto now = std::chrono::steady_clock::now();
             float frameTimeDeltaMs = std::chrono::duration<float, std::milli>(now - lastRenderTime_).count();
             lastRenderTime_ = now;
-            // Pre-exposure: must match RT push constant. Tells DLSS-RR the input
-            // dynamic range for internal normalization. Output is NOT rescaled
-            // (InExposureScale=1.0 in dlss_wrapper.cpp).
-            float preExposure = (Renderer::options.offlineState == 2) ? 1.0f : 0.1f;
+            // Keep DLSS-D/RR scene-referred. RT no longer pre-exposes by 0.1, so
+            // NGX sees the same scale that the histogram and tone mapper use.
+            float preExposure = 1.0f;
             // Use cameraEffectedViewMat — must match the matrix used to compute
             // linearDepthImage and motionVectorImage in world.rgen. Using cameraViewMat
             // (without view bob/camera effects) causes a depth↔matrix mismatch that

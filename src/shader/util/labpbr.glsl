@@ -11,16 +11,33 @@ struct LabPBRMat {
     float subSurface;
     float transmission;
     float ior;
+    vec3 absorption;
+    float absorptionDistance;
+    float thickness;
+    float refractionRoughness;
+    uint materialModeFlags;
     float emission;
+    vec3 emissionTint;
+    float emissionNits;
     vec3 normal;
     float ao;
     float height;
     // Principled BSDF extensions
     float anisotropic;
+    float anisotropicRotation;
     float sheenWeight;
     float sheenTint;
+    float sheenRoughness;
     float coatWeight;
     float coatRoughness;
+    float coatIor;
+    vec3 coatTint;
+    float coatMask;
+    vec2 uvScale;
+    vec2 uvOffset;
+    float filterRadius;
+    float mipBias;
+    float displacementScale;
 };
 
 vec3 CalculateF0(vec3 n, vec3 k) {
@@ -43,6 +60,11 @@ LabPBRMat convertLabPBRMaterial(vec4 texAlbedo, vec4 texSpecular, vec4 texNormal
     mat.metallic = 0.0;
     mat.transmission = 0.0;
     mat.ior = 1.5;
+    mat.absorption = vec3(0.0);
+    mat.absorptionDistance = 16.0;
+    mat.thickness = 0.5;
+    mat.refractionRoughness = 0.0;
+    mat.materialModeFlags = 0u;
     mat.f0 = vec3(0.04);
 
     int intEmission = int(round(texSpecular.a * 255.0));
@@ -106,10 +128,22 @@ LabPBRMat convertLabPBRMaterial(vec4 texAlbedo, vec4 texSpecular, vec4 texNormal
 
     // Principled BSDF defaults (overridden by material block data if present)
     mat.anisotropic = 0.0;
+    mat.anisotropicRotation = 0.0;
     mat.sheenWeight = 0.0;
     mat.sheenTint = 0.0;
+    mat.sheenRoughness = 0.5;
     mat.coatWeight = 0.0;
     mat.coatRoughness = 0.0;
+    mat.coatIor = 1.5;
+    mat.coatTint = vec3(1.0);
+    mat.coatMask = 1.0;
+    mat.emissionTint = vec3(1.0);
+    mat.emissionNits = 0.0;
+    mat.uvScale = vec2(1.0);
+    mat.uvOffset = vec2(0.0);
+    mat.filterRadius = 0.0;
+    mat.mipBias = 0.0;
+    mat.displacementScale = 1.0;
 
     vec2 normalXY = texNormal.xy * 2.0 - 1.0;
     float normalXYLenSq = dot(normalXY, normalXY);

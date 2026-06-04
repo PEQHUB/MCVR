@@ -8,7 +8,6 @@
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_EXT_shader_16bit_storage : enable
 #extension GL_EXT_control_flow_attributes : require
-#extension GL_EXT_opacity_micromap : require
 #extension GL_NV_shader_invocation_reorder : enable
 
 // SHARC compile-time gate: controlled by CMake MCVR_ENABLE_SHARC option.
@@ -74,20 +73,7 @@ layout(set = 1, binding = 6) readonly buffer LastObjToWorldMat {
 }
 lastObjToWorldMats;
 
-layout(set = 1, binding = 8) readonly buffer AreaLightBuffer {
-    AreaLight lights[];
-} areaLightBuffer;
-
-layout(set = 1, binding = 9) readonly buffer TileLightBuffer {
-    uint data[];
-} tileLightBuffer;
-
 #include "../util/vertex_fetch.glsl"
-
-const int TILE_SIZE = 16;
-const int MAX_LIGHTS_PER_TILE = 128;
-
-#define AREA_LIGHTS_ON ((pc.flags & 2) != 0)
 
 layout(set = 2, binding = 0) uniform WorldUniform {
     WorldUBO worldUBO;
@@ -147,22 +133,20 @@ layout(set = 3, binding = 37, rgba32f) uniform image2D sharcCandidatePrefixRadia
 layout(push_constant) uniform PushConstant {
     int numRayBounces;
     int flags;
-    int areaLightCount;
-    float shadowSoftness;
-    int risCandidates;
-    int temporalMClamp;
-    int wClamp;
+    int reservedLighting0;
+    float reservedLighting1;
+    int reservedLighting2;
+    int reservedLighting3;
+    int reservedLighting4;
     float preExposure;
-    float pomHeightScale;
-    int pomSteps;
-    int pomRefinement;
-    float pomFadeDistance;
-    // Color expansion
-    float colorExpansion;
+    float displacementDepthScale;
+    int displacementPrimarySteps;
+    int displacementRefinementSteps;
+    float displacementFadeDistanceBlocks;
     uint blueNoiseFrame;
     uint rtDebugFlags;
     uint handInstanceCount;
-    // SHARC fields
+    uint reservedPc0;
     uint64_t sharcHashEntries;
     uint64_t sharcAccumulation;
     uint64_t sharcResolved;
@@ -178,15 +162,12 @@ layout(push_constant) uniform PushConstant {
     int sharcUpdateBounces;
     int sharcQueryMode;
     int sharcQueryReserved;
-    // Offline accumulation
     int offlineFlags;
     int accumFrameCount;
     float aperture;
     float focalDistance;
-    // Material SSBO BDA
-    uint64_t materialClassAddr;
-}
-pc;
+    uint64_t reservedAddr;
+} pc;
 
 #define SHARC_ENABLED ((pc.flags & 32) != 0)
 #define SER_ENABLED   ((pc.flags & 8192) != 0)
@@ -845,12 +826,7 @@ void main() {
                 mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | CLOUD_MASK | BOAT_WATER_MASK;
             }
 
-            // Force 2-state OMM on indirect bounces: eliminates all AHS invocations
-            // on secondary rays (visual approximation at alpha edges is invisible on indirect lighting)
             uint bounceFlags = rayFlags;
-            if (b >= 1) {
-                bounceFlags |= gl_RayFlagsForceOpacityMicromap2StateEXT;
-            }
 
             // Save state before trace for SHARC cache hit replacement.
             // On a cache hit, we discard the CHS contribution (which includes direct light

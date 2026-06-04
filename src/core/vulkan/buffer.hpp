@@ -95,6 +95,7 @@ class DeviceLocalBuffer : public Buffer, public SharedObject<DeviceLocalBuffer> 
     VkBuffer &vkBuffer() override;
     void *mappedPtr();
     VkDeviceAddress &bufferAddress();
+    bool isValid() const;
 
   private:
     std::shared_ptr<VMA> vma_;

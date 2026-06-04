@@ -63,11 +63,6 @@ void main() {
     bool isBlockGeometry = (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
     bool isFluidGeometry = (v0.flags & PBR_FLAG_FLUID_GEOMETRY) != 0u;
 
-    // Greedy-merged quads: tile UVs for blocks
-    if (isBlockGeometry && (v0.flags & PBR_FLAG_GREEDY_MERGED) != 0u) {
-        uv = fract(uv);
-    }
-
     bool useTexture = (v0.flags & PBR_FLAG_USE_TEXTURE) != 0u;
     float alpha;
     ivec4 flags;
@@ -78,7 +73,7 @@ void main() {
             // Block geometry: texture array sampling via SpriteRegistry
             uint spriteId = textureID;
             alpha = fetchBlockAlbedoLod(spriteId, uv, ubo.animTick, lod).a;
-            flags = ivec4(0); // TODO: flag arrays in Phase 4
+            flags = fetchBlockFlagLod(spriteId, uv, lod);
         } else {
             // Entity geometry: legacy atlas sampling via textures[]
             alpha = textureLod(textures[nonuniformEXT(textureID)], uv, lod).a;

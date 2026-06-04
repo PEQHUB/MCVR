@@ -28,7 +28,6 @@ public:
         SHARC_UPDATE_RT,
         SHARC_RESOLVE,
         RT_DISPATCH_MAIN,
-        RESTIR_SPATIAL,
         OFFLINE_ACCUMULATE,
         SVGF_DENOISE,
         NRD_DENOISE,

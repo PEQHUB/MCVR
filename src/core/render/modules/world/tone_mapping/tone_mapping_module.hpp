@@ -103,7 +103,7 @@ struct ToneMappingModulePushConstant {
     float tonemapParam5;
     float tonemapParam6;
     float tonemapParam7;
-    float preExposure;  // RT pre-exposure value — histogram must undo this for correct metering
+    float preExposure;  // RT/DLSS-D scale, currently neutral.
     float highlightWeight; // Highlight-weighted metering strength (0-1, 0=uniform, 1=full highlight bias)
 };
 

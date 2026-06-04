@@ -3,7 +3,6 @@
 #include "core/all_extern.hpp"
 #include "core/render/buffers.hpp"
 #include "core/render/chunks.hpp"
-#include "core/render/lights.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/radiance_logger.hpp"
 #include "core/render/renderer.hpp"
@@ -14,8 +13,15 @@
 #include "core/vulkan/debug_utils.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 static void applyReflexSettings(); // forward decl — defined below
+
+static void invalidateChunksForDisplacementGeometry() {
+    auto* renderer = Renderer::try_instance();
+    if (!renderer || !renderer->world() || !renderer->world()->chunks()) return;
+    renderer->world()->chunks()->resetScheduler(true);
+}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMaxFps(JNIEnv *,
                                                                                jclass,
@@ -47,11 +53,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     if (write) Renderer::options.needRecreate = true;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetExtendedRenderDistance(
-    JNIEnv *, jclass, jint distance, jboolean write) {
-    // Stub: extended render distance not implemented at this commit.
-    // Prevents UnsatisfiedLinkError when Radiance Java code calls this method.
-}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkBuildingBatchSize(
     JNIEnv *, jclass, jint chunkBuildingBatchSize, jboolean write) {
@@ -80,33 +81,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.rayBounces = bounces;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOMMEnabled(
-    JNIEnv *, jclass, jboolean enabled, jboolean write) {
-    Renderer::options.ommEnabled = enabled;
-    if (write) {
-        Renderer::options.needRecreate = true;
-        Renderer::instance().world()->chunks()->resetScheduler();
-    }
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGreedyMeshingEnabled(
-    JNIEnv *, jclass, jboolean, jboolean write) {
-    bool wasEnabled = Renderer::options.greedyMeshingEnabled;
-    Renderer::options.greedyMeshingEnabled = false;
-    if (write && wasEnabled) {
-        Renderer::options.needRecreate = true;
-        Renderer::instance().world()->chunks()->resetScheduler();
-    }
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetOMMBakerLevel(
-    JNIEnv *, jclass, jint level, jboolean write) {
-    Renderer::options.ommBakerLevel = static_cast<uint32_t>(std::clamp(level, 1, 8));
-    if (write) {
-        Renderer::options.needRecreate = true;
-        Renderer::instance().world()->chunks()->resetScheduler();
-    }
-}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSimplifiedIndirect(
     JNIEnv *, jclass, jboolean enabled, jboolean write) {
@@ -315,10 +291,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.saturationAdaptive = enabled;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetNoiseLOD(
-    JNIEnv *, jclass, jboolean enabled, jboolean write) {
-    Renderer::options.noiseLOD = enabled;
-}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMultiScatterGGX(
     JNIEnv *, jclass, jboolean enabled, jboolean write) {
@@ -330,10 +302,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.eonDiffuse = enabled;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetColorExpansion(
-    JNIEnv *, jclass, jfloat colorExpansion, jboolean write) {
-    Renderer::options.colorExpansion = colorExpansion;
-}
 
 // PsychoV tonemapper setters
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPsychoEnabled(
@@ -500,222 +468,145 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::resetExposureAdaptation = true;
 }
 
-// --- Area Lights ---
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightsEnabled(
-    JNIEnv *, jclass, jboolean enabled, jboolean write) {
-    Renderer::options.areaLightsEnabled = enabled;
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirEnabled(
-    JNIEnv *, jclass, jboolean enabled, jboolean write) {
-    Renderer::options.restirEnabled = enabled;
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightIntensity(
-    JNIEnv *, jclass, jfloat intensity, jboolean write) {
-    Renderer::options.areaLightIntensity = std::clamp(intensity, 0.0f, 5.0f);
-}
-
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightRange(
-    JNIEnv *, jclass, jint range, jboolean write) {
-    Renderer::options.areaLightRange = static_cast<float>(std::clamp(range, 8, 512));
-}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkCullDistance(
-    JNIEnv *, jclass, jint distance, jboolean write) {
+    JNIEnv *, jclass, jint distance, jboolean) {
     Renderer::options.chunkCullDistance = static_cast<float>(std::clamp(distance, 64, 1024));
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkLodDistance(
-    JNIEnv *, jclass, jint distance, jboolean write) {
-    float oldDist = Renderer::options.chunkLodDistance;
-    float newDist = static_cast<float>(std::clamp(distance, 64, 512));
-    Renderer::options.chunkLodDistance = newDist;
-    // Live update: invalidate chunks that crossed the LOD boundary
-    if (write && oldDist != newDist && Renderer::instance().world() && Renderer::instance().world()->chunks()) {
-        auto chunks = Renderer::instance().world()->chunks();
-        auto cameraPos = Renderer::instance().world()->getCameraPos();
-        std::unique_lock<std::recursive_mutex> lock(chunks->mutex());
-        auto &chunk1s = chunks->chunks();
-        for (size_t i = 0; i < chunk1s.size(); i++) {
-            auto &c = chunk1s[i];
-            if (!c || !c->blas) continue;
-            float cx = static_cast<float>(c->x + 8.0 - cameraPos.x);
-            float cy = static_cast<float>(c->y + 8.0 - cameraPos.y);
-            float cz = static_cast<float>(c->z + 8.0 - cameraPos.z);
-            float dist = std::sqrt(cx * cx + cy * cy + cz * cz);
-            bool wasLossless = (dist <= oldDist);
-            bool nowLossless = (dist <= newDist);
-            if (wasLossless != nowLossless) {
-                c->invalidate();
-            }
-        }
-    }
-}
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMegaMergeDistance(
-    JNIEnv *, jclass, jint distance, jboolean write) {
-    // MegaBLAS abandoned (sync builds kill perf, TLAS build not bottleneck) — force off
+    JNIEnv *, jclass, jint, jboolean) {
     Renderer::options.megaMergeDistance = 0.0f;
-    std::cout << "[MegaBLAS] DISABLED (abandoned)" << std::endl;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetShadowSoftness(
-    JNIEnv *, jclass, jfloat softness, jboolean write) {
-    Renderer::options.shadowSoftness = std::clamp(softness, 0.0f, 2.0f);
+    JNIEnv *, jclass, jfloat, jboolean) {
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightBlockIntensity(
-    JNIEnv *, jclass, jint lightTypeId, jfloat intensity) {
-    if (lightTypeId >= 0 && lightTypeId < LIGHT_TYPE_COUNT) {
-        Renderer::options.perBlockIntensity[lightTypeId] = std::max(0.0f, intensity);
-    }
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightBlockScale(
-    JNIEnv *, jclass, jint lightTypeId, jfloat scale) {
-    if (lightTypeId >= 0 && lightTypeId < LIGHT_TYPE_COUNT) {
-        Renderer::options.perBlockScale[lightTypeId] = std::max(0.0f, scale);
-    }
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightBlockYOffset(
-    JNIEnv *, jclass, jint lightTypeId, jfloat offset) {
-    if (lightTypeId >= 0 && lightTypeId < LIGHT_TYPE_COUNT) {
-        Renderer::options.perBlockYOffset[lightTypeId] = offset;
-    }
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetAreaLightBlockColor(
-    JNIEnv *, jclass, jint lightTypeId, jfloat r, jfloat g, jfloat b) {
-    if (lightTypeId >= 0 && lightTypeId < LIGHT_TYPE_COUNT) {
-        Renderer::options.perBlockColorR[lightTypeId] = r;
-        Renderer::options.perBlockColorG[lightTypeId] = g;
-        Renderer::options.perBlockColorB[lightTypeId] = b;
-    }
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetBlockLightMode(
-    JNIEnv *, jclass, jint lightTypeId, jint mode) {
-    if (lightTypeId >= 0 && lightTypeId < LIGHT_TYPE_COUNT) {
-        Renderer::options.blockLightMode[lightTypeId] = std::clamp(mode, 0, 2);
-    }
-}
-
-// --- Per-Block Temperature ---
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetBlockTemperature(
-    JNIEnv *, jclass, jint typeId, jfloat kelvin, jboolean write) {
-    if (typeId >= 0 && typeId < 50) {
-        Renderer::options.perBlockTemperatureK[typeId] = std::clamp(kelvin, 773.15f, 4273.15f);
+    JNIEnv *, jclass, jint, jfloat, jboolean) {
+}
+
+
+
+// --- Cube-block height-field geometry displacement ---
+
+static void setGeometryDisplacementEnabled(jboolean v, jboolean write) {
+    bool enabled = (v == JNI_TRUE);
+    if (Renderer::options.displacementEnabled != enabled) {
+        if (write) {
+            Renderer::options.needRecreate = true;
+        }
+        Renderer::options.displacementEnabled = enabled;
+        invalidateChunksForDisplacementGeometry();
     }
 }
 
-// --- ReSTIR Tuning ---
-
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirCandidates(
-    JNIEnv *, jclass, jint candidates, jboolean write) {
-    Renderer::options.restirCandidates = std::clamp(candidates, 8, 64);
+static void setGeometryDisplacementDepthScale(jfloat v) {
+    float clamped = std::clamp(v, 0.01f, 0.50f);
+    if (std::abs(Renderer::options.displacementDepthScale - clamped) > 1e-6f) {
+        Renderer::options.displacementDepthScale = clamped;
+        invalidateChunksForDisplacementGeometry();
+    }
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirTemporalMClamp(
-    JNIEnv *, jclass, jint clamp, jboolean write) {
-    Renderer::options.restirTemporalMClamp = std::clamp(clamp, 5, 50);
+static void setGeometryDisplacementPrimarySteps(jint v) {
+    Renderer::options.displacementPrimarySteps = std::clamp(v, 8, 512);
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirWClamp(
-    JNIEnv *, jclass, jint clamp, jboolean write) {
-    Renderer::options.restirWClamp = std::clamp(clamp, 10, 200);
+static void setGeometryDisplacementRefinementSteps(jint v) {
+    Renderer::options.displacementRefinementSteps = std::clamp(v, 0, 8);
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirSpatialTaps(
-    JNIEnv *, jclass, jint taps, jboolean write) {
-    Renderer::options.restirSpatialTaps = std::clamp(taps, 1, 10);
+static void setGeometryDisplacementFadeDistance(jfloat v) {
+    float clamped = std::clamp(v, 8.0f, 256.0f);
+    if (std::abs(Renderer::options.displacementFadeDistanceBlocks - clamped) > 1e-6f) {
+        Renderer::options.displacementFadeDistanceBlocks = clamped;
+        invalidateChunksForDisplacementGeometry();
+    }
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirSpatialRadius(
-    JNIEnv *, jclass, jint radius, jboolean write) {
-    Renderer::options.restirSpatialRadius = std::clamp(radius, 5, 60);
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGeometryDisplacementEnabled(
+    JNIEnv *, jclass, jboolean v, jboolean write) {
+    setGeometryDisplacementEnabled(v, write);
 }
 
-// --- ReSTIR Performance ---
-
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirSimplifiedBRDF(
-    JNIEnv *, jclass, jboolean enabled, jboolean write) {
-    Renderer::options.restirSimplifiedBRDF = enabled;
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGeometryDisplacementDepthScale(
+    JNIEnv *, jclass, jfloat v, jboolean) {
+    setGeometryDisplacementDepthScale(v);
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirSpatialEnabled(
-    JNIEnv *, jclass, jboolean enabled, jboolean write) {
-    Renderer::options.restirSpatialEnabled = enabled;
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGeometryDisplacementPrimarySteps(
+    JNIEnv *, jclass, jint v, jboolean) {
+    setGeometryDisplacementPrimarySteps(v);
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetRestirBounceEnabled(
-    JNIEnv *, jclass, jboolean enabled, jboolean write) {
-    Renderer::options.restirBounceEnabled = enabled;
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGeometryDisplacementRefinementSteps(
+    JNIEnv *, jclass, jint v, jboolean) {
+    setGeometryDisplacementRefinementSteps(v);
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDirectLightBackend(
-    JNIEnv *, jclass, jint backend, jboolean write) {
-    Renderer::options.directLightBackend = static_cast<uint32_t>(std::clamp(static_cast<int>(backend), 0, 2));
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGeometryDisplacementFadeDistance(
+    JNIEnv *, jclass, jfloat v, jboolean) {
+    setGeometryDisplacementFadeDistance(v);
 }
-
-// --- Material-owned shader displacement ---
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMEnabled(
     JNIEnv *, jclass, jboolean v, jboolean write) {
-    bool enabled = (v == JNI_TRUE);
-    if (Renderer::options.pomEnabled != enabled && write) {
-        Renderer::options.needRecreate = true;
-    }
-    Renderer::options.pomEnabled = enabled;
+    setGeometryDisplacementEnabled(v, write);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMHeightScale(
     JNIEnv *, jclass, jfloat v, jboolean) {
-    Renderer::options.pomHeightScale = std::clamp(v, 0.01f, 0.50f);
+    setGeometryDisplacementDepthScale(v);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMSteps(
     JNIEnv *, jclass, jint v, jboolean) {
-    Renderer::options.pomSteps = std::clamp(v, 8, 512);
+    setGeometryDisplacementPrimarySteps(v);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMRefinement(
     JNIEnv *, jclass, jint v, jboolean) {
-    Renderer::options.pomRefinement = std::clamp(v, 0, 8);
+    setGeometryDisplacementRefinementSteps(v);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetPOMFadeDistance(
     JNIEnv *, jclass, jfloat v, jboolean) {
-    Renderer::options.pomFadeDistance = std::clamp(v, 8.0f, 256.0f);
+    setGeometryDisplacementFadeDistance(v);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDisplacementQuality(
     JNIEnv *, jclass, jint v, jboolean) {
-    Renderer::options.displacementQuality = static_cast<uint32_t>(std::clamp(v, 0, 4));
+    uint32_t quality = static_cast<uint32_t>(std::clamp(v, 0, 4));
+    if (Renderer::options.displacementQuality != quality) {
+        Renderer::options.displacementQuality = quality;
+        invalidateChunksForDisplacementGeometry();
+    }
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTessMaxLevel(
-    JNIEnv *, jclass, jint v, jboolean) {
-    Renderer::options.tessMaxLevel = std::clamp(static_cast<uint32_t>(v), 2u, 32u);
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGeneratedDisplacement(
+    JNIEnv *, jclass, jint mode, jfloat heightStrength, jfloat smoothing,
+    jfloat normalStrength, jfloat depthCap, jboolean) {
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTessNearDist(
-    JNIEnv *, jclass, jint v, jboolean) {
-    Renderer::options.tessNearDist = std::clamp(static_cast<float>(v), 8.0f, 256.0f);
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDisplacementHeightSourcePolicy(
+    JNIEnv *, jclass, jint policy, jboolean) {
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTessMidDist(
-    JNIEnv *, jclass, jint v, jboolean) {
-    Renderer::options.tessMidDist = std::clamp(static_cast<float>(v), 16.0f, 384.0f);
-}
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetTessFarDist(
-    JNIEnv *, jclass, jint v, jboolean) {
-    Renderer::options.tessFarDist = std::clamp(static_cast<float>(v), 32.0f, 512.0f);
-}
+
+
+
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetLoggingEnabled(
     JNIEnv *, jclass, jboolean enabled, jboolean) {

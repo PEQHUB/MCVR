@@ -5,7 +5,6 @@
 #include "core/vulkan/buffer.hpp"
 #include "core/vulkan/vertex.hpp"
 
-#include <deque>
 #include <vector>
 
 namespace vk {
@@ -65,8 +64,6 @@ class BLASBuilder : public SharedObject<BLASBuilder> {
 
         std::vector<VkAccelerationStructureGeometryKHR> geometries;
         std::vector<uint32_t> primitiveCounts;
-        // OMM pNext structs stored in deque for address stability across push_back
-        std::deque<VkAccelerationStructureTrianglesOpacityMicromapEXT> ommGeoms;
 
         BLASGeometryBuilder(BLASBuilder &parent);
 
@@ -82,28 +79,6 @@ class BLASBuilder : public SharedObject<BLASBuilder> {
                                                     VkDeviceAddress indexBufferAddress,
                                                     uint32_t numIndices,
                                                     bool isOpaque);
-        template <typename T>
-        BLASGeometryBuilder &defineTriangleGeomrtry(std::shared_ptr<DeviceLocalBuffer> vertexBuffer,
-                                                    uint32_t numVertices,
-                                                    std::shared_ptr<DeviceLocalBuffer> indexBuffer,
-                                                    uint32_t numIndices,
-                                                    bool isOpaque,
-                                                    VkDeviceAddress ommIndexBufferAddress,
-                                                    uint32_t numTriangles);
-        // Phase 2 OMM: with actual VkMicromapEXT and usage counts
-        template <typename T>
-        BLASGeometryBuilder &defineTriangleGeomrtryWithMicromap(
-            std::shared_ptr<DeviceLocalBuffer> vertexBuffer,
-            uint32_t numVertices,
-            std::shared_ptr<DeviceLocalBuffer> indexBuffer,
-            uint32_t numIndices,
-            bool isOpaque,
-            VkDeviceAddress ommIndexBufferAddress,
-            uint32_t numTriangles,
-            VkMicromapEXT micromap,
-            const VkMicromapUsageEXT *usageCounts,
-            uint32_t usageCountsCount);
-
         // Per-geometry transform: offsets vertices within the BLAS (for mega-chunks)
         template <typename T>
         BLASGeometryBuilder &defineTriangleGeometryWithTransform(
@@ -286,89 +261,6 @@ vk::BLASBuilder::BLASGeometryBuilder::defineTriangleGeomrtry(VkDeviceAddress ver
 
     geometries.push_back(geom);
     primitiveCounts.push_back(numIndices / 3);
-
-    return *this;
-}
-
-template <typename T>
-vk::BLASBuilder::BLASGeometryBuilder &
-vk::BLASBuilder::BLASGeometryBuilder::defineTriangleGeomrtry(std::shared_ptr<DeviceLocalBuffer> vertexBuffer,
-                                                             uint32_t numVertices,
-                                                             std::shared_ptr<DeviceLocalBuffer> indexBuffer,
-                                                             uint32_t numIndices,
-                                                             bool isOpaque,
-                                                             VkDeviceAddress ommIndexBufferAddress,
-                                                             uint32_t numTriangles) {
-    VkAccelerationStructureGeometryKHR geom{};
-    geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-    geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-    geom.flags = isOpaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
-
-    auto &triangles = geom.geometry.triangles;
-    triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-    triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-    triangles.vertexData.deviceAddress = vertexBuffer->bufferAddress();
-    triangles.vertexStride = sizeof(T);
-    triangles.maxVertex = numVertices - 1;
-    triangles.indexType = VK_INDEX_TYPE_UINT32;
-    triangles.indexData.deviceAddress = indexBuffer->bufferAddress();
-
-    // Attach OMM special indices via pNext
-    VkAccelerationStructureTrianglesOpacityMicromapEXT ommGeom{};
-    ommGeom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_EXT;
-    ommGeom.micromap = VK_NULL_HANDLE; // special indices only, no actual micromap
-    ommGeom.indexBuffer.deviceAddress = ommIndexBufferAddress;
-    ommGeom.indexStride = sizeof(int32_t);
-    ommGeom.indexType = VK_INDEX_TYPE_UINT32;
-    ommGeoms.push_back(ommGeom);
-    triangles.pNext = &ommGeoms.back();
-
-    geometries.push_back(geom);
-    primitiveCounts.push_back(numTriangles);
-
-    return *this;
-}
-
-template <typename T>
-vk::BLASBuilder::BLASGeometryBuilder &
-vk::BLASBuilder::BLASGeometryBuilder::defineTriangleGeomrtryWithMicromap(
-    std::shared_ptr<DeviceLocalBuffer> vertexBuffer,
-    uint32_t numVertices,
-    std::shared_ptr<DeviceLocalBuffer> indexBuffer,
-    uint32_t numIndices,
-    bool isOpaque,
-    VkDeviceAddress ommIndexBufferAddress,
-    uint32_t numTriangles,
-    VkMicromapEXT micromap,
-    const VkMicromapUsageEXT *usageCounts,
-    uint32_t usageCountsCount) {
-    VkAccelerationStructureGeometryKHR geom{};
-    geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-    geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-    geom.flags = isOpaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
-
-    auto &triangles = geom.geometry.triangles;
-    triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-    triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-    triangles.vertexData.deviceAddress = vertexBuffer->bufferAddress();
-    triangles.vertexStride = sizeof(T);
-    triangles.maxVertex = numVertices - 1;
-    triangles.indexType = VK_INDEX_TYPE_UINT32;
-    triangles.indexData.deviceAddress = indexBuffer->bufferAddress();
-
-    VkAccelerationStructureTrianglesOpacityMicromapEXT ommGeom{};
-    ommGeom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_EXT;
-    ommGeom.micromap = micromap;
-    ommGeom.indexBuffer.deviceAddress = ommIndexBufferAddress;
-    ommGeom.indexStride = sizeof(int32_t);
-    ommGeom.indexType = VK_INDEX_TYPE_UINT32;
-    ommGeom.usageCountsCount = usageCountsCount;
-    ommGeom.pUsageCounts = usageCounts;
-    ommGeoms.push_back(ommGeom);
-    triangles.pNext = &ommGeoms.back();
-
-    geometries.push_back(geom);
-    primitiveCounts.push_back(numTriangles);
 
     return *this;
 }

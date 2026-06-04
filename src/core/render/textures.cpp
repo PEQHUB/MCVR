@@ -19,9 +19,6 @@ Textures::Textures(std::shared_ptr<Framework> framework) {}
 
 void Textures::reset() {
     textures_.clear();
-    textureAlphaClass_.clear();
-    textureAlphaData_.clear();
-    textureRGBAData_.clear();
     nextID = 0;
 }
 
@@ -80,10 +77,6 @@ void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width,
     framework->gc().collect(textures_[id]);
     textures_[id] = vk::DeviceLocalImage::create(device, vma, false, maxLevel, width, height, 1, format,
                                                  VK_IMAGE_USAGE_SAMPLED_BIT, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-    textureAlphaClass_.erase(id);
-    textureAlphaData_.erase(id);
-    textureRGBAData_.erase(id);
-
     auto samplerIter = samplers.find(id);
     if (samplerIter == samplers.end()) {
         texturesCerr() << "The given texture id: " << id << " is not allocated for sampler" << std::endl;
@@ -214,73 +207,6 @@ void Textures::queueUpload(uint8_t *srcPointer,
     uploadBytes_ += width * height * bytePerPixel;
     uploadRegions_++;
 
-#ifdef MCVR_ENABLE_OMM
-    // Extract alpha channel for OMM baking (mip 0 only, RGBA formats = 4 bpp)
-    if (level == 0 && bytePerPixel == 4) {
-        uint32_t texW = dstTexture->width();
-        uint32_t texH = dstTexture->height();
-
-        auto it = textureAlphaData_.find(dstId);
-        if (it == textureAlphaData_.end() || it->second.width != texW || it->second.height != texH ||
-            it->second.alpha.size() != static_cast<size_t>(texW) * texH) {
-            TextureAlphaData &data = textureAlphaData_[dstId];
-            data.width = texW;
-            data.height = texH;
-            data.alpha.assign(static_cast<size_t>(texW) * texH, 255);
-            data.animated = false;
-            it = textureAlphaData_.find(dstId);
-        }
-
-        TextureAlphaData &data = it->second;
-        // Copy alpha channel from the uploaded RGBA region
-        for (uint32_t row = 0; row < height; ++row) {
-            uint32_t srcRow = srcOffsetY + row;
-            uint32_t dstRow = dstOffsetY + row;
-            if (dstRow >= texH) break;
-            for (uint32_t col = 0; col < width; ++col) {
-                uint32_t srcCol = srcOffsetX + col;
-                uint32_t dstCol = dstOffsetX + col;
-                if (dstCol >= texW) break;
-                size_t srcIdx = (srcRow * srcRowPixels + srcCol) * 4 + 3; // alpha byte
-                data.alpha[dstRow * texW + dstCol] = srcPointer[srcIdx];
-            }
-        }
-    }
-#endif
-
-    // Cache full RGBA data for shader-side material height sampling (mip 0, RGBA formats)
-    if (level == 0 && bytePerPixel == 4) {
-        uint32_t texW = dstTexture->width();
-        uint32_t texH = dstTexture->height();
-
-        auto it = textureRGBAData_.find(dstId);
-        if (it == textureRGBAData_.end() || it->second.width != texW || it->second.height != texH ||
-            it->second.rgba.size() != static_cast<size_t>(texW) * texH * 4) {
-            TextureRGBAData &data = textureRGBAData_[dstId];
-            data.width = texW;
-            data.height = texH;
-            data.rgba.assign(static_cast<size_t>(texW) * texH * 4, 0);
-            it = textureRGBAData_.find(dstId);
-        }
-
-        TextureRGBAData &data = it->second;
-        for (uint32_t row = 0; row < height; ++row) {
-            uint32_t srcRow = srcOffsetY + row;
-            uint32_t dstRow = dstOffsetY + row;
-            if (dstRow >= texH) break;
-            for (uint32_t col = 0; col < width; ++col) {
-                uint32_t srcCol = srcOffsetX + col;
-                uint32_t dstCol = dstOffsetX + col;
-                if (dstCol >= texW) break;
-                size_t srcIdx = (srcRow * srcRowPixels + srcCol) * 4;
-                size_t dstIdx = (dstRow * texW + dstCol) * 4;
-                data.rgba[dstIdx + 0] = srcPointer[srcIdx + 0];
-                data.rgba[dstIdx + 1] = srcPointer[srcIdx + 1];
-                data.rgba[dstIdx + 2] = srcPointer[srcIdx + 2];
-                data.rgba[dstIdx + 3] = srcPointer[srcIdx + 3];
-            }
-        }
-    }
 }
 
 void Textures::performQueuedUpload() {
@@ -413,44 +339,11 @@ void Textures::destroyTexture(uint32_t id) {
         samplers.erase(samplerIter);
     }
 
-    // Clean up associated caches and metadata
+    // Clean up associated upload cache.
     caches_.erase(id);
-    textureAlphaClass_.erase(id);
-    textureAlphaData_.erase(id);
-    textureRGBAData_.erase(id);
 
     // Return ID to free list for reuse
     freeList_.push_back(id);
-}
-
-void Textures::setTextureAlphaClass(uint32_t id, AlphaClass alphaClass) {
-    std::unique_lock<std::recursive_mutex> lck(mutex_);
-    textureAlphaClass_[id] = alphaClass;
-}
-
-Textures::AlphaClass Textures::getTextureAlphaClass(uint32_t id) const {
-    auto it = textureAlphaClass_.find(id);
-    if (it != textureAlphaClass_.end()) {
-        return it->second;
-    }
-    // Default: assume mixed (needs AHS) for unknown textures
-    return AlphaClass::MIXED;
-}
-
-const Textures::TextureAlphaData *Textures::getTextureAlphaData(uint32_t id) const {
-    auto it = textureAlphaData_.find(id);
-    if (it != textureAlphaData_.end()) {
-        return &it->second;
-    }
-    return nullptr;
-}
-
-const Textures::TextureRGBAData *Textures::getTextureRGBAData(uint32_t id) const {
-    auto it = textureRGBAData_.find(id);
-    if (it != textureRGBAData_.end()) {
-        return &it->second;
-    }
-    return nullptr;
 }
 
 ImageBufferCache::ImageBufferCache(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device, uint32_t frameNum)

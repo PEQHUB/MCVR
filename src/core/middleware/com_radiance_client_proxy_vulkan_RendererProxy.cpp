@@ -384,10 +384,6 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Rende
     out << "rendererUsable:1"
         << ",gpuProfilerEnabled:" << (Renderer::gpuProfiler.isEnabled() ? 1 : 0)
         << ",rayBounces:" << Renderer::options.rayBounces
-        << ",areaLightsOption:" << (Renderer::options.areaLightsEnabled ? 1 : 0)
-        << ",restirOption:" << (Renderer::options.restirEnabled ? 1 : 0)
-        << ",restirSpatialOption:" << (Renderer::options.restirSpatialEnabled ? 1 : 0)
-        << ",restirBounceOption:" << (Renderer::options.restirBounceEnabled ? 1 : 0)
         << ",simplifiedIndirectOption:" << (Renderer::options.simplifiedIndirect ? 1 : 0)
         << ",serDevice:" << (serDevice ? 1 : 0)
         << ",serOption:" << (Renderer::options.serEnabled ? 1 : 0)
@@ -536,11 +532,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Rende
         Renderer::textureSystem.dumpDebug("C:/RadSER/texture_system_full.csv", 0);
     std::ostringstream out;
     out << Renderer::textureSystem.statusString()
-        << ",textureDebugDumped:" << (textureDebugDumped ? 1 : 0)
-        << ",blockModelTableLoaded:" << (Renderer::blockModelTable.isLoaded() ? 1 : 0)
-        << ",blockModelTableGeneration:" << Renderer::blockModelTable.generation()
-        << ",blockModelStateCount:" << Renderer::blockModelTable.stateCount()
-        << ",blockModelMaxStateId:" << Renderer::blockModelTable.maxStateId();
+        << ",textureDebugDumped:" << (textureDebugDumped ? 1 : 0);
 
     uint32_t chunkTotal = 0;
     uint32_t chunksWithBlas = 0;

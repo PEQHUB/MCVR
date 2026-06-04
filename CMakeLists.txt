@@ -163,17 +163,12 @@ set_target_properties(minizip PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_subdirectory(extern/json EXCLUDE_FROM_ALL)
 
-# OMM SDK (Opacity Micro-Map) - CPU baker only
-# We bypass the OMM top-level CMake and add only the library + its deps,
-# providing glm/stb from our existing project to avoid target conflicts.
 option(MCVR_ENABLE_SHARC "Enable SHARC hash grid radiance cache build support" ON)
 option(MCVR_ENABLE_SHARC_BUFFERS "Enable SHARC hash grid buffer allocation/init. Off by default until BLAS streaming lifetime is stable." OFF)
 option(MCVR_ENABLE_SHARC_UPDATE_PASS "Enable SHARC sparse update RT pipeline creation/dispatch. Off by default until explicitly profiling SHARC." OFF)
 option(MCVR_ENABLE_SHARC_RESOLVE_PASS "Enable SHARC resolve compute pipeline creation/dispatch. Off by default until explicitly profiling SHARC." OFF)
 option(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY "Compile the small read-only SHARC cache query into the main world RT raygen. Off by default because current NVIDIA drivers crash compiling this path into the main RT pipeline." OFF)
 option(MCVR_ENABLE_SHARC_QUERY_PASS "Compile the isolated SHARC candidate/query compute pass. Runtime default stays Off; this avoids SHARC hash/BDA reads in world.rgen." OFF)
-option(MCVR_ENABLE_DIRECT_LIGHT_PIPELINE "Compile experimental upstream-style split direct-light pipeline scaffolding. Runtime default stays Legacy." OFF)
-option(MCVR_ENABLE_RTXDI "Compile experimental RTXDI 3.0 direct-light backend scaffolding. Requires MCVR_ENABLE_DIRECT_LIGHT_PIPELINE and remains runtime-disabled by default." OFF)
 set(MCVR_SHARC_MAIN_TRACE_QUERY_MODE "off" CACHE STRING "SHARC main trace query compile mode: off, stub, math, hash, or radiance")
 set_property(CACHE MCVR_SHARC_MAIN_TRACE_QUERY_MODE PROPERTY STRINGS off stub math hash radiance)
 string(TOLOWER "${MCVR_SHARC_MAIN_TRACE_QUERY_MODE}" MCVR_SHARC_MAIN_TRACE_QUERY_MODE_LOWER)
@@ -194,52 +189,6 @@ else()
     message(FATAL_ERROR "Invalid MCVR_SHARC_MAIN_TRACE_QUERY_MODE='${MCVR_SHARC_MAIN_TRACE_QUERY_MODE}'. Expected off, stub, math, hash, or radiance.")
 endif()
 
-option(MCVR_ENABLE_OMM "Enable Opacity Micro-Map SDK for AHS elimination" ON)
 option(MCVR_SHADER_DEBUG_INFO "Emit NonSemantic Vulkan debug info with source (-gVS) for Nsight Graphics profiling. Off by default: 3x SPIR-V size, may regress RT pipeline performance." OFF)
-
-if (MCVR_ENABLE_OMM)
-    message(STATUS "OMM SDK Enabled")
-
-    # glm target (OMM expects a 'glm' CMake target; we provide our existing headers)
-    if(NOT TARGET glm)
-        add_library(glm INTERFACE)
-        target_include_directories(glm INTERFACE ${GLM_INCLUDE_DIR})
-    endif()
-
-    # stb_lib target (OMM expects 'stb_lib' for stb_image.h / stb_image_write.h)
-    if(NOT TARGET stb_lib)
-        add_library(stb_lib INTERFACE)
-        target_include_directories(stb_lib INTERFACE ${STB_INCLUDE_DIR})
-    endif()
-
-    # lz4 (from OMM's external, static only)
-    set(LZ4_BUILD_CLI OFF CACHE BOOL "" FORCE)
-    set(LZ4_BUILD_LEGACY_LZ4C OFF CACHE BOOL "" FORCE)
-    add_subdirectory(extern/omm/external/lz4/build/cmake EXCLUDE_FROM_ALL)
-
-    # xxHash (from OMM's external)
-    set(XXHASH_BUILD_XXHSUM OFF CACHE BOOL "" FORCE)
-    add_subdirectory(extern/omm/external/xxHash/build/cmake EXCLUDE_FROM_ALL)
-
-    # OMM library - static, CPU-only (no precompiled shaders)
-    set(OMM_LIB_TARGET_NAME omm-lib)
-    set(OMM_PROJECT_FOLDER "External/OMM")
-    set(OMM_STATIC_LIBRARY ON CACHE BOOL "" FORCE)
-    set(OMM_ENABLE_PRECOMPILED_SHADERS_DXIL OFF CACHE BOOL "" FORCE)
-    set(OMM_ENABLE_PRECOMPILED_SHADERS_SPIRV OFF CACHE BOOL "" FORCE)
-    set(OMM_ENABLE_OPENMP OFF CACHE BOOL "" FORCE)
-    set(OMM_LIB_INSTALL OFF CACHE BOOL "" FORCE)
-    # OMM lib uses PROJECT_VERSION which requires a version-enabled project scope
-    set(PROJECT_VERSION "1.0.0")
-    add_subdirectory(extern/omm/libraries/omm-lib EXCLUDE_FROM_ALL)
-    unset(PROJECT_VERSION)
-    # Remove stb_lib.cpp (duplicate STB_IMAGE_IMPLEMENTATION) and debug_impl.cpp
-    # (debug visualization, not needed) from omm-lib sources.
-    get_target_property(_omm_sources omm-lib SOURCES)
-    list(FILTER _omm_sources EXCLUDE REGEX "(stb_lib|debug_impl)\\.cpp$")
-    set_target_properties(omm-lib PROPERTIES SOURCES "${_omm_sources}")
-else()
-    message(STATUS "OMM SDK Disabled")
-endif()
 
 add_subdirectory(src)

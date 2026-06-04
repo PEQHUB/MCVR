@@ -123,19 +123,15 @@ namespace VertexFormat {
     static constexpr uint32_t PBR_FLAG_USE_OVERLAY      = 1u << 3;
     static constexpr uint32_t PBR_FLAG_USE_GLINT        = 1u << 4;
     static constexpr uint32_t PBR_FLAG_USE_LIGHT        = 1u << 5;
-    static constexpr uint32_t PBR_FLAG_GREEDY_MERGED    = 1u << 6; // UV tiling needed (greedy-merged quad)
     static constexpr uint32_t PBR_FLAG_OVERLAY_ALPHA_MASK = 1u << 7; // colorLayer holds overlay sprite bounds for alpha-masked biome tinting
     static constexpr uint32_t PBR_FLAG_COORD_SHIFT      = 8u;
     static constexpr uint32_t PBR_FLAG_COORD_MASK       = 0x7u << 8u; // 3 bits
-    // Compact format: vivid flag relocated from emissiveBlockType bit 16 to flags bit 11
-    static constexpr uint32_t PBR_FLAG_COMPACT_VIVID    = 1u << 11;
     // Biome tint type in bits 12-13: 0=none, 1=grass, 2=foliage, 3=water
     // Resolved in shader from per-section SSBO - NOT baked into vertex colorLayer
     static constexpr uint32_t PBR_FLAG_BIOME_TINT_SHIFT = 12u;
     static constexpr uint32_t PBR_FLAG_BIOME_TINT_MASK  = 0x3u << 12u;
     static constexpr uint32_t PBR_FLAG_BLOCK_GEOMETRY   = 1u << 14; // block chunk: use texture array, not bindless atlas
     static constexpr uint32_t PBR_FLAG_FLUID_GEOMETRY   = 1u << 15; // fluid surface: alpha is not a cutout mask
-    static constexpr uint32_t PBR_FLAG_COMPACT_THIN_CUTOUT_PLANT = 1u << 15; // compact-only carrier for emissiveBlockType bit 31
     static constexpr uint32_t PBR_PACKED_THIN_CUTOUT_PLANT = 1u << 31; // emissiveBlockType bit: exact Minecraft plant cards
 #else
     #define PBR_FLAG_USE_NORM        (1u << 0)
@@ -144,16 +140,13 @@ namespace VertexFormat {
     #define PBR_FLAG_USE_OVERLAY     (1u << 3)
     #define PBR_FLAG_USE_GLINT       (1u << 4)
     #define PBR_FLAG_USE_LIGHT       (1u << 5)
-    #define PBR_FLAG_GREEDY_MERGED   (1u << 6)
     #define PBR_FLAG_OVERLAY_ALPHA_MASK (1u << 7)
     #define PBR_FLAG_COORD_SHIFT     8u
     #define PBR_FLAG_COORD_MASK      (0x7u << 8u)
-    #define PBR_FLAG_COMPACT_VIVID   (1u << 11)
     #define PBR_FLAG_BIOME_TINT_SHIFT 12u
     #define PBR_FLAG_BIOME_TINT_MASK  (0x3u << 12u)
     #define PBR_FLAG_BLOCK_GEOMETRY   (1u << 14)
     #define PBR_FLAG_FLUID_GEOMETRY   (1u << 15)
-    #define PBR_FLAG_COMPACT_THIN_CUTOUT_PLANT (1u << 15)
     #define PBR_PACKED_THIN_CUTOUT_PLANT (1u << 31)
 #endif
 
@@ -192,54 +185,6 @@ namespace VertexFormat {
     static_assert(offsetof(PBRTriangle, lightPacked) == 92, "lightPacked offset mismatch");
 #endif
 
-    // 32 bytes per vertex, std430 aligned (2 x vec4)
-    // Compact format for world chunk geometry. Drops norm, postBase, lightPacked,
-    // glintUV, glintTexture, overlayPacked. Compresses colorLayer to RGBA8,
-    // albedoEmission to fp16. Entities keep full PBRTriangle.
-    struct PBRTriangleCompact {
-        T_VEC3 pos;            // 0..11   float32 world position (required by VK AS)
-        T_UINT packed0;        // 12..15  flags/carriers:16 | textureID:16
-                               //         bits 0-10 = flags, 11 = vivid, 15 = thin plant carrier
-        T_VEC2 textureUV;      // 16..23  float32 atlas UVs
-        T_UINT colorPacked;    // 24..27  R:8 | G:8 | B:8 | A:8
-        T_UINT packed1;        // 28..31  albedoEmission_half:16 | emissiveBlockType:16
-    };
-#ifdef __cplusplus
-    static_assert(sizeof(PBRTriangleCompact) == 32, "PBRTriangleCompact must be exactly 32 bytes");
-    static_assert(offsetof(PBRTriangleCompact, pos) == 0, "compact pos offset mismatch");
-    static_assert(offsetof(PBRTriangleCompact, packed0) == 12, "compact packed0 offset mismatch");
-    static_assert(offsetof(PBRTriangleCompact, textureUV) == 16, "compact textureUV offset mismatch");
-    static_assert(offsetof(PBRTriangleCompact, colorPacked) == 24, "compact colorPacked offset mismatch");
-    static_assert(offsetof(PBRTriangleCompact, packed1) == 28, "compact packed1 offset mismatch");
-#endif
-
-    // 64 bytes per vertex, std430 aligned (4 x vec4)
-    // Lossless format: drops only dead fields (norm, postBase, lightPacked).
-    // Every field the shader reads is at full precision — bit-identical output.
-    // Packs textureID + glintTexture into one uint32 (16 bits each).
-    struct PBRTriangleLossless {
-        T_VEC3 pos;                // 0..11   float32 world position
-        T_UINT flags;              // 12..15  full uint32 (all flag bits intact)
-        T_VEC4 colorLayer;         // 16..31  full vec4 (alpha preserved for glass)
-        T_VEC2 textureUV;          // 32..39  float32 atlas UVs
-        T_VEC2 glintUV;            // 40..47  float32 (enchantment shimmer preserved)
-        T_FLOAT albedoEmission;    // 48..51  float32 (full precision, area lights exact)
-        T_UINT emissiveBlockType;  // 52..55  full uint32 (vivid bit 16 in place)
-        T_UINT textureID_glint;    // 56..59  textureID:16 | glintTexture:16
-        T_UINT overlayPacked;      // 60..63  full uint32 (mining cracks preserved)
-    };
-#ifdef __cplusplus
-    static_assert(sizeof(PBRTriangleLossless) == 64, "PBRTriangleLossless must be exactly 64 bytes");
-    static_assert(offsetof(PBRTriangleLossless, pos) == 0, "lossless pos offset mismatch");
-    static_assert(offsetof(PBRTriangleLossless, flags) == 12, "lossless flags offset mismatch");
-    static_assert(offsetof(PBRTriangleLossless, colorLayer) == 16, "lossless colorLayer offset mismatch");
-    static_assert(offsetof(PBRTriangleLossless, textureUV) == 32, "lossless textureUV offset mismatch");
-    static_assert(offsetof(PBRTriangleLossless, glintUV) == 40, "lossless glintUV offset mismatch");
-    static_assert(offsetof(PBRTriangleLossless, albedoEmission) == 48, "lossless albedoEmission offset mismatch");
-    static_assert(offsetof(PBRTriangleLossless, emissiveBlockType) == 52, "lossless emissiveBlockType offset mismatch");
-    static_assert(offsetof(PBRTriangleLossless, textureID_glint) == 56, "lossless textureID_glint offset mismatch");
-    static_assert(offsetof(PBRTriangleLossless, overlayPacked) == 60, "lossless overlayPacked offset mismatch");
-#endif
 #ifdef __cplusplus
 }; // namespace VertexFormat
 #endif
@@ -435,7 +380,7 @@ namespace Data {
         T_INT normal;
         T_INT flag;
         T_INT properties;    // bit 0: has height map
-        T_INT maskTexture;   // bindless index of R8_UNORM material class mask, -1 = none
+        T_INT _reservedTexRule; // reserved; old material-class mask slot removed
         T_FLOAT _reserved0;  // padding (sprite bounds moved to per-vertex data)
         T_FLOAT _reserved1;
         T_FLOAT _reserved2;
@@ -467,6 +412,52 @@ namespace Data {
         T_INT   maskLayer;       // Block height range pack: minAlpha | (maxAlpha << 8), -1 = none
     };
 
+    // Texture-primary scalar material rules. These are keyed by spriteId and are
+    // deliberately not broad material classes. LabPBR texture pixels remain the
+    // source for roughness, F0/metal, emission, normal, AO, and height.
+    struct TextureRuleEntry {
+        T_UINT flags;             // bit 0: enabled; later bits mark explicit channels
+        T_FLOAT transmission;     // 0 opaque, 1 fully transmissive
+        T_FLOAT ior;
+        T_FLOAT metallic;
+        T_FLOAT f0;
+        T_FLOAT roughness;
+        T_FLOAT anisotropic;
+        T_FLOAT sheenWeight;
+        T_FLOAT sheenTint;
+        T_FLOAT coatWeight;
+        T_FLOAT coatRoughness;
+        T_FLOAT emission;
+        T_FLOAT conductorF0R;
+        T_FLOAT conductorF0G;
+        T_FLOAT conductorF0B;
+        T_UINT modeFlags;         // bits 0-1 volume, 2-3 thickness, 4-5 coat mask
+        T_FLOAT absorptionR;
+        T_FLOAT absorptionG;
+        T_FLOAT absorptionB;
+        T_FLOAT absorptionDistance;
+        T_FLOAT thicknessAmount;
+        T_FLOAT refractionRoughness;
+        T_FLOAT emissionTintR;
+        T_FLOAT emissionTintG;
+        T_FLOAT emissionTintB;
+        T_FLOAT emissionNits;
+        T_FLOAT anisotropicRotation;
+        T_FLOAT sheenRoughness;
+        T_FLOAT coatIor;
+        T_FLOAT coatTintR;
+        T_FLOAT coatTintG;
+        T_FLOAT coatTintB;
+        T_FLOAT coatMask;
+        T_FLOAT uvScaleU;
+        T_FLOAT uvScaleV;
+        T_FLOAT uvOffsetU;
+        T_FLOAT uvOffsetV;
+        T_FLOAT filterRadius;
+        T_FLOAT mipBias;
+        T_FLOAT displacementScale;
+    };
+
 #ifdef __cplusplus
     static constexpr uint32_t SPRITE_FLAG_HAS_SPECULAR = 1u << 0;
     static constexpr uint32_t SPRITE_FLAG_HAS_NORMAL   = 1u << 1;
@@ -482,6 +473,30 @@ namespace Data {
     static constexpr uint32_t SPRITE_SOURCE_FLAT = 3u;
     static constexpr uint32_t SPRITE_MAX_ENTRIES        = 4096u;
     static_assert(sizeof(SpriteEntry) == 32, "SpriteEntry must be exactly 32 bytes");
+    static constexpr uint32_t TEXTURE_RULE_ENABLED = 1u << 0;
+    static constexpr uint32_t TEXTURE_RULE_TRANSMISSION = 1u << 1;
+    static constexpr uint32_t TEXTURE_RULE_IOR = 1u << 2;
+    static constexpr uint32_t TEXTURE_RULE_METALLIC = 1u << 3;
+    static constexpr uint32_t TEXTURE_RULE_F0 = 1u << 4;
+    static constexpr uint32_t TEXTURE_RULE_ROUGHNESS = 1u << 5;
+    static constexpr uint32_t TEXTURE_RULE_ANISOTROPIC = 1u << 6;
+    static constexpr uint32_t TEXTURE_RULE_SHEEN = 1u << 7;
+    static constexpr uint32_t TEXTURE_RULE_COAT = 1u << 8;
+    static constexpr uint32_t TEXTURE_RULE_EMISSION = 1u << 9;
+    static constexpr uint32_t TEXTURE_RULE_CONDUCTOR_F0_RGB = 1u << 10;
+    static constexpr uint32_t TEXTURE_RULE_ABSORPTION = 1u << 11;
+    static constexpr uint32_t TEXTURE_RULE_THICKNESS = 1u << 12;
+    static constexpr uint32_t TEXTURE_RULE_VOLUME_MODE = 1u << 13;
+    static constexpr uint32_t TEXTURE_RULE_REFRACTION_ROUGHNESS = 1u << 14;
+    static constexpr uint32_t TEXTURE_RULE_EMISSION_TINT_NITS = 1u << 15;
+    static constexpr uint32_t TEXTURE_RULE_ANISOTROPIC_ROTATION = 1u << 16;
+    static constexpr uint32_t TEXTURE_RULE_COAT_EXT = 1u << 17;
+    static constexpr uint32_t TEXTURE_RULE_SHEEN_ROUGHNESS = 1u << 18;
+    static constexpr uint32_t TEXTURE_RULE_UV_TRANSFORM = 1u << 19;
+    static constexpr uint32_t TEXTURE_RULE_FILTER_RADIUS = 1u << 20;
+    static constexpr uint32_t TEXTURE_RULE_MIP_BIAS = 1u << 21;
+    static constexpr uint32_t TEXTURE_RULE_DISPLACEMENT_SCALE = 1u << 22;
+    static_assert(sizeof(TextureRuleEntry) == 160, "TextureRuleEntry must be exactly 160 bytes");
 #else
     #define SPRITE_FLAG_HAS_SPECULAR (1u << 0)
     #define SPRITE_FLAG_HAS_NORMAL   (1u << 1)
@@ -496,80 +511,38 @@ namespace Data {
     #define SPRITE_SOURCE_USER_CUSTOM 2u
     #define SPRITE_SOURCE_FLAT 3u
     #define SPRITE_MAX_ENTRIES       4096u
+    #define TEXTURE_RULE_ENABLED (1u << 0)
+    #define TEXTURE_RULE_TRANSMISSION (1u << 1)
+    #define TEXTURE_RULE_IOR (1u << 2)
+    #define TEXTURE_RULE_METALLIC (1u << 3)
+    #define TEXTURE_RULE_F0 (1u << 4)
+    #define TEXTURE_RULE_ROUGHNESS (1u << 5)
+    #define TEXTURE_RULE_ANISOTROPIC (1u << 6)
+    #define TEXTURE_RULE_SHEEN (1u << 7)
+    #define TEXTURE_RULE_COAT (1u << 8)
+    #define TEXTURE_RULE_EMISSION (1u << 9)
+    #define TEXTURE_RULE_CONDUCTOR_F0_RGB (1u << 10)
+    #define TEXTURE_RULE_ABSORPTION (1u << 11)
+    #define TEXTURE_RULE_THICKNESS (1u << 12)
+    #define TEXTURE_RULE_VOLUME_MODE (1u << 13)
+    #define TEXTURE_RULE_REFRACTION_ROUGHNESS (1u << 14)
+    #define TEXTURE_RULE_EMISSION_TINT_NITS (1u << 15)
+    #define TEXTURE_RULE_ANISOTROPIC_ROTATION (1u << 16)
+    #define TEXTURE_RULE_COAT_EXT (1u << 17)
+    #define TEXTURE_RULE_SHEEN_ROUGHNESS (1u << 18)
+    #define TEXTURE_RULE_UV_TRANSFORM (1u << 19)
+    #define TEXTURE_RULE_FILTER_RADIUS (1u << 20)
+    #define TEXTURE_RULE_MIP_BIAS (1u << 21)
+    #define TEXTURE_RULE_DISPLACEMENT_SCALE (1u << 22)
 #endif
 
     struct SpriteRegistry {
         SpriteEntry entries[SPRITE_MAX_ENTRIES];
     };
 
-    // Unified material class: full Disney BRDF parameters for a material category.
-    // ~32 classes (IRON, GOLD, DIAMOND, WOOD, GLASS, etc.), 128 bytes each.
-    // Indexed by material class ID from the material mask atlas.
-    struct MaterialClassEntry {
-        // Pack 0: base BRDF
-        T_VEC3 f0;              // Fresnel reflectance at normal incidence (RGB)
-        T_FLOAT roughness;      // Perceptual roughness [0,1] (squared in shader for GGX alpha)
-
-        // Pack 1: extended BRDF
-        T_FLOAT metallic;       // [0,1]
-        T_FLOAT transmission;   // [0,1], -1.0 = keep LabPBR value
-        T_FLOAT ior;            // Index of refraction (>= 1.0)
-        T_FLOAT subsurface;     // [0,1]
-
-        // Pack 2: Disney extended
-        T_FLOAT anisotropic;    // [0,1]
-        T_FLOAT sheenWeight;    // [0,1]
-        T_FLOAT sheenTint;      // [0,1]
-        T_FLOAT coatWeight;     // [0,1]
-
-        // Pack 3: coat + noise base
-        T_FLOAT coatRoughness;  // [0,1]
-        T_FLOAT noiseScale;     // World-space noise scale
-        T_FLOAT noiseStrength;  // [0,1]
-        T_UINT  noisePacked;    // Bit-packed: octaves(0-3), type(4-8), seed(9-17), target(20-23)
-
-        // Pack 4: displacement + height field + normal controls (16 bytes)
-        T_UINT  pomPacked0;   // heightFilter(3) | displacementMode(2) | heightSource(3) | filterRadius(4) | mipBias(4) | selfShadow(1)
-        T_UINT  pomPacked1;   // normalClamp(8) | geometricBlend(8) | legacyAO(8) | heightContrast(8)
-        T_UINT  pomPacked2;   // heightRemapMin(8) | heightRemapMax(8) | heightOffset(8) | normalDistanceFade(8)
-        T_FLOAT pomDepth;     // [0.00-2.00] per-block displacement depth in blocks (0 = disabled)
-
-        // Pack 5: gamut + noise mask + normal strength
-        T_FLOAT gamutBoost;     // Oklab chroma scale (1.0 = neutral)
-        T_FLOAT noiseMaskThreshold; // [0,1]
-        T_UINT  noiseMaskPacked;    // Bit-packed mask params
-        T_FLOAT normalStrength; // Normal map intensity (1.0 = neutral)
-
-        // Pack 6: noise transform
-        T_FLOAT noiseRotation;  // Radians
-        T_FLOAT noiseAspect;    // Y/X ratio
-        T_FLOAT noiseLacunarity;// FBM lacunarity
-        T_FLOAT noiseContrast;  // S-curve contrast
-
-        // Pack 7: emission + classification
-        T_FLOAT emissionNits;   // Surface luminance in nits (0 = no emission)
-        T_UINT  emissionType;   // EmissiveBlock ordinal (255 = none)
-        T_UINT  classId;        // Material class ID (for cross-reference)
-        T_UINT  flags;          // Bit 0: has override, Bit 1: area light, Bit 2: vivid color,
-                                // Bit 3: AutoPBR (shader-side roughness+normal from albedo),
-                                // Bit 4: invertRoughness, Bit 5: invertNormal, Bit 6: invertHeight
-
-        // Pack 8: AutoPBR shader-side params (GPU-computed roughness + normal from albedo)
-        T_FLOAT lumMin;         // Precomputed per-block min luminance [0,1] (linear)
-        T_FLOAT lumMax;         // Precomputed per-block max luminance [0,1] (linear)
-        T_UINT  autoPBRPacked0; // rMin_u8 | rMax_u8<<8 | center_u8<<16 | spread_u8<<24
-        T_UINT  autoPBRPacked1; // heightGamma_u16 | roughnessBlend_u8<<16 | reserved_u8<<24
-    }; // 144 bytes (9 x vec4), std430 aligned
-
-#ifdef __cplusplus
-    static constexpr int MAX_MATERIAL_CLASSES = 512;
-#else
-    #define MAX_MATERIAL_CLASSES 512
-#endif
-
-    struct MaterialClassMapping {
-        MaterialClassEntry entries[MAX_MATERIAL_CLASSES];
-    }; // 72 KB (512 × 144 bytes)
+    struct TextureRuleRegistry {
+        TextureRuleEntry entries[SPRITE_MAX_ENTRIES];
+    };
 
     struct ExposureData {
         T_INT width;
@@ -599,15 +572,6 @@ namespace Data {
         T_FLOAT brightnessFactor;
         T_FLOAT pad0;
     };
-
-    struct AreaLight {
-        T_VEC3 position;     // camera-relative world position
-        T_FLOAT halfExtent;  // cube half-size (0.5=full block, 0.05=point-like)
-        T_VEC3 color;        // pre-computed emissive RGB
-        T_FLOAT intensity;   // brightness scale
-        T_VEC3 _unused;      // available for future use
-        T_FLOAT radius;      // max range in blocks
-    }; // 48 bytes, std430 aligned (3 x vec4)
 #ifdef __cplusplus
 }; // namespace Data
 #endif

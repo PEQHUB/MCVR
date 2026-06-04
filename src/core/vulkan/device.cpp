@@ -44,8 +44,6 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                                                    VK_KHR_MAINTENANCE_5_EXTENSION_NAME,
                                                    // HDR10: enables vkSetHdrMetadataEXT for SMPTE ST.2086 mastering display metadata
                                                    VK_EXT_HDR_METADATA_EXTENSION_NAME,
-                                                   // OMM: Opacity Micro Maps for hardware-resolved alpha testing
-                                                   VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME,
                                                    // SER: Shader Execution Reordering for material coherence
                                                    // Try EXT first (promoted), fall back to NV (original)
                                                    VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME,
@@ -124,14 +122,9 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV supportedSERFeatures{};
     supportedSERFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
     supportedSERFeatures.pNext = &supportedShaderClockFeatures;
-
-    VkPhysicalDeviceOpacityMicromapFeaturesEXT supportedOMMFeatures{};
-    supportedOMMFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT;
-    supportedOMMFeatures.pNext = &supportedSERFeatures;
-
     VkPhysicalDeviceMaintenance5Features supportedMaintenance5{};
     supportedMaintenance5.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES;
-    supportedMaintenance5.pNext = &supportedOMMFeatures;
+    supportedMaintenance5.pNext = &supportedSERFeatures;
 
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT supportedVertexInputDynamicState{};
     supportedVertexInputDynamicState.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT;
@@ -176,14 +169,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     selectedExtensions.reserve(filteredExtensions.size());
     for (const auto *ext : filteredExtensions) { selectedExtensions.insert(ext); }
     auto hasExtension = [&](const char *name) { return selectedExtensions.find(name) != selectedExtensions.end(); };
-
     // enabling features
-    ommSupported_ = hasExtension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME) &&
-                    supportedOMMFeatures.micromap == VK_TRUE;
-
-    VkPhysicalDeviceOpacityMicromapFeaturesEXT ommFeatures{};
-    ommFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT;
-    ommFeatures.micromap = ommSupported_ ? VK_TRUE : VK_FALSE;
 
     // SER: Shader Execution Reordering for material coherence in RT
     // Accept either EXT (promoted) or NV (original) extension
@@ -193,7 +179,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
 
     VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV serFeatures{};
     serFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
-    serFeatures.pNext = &ommFeatures;
+    serFeatures.pNext = nullptr;
     serFeatures.rayTracingInvocationReorder = serSupported_ ? VK_TRUE : VK_FALSE;
 
     // Shader clock: per-pixel profiling instrumentation
@@ -227,7 +213,6 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     faultFeatures.deviceFault = deviceFaultSupported_ ? VK_TRUE : VK_FALSE;
     faultFeatures.deviceFaultVendorBinary = VK_FALSE;
 
-    deviceCout() << "Opacity Micro Maps (OMM): " << (ommSupported_ ? "YES" : "NO") << std::endl;
     deviceCout() << "Shader Execution Reordering (SER): " << (serSupported_ ? "YES" : "NO")
                  << " (EXT=" << hasExtension(VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME)
                  << " NV=" << hasExtension(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME)
