@@ -135,6 +135,7 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
 
     std::shared_ptr<vk::Shader> worldSolidTransparentClosestHitShader_;
     std::shared_ptr<vk::Shader> worldSolidTransparentNoDisplacementClosestHitShader_;
+    std::shared_ptr<vk::Shader> worldSolidAnyHitShader_;
     std::shared_ptr<vk::Shader> worldTransparentAnyHitShader_;
 
     std::shared_ptr<vk::Shader> worldNoReflectClosestHitShader_;

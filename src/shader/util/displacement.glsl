@@ -17,6 +17,7 @@ struct DisplacementSource {
     vec2 uvMin;
     vec2 uvMax;
     float maxDepth;
+    bool boundaryWalls;
 };
 
 struct DisplacementHit {
@@ -45,6 +46,7 @@ void displacementInitSource(out DisplacementSource src) {
     src.uvMin = vec2(0.0);
     src.uvMax = vec2(1.0);
     src.maxDepth = 0.0;
+    src.boundaryWalls = true;
 }
 
 vec3 displacementNormalize(vec3 value, vec3 fallback) {
@@ -242,6 +244,32 @@ vec3 displacementWallNormal(bool steppedU,
     return displacementNormalize(n, baseNormal);
 }
 
+float displacementDominantAxisSignedOffset(vec3 blockBase, vec3 axis) {
+    vec3 a = abs(axis);
+    if (a.x >= a.y && a.x >= a.z) return blockBase.x * (axis.x < 0.0 ? -1.0 : 1.0);
+    if (a.y >= a.z) return blockBase.y * (axis.y < 0.0 ? -1.0 : 1.0);
+    return blockBase.z * (axis.z < 0.0 ? -1.0 : 1.0);
+}
+
+bool displacementAxisNearlyCardinal(vec3 axis) {
+    vec3 a = abs(normalize(axis));
+    return max(max(a.x, a.y), a.z) > 0.999;
+}
+
+bool displacementBuildBlockChart(vec3 blockBase,
+                                 vec3 dPdu,
+                                 vec3 dPdv,
+                                 out vec2 chartOffset) {
+    chartOffset = vec2(0.0);
+    if (!displacementAxisNearlyCardinal(dPdu) || !displacementAxisNearlyCardinal(dPdv)) {
+        return false;
+    }
+
+    chartOffset = vec2(displacementDominantAxisSignedOffset(blockBase, dPdu),
+                       displacementDominantAxisSignedOffset(blockBase, dPdv));
+    return true;
+}
+
 float displacementNextBoundaryT(float originUv,
                                 float rate,
                                 int texel,
@@ -341,6 +369,9 @@ bool displacementTracePrimary(DisplacementSource src,
                        nextTexel.x >= size.x || nextTexel.y >= size.y;
 
         if (outside) {
+            if (!src.boundaryWalls) {
+                return false;
+            }
             if (displacementWallInterval(edgeDepth, currentDepth, 0.0)) {
                 hit.hit = true;
                 hit.sideWall = true;
@@ -428,7 +459,9 @@ bool displacementTraceExit(DisplacementSource src,
             float d = max(startDepth + depthRate * tExit, 0.0);
             vec2 uv = clamp(startUV + rateUV * tExit, boundsMin, boundsMax);
             exitPos = displacementWorldPosAt(uv, d, startUV, planeWorldPos, dPdu, dPdv, baseNormal);
-            exitNormal = displacementWallNormal(stepU, stepV, rateUV, dPdu, dPdv, baseNormal);
+            exitNormal = src.boundaryWalls
+                ? displacementWallNormal(stepU, stepV, rateUV, dPdu, dPdv, baseNormal)
+                : baseNormal;
             return true;
         }
         texel = nextTexel;

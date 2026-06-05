@@ -419,12 +419,16 @@ void main() {
         }
 
         if (basisValid) {
+            vec2 displacementChartOffset = vec2(0.0);
+            displacementBuildBlockChart(v0.postBase, displacedDpu, displacedDpv, displacementChartOffset);
+
             displacementSource.isBlock = isBlockGeometry;
             displacementSource.textureID = textureID;
             displacementSource.normalTextureID = normalTextureID;
             displacementSource.animTick = worldUbo.animTick;
-            displacementSource.uvMin = min(min(v0.textureUV, v1.textureUV), v2.textureUV);
-            displacementSource.uvMax = max(max(v0.textureUV, v1.textureUV), v2.textureUV);
+            displacementSource.uvMin = min(min(v0.textureUV, v1.textureUV), v2.textureUV) + displacementChartOffset;
+            displacementSource.uvMax = max(max(v0.textureUV, v1.textureUV), v2.textureUV) + displacementChartOffset;
+            displacementSource.boundaryWalls = false;
 
             float fade = 1.0 - smoothstep(pc.displacementFadeDistanceBlocks * 0.75, pc.displacementFadeDistanceBlocks, actualHitT);
             TextureRuleEntry displacementRule = safeTextureRuleEntry(textureID);
@@ -438,7 +442,7 @@ void main() {
 
             DisplacementHit displacementHit;
             int primarySteps = clamp(pc.displacementPrimarySteps, 1, 512);
-            vec2 planeTextureUV = textureUVRaw;
+            vec2 planeTextureUV = textureUVRaw + displacementChartOffset;
             if (displacementTracePrimary(displacementSource, planeTextureUV, planeHitWorldPos, gl_WorldRayDirectionEXT,
                                          viewDir, displacedDpu, displacedDpv, displacedBaseNormal,
                                          primarySteps, pc.displacementRefinementSteps, displacementHit)) {

@@ -16,6 +16,7 @@ struct UnpackedVertex {
     vec3 colorLayer;
     float colorLayerAlpha;
     float albedoEmission;
+    vec3 postBase;
     uint emissiveBlockType;
     vec2 glintUV;
     uint glintTexture;
@@ -32,6 +33,7 @@ UnpackedVertex unpackFullVertex(PBRTriangle t) {
     v.colorLayer = t.colorLayer.rgb;
     v.colorLayerAlpha = t.colorLayer.a;
     v.albedoEmission = t.albedoEmission;
+    v.postBase = t.postBase;
     v.emissiveBlockType = t.emissiveBlockType;
     v.glintUV = t.glintUV;
     v.glintTexture = t.glintTexture;

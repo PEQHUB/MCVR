@@ -161,7 +161,7 @@ namespace VertexFormat {
 
         T_VEC4 colorLayer;          // 32..47
 
-        T_VEC3 postBase;            // 48..59
+        T_VEC3 postBase;            // 48..59  block origin for block geometry, post base otherwise
         T_UINT emissiveBlockType;   // 60..63  EmissiveBlock ordinal (0-39), 255 = none/LabPBR
 
         T_VEC2 textureUV;           // 64..71

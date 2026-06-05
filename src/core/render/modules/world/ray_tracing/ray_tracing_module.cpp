@@ -1371,8 +1371,14 @@ void RayTracingModule::initPipeline() {
     worldCloudClosestHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_cloud_rchit.spv").string());
     shadowAnyHitShader_ = vk::Shader::create(device, (shaderPath / "world/ray_tracing/shadow_rahit.spv").string());
+    worldSolidAnyHitShader_ =
+        vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_solid_rahit.spv").string());
+    const uint32_t activeWorldSolidAnyHitStage =
+        (useShaderDisplacement && worldSolidAnyHitShader_) ? 19u : VK_SHADER_UNUSED_KHR;
     worldTransparentAnyHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_transparent_rahit.spv").string());
+    auto worldSolidAnyHitStageShader =
+        worldSolidAnyHitShader_ ? worldSolidAnyHitShader_ : worldTransparentAnyHitShader_;
     worldNoReflectAnyHitShader_ =
         vk::Shader::create(device, (shaderPath / "world/ray_tracing/world_no_reflect_rahit.spv").string());
     worldCloudAnyHitShader_ =
@@ -1425,6 +1431,7 @@ void RayTracingModule::initPipeline() {
             .defineShaderStage(endGatewayClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)            // 16
             .defineShaderStage(endGatewayAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                    // 17
             .defineShaderStage(pointLightShadowMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                   // 18
+            .defineShaderStage(worldSolidAnyHitStageShader, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                // 19
             .endShaderStage()
             .beginShaderGroup()
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 0, VK_SHADER_UNUSED_KHR,
@@ -1441,7 +1448,7 @@ void RayTracingModule::initPipeline() {
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 10, 11,
                                VK_SHADER_UNUSED_KHR) // shadow
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 4,
-                               VK_SHADER_UNUSED_KHR,
+                               activeWorldSolidAnyHitStage,
                                VK_SHADER_UNUSED_KHR) // world solid
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 4, 7,
                                VK_SHADER_UNUSED_KHR) // world transparent
@@ -1526,6 +1533,10 @@ void RayTracingModule::initSharcUpdatePipeline() {
     if (!activeWorldSolidTransparentClosestHitShader) {
         activeWorldSolidTransparentClosestHitShader = worldSolidTransparentClosestHitShader_;
     }
+    const uint32_t activeWorldSolidAnyHitStage =
+        (useShaderDisplacement && worldSolidAnyHitShader_) ? 19u : VK_SHADER_UNUSED_KHR;
+    auto worldSolidAnyHitStageShader =
+        worldSolidAnyHitShader_ ? worldSolidAnyHitShader_ : worldTransparentAnyHitShader_;
     RadianceLogger::log("RayTracing", "INFO",
                         "SHARC closest-hit variant: %s (displacementRequested=%d displacementRuntimeAllowed=%d displacementForceDisabled=%d noDisplacementShader=%d)",
                         useShaderDisplacement ? "displacement" : "no_displacement",
@@ -1557,6 +1568,7 @@ void RayTracingModule::initSharcUpdatePipeline() {
             .defineShaderStage(endGatewayClosestHitShader_, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR)             // 16
             .defineShaderStage(endGatewayAnyHitShader_, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                     // 17
             .defineShaderStage(pointLightShadowMissShader_, VK_SHADER_STAGE_MISS_BIT_KHR)                    // 18
+            .defineShaderStage(worldSolidAnyHitStageShader, VK_SHADER_STAGE_ANY_HIT_BIT_KHR)                 // 19
             .endShaderStage()
             .beginShaderGroup()
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR, 0, VK_SHADER_UNUSED_KHR,
@@ -1572,7 +1584,7 @@ void RayTracingModule::initSharcUpdatePipeline() {
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 10, 11,
                                VK_SHADER_UNUSED_KHR) // shadow
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 4,
-                               VK_SHADER_UNUSED_KHR,
+                               activeWorldSolidAnyHitStage,
                                VK_SHADER_UNUSED_KHR) // world solid
             .defineShaderGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR, VK_SHADER_UNUSED_KHR, 4, 7,
                                VK_SHADER_UNUSED_KHR) // world transparent
