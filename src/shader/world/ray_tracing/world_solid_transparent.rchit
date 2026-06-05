@@ -393,7 +393,6 @@ void main() {
     displacementInitSource(displacementSource);
     bool hasDisplacedSurface = false;
     bool displacementUsesWorldOffset = DISPLACEMENT_WORLD_OFFSET_SCALE > 0.0;
-    bool displacementSelfShadowEnabled = false;
     float displacedDepth = 0.0;
     vec2 displacedUV = textureUV;
     vec3 displacedBaseNormal = vec3(0.0, 1.0, 0.0);
@@ -699,6 +698,19 @@ void main() {
     vec3 shadowBiasN = dot(sampledLightDir, geometricNormal) > 0.0 ? geometricNormal : -geometricNormal;
     vec3 shadowRayOrigin = thinCutoutPlant ? thinPlantRayOrigin(worldPos, sampledLightDir, geometricNormal)
                                            : offset_ray(worldPos, shadowBiasN);
+    bool shadowLocalVisible = true;
+#if RARSER_SHADER_DISPLACEMENT
+    if (hasDisplacedSurface && displacementUsesWorldOffset) {
+        DisplacementOutgoingRayStart shadowStart;
+        displacementResolveOutgoingRayStart(displacementSource, displacedUV, displacedDepth,
+                                            worldPos, displacedPlaneAtUv, sampledLightDir,
+                                            displacedDpu, displacedDpv, displacedBaseNormal,
+                                            geometricNormal, max(8, pc.displacementPrimarySteps / 2),
+                                            shadowStart);
+        shadowLocalVisible = shadowStart.visible;
+        shadowRayOrigin = offset_ray(shadowStart.origin, shadowStart.biasNormal);
+    }
+#endif
 
     bool skipSecondarySunShadow = RT_DEBUG_DISABLE_SECONDARY_SUN_SHADOW && mainRay.index > 0;
     if (worldUbo.skyType == 1 && !skipSecondarySunShadow) {
@@ -723,23 +735,17 @@ void main() {
             shadowMask |= PLAYER_MASK | PLAYER_HEAD_MASK;  // world surfaces see player shadows; hand does not (prevents self-shadowing)
         }
 
-        traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT,
-                    shadowMask,
-                    0,                                     // sbtRecordOffset
-                    0,                                     // sbtRecordStride
-                    2,                                     // missIndex
-                    shadowRayOrigin, 0.0, sampledLightDir, 1000, 1);
+        if (shadowLocalVisible) {
+            traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT,
+                        shadowMask,
+                        0,                                     // sbtRecordOffset
+                        0,                                     // sbtRecordStride
+                        2,                                     // missIndex
+                        shadowRayOrigin, 0.0, sampledLightDir, 1000, 1);
+        }
 
         // Add direct lighting contribution
         vec3 lightContribution = shadowRay.radiance;
-#if RARSER_SHADER_DISPLACEMENT
-        if (hasDisplacedSurface && displacementSelfShadowEnabled) {
-            int secondarySteps = max(8, pc.displacementPrimarySteps / 2);
-            lightContribution *= displacementSelfShadow(displacementSource, displacedUV, displacedDepth,
-                                                        displacedPlaneAtUv, sampledLightDir, displacedDpu, displacedDpv,
-                                                        displacedBaseNormal, secondarySteps);
-        }
-#endif
 
         // Apply cloud shadowing (procedural volumetric slab).
         // This is evaluated at the shading point so it works for primary and reflected paths.
@@ -806,12 +812,17 @@ void main() {
                 vec3 bounceWorldPos = worldPos;
 #if RARSER_SHADER_DISPLACEMENT
                 if (hasDisplacedSurface && displacementUsesWorldOffset) {
-                    vec3 exitWorldPos;
-                    vec3 exitNormal;
-                    if (displacementTraceExit(displacementSource, displacedUV, displacedDepth, displacedPlaneAtUv,
-                                              reflectDir, displacedDpu, displacedDpv, displacedBaseNormal,
-                                              max(8, pc.displacementPrimarySteps / 2), exitWorldPos, exitNormal)) {
-                        bounceWorldPos = exitWorldPos;
+                    DisplacementOutgoingRayStart bounceStart;
+                    if (displacementResolveOutgoingRayStart(displacementSource, displacedUV, displacedDepth,
+                                                            worldPos, displacedPlaneAtUv, reflectDir,
+                                                            displacedDpu, displacedDpv, displacedBaseNormal,
+                                                            geometricNormal, max(8, pc.displacementPrimarySteps / 2),
+                                                            bounceStart)) {
+                        bounceWorldPos = bounceStart.origin;
+                        bounceOffsetN = bounceStart.biasNormal;
+                    } else {
+                        mainRay.flags |= PR_STOP_BIT;
+                        return;
                     }
                 }
 #endif
@@ -825,12 +836,17 @@ void main() {
                 vec3 bounceWorldPos = worldPos;
 #if RARSER_SHADER_DISPLACEMENT
                 if (hasDisplacedSurface && displacementUsesWorldOffset) {
-                    vec3 exitWorldPos;
-                    vec3 exitNormal;
-                    if (displacementTraceExit(displacementSource, displacedUV, displacedDepth, displacedPlaneAtUv,
-                                              refractDir, displacedDpu, displacedDpv, displacedBaseNormal,
-                                              max(8, pc.displacementPrimarySteps / 2), exitWorldPos, exitNormal)) {
-                        bounceWorldPos = exitWorldPos;
+                    DisplacementOutgoingRayStart bounceStart;
+                    if (displacementResolveOutgoingRayStart(displacementSource, displacedUV, displacedDepth,
+                                                            worldPos, displacedPlaneAtUv, refractDir,
+                                                            displacedDpu, displacedDpv, displacedBaseNormal,
+                                                            geometricNormal, max(8, pc.displacementPrimarySteps / 2),
+                                                            bounceStart)) {
+                        bounceWorldPos = bounceStart.origin;
+                        bounceOffsetN = bounceStart.biasNormal;
+                    } else {
+                        mainRay.flags |= PR_STOP_BIT;
+                        return;
                     }
                 }
 #endif
@@ -852,12 +868,17 @@ void main() {
             vec3 bounceWorldPos = worldPos;
 #if RARSER_SHADER_DISPLACEMENT
             if (hasDisplacedSurface && displacementUsesWorldOffset) {
-                vec3 exitWorldPos;
-                vec3 exitNormal;
-                if (displacementTraceExit(displacementSource, displacedUV, displacedDepth, displacedPlaneAtUv,
-                                          reflectDir, displacedDpu, displacedDpv, displacedBaseNormal,
-                                          max(8, pc.displacementPrimarySteps / 2), exitWorldPos, exitNormal)) {
-                    bounceWorldPos = exitWorldPos;
+                DisplacementOutgoingRayStart bounceStart;
+                if (displacementResolveOutgoingRayStart(displacementSource, displacedUV, displacedDepth,
+                                                        worldPos, displacedPlaneAtUv, reflectDir,
+                                                        displacedDpu, displacedDpv, displacedBaseNormal,
+                                                        geometricNormal, max(8, pc.displacementPrimarySteps / 2),
+                                                        bounceStart)) {
+                    bounceWorldPos = bounceStart.origin;
+                    bounceOffsetN = bounceStart.biasNormal;
+                } else {
+                    mainRay.flags |= PR_STOP_BIT;
+                    return;
                 }
             }
 #endif
@@ -913,12 +934,17 @@ void main() {
     vec3 bounceWorldPos = worldPos;
 #if RARSER_SHADER_DISPLACEMENT
     if (hasDisplacedSurface && displacementUsesWorldOffset) {
-        vec3 exitWorldPos;
-        vec3 exitNormal;
-        if (displacementTraceExit(displacementSource, displacedUV, displacedDepth, displacedPlaneAtUv,
-                                  sampleDir, displacedDpu, displacedDpv, displacedBaseNormal,
-                                  max(8, pc.displacementPrimarySteps / 2), exitWorldPos, exitNormal)) {
-            bounceWorldPos = exitWorldPos;
+        DisplacementOutgoingRayStart bounceStart;
+        if (displacementResolveOutgoingRayStart(displacementSource, displacedUV, displacedDepth,
+                                                worldPos, displacedPlaneAtUv, sampleDir,
+                                                displacedDpu, displacedDpv, displacedBaseNormal,
+                                                geometricNormal, max(8, pc.displacementPrimarySteps / 2),
+                                                bounceStart)) {
+            bounceWorldPos = bounceStart.origin;
+            bounceOffsetN = bounceStart.biasNormal;
+        } else {
+            mainRay.flags |= PR_STOP_BIT;
+            return;
         }
     }
 #endif

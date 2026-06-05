@@ -30,6 +30,12 @@ struct DisplacementHit {
     vec3 geometricNormal;
 };
 
+struct DisplacementOutgoingRayStart {
+    bool visible;
+    vec3 origin;
+    vec3 biasNormal;
+};
+
 void displacementInitSource(out DisplacementSource src) {
     src.mode = DISPLACEMENT_SOURCE_FLAT;
     src.isBlock = false;
@@ -432,19 +438,44 @@ bool displacementTraceExit(DisplacementSource src,
     return false;
 }
 
-float displacementSelfShadow(DisplacementSource src,
-                             vec2 startUV,
-                             float startDepth,
-                             vec3 planeWorldPos,
-                             vec3 lightDir,
-                             vec3 dPdu,
-                             vec3 dPdv,
-                             vec3 baseNormal,
-                             int maxSteps) {
+void displacementInitOutgoingRayStart(vec3 worldPos,
+                                      vec3 rayDir,
+                                      vec3 fallbackNormal,
+                                      out DisplacementOutgoingRayStart rayStart) {
+    rayStart.visible = true;
+    rayStart.origin = worldPos;
+    rayStart.biasNormal = dot(rayDir, fallbackNormal) > 0.0 ? fallbackNormal : -fallbackNormal;
+}
+
+bool displacementResolveOutgoingRayStart(DisplacementSource src,
+                                         vec2 startUV,
+                                         float startDepth,
+                                         vec3 startWorldPos,
+                                         vec3 planeWorldPos,
+                                         vec3 rayDir,
+                                         vec3 dPdu,
+                                         vec3 dPdv,
+                                         vec3 baseNormal,
+                                         vec3 fallbackNormal,
+                                         int maxSteps,
+                                         out DisplacementOutgoingRayStart rayStart) {
+    displacementInitOutgoingRayStart(startWorldPos, rayDir, fallbackNormal, rayStart);
+    if (src.mode != DISPLACEMENT_SOURCE_AUTHORED_NORMAL_ALPHA ||
+        src.maxDepth <= DISPLACEMENT_MIN_DEPTH) {
+        return true;
+    }
+
     vec3 exitPos;
     vec3 exitNormal;
-    return displacementTraceExit(src, startUV, startDepth, planeWorldPos, lightDir,
-                                 dPdu, dPdv, baseNormal, maxSteps, exitPos, exitNormal) ? 1.0 : 0.0;
+    if (displacementTraceExit(src, startUV, startDepth, planeWorldPos, rayDir,
+                              dPdu, dPdv, baseNormal, maxSteps, exitPos, exitNormal)) {
+        rayStart.origin = exitPos;
+        rayStart.biasNormal = dot(rayDir, exitNormal) > 0.0 ? exitNormal : -exitNormal;
+        return true;
+    }
+
+    rayStart.visible = false;
+    return false;
 }
 
 #endif // RARSER_DISPLACEMENT_GLSL

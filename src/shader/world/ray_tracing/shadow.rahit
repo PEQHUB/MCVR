@@ -5,6 +5,10 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
+#ifndef RARSER_SHADER_DISPLACEMENT
+#define RARSER_SHADER_DISPLACEMENT 1
+#endif
+
 #include "../util/labpbr.glsl"
 #include "../util/random.glsl"
 #include "../util/ray_payloads.glsl"
@@ -16,6 +20,9 @@
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
 #include "../util/sprite_fetch.glsl"
+#if RARSER_SHADER_DISPLACEMENT
+#include "../util/displacement.glsl"
+#endif
 
 layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
 
@@ -126,6 +133,76 @@ vec3 thinPlantShadowTransmittance(vec3 tint) {
     float transmission = clamp(1.0 - shadowStrength * 0.28, 0.28, 0.95);
     return clamp(coloredTransmission * transmission, vec3(0.25), vec3(0.95));
 }
+
+#if RARSER_SHADER_DISPLACEMENT
+bool shadowAuthoredDisplacementBlocksOpaqueHit(UnpackedVertex v0,
+                                               UnpackedVertex v1,
+                                               UnpackedVertex v2,
+                                               vec2 textureUV,
+                                               uint textureID,
+                                               bool useTexture,
+                                               bool isBlockGeometry,
+                                               bool isFluidGeometry) {
+    if (pc.displacementDepthScale <= DISPLACEMENT_MIN_DEPTH ||
+        pc.displacementFadeDistanceBlocks <= DISPLACEMENT_MIN_DEPTH ||
+        gl_HitTEXT >= pc.displacementFadeDistanceBlocks ||
+        !useTexture || !isBlockGeometry || isFluidGeometry ||
+        !displacementBlockHasAuthoredHeight(textureID)) {
+        return true;
+    }
+
+    uint coordinateMode = (v0.flags & PBR_FLAG_COORD_MASK) >> PBR_FLAG_COORD_SHIFT;
+    if (coordinateMode != 0u) return true;
+
+    vec3 wp0 = vec3(gl_ObjectToWorldEXT * vec4(v0.pos, 1.0));
+    vec3 wp1 = vec3(gl_ObjectToWorldEXT * vec4(v1.pos, 1.0));
+    vec3 wp2 = vec3(gl_ObjectToWorldEXT * vec4(v2.pos, 1.0));
+
+    vec3 dPdu;
+    vec3 dPdv;
+    vec3 baseNormal;
+    if (!displacementBuildBasis(wp0, wp1, wp2, v0.textureUV, v1.textureUV, v2.textureUV,
+                                dPdu, dPdv, baseNormal)) {
+        return true;
+    }
+
+    vec3 rayDir = gl_WorldRayDirectionEXT;
+    vec3 viewDir = -rayDir;
+    if (dot(baseNormal, viewDir) < 0.0) {
+        baseNormal = -baseNormal;
+    }
+
+    float fade = 1.0 - smoothstep(pc.displacementFadeDistanceBlocks * 0.75,
+                                  pc.displacementFadeDistanceBlocks, gl_HitTEXT);
+    TextureRuleEntry displacementRule = safeTextureRuleEntry(textureID);
+    float materialDisplacementScale = ((displacementRule.flags & TEXTURE_RULE_ENABLED) != 0u
+        && (displacementRule.flags & TEXTURE_RULE_DISPLACEMENT_SCALE) != 0u)
+        ? clamp(displacementRule.displacementScale, 0.0, 4.0)
+        : 1.0;
+
+    DisplacementSource displacementSource;
+    displacementInitSource(displacementSource);
+    displacementSource.isBlock = true;
+    displacementSource.textureID = textureID;
+    displacementSource.normalTextureID = -1;
+    displacementSource.animTick = ubo.animTick;
+    displacementSource.uvMin = min(min(v0.textureUV, v1.textureUV), v2.textureUV);
+    displacementSource.uvMax = max(max(v0.textureUV, v1.textureUV), v2.textureUV);
+    displacementSource.maxDepth = max(pc.displacementDepthScale, 0.0) * fade * materialDisplacementScale;
+    displacementSource.mode = DISPLACEMENT_SOURCE_AUTHORED_NORMAL_ALPHA;
+
+    if (displacementSource.maxDepth <= DISPLACEMENT_MIN_DEPTH) {
+        return true;
+    }
+
+    vec3 planeWorldPos = gl_WorldRayOriginEXT + rayDir * gl_HitTEXT;
+    DisplacementHit displacementHit;
+    return displacementTracePrimary(displacementSource, textureUV, planeWorldPos, rayDir,
+                                    viewDir, dPdu, dPdv, baseNormal,
+                                    clamp(pc.displacementPrimarySteps, 1, 512),
+                                    pc.displacementRefinementSteps, displacementHit);
+}
+#endif
 
 void main() {
     uint instanceID = gl_InstanceCustomIndexEXT;
@@ -266,6 +343,15 @@ void main() {
         }
         hasTransmission = mat.transmission > 0.0;
     }
+
+#if RARSER_SHADER_DISPLACEMENT
+    if (alpha >= 0.95 && !hasTransmission &&
+        !shadowAuthoredDisplacementBlocksOpaqueHit(v0, v1, v2, uv, textureID,
+                                                   useTexture, isBlockGeometry, isFluidGeometry)) {
+        ignoreIntersectionEXT;
+        return;
+    }
+#endif
 
     if (BEER_LAW_SHADOWS) {
         // Ground truth: Beer's Law volumetric absorption for transmissive materials
