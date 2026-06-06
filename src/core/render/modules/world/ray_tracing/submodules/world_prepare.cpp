@@ -234,6 +234,9 @@ void WorldPrepareContext::render() {
     std::shared_ptr<vk::Device> device = framework->device();
     std::shared_ptr<vk::PhysicalDevice> physicalDevice = framework->physicalDevice();
     std::shared_ptr<vk::CommandBuffer> worldCommandBuffer = context->worldCommandBuffer;
+    const uint32_t mainQueueIndex = physicalDevice->mainQueueIndex();
+    const uint32_t secondaryQueueIndex = physicalDevice->secondaryQueueIndex();
+    const bool needsQueueOwnershipTransfer = mainQueueIndex != secondaryQueueIndex;
     VkCommandBuffer profileCmd = (Renderer::gpuProfiler.isEnabled() && worldCommandBuffer)
         ? worldCommandBuffer->vkCommandBuffer()
         : VK_NULL_HANDLE;
@@ -383,10 +386,30 @@ void WorldPrepareContext::render() {
     uint32_t blasAccu = 0, blasGroupAccu = 0;
     std::vector<uint32_t> blasOffset;
     std::vector<uint32_t> geometryTypes;
+    std::vector<uint32_t> geometryMasks;
+    std::vector<uint32_t> geometrySources;
     std::vector<uint64_t> vertexBufferAddrs, indexBufferAddrs;
     std::vector<uint64_t> lastVertexBufferAddrs, lastIndexBufferAddrs;
     std::vector<glm::mat4> lastObjToWorldMats;
     std::vector<glm::uvec4> biomeColors;
+    std::vector<vk::CommandBuffer::BufferMemoryBarrier> queueOwnershipAcquireBarriers;
+
+    auto addSecondaryToMainAcquireBarrier = [&](const std::shared_ptr<vk::DeviceLocalBuffer> &buffer,
+                                                VkPipelineStageFlags2 srcStage,
+                                                VkAccessFlags2 srcAccess,
+                                                VkPipelineStageFlags2 dstStage,
+                                                VkAccessFlags2 dstAccess) {
+        if (!needsQueueOwnershipTransfer || !buffer || !buffer->isValid()) return;
+        queueOwnershipAcquireBarriers.push_back({
+            .srcStageMask = srcStage,
+            .srcAccessMask = srcAccess,
+            .dstStageMask = dstStage,
+            .dstAccessMask = dstAccess,
+            .srcQueueFamilyIndex = secondaryQueueIndex,
+            .dstQueueFamilyIndex = mainQueueIndex,
+            .buffer = buffer,
+        });
+    };
 
     tlasBuilder = vk::TLASBuilder::create();
     auto &instanceBuilder = tlasBuilder->beginInstanceBuilder();
@@ -511,8 +534,13 @@ void WorldPrepareContext::render() {
 			continue;
 			}
                 geometryTypes.push_back(World::GeometryTypes::SHADOW);
-                geometryTypes.insert(geometryTypes.end(), entities1[i]->geometryTypes->begin(),
-                                     entities1[i]->geometryTypes->end());
+                geometryMasks.push_back(static_cast<uint32_t>(entities1[i]->rtFlag));
+                geometrySources.push_back(SBT_SOURCE_ENTITY);
+                for (auto geometryType : *entities1[i]->geometryTypes) {
+                    geometryTypes.push_back(geometryType);
+                    geometryMasks.push_back(static_cast<uint32_t>(entities1[i]->rtFlag));
+                    geometrySources.push_back(SBT_SOURCE_ENTITY);
+                }
 
                 for (int j = 0; j < entities1[i]->geometryCount; j++) {
                     vertexBufferAddrs.push_back((*entities1[i]->vertexBufferAddresses)[j]);
@@ -586,6 +614,15 @@ void WorldPrepareContext::render() {
         float mergeDist = Renderer::options.megaMergeDistance;
         float mergeDist2 = mergeDist * mergeDist;
         bool megaEnabled = mergeDist > 0 && mergeDist < cullDist;
+        if (megaEnabled && needsQueueOwnershipTransfer) {
+            static bool loggedMegaQueueFamilyDisable = false;
+            if (!loggedMegaQueueFamilyDisable) {
+                renderDiag("WP disabled MegaBLAS on split queue families main=%u secondary=%u",
+                           mainQueueIndex, secondaryQueueIndex);
+                loggedMegaQueueFamilyDisable = true;
+            }
+            megaEnabled = false;
+        }
 
         constexpr int MEGA_SIZE = 64;
         auto megaKey = [](int x, int y, int z) -> int64_t {
@@ -616,6 +653,15 @@ void WorldPrepareContext::render() {
         allVisible.reserve(numChunks);
         uint64_t textureGeneration = Renderer::textureSystem.generation();
         uint32_t staleTextureChunks = 0;
+        uint32_t chunksMissingBlas = 0;
+        uint32_t chunksWithBlas = 0;
+        uint32_t chunksInvalidMetadata = 0;
+        uint32_t chunksInvalidBuffers = 0;
+        uint32_t chunksInvalidGpuBuffers = 0;
+        uint32_t chunksMissingBdaBuffers = 0;
+        uint32_t chunksMissingStaging = 0;
+        uint32_t placeholderGeometries = 0;
+        uint32_t chunksCulled = 0;
         bool scan25Recorded = numChunks < 4;
         bool scan50Recorded = numChunks < 4;
         bool scan75Recorded = numChunks < 4;
@@ -635,38 +681,113 @@ void WorldPrepareContext::render() {
                 scan75Recorded = true;
             }
             auto &chunk1 = chunk1s[i];
-            if (!chunk1 || chunk1->blas == nullptr) continue;
-            if (!chunk1->geometryTypes || !chunk1->vertexBuffers || !chunk1->indexBuffers) continue;
-            if (chunk1->geometryCount > chunk1->geometryTypes->size() ||
-                chunk1->geometryCount > chunk1->vertexBuffers->size() ||
-                chunk1->geometryCount > chunk1->indexBuffers->size()) {
-                continue;
-            }
-            if (textureGeneration != 0 && chunk1->textureGeneration != textureGeneration) {
-                staleTextureChunks++;
-            }
-
-            // Update cache if generation changed.
             auto &cc = cachedChunks_[i];
-            if (cc.blasGeneration != chunk1->blasGeneration) {
-                cc.blasGeneration = chunk1->blasGeneration;
-                cc.blas = chunk1->blas;
-                cc.x = chunk1->x; cc.y = chunk1->y; cc.z = chunk1->z;
-                cc.biomeGrassColor = chunk1->biomeGrassColor;
-                cc.biomeFoliageColor = chunk1->biomeFoliageColor;
-                cc.biomeWaterColor = chunk1->biomeWaterColor;
-                cc.geometryCount = chunk1->geometryCount;
-                cc.geoTypes.clear();
-                cc.geoTypes.push_back(World::GeometryTypes::SHADOW);
-                cc.geoTypes.insert(cc.geoTypes.end(), chunk1->geometryTypes->begin(), chunk1->geometryTypes->end());
-                cc.vertBufAddrs.clear();
-                cc.idxBufAddrs.clear();
-                for (uint32_t j = 0; j < chunk1->geometryCount; j++) {
-                    cc.vertBufAddrs.push_back((*chunk1->vertexBuffers)[j]->bufferAddress());
-                    cc.idxBufAddrs.push_back((*chunk1->indexBuffers)[j]->bufferAddress());
+            auto hasCachedChunkData = [&cc]() {
+                return cc.blas &&
+                       cc.geometryCount > 0 &&
+                       cc.geoTypes.size() >= static_cast<size_t>(cc.geometryCount + 1) &&
+                       cc.vertBufAddrs.size() >= cc.geometryCount &&
+                       cc.idxBufAddrs.size() >= cc.geometryCount &&
+                       cc.vertexBuffers &&
+                       cc.indexBuffers;
+            };
+            auto clearOrUseCached = [&]() {
+                if (hasCachedChunkData()) return true;
+                cc = CachedChunkData{};
+                return false;
+            };
+            if (!chunk1 || chunk1->blas == nullptr) {
+                chunksMissingBlas++;
+                if (!clearOrUseCached()) {
+                    continue;
                 }
-                cc.vertexBuffers = chunk1->vertexBuffers;
-                cc.indexBuffers = chunk1->indexBuffers;
+            } else {
+                chunksWithBlas++;
+                if (!chunk1->geometryTypes || !chunk1->vertexBuffers || !chunk1->indexBuffers) {
+                    chunksInvalidMetadata++;
+                    if (!clearOrUseCached()) {
+                        continue;
+                    }
+                } else if (chunk1->geometryCount > chunk1->geometryTypes->size() ||
+                           chunk1->geometryCount > chunk1->vertexBuffers->size() ||
+                           chunk1->geometryCount > chunk1->indexBuffers->size()) {
+                    chunksInvalidMetadata++;
+                    if (!clearOrUseCached()) {
+                        continue;
+                    }
+                } else if (!chunk1->blas->blasBuffer() || !chunk1->blas->blasBuffer()->isValid()) {
+                    chunksInvalidBuffers++;
+                    if (!clearOrUseCached()) {
+                        continue;
+                    }
+                } else {
+                    bool validGeometryBuffers = true;
+                    bool chunkMissingStaging = false;
+                    bool chunkInvalidGpuBuffer = false;
+                    bool chunkMissingBdaBuffer = false;
+                    for (uint32_t j = 0; j < chunk1->geometryCount; j++) {
+                        auto &vertexBuffer = (*chunk1->vertexBuffers)[j];
+                        auto &indexBuffer = (*chunk1->indexBuffers)[j];
+                        if (!vertexBuffer && !indexBuffer) {
+                            placeholderGeometries++;
+                            continue;
+                        }
+                        if (!vertexBuffer || !indexBuffer ||
+                            !vertexBuffer->isValid() || !indexBuffer->isValid()) {
+                            chunkInvalidGpuBuffer = true;
+                            validGeometryBuffers = false;
+                            break;
+                        }
+                        if (!vertexBuffer->hasDeviceAddress() || !indexBuffer->hasDeviceAddress()) {
+                            chunkMissingBdaBuffer = true;
+                            validGeometryBuffers = false;
+                            break;
+                        }
+                        if (!vertexBuffer->hasStaging() || !indexBuffer->hasStaging()) {
+                            chunkMissingStaging = true;
+                        }
+                    }
+                    if (!validGeometryBuffers) {
+                        chunksInvalidBuffers++;
+                        if (chunkInvalidGpuBuffer) chunksInvalidGpuBuffers++;
+                        if (chunkMissingBdaBuffer) chunksMissingBdaBuffers++;
+                        if (!clearOrUseCached()) {
+                            continue;
+                        }
+                    } else {
+                        if (chunkMissingStaging) {
+                            chunksMissingStaging++;
+                        }
+                        if (textureGeneration != 0 && chunk1->textureGeneration != textureGeneration) {
+                            staleTextureChunks++;
+                        }
+
+                        // Update cache if generation changed.
+                        if (cc.blasGeneration != chunk1->blasGeneration) {
+                            cc.blasGeneration = chunk1->blasGeneration;
+                            cc.blas = chunk1->blas;
+                            cc.x = chunk1->x; cc.y = chunk1->y; cc.z = chunk1->z;
+                            cc.biomeGrassColor = chunk1->biomeGrassColor;
+                            cc.biomeFoliageColor = chunk1->biomeFoliageColor;
+                            cc.biomeWaterColor = chunk1->biomeWaterColor;
+                            cc.geometryCount = chunk1->geometryCount;
+                            cc.geoTypes.clear();
+                            cc.geoTypes.push_back(World::GeometryTypes::SHADOW);
+                            cc.geoTypes.insert(cc.geoTypes.end(), chunk1->geometryTypes->begin(), chunk1->geometryTypes->end());
+                            cc.vertBufAddrs.clear();
+                            cc.idxBufAddrs.clear();
+                            for (uint32_t j = 0; j < chunk1->geometryCount; j++) {
+                                auto &vertexBuffer = (*chunk1->vertexBuffers)[j];
+                                auto &indexBuffer = (*chunk1->indexBuffers)[j];
+                                cc.vertBufAddrs.push_back(vertexBuffer ? vertexBuffer->bufferAddress() : 0);
+                                cc.idxBufAddrs.push_back(indexBuffer ? indexBuffer->bufferAddress() : 0);
+                            }
+                            cc.vertexBuffers = chunk1->vertexBuffers;
+                            cc.indexBuffers = chunk1->indexBuffers;
+                            cc.queueOwnershipPending = chunk1->secondaryQueueOwnershipPending;
+                        }
+                    }
+                }
             }
 
             // Distance cull
@@ -674,7 +795,10 @@ void WorldPrepareContext::render() {
             float cy = static_cast<float>(static_cast<double>(cc.y) + 8.0 - cameraPos.y);
             float cz = static_cast<float>(static_cast<double>(cc.z) + 8.0 - cameraPos.z);
             float dist2 = cx * cx + cy * cy + cz * cz;
-            if (dist2 > cullDist2) continue;
+            if (dist2 > cullDist2) {
+                chunksCulled++;
+                continue;
+            }
 
             if (megaEnabled && dist2 >= mergeDist2) {
                 farChunksByMega[megaKey(cc.x, cc.y, cc.z)].push_back(static_cast<int>(i));
@@ -689,6 +813,22 @@ void WorldPrepareContext::render() {
                 renderDiag("WP accepted stale-texture chunks count=%u currentGen=%llu",
                            staleTextureChunks,
                            static_cast<unsigned long long>(textureGeneration));
+            }
+        }
+        {
+            static uint32_t zeroVisibleLogCounter = 0;
+            uint32_t chunkVisCountForDiag = static_cast<uint32_t>(allVisible.size());
+            if (numChunks > 0 && (chunkVisCountForDiag == 0 || (zeroVisibleLogCounter % 240) == 0)) {
+                zeroVisibleLogCounter++;
+                if (chunkVisCountForDiag == 0 || zeroVisibleLogCounter <= 5) {
+                    renderDiag("WP chunk visibility total=%u withBlas=%u missingBlas=%u invalidMeta=%u invalidBuf=%u invalidGpu=%u missingBda=%u releasedStaging=%u placeholderGeo=%u staleTex=%u culled=%u visible=%u cullDist=%.1f cam=(%.1f,%.1f,%.1f)",
+                               numChunks, chunksWithBlas, chunksMissingBlas, chunksInvalidMetadata,
+                               chunksInvalidBuffers, chunksInvalidGpuBuffers, chunksMissingBdaBuffers,
+                               chunksMissingStaging, placeholderGeometries, staleTextureChunks, chunksCulled,
+                               chunkVisCountForDiag, cullDist,
+                               static_cast<float>(cameraPos.x), static_cast<float>(cameraPos.y),
+                               static_cast<float>(cameraPos.z));
+                }
             }
         }
         g_crashRing.record("WP:chunkPass1Done");
@@ -724,6 +864,8 @@ void WorldPrepareContext::render() {
         currBlasSnapshot.vertexBuffers.resize(chunkInstBase + totalChunkInst);
         currBlasSnapshot.indexBuffers.resize(chunkInstBase + totalChunkInst);
         geometryTypes.resize(chunkSbtBase + totalChunkSbt);
+        geometryMasks.resize(chunkSbtBase + totalChunkSbt, 0x01u);
+        geometrySources.resize(chunkSbtBase + totalChunkSbt, SBT_SOURCE_CHUNK);
         vertexBufferAddrs.resize(chunkGeoBase + totalChunkGeo);
         indexBufferAddrs.resize(chunkGeoBase + totalChunkGeo);
         lastVertexBufferAddrs.resize(chunkGeoBase + totalChunkGeo, 0);
@@ -759,14 +901,56 @@ void WorldPrepareContext::render() {
 
             // SBT geometry types: SHADOW + chunk types
             geometryTypes[sbtIdx] = World::GeometryTypes::SHADOW;
+            geometryMasks[sbtIdx] = 0x01u;
+            geometrySources[sbtIdx] = SBT_SOURCE_CHUNK;
             for (uint32_t g = 0; g < cc.geometryCount; g++) {
                 geometryTypes[sbtIdx + 1 + g] = cc.geoTypes[g + 1]; // skip cached SHADOW
+                geometryMasks[sbtIdx + 1 + g] = 0x01u;
+                geometrySources[sbtIdx + 1 + g] = SBT_SOURCE_CHUNK;
             }
 
             // Buffer addresses
             for (uint32_t g = 0; g < cc.geometryCount; g++) {
                 vertexBufferAddrs[geoIdx + g] = cc.vertBufAddrs[g];
                 indexBufferAddrs[geoIdx + g] = cc.idxBufAddrs[g];
+            }
+
+            if (cc.queueOwnershipPending) {
+                addSecondaryToMainAcquireBarrier(
+                    cc.blas ? cc.blas->blasBuffer() : nullptr,
+                    VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                    VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+                    VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                        VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                    VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+
+                for (uint32_t g = 0; g < cc.geometryCount; g++) {
+                    addSecondaryToMainAcquireBarrier(
+                        (*cc.vertexBuffers)[g],
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+                            VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                        VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                            VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
+                        VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                        VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                            VK_ACCESS_2_SHADER_READ_BIT);
+                    addSecondaryToMainAcquireBarrier(
+                        (*cc.indexBuffers)[g],
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+                            VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                        VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                            VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR,
+                        VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+                        VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                            VK_ACCESS_2_SHADER_READ_BIT);
+                }
+
+                cc.queueOwnershipPending = false;
+                if (chunk1s[allVisible[vi]]) {
+                    chunk1s[allVisible[vi]]->secondaryQueueOwnershipPending = false;
+                }
             }
 
             // Per-instance metadata
@@ -848,6 +1032,13 @@ void WorldPrepareContext::render() {
                             bool isOpaque = (*chunk1->geometryTypes)[g] == World::WORLD_SOLID;
                             auto &vb = (*chunk1->vertexBuffers)[g];
                             auto &ib = (*chunk1->indexBuffers)[g];
+                            if (!vb && !ib) {
+                                continue;
+                            }
+                            if (!vb || !ib || !vb->isValid() || !ib->isValid() ||
+                                !vb->hasDeviceAddress() || !ib->hasDeviceAddress()) {
+                                continue;
+                            }
                             uint32_t vertCount = static_cast<uint32_t>(vb->size() / sizeof(vk::VertexFormat::PBRTriangle));
                             uint32_t idxCount = static_cast<uint32_t>(ib->size() / sizeof(uint32_t));
 
@@ -860,6 +1051,10 @@ void WorldPrepareContext::render() {
                             mega->indexBuffers.push_back(ib);
                             totalGeoms++;
                         }
+                    }
+                    if (totalGeoms == 0) {
+                        megaGeom->endGeometries();
+                        continue;
                     }
                     megaGeom->endGeometries();
 
@@ -876,7 +1071,13 @@ void WorldPrepareContext::render() {
                         ->querySizeInfo(device)
                         ->allocateBuffers(physicalDevice, device, vma)
                         ->build(device);
+                    if (!megaBuilt || !megaBuilt->blasBuffer() || !megaBuilt->blasBuffer()->isValid()) {
+                        renderDiag("WP MegaBLAS build allocation failed key=%lld geoms=%u",
+                                   static_cast<long long>(mk), totalGeoms);
+                        continue;
+                    }
 
+                    vkResetCommandBuffer(megaCmdBuffer_->vkCommandBuffer(), 0);
                     megaCmdBuffer_->begin();
                     megaBuilder->submit(megaCmdBuffer_);
                     megaCmdBuffer_->end();
@@ -885,7 +1086,23 @@ void WorldPrepareContext::render() {
                     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
                     si.commandBufferCount = 1;
                     si.pCommandBuffers = &megaCmdBuffer_->vkCommandBuffer();
-                    vkQueueSubmit(device->secondaryQueue(), 1, &si, megaFence_->vkFence());
+                    VkResult megaSubmitResult;
+                    {
+                        std::lock_guard<std::mutex> qLock(device->queueMutex());
+                        vk::DebugUtils::ScopedQueueLabel queueLabel(
+                            device->secondaryQueue(), "Radiance QueueSubmit: MegaBLAS", 0.9f, 0.45f, 0.2f);
+                        megaSubmitResult = vkQueueSubmit(device->secondaryQueue(), 1, &si, megaFence_->vkFence());
+                    }
+                    if (megaSubmitResult != VK_SUCCESS) {
+                        g_crashRing.record("megaBlasSubmitFail", megaSubmitResult);
+                        if (megaSubmitResult == VK_ERROR_DEVICE_LOST) {
+                            crashExitWithQueue(megaSubmitResult, "MegaBLAS submit DEVICE_LOST",
+                                               device->secondaryQueue());
+                        }
+                        renderDiag("WP MegaBLAS submit failed key=%lld result=%d",
+                                   static_cast<long long>(mk), megaSubmitResult);
+                        continue;
+                    }
                     // 10-second timeout: prevents infinite hang on GPU TDR.
             // Mega-BLAS builds typically complete in <1s; 10s is very generous.
             constexpr uint64_t kMegaBlasTimeoutNs = 10000000000ULL;
@@ -893,7 +1110,13 @@ void WorldPrepareContext::render() {
             if (megaFenceResult == VK_TIMEOUT) {
                 std::cerr << "[MegaBLAS] vkWaitForFences timed out (10s) — GPU may be hung" << std::endl;
                 vkDeviceWaitIdle(device->vkDevice());
+                vkResetFences(device->vkDevice(), 1, &megaFence_->vkFence());
                 // Continue with potentially incomplete BLAS — the next frame will rebuild
+                continue;
+            }
+            if (megaFenceResult != VK_SUCCESS) {
+                crashExitWithQueue(megaFenceResult, "MegaBLAS fence wait failed",
+                                   device->secondaryQueue());
             }
                     vkResetFences(device->vkDevice(), 1, &megaFence_->vkFence());
 
@@ -925,7 +1148,13 @@ void WorldPrepareContext::render() {
 
                 // SBT: SHADOW prefix + all sub-chunk geometry types
                 geometryTypes.push_back(World::GeometryTypes::SHADOW);
-                geometryTypes.insert(geometryTypes.end(), mega->geometryTypes.begin(), mega->geometryTypes.end());
+                geometryMasks.push_back(0x01u);
+                geometrySources.push_back(SBT_SOURCE_CHUNK);
+                for (auto geometryType : mega->geometryTypes) {
+                    geometryTypes.push_back(geometryType);
+                    geometryMasks.push_back(0x01u);
+                    geometrySources.push_back(SBT_SOURCE_CHUNK);
+                }
 
                 for (size_t g = 0; g < mega->vertexBuffers.size(); g++) {
                     vertexBufferAddrs.push_back(mega->vertexBuffers[g]->bufferAddress());
@@ -985,6 +1214,11 @@ void WorldPrepareContext::render() {
     g_crashRing.record("WP:lightsSkipped");
     cpuAccInstances += cpuMsSince(cpuT6);
     pfInstances += cpuMsSince(cpuT6);
+
+    if (!queueOwnershipAcquireBarriers.empty()) {
+        ScopedGpuProfile profile(profileCmd, "RT.WP.BLASOwnershipAcquire");
+        worldCommandBuffer->barriersBufferImage(queueOwnershipAcquireBarriers, {});
+    }
 
     if (instanceBuilder.instances.empty()) {
         g_crashRing.record("WP:noInstances");
@@ -1296,6 +1530,8 @@ void WorldPrepareContext::render() {
     {
         ScopedGpuProfile profile(profileCmd, "RT.WP.SBTSetup");
         lastGeometryTypes_ = geometryTypes;
+        lastGeometryMasks_ = geometryMasks;
+        lastGeometrySources_ = geometrySources;
         rtModuleCtx->sbt->setupHitSBT(geometryTypes);
         if (rtModuleCtx->sharcUpdateSbt) {
             rtModuleCtx->sharcUpdateSbt->setupHitSBT(geometryTypes);

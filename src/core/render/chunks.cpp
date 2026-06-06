@@ -18,6 +18,94 @@
 #include <mutex>
 #include <set>
 
+namespace {
+uint32_t alphaModeBitsFor(World::GeometryTypes geometryType, uint32_t flags) {
+    namespace VF = vk::VertexFormat;
+    if ((flags & VF::PBR_FLAG_ALPHA_MODE_MASK) != 0u) {
+        return flags & VF::PBR_FLAG_ALPHA_MODE_MASK;
+    }
+    if (geometryType != World::WORLD_TRANSPARENT) {
+        return VF::PBR_ALPHA_MODE_OPAQUE << VF::PBR_FLAG_ALPHA_MODE_SHIFT;
+    }
+    const uint32_t mode = (flags & VF::PBR_FLAG_FLUID_GEOMETRY) != 0u
+        ? VF::PBR_ALPHA_MODE_TRANSPARENT
+        : VF::PBR_ALPHA_MODE_CUTOUT;
+    return mode << VF::PBR_FLAG_ALPHA_MODE_SHIFT;
+}
+
+void applyAlphaModeFallback(World::GeometryTypes geometryType,
+                            std::vector<vk::VertexFormat::PBRTriangle> &vertices) {
+    for (auto &vertex : vertices) {
+        vertex.flags = (vertex.flags & ~vk::VertexFormat::PBR_FLAG_ALPHA_MODE_MASK) |
+            alphaModeBitsFor(geometryType, vertex.flags);
+    }
+}
+
+void resetCommandBufferForReuse(const std::shared_ptr<vk::CommandBuffer> &cmd) {
+    if (cmd) {
+        vkResetCommandBuffer(cmd->vkCommandBuffer(), 0);
+    }
+}
+
+void appendSecondaryToMainReleaseBarriers(
+    std::vector<vk::CommandBuffer::BufferMemoryBarrier> &barriers,
+    const std::vector<std::shared_ptr<ChunkBuildData>> &batch,
+    uint32_t secondaryQueueIndex,
+    uint32_t mainQueueIndex) {
+    if (secondaryQueueIndex == mainQueueIndex) return;
+
+    auto addBuffer = [&](const std::shared_ptr<vk::DeviceLocalBuffer> &buffer,
+                         VkPipelineStageFlags2 srcStage,
+                         VkAccessFlags2 srcAccess) {
+        if (!buffer || !buffer->isValid()) return;
+        barriers.push_back({
+            .srcStageMask = srcStage,
+            .srcAccessMask = srcAccess,
+            .dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+            .dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                             VK_ACCESS_2_SHADER_READ_BIT,
+            .srcQueueFamilyIndex = secondaryQueueIndex,
+            .dstQueueFamilyIndex = mainQueueIndex,
+            .buffer = buffer,
+        });
+    };
+
+    for (const auto &cbd : batch) {
+        if (!cbd) continue;
+        for (uint32_t i = 0; i < cbd->geometryCount; i++) {
+            if (i < cbd->vertexBuffers.size()) {
+                addBuffer(cbd->vertexBuffers[i],
+                          VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+                              VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                          VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                              VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+            }
+            if (i < cbd->indexBuffers.size()) {
+                addBuffer(cbd->indexBuffers[i],
+                          VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+                              VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                          VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                              VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+            }
+        }
+        if (cbd->blas && cbd->blas->blasBuffer()) {
+            addBuffer(cbd->blas->blasBuffer(),
+                      VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                      VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
+        }
+    }
+}
+
+void restorePreCompactionBlases(const std::vector<std::shared_ptr<ChunkBuildData>> &chunks) {
+    for (const auto &cbd : chunks) {
+        if (!cbd || !cbd->preCompactionBlas) continue;
+        cbd->blas = cbd->preCompactionBlas;
+        cbd->preCompactionBlas.reset();
+    }
+}
+}
+
 
 ChunkBuildData::ChunkBuildData(int64_t id,
                                int x,
@@ -91,7 +179,7 @@ void ChunkBuildData::uploadGPU() {
                              const char *what,
                              int geometryIndex,
                              VkDeviceSize bytes) -> bool {
-        if (!buffer || !buffer->isValid()) {
+        if (!buffer || !buffer->isValid() || !buffer->hasStaging()) {
             failUpload(what, geometryIndex, bytes);
             return false;
         }
@@ -276,11 +364,12 @@ void ChunkBuildScheduler::integrateCompleted() {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     for (auto &cbd : completed) {
         if (cbd->id >= static_cast<int64_t>(chunks_.size())) continue;
-        chunks_[cbd->id]->enqueue(cbd);
-
-        ChunkPackedData data = { .geometryCount = cbd->geometryCount };
-        chunkPackedData_->uploadToBuffer(&data, sizeof(ChunkPackedData),
-                                         cbd->id * sizeof(ChunkPackedData));
+        const bool accepted = chunks_[cbd->id]->enqueue(cbd);
+        if (accepted) {
+            ChunkPackedData data = { .geometryCount = cbd->geometryCount };
+            chunkPackedData_->uploadToBuffer(&data, sizeof(ChunkPackedData),
+                                             cbd->id * sizeof(ChunkPackedData));
+        }
 
         // Release ChunkBuildData slot to free scratch geometry buffers
         // that were NOT transferred to Chunk1 (blasBuilder.).
@@ -326,6 +415,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
     auto device = framework->device();
     auto physicalDevice = framework->physicalDevice();
     auto asyncPool = framework->asyncCommandPool();
+    auto mainQueueIndex = physicalDevice->mainQueueIndex();
     auto secondaryQueueIndex = physicalDevice->secondaryQueueIndex();
 
     // Pre-allocate cmd pool — sole owner, no mutex needed.
@@ -365,29 +455,13 @@ void ChunkBuildScheduler::blasThreadLoop() {
         }
     };
     ensureDiagOpen();
+    auto publishInFlightCount = [this]() {
+        inFlightCount_.store(static_cast<uint32_t>(inFlight_.size()), std::memory_order_release);
+    };
+    publishInFlightCount();
 
     while (!stop_.load()) {
         if (diagLog.is_open() && diagIter % 2000 == 0) { diagLog << diagTs() << " HEARTBEAT iter=" << diagIter << " inFlight=" << inFlight_.size() << " cmdPool=" << cmdPool_.size() << std::endl; diagLog.flush(); }
-        // Pause gate: render thread requests pause during swapchain recreate
-        if (paused_.load(std::memory_order_acquire)) {
-            pausedAck_.store(true, std::memory_order_release);
-            if (diagLog.is_open()) {
-                diagLog << diagTs() << " PAUSE_ACK iter=" << diagIter
-                        << " inFlight=" << inFlight_.size() << std::endl;
-                diagLog.flush();
-            }
-            while (paused_.load(std::memory_order_acquire) && !stop_.load()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            pausedAck_.store(false, std::memory_order_release);
-            if (diagLog.is_open()) {
-                diagLog << diagTs() << " PAUSE_RESUME iter=" << diagIter
-                        << " stop=" << stop_.load() << std::endl;
-                diagLog.flush();
-            }
-            if (stop_.load()) break;
-        }
-
         diagIter++;
         ensureDiagOpen();
         // ---- POLL: check completed batches via timeline counter (non-blocking) ----
@@ -423,6 +497,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
                 }
                 cmdPool_.push(std::move(front.cmd));
                 inFlight_.pop_front();
+                publishInFlightCount();
 
             } else if (front.compactionQP && front.compactionCount > 0 && !cmdPool_.empty()) {
                 // Build phase complete with compaction queries — submit compaction async (non-blocking)
@@ -436,6 +511,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
                     cmdPool_.push(std::move(front.cmd));
                     auto compCmd = std::move(cmdPool_.front()); cmdPool_.pop();
 
+                    resetCommandBufferForReuse(compCmd);
                     compCmd->begin();
                     uint32_t qi = 0;
                     for (auto &cbd : front.chunks) {
@@ -464,6 +540,12 @@ void ChunkBuildScheduler::blasThreadLoop() {
                             cbd->blas = vk::BLAS::create(device, as, buf);
                         }
                         totalOrig += origSz; totalComp += compSz; totalN++;
+                    }
+                    std::vector<vk::CommandBuffer::BufferMemoryBarrier> releaseBarriers;
+                    appendSecondaryToMainReleaseBarriers(releaseBarriers, front.chunks,
+                                                         secondaryQueueIndex, mainQueueIndex);
+                    if (!releaseBarriers.empty()) {
+                        compCmd->barriersBufferImage(releaseBarriers, {});
                     }
                     compCmd->end();
 
@@ -499,9 +581,11 @@ void ChunkBuildScheduler::blasThreadLoop() {
                         inFlight_.pop_front();
                         inFlight_.push_back({compactValue, std::move(compCmd),
                             std::move(chunks), qp, qpCount, true});
+                        publishInFlightCount();
                     } else {
                         // Submit failed — propagate device lost
                         --blasTimelineCounter_;
+                        restorePreCompactionBlases(front.chunks);
                         g_crashRing.record("compactionSubmitFail", cr);
                         if (cr == VK_ERROR_DEVICE_LOST) {
                             if (diagLog.is_open()) { diagLog << diagTs() << " DEVICE_LOST_COMPACT" << std::endl; diagLog.flush(); }
@@ -515,6 +599,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
                         }
                         cmdPool_.push(std::move(compCmd));
                         inFlight_.pop_front();
+                        publishInFlightCount();
                     }
                 } else {
                     // Query failed — hand off without compaction
@@ -526,6 +611,7 @@ void ChunkBuildScheduler::blasThreadLoop() {
                     }
                     cmdPool_.push(std::move(front.cmd));
                     inFlight_.pop_front();
+                    publishInFlightCount();
                 }
 
             } else {
@@ -538,7 +624,40 @@ void ChunkBuildScheduler::blasThreadLoop() {
                 }
                 cmdPool_.push(std::move(front.cmd));
                 inFlight_.pop_front();
+                publishInFlightCount();
             }
+        }
+
+        // Pause gate: stop new submits, then acknowledge only after owned in-flight
+        // secondary work is retired and command buffers/query pools have been recycled.
+        if (paused_.load(std::memory_order_acquire)) {
+            if (!inFlight_.empty()) {
+                if (diagLog.is_open() && diagIter % 500 == 0) {
+                    diagLog << diagTs() << " PAUSE_DRAIN iter=" << diagIter
+                            << " inFlight=" << inFlight_.size()
+                            << " gpuVal=" << currentTimelineVal << std::endl;
+                    diagLog.flush();
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                continue;
+            }
+
+            pausedAck_.store(true, std::memory_order_release);
+            if (diagLog.is_open()) {
+                diagLog << diagTs() << " PAUSE_ACK iter=" << diagIter
+                        << " inFlight=" << inFlight_.size() << std::endl;
+                diagLog.flush();
+            }
+            while (paused_.load(std::memory_order_acquire) && !stop_.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            pausedAck_.store(false, std::memory_order_release);
+            if (diagLog.is_open()) {
+                diagLog << diagTs() << " PAUSE_RESUME iter=" << diagIter
+                        << " stop=" << stop_.load() << std::endl;
+                diagLog.flush();
+            }
+            if (stop_.load()) break;
         }
 
         // ---- SUBMIT: prepare + submit new batch if we have work AND capacity ----
@@ -623,6 +742,7 @@ for (auto &cbd : batch) cbd->uploadGPU();
                 auto cmd = std::move(cmdPool_.front()); cmdPool_.pop();
 
                 // Record
+                resetCommandBufferForReuse(cmd);
                 cmd->begin();
                 for (auto &cbd : batch) {
                     for (int i = 0; i < cbd->geometryCount; i++) {
@@ -658,6 +778,15 @@ for (auto &cbd : batch) cbd->uploadGPU();
 
                 // Compaction queries — only valid when BLAS was built with ALLOW_COMPACTION
                 VkQueryPool qp = VK_NULL_HANDLE; uint32_t qpCount = 0;
+
+                if (qpCount == 0) {
+                    std::vector<vk::CommandBuffer::BufferMemoryBarrier> releaseBarriers;
+                    appendSecondaryToMainReleaseBarriers(releaseBarriers, batch,
+                                                         secondaryQueueIndex, mainQueueIndex);
+                    if (!releaseBarriers.empty()) {
+                        cmd->barriersBufferImage(releaseBarriers, {});
+                    }
+                }
 
                 cmd->end();
 
@@ -702,6 +831,7 @@ for (auto &cbd : batch) cbd->uploadGPU();
                 lastSubmittedTimeline_.store(batchValue, std::memory_order_release);
                 totalSubmitted_.fetch_add(static_cast<uint64_t>(batch.size()), std::memory_order_relaxed);
                 inFlight_.push_back({batchValue, std::move(cmd), std::move(batch), qp, qpCount});
+                publishInFlightCount();
             }
         } else if (!hasWork && inFlight_.empty()) {
             if (diagLog.is_open() && diagIter % 500 == 0) {
@@ -749,6 +879,8 @@ for (auto &cbd : batch) cbd->uploadGPU();
         std::lock_guard<std::mutex> lock(completedMtx_);
         for (auto &cbd : f.chunks) completedQueue_.push_back(std::move(cbd));
     }
+    inFlight_.clear();
+    publishInFlightCount();
     blasThreadExited_.store(true, std::memory_order_release);
 }
 
@@ -760,7 +892,7 @@ ChunkBuildSchedulerStats ChunkBuildScheduler::stats() {
     ChunkBuildSchedulerStats s;
     { std::lock_guard<std::mutex> lock(inputMtx_); s.inputQueue = static_cast<uint32_t>(inputQueue_.size()); }
     { std::lock_guard<std::mutex> lock(completedMtx_); s.completedQueue = static_cast<uint32_t>(completedQueue_.size()); }
-    s.inFlight = static_cast<uint32_t>(inFlight_.size());
+    s.inFlight = inFlightCount_.load(std::memory_order_acquire);
     s.enqueued = totalEnqueued_.load(std::memory_order_relaxed);
     s.submitted = totalSubmitted_.load(std::memory_order_relaxed);
     s.completed = totalCompleted_.load(std::memory_order_relaxed);
@@ -806,7 +938,7 @@ float Chunk1::buildFactor(std::chrono::steady_clock::time_point currentTime, glm
     return score;
 }
 
-void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
+bool Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
     auto framework = Renderer::instance().framework();
     auto &gc = framework->gc();
 
@@ -815,13 +947,16 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
     y = chunkBuildData->y;
     z = chunkBuildData->z;
 
-    if (chunkBuildData->version > blasVersion) {
-        blasVersion = chunkBuildData->version;
+    if (chunkBuildData->version > blasVersion || blas == nullptr) {
+        if (chunkBuildData->version > blasVersion) {
+            blasVersion = chunkBuildData->version;
+        }
 
         gc.collect(blas);
         if (chunkBuildData->preCompactionBlas) gc.collect(chunkBuildData->preCompactionBlas);
         blas = chunkBuildData->blas;
         blasGeneration++;
+        secondaryQueueOwnershipPending = true;
 
         gc.collect(vertexBuffers);
         vertexBuffers = std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
@@ -839,6 +974,8 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
 
         gc.collect(std::make_shared<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>(
             std::move(chunkBuildData->indexBuffers)));
+
+        return false;
     }
 
     allVertexCount = chunkBuildData->allVertexCount;
@@ -849,6 +986,7 @@ void Chunk1::enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData) {
     biomeFoliageColor = chunkBuildData->biomeFoliageColor;
     biomeWaterColor = chunkBuildData->biomeWaterColor;
     textureGeneration = chunkBuildData->textureGeneration;
+    return true;
 }
 void Chunk1::invalidate() {
     auto framework = Renderer::instance().framework();
@@ -861,6 +999,7 @@ void Chunk1::invalidate() {
 
     gc.collect(blas);
     blas = nullptr;
+    secondaryQueueOwnershipPending = false;
 
     gc.collect(vertexBuffers);
     vertexBuffers = nullptr;
@@ -1032,6 +1171,7 @@ void Chunks::queueChunkBuild(ChunkBuildTask task) {
         geometryVertices.resize(task.vertexCounts[i]);
         std::memcpy(geometryVertices.data(), task.vertices[i],
                     task.vertexCounts[i] * sizeof(vk::VertexFormat::PBRTriangle));
+        applyAlphaModeFallback(geometryType, geometryVertices);
 
         for (int j = 0; j < task.vertexCounts[i]; j += 4) {
             geometryIndices.push_back(j + 0);

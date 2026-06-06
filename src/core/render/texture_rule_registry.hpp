@@ -13,7 +13,7 @@ class TextureRuleRegistry {
   public:
     TextureRuleRegistry() = default;
 
-    void uploadRules(const vk::Data::TextureRuleEntry* entries, uint32_t count,
+    bool uploadRules(const vk::Data::TextureRuleEntry* entries, uint32_t count,
                      std::shared_ptr<vk::VMA> vma,
                      std::shared_ptr<vk::Device> device);
 

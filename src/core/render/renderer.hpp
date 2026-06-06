@@ -59,6 +59,7 @@ struct Options {
     bool saturationAdaptive = false;   // Adaptive saturation: brightness+chroma-dependent (Special K style)
     bool multiScatterGGX = true;       // Kulla-Conty multi-scatter GGX energy compensation (flag bit 7)
     bool eonDiffuse = true;            // EON energy-preserving diffuse BRDF, replaces Disney diffuse (flag bit 8)
+    uint32_t diffuseModel = 0;          // 0=EON, 1=VMF experimental, 2=legacy compatibility
 
     // Per-tonemapper configurable parameters (8 generic slots)
     float tonemapParams[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};

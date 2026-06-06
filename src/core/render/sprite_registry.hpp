@@ -35,7 +35,7 @@ class SpriteRegistry {
 
     /// Upload all entries to the GPU SSBO. Call after all sprites are registered.
     /// Requires valid VMA and Device from the renderer.
-    void uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device);
+    bool uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device);
 
     /// Get the GPU buffer for descriptor binding. Returns nullptr if not uploaded.
     std::shared_ptr<vk::DeviceLocalBuffer> getBuffer() const {
@@ -50,6 +50,7 @@ class SpriteRegistry {
     }
 
     /// Reset all entries (resource reload).
+    void clearEntries();
     void reset();
 
     /// Retire GPU buffer through the frame GC, then reset CPU bookkeeping.

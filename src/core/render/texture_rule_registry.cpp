@@ -4,44 +4,48 @@
 
 #include <algorithm>
 #include <iostream>
+#include <utility>
 
-void TextureRuleRegistry::uploadRules(const vk::Data::TextureRuleEntry* entries, uint32_t count,
+bool TextureRuleRegistry::uploadRules(const vk::Data::TextureRuleEntry* entries, uint32_t count,
                                       std::shared_ptr<vk::VMA> vma,
                                       std::shared_ptr<vk::Device> device) {
+    if (!entries || count == 0 || !vma || !device) return false;
     std::lock_guard<std::mutex> lock(mutex_);
+
+    auto renderer = Renderer::try_instance();
+    if (!renderer || !renderer->framework()) return false;
+    auto framework = renderer->framework();
 
     vk::Data::TextureRuleEntry defaultEntry{};
     std::vector<vk::Data::TextureRuleEntry> uploadEntries(vk::Data::SPRITE_MAX_ENTRIES, defaultEntry);
-    if (entries && count > 0) {
-        const size_t copyCount = std::min<size_t>(count, uploadEntries.size());
-        std::copy(entries, entries + copyCount, uploadEntries.begin());
-        entries_.assign(entries, entries + copyCount);
-    } else {
-        entries_.clear();
-    }
-
-    auto framework = Renderer::instance().framework();
-    if (ssbo_) {
-        framework->gc().collect(ssbo_);
-    }
+    const size_t copyCount = std::min<size_t>(count, uploadEntries.size());
+    std::copy(entries, entries + copyCount, uploadEntries.begin());
 
     VkDeviceSize dataSize = uploadEntries.size() * sizeof(vk::Data::TextureRuleEntry);
-    ssbo_ = vk::DeviceLocalBuffer::create(
+    auto nextSsbo = vk::DeviceLocalBuffer::create(
         vma, device, true, dataSize,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-    ssbo_->uploadToStagingBuffer(uploadEntries.data(), static_cast<size_t>(dataSize), 0);
+    nextSsbo->uploadToStagingBuffer(uploadEntries.data(), static_cast<size_t>(dataSize), 0);
 
     auto fence = vk::Fence::create(device);
     auto cmd = vk::CommandBuffer::create(device, framework->mainCommandPool());
     cmd->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-    ssbo_->uploadToBuffer(cmd);
+    nextSsbo->uploadToBuffer(cmd);
     cmd->end();
     cmd->submitMainQueueIndividual(device, fence);
     vkWaitForFences(device->vkDevice(), 1, &fence->vkFence(), VK_TRUE, UINT64_MAX);
 
-    std::cout << "[TextureRuleRegistry] Uploaded " << std::min<uint32_t>(count, vk::Data::SPRITE_MAX_ENTRIES)
+    if (ssbo_) {
+        framework->gc().collect(ssbo_);
+    }
+    ssbo_ = std::move(nextSsbo);
+    entries_.assign(entries, entries + copyCount);
+
+    std::cout << "[TextureRuleRegistry] Uploaded "
+              << std::min<uint32_t>(count, vk::Data::SPRITE_MAX_ENTRIES)
               << " texture rules (" << dataSize << " bytes padded)" << std::endl;
+    return true;
 }
 
 void TextureRuleRegistry::reset() {

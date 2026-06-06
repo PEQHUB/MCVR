@@ -33,6 +33,7 @@ class GarbageCollector : public SharedObject<GarbageCollector> {
 
   private:
     std::weak_ptr<Framework> framework_;
+    std::mutex mutex_;
     std::vector<std::vector<std::shared_ptr<void>>> collectors_;
     uint32_t index_ = 0;
 };
@@ -168,6 +169,7 @@ class Framework : public SharedObject<Framework> {
 
 template <typename T>
 void GarbageCollector::collect(std::shared_ptr<T> garbage) {
-    auto framework = framework_.lock();
-    if (garbage != nullptr) { collectors_[index_].push_back(garbage); }
+    if (garbage == nullptr) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    collectors_[index_].push_back(garbage);
 }

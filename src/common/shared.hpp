@@ -123,7 +123,7 @@ namespace VertexFormat {
     static constexpr uint32_t PBR_FLAG_USE_OVERLAY      = 1u << 3;
     static constexpr uint32_t PBR_FLAG_USE_GLINT        = 1u << 4;
     static constexpr uint32_t PBR_FLAG_USE_LIGHT        = 1u << 5;
-    static constexpr uint32_t PBR_FLAG_OVERLAY_ALPHA_MASK = 1u << 7; // colorLayer holds overlay sprite bounds for alpha-masked biome tinting
+    static constexpr uint32_t PBR_FLAG_OVERLAY_ALPHA_MASK = 1u << 7; // colorLayer holds tint for folded block overlay sprites
     static constexpr uint32_t PBR_FLAG_COORD_SHIFT      = 8u;
     static constexpr uint32_t PBR_FLAG_COORD_MASK       = 0x7u << 8u; // 3 bits
     // Biome tint type in bits 12-13: 0=none, 1=grass, 2=foliage, 3=water
@@ -132,6 +132,22 @@ namespace VertexFormat {
     static constexpr uint32_t PBR_FLAG_BIOME_TINT_MASK  = 0x3u << 12u;
     static constexpr uint32_t PBR_FLAG_BLOCK_GEOMETRY   = 1u << 14; // block chunk: use texture array, not bindless atlas
     static constexpr uint32_t PBR_FLAG_FLUID_GEOMETRY   = 1u << 15; // fluid surface: alpha is not a cutout mask
+    static constexpr uint32_t PBR_FLAG_ALPHA_MODE_SHIFT = 16u;
+    static constexpr uint32_t PBR_FLAG_ALPHA_MODE_MASK  = 0x3u << 16u; // 0=opaque, 1=cutout, 2=transparent
+    static constexpr uint32_t PBR_ALPHA_MODE_OPAQUE      = 0u;
+    static constexpr uint32_t PBR_ALPHA_MODE_CUTOUT      = 1u;
+    static constexpr uint32_t PBR_ALPHA_MODE_TRANSPARENT = 2u;
+    static constexpr uint32_t PBR_FLAG_TEXT_MODE_SHIFT = 18u;
+    static constexpr uint32_t PBR_FLAG_TEXT_MODE_MASK  = 0xFu << 18u; // vanilla text modes 1..8
+    static constexpr uint32_t PBR_FLAG_WATER_GEOMETRY  = 1u << 22; // water fluid surface, distinct from lava/other fluids
+    static constexpr uint32_t PBR_TEXT_MODE_BACKGROUND = 1u;
+    static constexpr uint32_t PBR_TEXT_MODE_INTENSITY = 2u;
+    static constexpr uint32_t PBR_TEXT_MODE_RGBA = 3u;
+    static constexpr uint32_t PBR_TEXT_MODE_BACKGROUND_SEE_THROUGH = 4u;
+    static constexpr uint32_t PBR_TEXT_MODE_INTENSITY_SEE_THROUGH = 5u;
+    static constexpr uint32_t PBR_TEXT_MODE_RGBA_SEE_THROUGH = 6u;
+    static constexpr uint32_t PBR_TEXT_MODE_INTENSITY_POLYGON_OFFSET = 7u;
+    static constexpr uint32_t PBR_TEXT_MODE_RGBA_POLYGON_OFFSET = 8u;
     static constexpr uint32_t PBR_PACKED_THIN_CUTOUT_PLANT = 1u << 31; // emissiveBlockType bit: exact Minecraft plant cards
 #else
     #define PBR_FLAG_USE_NORM        (1u << 0)
@@ -147,6 +163,22 @@ namespace VertexFormat {
     #define PBR_FLAG_BIOME_TINT_MASK  (0x3u << 12u)
     #define PBR_FLAG_BLOCK_GEOMETRY   (1u << 14)
     #define PBR_FLAG_FLUID_GEOMETRY   (1u << 15)
+    #define PBR_FLAG_ALPHA_MODE_SHIFT 16u
+    #define PBR_FLAG_ALPHA_MODE_MASK  (0x3u << 16u)
+    #define PBR_ALPHA_MODE_OPAQUE      0u
+    #define PBR_ALPHA_MODE_CUTOUT      1u
+    #define PBR_ALPHA_MODE_TRANSPARENT 2u
+    #define PBR_FLAG_TEXT_MODE_SHIFT 18u
+    #define PBR_FLAG_TEXT_MODE_MASK  (0xFu << 18u)
+    #define PBR_FLAG_WATER_GEOMETRY  (1u << 22)
+    #define PBR_TEXT_MODE_BACKGROUND 1u
+    #define PBR_TEXT_MODE_INTENSITY 2u
+    #define PBR_TEXT_MODE_RGBA 3u
+    #define PBR_TEXT_MODE_BACKGROUND_SEE_THROUGH 4u
+    #define PBR_TEXT_MODE_INTENSITY_SEE_THROUGH 5u
+    #define PBR_TEXT_MODE_RGBA_SEE_THROUGH 6u
+    #define PBR_TEXT_MODE_INTENSITY_POLYGON_OFFSET 7u
+    #define PBR_TEXT_MODE_RGBA_POLYGON_OFFSET 8u
     #define PBR_PACKED_THIN_CUTOUT_PLANT (1u << 31)
 #endif
 
@@ -179,10 +211,13 @@ namespace VertexFormat {
     static_assert(offsetof(PBRTriangle, albedoEmission) == 28, "albedoEmission offset mismatch");
     static_assert(offsetof(PBRTriangle, colorLayer) == 32, "colorLayer offset mismatch");
     static_assert(offsetof(PBRTriangle, postBase) == 48, "postBase offset mismatch");
+    static_assert(offsetof(PBRTriangle, emissiveBlockType) == 60, "emissiveBlockType offset mismatch");
     static_assert(offsetof(PBRTriangle, textureUV) == 64, "textureUV offset mismatch");
     static_assert(offsetof(PBRTriangle, textureID) == 80, "textureID offset mismatch");
     static_assert(offsetof(PBRTriangle, overlayPacked) == 88, "overlayPacked offset mismatch");
     static_assert(offsetof(PBRTriangle, lightPacked) == 92, "lightPacked offset mismatch");
+    static_assert(PBR_FLAG_FLUID_GEOMETRY == (1u << 15), "fluid geometry flag bit mismatch");
+    static_assert(PBR_FLAG_WATER_GEOMETRY == (1u << 22), "water geometry flag bit mismatch");
 #endif
 
 #ifdef __cplusplus
@@ -431,7 +466,7 @@ namespace Data {
         T_FLOAT conductorF0R;
         T_FLOAT conductorF0G;
         T_FLOAT conductorF0B;
-        T_UINT modeFlags;         // bits 0-1 volume, 2-3 thickness, 4-5 coat mask
+        T_UINT modeFlags;         // bits 0-1 volume, 2-3 thickness, 4-5 coat mask, 6-7 diffuse model
         T_FLOAT absorptionR;
         T_FLOAT absorptionG;
         T_FLOAT absorptionB;
@@ -456,12 +491,21 @@ namespace Data {
         T_FLOAT filterRadius;
         T_FLOAT mipBias;
         T_FLOAT displacementScale;
+        T_FLOAT subSurfaceRadius;
+        T_FLOAT subSurfaceThickness;
+        T_FLOAT subSurfaceTintR;
+        T_FLOAT subSurfaceTintG;
+        T_FLOAT subSurfaceTintB;
+        T_FLOAT reserved0;
+        T_FLOAT reserved1;
+        T_FLOAT reserved2;
     };
 
 #ifdef __cplusplus
     static constexpr uint32_t SPRITE_FLAG_HAS_SPECULAR = 1u << 0;
     static constexpr uint32_t SPRITE_FLAG_HAS_NORMAL   = 1u << 1;
     static constexpr uint32_t SPRITE_FLAG_HAS_HEIGHT   = 1u << 2;
+    static constexpr uint32_t SPRITE_FLAG_EMISSIVE_OVERLAY = 1u << 7;
     static constexpr uint32_t SPRITE_FLAG_SPEC_SOURCE_SHIFT = 3u;
     static constexpr uint32_t SPRITE_FLAG_NORMAL_SOURCE_SHIFT = 5u;
     static constexpr uint32_t SPRITE_FLAG_SOURCE_MASK = 0x3u;
@@ -496,11 +540,20 @@ namespace Data {
     static constexpr uint32_t TEXTURE_RULE_FILTER_RADIUS = 1u << 20;
     static constexpr uint32_t TEXTURE_RULE_MIP_BIAS = 1u << 21;
     static constexpr uint32_t TEXTURE_RULE_DISPLACEMENT_SCALE = 1u << 22;
-    static_assert(sizeof(TextureRuleEntry) == 160, "TextureRuleEntry must be exactly 160 bytes");
+    static constexpr uint32_t TEXTURE_RULE_SUBSURFACE_EXT = 1u << 23;
+    static constexpr uint32_t TEXTURE_RULE_DIFFUSE_MODEL = 1u << 24;
+    static constexpr uint32_t TEXTURE_RULE_MODE_DIFFUSE_SHIFT = 6u;
+    static constexpr uint32_t TEXTURE_RULE_MODE_DIFFUSE_MASK = 0x3u << TEXTURE_RULE_MODE_DIFFUSE_SHIFT;
+    static constexpr uint32_t TEXTURE_RULE_DIFFUSE_GLOBAL = 0u;
+    static constexpr uint32_t TEXTURE_RULE_DIFFUSE_EON = 1u;
+    static constexpr uint32_t TEXTURE_RULE_DIFFUSE_VMF = 2u;
+    static constexpr uint32_t TEXTURE_RULE_DIFFUSE_LEGACY = 3u;
+    static_assert(sizeof(TextureRuleEntry) == 192, "TextureRuleEntry must be exactly 192 bytes");
 #else
     #define SPRITE_FLAG_HAS_SPECULAR (1u << 0)
     #define SPRITE_FLAG_HAS_NORMAL   (1u << 1)
     #define SPRITE_FLAG_HAS_HEIGHT   (1u << 2)
+    #define SPRITE_FLAG_EMISSIVE_OVERLAY (1u << 7)
     #define SPRITE_FLAG_SPEC_SOURCE_SHIFT 3u
     #define SPRITE_FLAG_NORMAL_SOURCE_SHIFT 5u
     #define SPRITE_FLAG_SOURCE_MASK 0x3u
@@ -534,6 +587,14 @@ namespace Data {
     #define TEXTURE_RULE_FILTER_RADIUS (1u << 20)
     #define TEXTURE_RULE_MIP_BIAS (1u << 21)
     #define TEXTURE_RULE_DISPLACEMENT_SCALE (1u << 22)
+    #define TEXTURE_RULE_SUBSURFACE_EXT (1u << 23)
+    #define TEXTURE_RULE_DIFFUSE_MODEL (1u << 24)
+    #define TEXTURE_RULE_MODE_DIFFUSE_SHIFT 6u
+    #define TEXTURE_RULE_MODE_DIFFUSE_MASK (0x3u << TEXTURE_RULE_MODE_DIFFUSE_SHIFT)
+    #define TEXTURE_RULE_DIFFUSE_GLOBAL 0u
+    #define TEXTURE_RULE_DIFFUSE_EON 1u
+    #define TEXTURE_RULE_DIFFUSE_VMF 2u
+    #define TEXTURE_RULE_DIFFUSE_LEGACY 3u
 #endif
 
     struct SpriteRegistry {

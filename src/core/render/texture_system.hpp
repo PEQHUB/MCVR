@@ -56,6 +56,13 @@ class TextureSystem {
         float minU, maxU, minV, maxV;
     };
 
+    enum class LayerKind {
+        Albedo,
+        Specular,
+        Normal,
+        Flag,
+    };
+
     TextureSystem() = default;
 
     // ---- Data reception from Java (called on game thread via JNI) ----
@@ -65,20 +72,20 @@ class TextureSystem {
     void receiveSpriteTable(const SpriteMetadata* table, uint32_t count,
                             uint32_t atlasWidth, uint32_t atlasHeight);
 
-    /// Receive concatenated frame-0 pixel data for all sprites (sorted order).
-    /// Total bytes = sum of (width * height * 4) for each sprite.
+    /// Receive concatenated fixed-layer frame-0 pixel data for all sprites (sorted order).
+    /// Java resamples every frame into the selected square texture-array layer size.
     /// Pixels are RGBA8, in the same order as the sprite table.
     void receiveSpritePixels(const uint8_t* data, uint32_t totalBytes);
 
     /// Receive concatenated specular + normal + flag pixel data for all sprites (sorted order).
-    /// Each buffer is count * (spriteSize * spriteSize * 4) bytes, RGBA8 UNORM.
+    /// Each buffer is count * (layerSize * layerSize * 4) bytes, RGBA8 UNORM.
     void receiveAuxPixels(const uint8_t* specularData, const uint8_t* normalData,
                           const uint8_t* flagData,
                           uint32_t totalBytesPerType);
 
     /// Receive bulk animation frame data for all animated sprites.
-    /// Format: repeated entries of [spriteId(uint16), frameIndex(uint16), pixels(w*h*4 bytes)]
-    /// where w and h come from the sprite's metadata.
+    /// Format: repeated entries of
+    /// [spriteId(uint16), frameIndex(uint16), pixels(layerSize*layerSize*4 bytes)].
     void receiveAnimationFrames(const uint8_t* data, uint32_t totalBytes);
 
     // ---- Finalization (called on game thread, creates GPU resources) ----
@@ -94,7 +101,7 @@ class TextureSystem {
     // ---- Per-frame operations (called on render thread) ----
 
     /// Tick animation: stage changed frames for upload. Returns true if any layers changed.
-    bool tickAnimation(uint32_t gameTick);
+    bool tickAnimation(uint32_t gameTick, uint64_t generation);
 
     /// Flush any pending texture uploads + selective mipgen.
     /// Must be called within a valid command buffer recording (render thread).
@@ -114,7 +121,7 @@ class TextureSystem {
     uint32_t atlasWidth() const { return atlasWidth_; }
     uint32_t atlasHeight() const { return atlasHeight_; }
 
-    void setGeneration(uint64_t generation) { generation_.store(generation, std::memory_order_release); }
+    void setGeneration(uint64_t generation);
     uint64_t generation() const { return generation_.load(std::memory_order_acquire); }
 
     std::string statusString() const;
@@ -124,9 +131,17 @@ class TextureSystem {
     TextureArrayManager& arrayManager() { return arrayManager_; }
     SpriteRegistry& registry() { return registry_; }
     TextureRuleRegistry& textureRules() { return textureRules_; }
+    bool stageLayerUpdate(LayerKind layerKind, uint32_t spriteId,
+                          const uint8_t* pixels, size_t pixelSize,
+                          uint64_t generation);
     bool updateSpriteHeightMetadata(uint32_t spriteId, uint32_t flags, int32_t maskLayer,
+                                    uint64_t generation,
                                     std::shared_ptr<vk::VMA> vma,
                                     std::shared_ptr<vk::Device> device);
+    bool uploadTextureRules(const vk::Data::TextureRuleEntry* entries, uint32_t count,
+                            uint64_t generation,
+                            std::shared_ptr<vk::VMA> vma,
+                            std::shared_ptr<vk::Device> device);
 
     /// Get texture array IDs (for descriptor binding).
     uint32_t blockAlbedoArrayId() const { return blockAlbedoArrayId_.load(std::memory_order_acquire); }
@@ -137,6 +152,7 @@ class TextureSystem {
     void reset();
 
   private:
+    void waitForGpuIdleLocked(std::shared_ptr<vk::Device> device, const char* reason);
     void retireGpuResourcesLocked(std::shared_ptr<vk::Device> device, const char* reason);
 
     // Sprite metadata (sorted by identifier, spriteId = index)

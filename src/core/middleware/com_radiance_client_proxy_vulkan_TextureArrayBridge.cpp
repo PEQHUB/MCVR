@@ -39,92 +39,87 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureA
         specData, normData, flagData, static_cast<uint32_t>(totalBytesPerType));
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeUpdateAlbedoLayer(
+extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeUpdateAlbedoLayer(
     JNIEnv *, jclass, jint spriteId, jlong pixelPtr, jint sizeBytes, jlong generation) {
 
     auto& ts = Renderer::textureSystem;
-    if (generation != 0 && static_cast<uint64_t>(generation) != ts.generation()) return;
-    if (!ts.isFinalized() || ts.blockAlbedoArrayId() == UINT32_MAX) return;
-    if (spriteId < 0 || static_cast<uint32_t>(spriteId) >= ts.spriteCount()) return;
-    if (pixelPtr == 0 || sizeBytes <= 0) return;
-    ts.arrayManager().stageLayerPixels(
-        ts.blockAlbedoArrayId(), static_cast<uint32_t>(spriteId), 0,
-        reinterpret_cast<const uint8_t*>(pixelPtr), static_cast<size_t>(sizeBytes));
+    if (spriteId < 0 || pixelPtr == 0 || sizeBytes <= 0) return JNI_FALSE;
+    return ts.stageLayerUpdate(TextureSystem::LayerKind::Albedo,
+        static_cast<uint32_t>(spriteId),
+        reinterpret_cast<const uint8_t*>(pixelPtr),
+        static_cast<size_t>(sizeBytes),
+        static_cast<uint64_t>(generation)) ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeUpdateSpecularLayer(
+extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeUpdateSpecularLayer(
     JNIEnv *, jclass, jint spriteId, jlong pixelPtr, jint sizeBytes, jlong generation) {
 
     auto& ts = Renderer::textureSystem;
-    if (generation != 0 && static_cast<uint64_t>(generation) != ts.generation()) return;
-    if (!ts.isFinalized() || ts.blockSpecularArrayId() == UINT32_MAX) return;
-    if (spriteId < 0 || static_cast<uint32_t>(spriteId) >= ts.spriteCount()) return;
-    if (pixelPtr == 0 || sizeBytes <= 0) return;
-    ts.arrayManager().stageLayerPixels(
-        ts.blockSpecularArrayId(), static_cast<uint32_t>(spriteId), 0,
-        reinterpret_cast<const uint8_t*>(pixelPtr), static_cast<size_t>(sizeBytes));
+    if (spriteId < 0 || pixelPtr == 0 || sizeBytes <= 0) return JNI_FALSE;
+    return ts.stageLayerUpdate(TextureSystem::LayerKind::Specular,
+        static_cast<uint32_t>(spriteId),
+        reinterpret_cast<const uint8_t*>(pixelPtr),
+        static_cast<size_t>(sizeBytes),
+        static_cast<uint64_t>(generation)) ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeUpdateNormalLayer(
+extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeUpdateNormalLayer(
     JNIEnv *, jclass, jint spriteId, jlong pixelPtr, jint sizeBytes, jlong generation) {
 
     auto& ts = Renderer::textureSystem;
-    if (generation != 0 && static_cast<uint64_t>(generation) != ts.generation()) return;
-    if (!ts.isFinalized() || ts.blockNormalArrayId() == UINT32_MAX) return;
-    if (spriteId < 0 || static_cast<uint32_t>(spriteId) >= ts.spriteCount()) return;
-    if (pixelPtr == 0 || sizeBytes <= 0) return;
-    ts.arrayManager().stageLayerPixels(
-        ts.blockNormalArrayId(), static_cast<uint32_t>(spriteId), 0,
-        reinterpret_cast<const uint8_t*>(pixelPtr), static_cast<size_t>(sizeBytes));
+    if (spriteId < 0 || pixelPtr == 0 || sizeBytes <= 0) return JNI_FALSE;
+    return ts.stageLayerUpdate(TextureSystem::LayerKind::Normal,
+        static_cast<uint32_t>(spriteId),
+        reinterpret_cast<const uint8_t*>(pixelPtr),
+        static_cast<size_t>(sizeBytes),
+        static_cast<uint64_t>(generation)) ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeUpdateFlagLayer(
+extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeUpdateFlagLayer(
     JNIEnv *, jclass, jint spriteId, jlong pixelPtr, jint sizeBytes, jlong generation) {
 
     auto& ts = Renderer::textureSystem;
-    if (generation != 0 && static_cast<uint64_t>(generation) != ts.generation()) return;
-    if (!ts.isFinalized() || ts.blockFlagArrayId() == UINT32_MAX) return;
-    if (spriteId < 0 || static_cast<uint32_t>(spriteId) >= ts.spriteCount()) return;
-    if (pixelPtr == 0 || sizeBytes <= 0) return;
-    ts.arrayManager().stageLayerPixels(
-        ts.blockFlagArrayId(), static_cast<uint32_t>(spriteId), 0,
-        reinterpret_cast<const uint8_t*>(pixelPtr), static_cast<size_t>(sizeBytes));
+    if (spriteId < 0 || pixelPtr == 0 || sizeBytes <= 0) return JNI_FALSE;
+    return ts.stageLayerUpdate(TextureSystem::LayerKind::Flag,
+        static_cast<uint32_t>(spriteId),
+        reinterpret_cast<const uint8_t*>(pixelPtr),
+        static_cast<size_t>(sizeBytes),
+        static_cast<uint64_t>(generation)) ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeUpdateSpriteHeightMetadata(
+extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeUpdateSpriteHeightMetadata(
     JNIEnv *, jclass, jint spriteId, jint flags, jint heightRangePacked, jlong generation) {
 
     auto& ts = Renderer::textureSystem;
-    if (generation != 0 && static_cast<uint64_t>(generation) != ts.generation()) return;
-    if (!ts.isFinalized()) return;
-    if (spriteId < 0 || static_cast<uint32_t>(spriteId) >= ts.spriteCount()) return;
+    if (spriteId < 0) return JNI_FALSE;
 
     auto renderer = Renderer::try_instance();
-    if (!renderer || !renderer->framework()) return;
+    if (!renderer || !renderer->framework()) return JNI_FALSE;
     auto framework = renderer->framework();
-    ts.updateSpriteHeightMetadata(
+    return ts.updateSpriteHeightMetadata(
         static_cast<uint32_t>(spriteId),
         static_cast<uint32_t>(flags),
         static_cast<int32_t>(heightRangePacked),
+        static_cast<uint64_t>(generation),
         framework->vma(),
-        framework->device());
+        framework->device()) ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeReceiveTextureRules(
+extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeReceiveTextureRules(
     JNIEnv *, jclass, jlong dataPtr, jint count, jlong generation) {
 
     auto& ts = Renderer::textureSystem;
-    if (generation != 0 && static_cast<uint64_t>(generation) != ts.generation()) return;
-    if (dataPtr == 0 || count <= 0) return;
+    if (dataPtr == 0 || count <= 0) return JNI_FALSE;
 
     auto renderer = Renderer::try_instance();
-    if (!renderer || !renderer->framework()) return;
+    if (!renderer || !renderer->framework()) return JNI_FALSE;
     auto framework = renderer->framework();
-    ts.textureRules().uploadRules(
+    return ts.uploadTextureRules(
         reinterpret_cast<const vk::Data::TextureRuleEntry*>(dataPtr),
         static_cast<uint32_t>(count),
+        static_cast<uint64_t>(generation),
         framework->vma(),
-        framework->device());
+        framework->device()) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeTextureFinalize(
@@ -139,6 +134,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureA
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeSetTextureGeneration(
     JNIEnv *, jclass, jlong generation) {
+    if (!Renderer::textureSystem.isFinalized()) return;
     Renderer::textureSystem.setGeneration(static_cast<uint64_t>(generation));
 }
 
@@ -149,7 +145,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureA
     if (generation != 0 && generation != currentGen) {
         return;
     }
-    Renderer::textureSystem.tickAnimation(static_cast<uint32_t>(gameTick));
+    Renderer::textureSystem.tickAnimation(static_cast<uint32_t>(gameTick), static_cast<uint64_t>(generation));
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeSetTextureArrayAnimationEnabled(

@@ -38,7 +38,7 @@ class TextureArrayManager {
 
     /// Stage pixel data for a specific layer and mip level.
     /// Pixels are buffered CPU-side until flushUploads() is called.
-	void stageLayerPixels(uint32_t arrayId,
+	bool stageLayerPixels(uint32_t arrayId,
 		uint32_t layer,
 		uint32_t mipLevel,
 		const uint8_t* pixels,
@@ -67,6 +67,7 @@ class TextureArrayManager {
 
     /// Get the array info for descriptor binding.
     const ArrayInfo* getArray(uint32_t arrayId) const;
+    bool getArraySnapshot(uint32_t arrayId, ArrayInfo& out) const;
 
     /// Check if there are pending uploads that need flushing.
     bool hasPendingUploads() const;
@@ -76,6 +77,8 @@ class TextureArrayManager {
 
     /// Retire GPU resources through the frame GC, then reset CPU bookkeeping.
     void retire(GarbageCollector& gc);
+    void retireArrays(GarbageCollector& gc, const std::vector<uint32_t>& arrayIds);
+    void discardPendingUploads();
 
     /// Compute mip level count for a given sprite size.
     static uint32_t computeMipLevels(uint32_t spriteSize);

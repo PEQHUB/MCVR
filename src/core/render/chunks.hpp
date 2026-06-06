@@ -7,6 +7,7 @@
 
 #include "core/render/world.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -198,6 +199,7 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
         bool isCompaction = false; // true = compaction phase, false = build phase
     };
     std::deque<InFlightBatch> inFlight_;
+    std::atomic<uint32_t> inFlightCount_{0};
 
     // BLAS timeline counter — only incremented by BLAS thread (sole owner, no atomic needed)
     uint64_t blasTimelineCounter_{0};
@@ -243,6 +245,7 @@ struct Chunk1 : public SharedObject<Chunk1> {
     std::shared_ptr<vk::BLAS> blas;
     int64_t blasVersion = -1;
     uint64_t blasGeneration = 0;  // incremented on each BLAS swap, for TLAS UPDATE change detection
+    bool secondaryQueueOwnershipPending = false;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
 
@@ -258,7 +261,7 @@ struct Chunk1 : public SharedObject<Chunk1> {
     uint64_t textureGeneration = 0;
 
     float buildFactor(std::chrono::steady_clock::time_point currentTime, glm::vec3 cameraPos);
- void enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData);
+ bool enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData);
  void invalidate();
  std::shared_ptr<ChunkRenderData> tryGetValid();
 };

@@ -13,7 +13,6 @@
 #include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/modules/world/svgf/svgf_module.hpp"
 #include "core/render/modules/world/temporal_accumulation/temporal_accumulation_module.hpp"
-#include "core/render/modules/world/cloud/cloud_module.hpp"
 #include "core/render/modules/world/tone_mapping/tone_mapping_module.hpp"
 
 #include "core/render/gpu_profiler.hpp"
@@ -245,7 +244,6 @@ void WorldPipelineContext::render() {
         {"render_pipeline.module.post_render.name", "PostRender"},
         {"render_pipeline.module.temporal_accumulation.name", "TAA"},
         {"SVGF", "SVGF"},
-        {"render_pipeline.module.cloud.name", "Clouds"},
     };
 
     auto& profiler = Renderer::gpuProfiler;
@@ -401,12 +399,8 @@ void Pipeline::collectWorldModules() {
   worldModuleInOutImageNums.insert(std::make_pair(
       PostRenderModule::NAME, std::make_pair(PostRenderModule::inputImageNum, PostRenderModule::outputImageNum)));
 
-  worldModuleConstructors.insert(std::make_pair(
-      CloudModule::NAME, [](std::shared_ptr<Framework> framework, std::shared_ptr<WorldPipeline> worldPipeline) {
-        return CloudModule::create(framework, worldPipeline);
-      }));
-  worldModuleInOutImageNums.insert(std::make_pair(
-      CloudModule::NAME, std::make_pair(CloudModule::inputImageNum, CloudModule::outputImageNum)));
+  // The fork-native volumetric cloud compute module is intentionally not registered.
+  // Clouds are handled shader-side in the ray tracing path for the visual-only lane.
 
   // TODO: invoke extension's collection
 }

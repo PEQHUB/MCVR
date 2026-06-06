@@ -536,14 +536,21 @@ bool vk::DeviceLocalBuffer::isValid() const {
     if (size_ == 0 || buffer_ == VK_NULL_HANDLE || allocation_ == VK_NULL_HANDLE) {
         return false;
     }
-    if (persistStaging_ &&
-        (stagingBuffer_ == VK_NULL_HANDLE || stagingAllocation_ == VK_NULL_HANDLE || mappedPtr_ == nullptr)) {
-        return false;
-    }
     if ((bufferUsage_ & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) && bufferAddress_ == 0) {
         return false;
     }
     return true;
+}
+
+bool vk::DeviceLocalBuffer::hasStaging() const {
+    return stagingBuffer_ != VK_NULL_HANDLE &&
+           stagingAllocation_ != VK_NULL_HANDLE &&
+           mappedPtr_ != nullptr;
+}
+
+bool vk::DeviceLocalBuffer::hasDeviceAddress() const {
+    return (bufferUsage_ & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) &&
+           bufferAddress_ != 0;
 }
 
 VkDeviceAddress &vk::DeviceLocalBuffer::bufferAddress() {

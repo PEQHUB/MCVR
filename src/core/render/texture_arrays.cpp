@@ -211,12 +211,21 @@ uint32_t TextureArrayManager::createArray(std::shared_ptr<vk::VMA> vma,
     return id;
 }
 
-void TextureArrayManager::stageLayerPixels(uint32_t arrayId,
+bool TextureArrayManager::stageLayerPixels(uint32_t arrayId,
                                             uint32_t layer,
                                             uint32_t mipLevel,
                                             const uint8_t* pixels,
                                             size_t pixelSize) {
+    if (!pixels || pixelSize == 0) return false;
     std::lock_guard<std::mutex> lock(mutex_);
+    auto it = arrays_.find(arrayId);
+    if (it == arrays_.end()) return false;
+    const auto& info = it->second;
+    if (layer >= info.layerCount || mipLevel >= info.mipLevels) return false;
+    uint32_t mipSize = info.spriteSize >> mipLevel;
+    if (mipSize == 0) mipSize = 1;
+    size_t expectedSize = mipSize * mipSize * vk::formatToByte(info.format);
+    if (pixelSize < expectedSize) return false;
 
     StagedUpload upload;
     upload.arrayId = arrayId;
@@ -224,6 +233,7 @@ void TextureArrayManager::stageLayerPixels(uint32_t arrayId,
     upload.mipLevel = mipLevel;
     upload.pixels.assign(pixels, pixels + pixelSize);
     stagedUploads_.push_back(std::move(upload));
+    return true;
 }
 
 TextureArrayManager::DirtyLayers TextureArrayManager::flushUploads(
@@ -237,23 +247,14 @@ TextureArrayManager::DirtyLayers TextureArrayManager::flushUploads(
 	size_t maxBytes) {
 	DirtyLayers dirty;
 
-	// Phase 1: Snapshot staged uploads under mutex (~1us for 51 entries).
-	// After the move, the Java thread can immediately stage new uploads
-	// to the now-empty stagedUploads_ -- no contention.
+	// Snapshot and process under one mutex so resource reload cannot retire arrays_
+	// while this command buffer is recording copies/barriers/mip transitions.
 	std::vector<StagedUpload> snapshot;
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		if (stagedUploads_.empty()) return dirty;
-		snapshot = std::move(stagedUploads_);
-		// stagedUploads_ is now empty -- Java thread can stage new uploads immediately
-	}
+    std::lock_guard<std::mutex> lock(mutex_);
+	if (stagedUploads_.empty()) return dirty;
+	snapshot = std::move(stagedUploads_);
 
 	currentFrameStagingBuffers_.clear();
-
-	// Phase 2: Process snapshot WITHOUT mutex (1-3ms).
-	// arrays_ is read-only during rendering (only written during finalize after vkDeviceWaitIdle).
-	// subresourceLayouts_ is single-writer (render thread only).
-	// currentFrameStagingBuffers_ is single-thread (render thread only).
 
 	for (auto& upload : snapshot) {
 		auto it = arrays_.find(upload.arrayId);
@@ -325,7 +326,8 @@ TextureArrayManager::DirtyLayers TextureArrayManager::flushUploads(
 }
 
 void TextureArrayManager::generateMipmaps(uint32_t arrayId,
-                                           std::shared_ptr<vk::CommandBuffer> cmdBuffer) {
+                                            std::shared_ptr<vk::CommandBuffer> cmdBuffer) {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = arrays_.find(arrayId);
     if (it == arrays_.end()) return;
 
@@ -345,7 +347,8 @@ void TextureArrayManager::generateMipmaps(uint32_t arrayId,
 }
 
 void TextureArrayManager::generateMipmapsForLayer(uint32_t arrayId, uint32_t layer,
-                                                    std::shared_ptr<vk::CommandBuffer> cmdBuffer) {
+                                                     std::shared_ptr<vk::CommandBuffer> cmdBuffer) {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = arrays_.find(arrayId);
     if (it == arrays_.end()) return;
 
@@ -359,10 +362,11 @@ void TextureArrayManager::generateMipmapsForLayer(uint32_t arrayId, uint32_t lay
 }
 
 void TextureArrayManager::generateMipmapsForLayers(uint32_t arrayId,
-                                                   const std::vector<uint32_t>& layers,
-                                                   std::shared_ptr<vk::CommandBuffer> cmdBuffer) {
+                                                    const std::vector<uint32_t>& layers,
+                                                    std::shared_ptr<vk::CommandBuffer> cmdBuffer) {
     if (layers.empty()) return;
 
+    std::lock_guard<std::mutex> lock(mutex_);
     auto it = arrays_.find(arrayId);
     if (it == arrays_.end()) return;
 
@@ -383,9 +387,18 @@ void TextureArrayManager::generateMipmapsForLayers(uint32_t arrayId,
 }
 
 const TextureArrayManager::ArrayInfo* TextureArrayManager::getArray(uint32_t arrayId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
 	auto it = arrays_.find(arrayId);
     if (it == arrays_.end()) return nullptr;
     return &it->second;
+}
+
+bool TextureArrayManager::getArraySnapshot(uint32_t arrayId, ArrayInfo& out) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = arrays_.find(arrayId);
+    if (it == arrays_.end()) return false;
+    out = it->second;
+    return true;
 }
 
 bool TextureArrayManager::hasPendingUploads() const {
@@ -403,6 +416,7 @@ std::vector<uint32_t> TextureArrayManager::collectDirtyLayers(uint32_t arrayId) 
 }
 
 std::vector<std::shared_ptr<vk::HostVisibleBuffer>> TextureArrayManager::takeStagingBuffers() {
+    std::lock_guard<std::mutex> lock(mutex_);
     return std::move(currentFrameStagingBuffers_);
 }
 
@@ -429,4 +443,30 @@ void TextureArrayManager::retire(GarbageCollector& gc) {
     stagedUploads_.clear();
     currentFrameStagingBuffers_.clear();
     nextArrayId_ = 0;
+}
+
+void TextureArrayManager::retireArrays(GarbageCollector& gc, const std::vector<uint32_t>& arrayIds) {
+    if (arrayIds.empty()) return;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (uint32_t id : arrayIds) {
+        auto it = arrays_.find(id);
+        if (it == arrays_.end()) continue;
+        gc.collect(it->second.image);
+        gc.collect(it->second.sampler);
+        arrays_.erase(it);
+    }
+
+    stagedUploads_.erase(
+        std::remove_if(stagedUploads_.begin(), stagedUploads_.end(),
+            [&](const StagedUpload& upload) {
+                return std::find(arrayIds.begin(), arrayIds.end(), upload.arrayId) != arrayIds.end();
+            }),
+        stagedUploads_.end());
+}
+
+void TextureArrayManager::discardPendingUploads() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stagedUploads_.clear();
 }

@@ -60,6 +60,25 @@ RtFlagStats& statsForFlag(std::array<RtFlagStats, 8>& stats, int flag) {
     return stats[0];
 }
 
+uint32_t alphaModeBitsFor(World::GeometryTypes geometryType, uint32_t flags) {
+    namespace VF = vk::VertexFormat;
+    if ((flags & VF::PBR_FLAG_ALPHA_MODE_MASK) != 0u) {
+        return flags & VF::PBR_FLAG_ALPHA_MODE_MASK;
+    }
+    const uint32_t mode = geometryType == World::WORLD_TRANSPARENT
+        ? VF::PBR_ALPHA_MODE_TRANSPARENT
+        : VF::PBR_ALPHA_MODE_OPAQUE;
+    return mode << VF::PBR_FLAG_ALPHA_MODE_SHIFT;
+}
+
+void applyAlphaModeFallback(World::GeometryTypes geometryType,
+                            std::vector<vk::VertexFormat::PBRTriangle>& vertices) {
+    for (auto& vertex : vertices) {
+        vertex.flags = (vertex.flags & ~vk::VertexFormat::PBR_FLAG_ALPHA_MODE_MASK) |
+            alphaModeBitsFor(geometryType, vertex.flags);
+    }
+}
+
 void accumulateEntityStats(std::array<RtFlagStats, 8>& byFlag,
                            const std::shared_ptr<EntityBuildData>& data,
                            uint32_t& totalGeometries,
@@ -630,6 +649,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                     geometryVertices.push_back(vertex);
                 }
             }
+            applyAlphaModeFallback(geometryType, geometryVertices);
 
             auto orthonormalBasis = [](const glm::dvec3 &a_unit,
                                        const glm::dvec3 &ref) -> std::pair<glm::dvec3, glm::dvec3> {

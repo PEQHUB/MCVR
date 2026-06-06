@@ -34,4 +34,5 @@
 #    define PARTICLE_MASK 32
 #    define CLOUD_MASK 64
 #    define BOAT_WATER_MASK 128
+#    define FISHING_BOBBER_MASK PLAYER_HEAD_MASK
 #endif

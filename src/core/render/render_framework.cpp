@@ -709,7 +709,7 @@ void Framework::acquireContext() {
     // Capture per-frame upload diagnostics before resetFrame clears them
       FrameTiming::pfUploadBytes += Renderer::instance().textures()->uploadBytes();
       FrameTiming::pfUploadRegions += Renderer::instance().textures()->uploadRegions();
-      Renderer::instance().textures()->resetFrame();
+      Renderer::instance().textures()->resetFrame(currentContextIndex_);
     Renderer::instance().world()->resetFrame();
     Renderer::instance().world()->chunks()->resetFrame();
     Renderer::instance().world()->entities()->resetFrame();
@@ -1059,9 +1059,11 @@ void Framework::recreate() {
     // waits for the thread to acknowledge, but the thread may be holding recreateMtx_
     // inside its loop body. Pausing first ensures the thread releases recreateMtx_
     // and enters its pause wait before we try to acquire the lock.
+    bool presentThreadPausedForRecreate = false;
     if (presentThread_ && presentThread_->isRunning() && !presentThread_->isPaused()) {
         renderDiag("  pausing PresentThread...");
         presentThread_->pause();
+        presentThreadPausedForRecreate = true;
         renderDiag("  PresentThread paused");
     }
 
@@ -1096,7 +1098,16 @@ void Framework::recreate() {
     {
         auto world = Renderer::instance().world();
         if (world && world->chunks() && world->chunks()->chunkBuildScheduler()) {
-            world->chunks()->chunkBuildScheduler()->pause();
+            if (!world->chunks()->chunkBuildScheduler()->pause()) {
+                renderDiag("  BLAS thread pause timed out; deferring recreate");
+                Renderer::options.needRecreate = true;
+                vk::Window::framebufferResized = true;
+                pipeline_->needRecreate = true;
+                if (presentThreadPausedForRecreate && presentThread_) {
+                    presentThread_->resume();
+                }
+                return;
+            }
         }
     }
     renderDiag("  BLAS thread paused, waiting device idle...");
@@ -1714,8 +1725,7 @@ GarbageCollector::GarbageCollector(std::shared_ptr<Framework> framework) : frame
 }
 
 void GarbageCollector::clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
     index_ = (index_ + 1) % collectors_.size();
-
-    auto framework = framework_.lock();
     collectors_[index_].clear();
 }

@@ -17,7 +17,7 @@ class Textures : public SharedObject<Textures> {
     Textures(std::shared_ptr<Framework> framework);
 
     void reset();
-    void resetFrame();
+    void resetFrame(uint32_t frameIndex);
     uint32_t allocateTexture();
     void initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width, uint32_t height, VkFormat format);
     void setSamplingMode(uint32_t id, VkFilter samplingMode, VkSamplerMipmapMode mipmapMode);
@@ -65,7 +65,7 @@ class ImageBufferCache : public SharedObject<ImageBufferCache> {
 
     size_t append(void *src, size_t size);
     void flush();
-    void reset();
+    void reset(uint32_t frameIndex);
 
     VkBuffer &vkBuffer();
 

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <utility>
 
 void SpriteRegistry::registerSprite(uint16_t spriteId,
                                      uint32_t baseLayer,
@@ -24,7 +25,6 @@ void SpriteRegistry::registerSprite(uint16_t spriteId,
     }
 
     if (entries_.size() <= spriteId) {
-        // Default entry: single static layer, no aux textures
         vk::Data::SpriteEntry defaultEntry{};
         defaultEntry.baseLayer = 0;
         defaultEntry.frameCount = 1;
@@ -51,6 +51,7 @@ void SpriteRegistry::registerSprite(uint16_t spriteId,
 }
 
 const vk::Data::SpriteEntry* SpriteRegistry::getEntry(uint16_t spriteId) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (spriteId >= entries_.size()) return nullptr;
     return &entries_[spriteId];
 }
@@ -65,8 +66,17 @@ bool SpriteRegistry::updateHeightMetadata(uint16_t spriteId, uint32_t flags, int
     return true;
 }
 
-void SpriteRegistry::uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device) {
+bool SpriteRegistry::uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device) {
+    if (!vma || !device) return false;
+
     std::lock_guard<std::mutex> lock(mutex_);
+
+    auto renderer = Renderer::try_instance();
+    auto framework = renderer ? renderer->framework() : nullptr;
+    if (!framework) {
+        std::cerr << "[SpriteRegistry] Cannot upload SSBO without renderer framework" << std::endl;
+        return false;
+    }
 
     vk::Data::SpriteEntry defaultEntry{};
     defaultEntry.baseLayer = 0;
@@ -85,26 +95,28 @@ void SpriteRegistry::uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk
     }
 
     VkDeviceSize dataSize = uploadEntries.size() * sizeof(vk::Data::SpriteEntry);
-
-    ssbo_ = vk::DeviceLocalBuffer::create(
+    auto nextSsbo = vk::DeviceLocalBuffer::create(
         vma, device, true, dataSize,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-    ssbo_->uploadToStagingBuffer(uploadEntries.data(), static_cast<size_t>(dataSize), 0);
+    nextSsbo->uploadToStagingBuffer(uploadEntries.data(), static_cast<size_t>(dataSize), 0);
 
-    // One-shot staging → device-local transfer. Without this, the shader reads
-    // uninitialized VRAM from the device-local buffer (staging is a separate VkBuffer).
-    auto framework = Renderer::instance().framework();
     auto fence = vk::Fence::create(device);
     auto cmd = vk::CommandBuffer::create(device, framework->mainCommandPool());
     cmd->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-    ssbo_->uploadToBuffer(cmd);
+    nextSsbo->uploadToBuffer(cmd);
     cmd->end();
     cmd->submitMainQueueIndividual(device, fence);
     vkWaitForFences(device->vkDevice(), 1, &fence->vkFence(), VK_TRUE, UINT64_MAX);
 
+    if (ssbo_) {
+        framework->gc().collect(ssbo_);
+    }
+    ssbo_ = std::move(nextSsbo);
+
     std::cout << "[SpriteRegistry] Uploaded " << spriteCount_ << " sprites ("
               << dataSize << " bytes padded) to GPU SSBO" << std::endl;
+    return true;
 }
 
 void SpriteRegistry::reset() {
@@ -112,6 +124,12 @@ void SpriteRegistry::reset() {
     entries_.clear();
     spriteCount_ = 0;
     ssbo_.reset();
+}
+
+void SpriteRegistry::clearEntries() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    entries_.clear();
+    spriteCount_ = 0;
 }
 
 void SpriteRegistry::retire(GarbageCollector& gc) {

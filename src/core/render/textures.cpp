@@ -15,14 +15,21 @@ std::ostream &texturesCerr() {
     return std::cerr << "[Textures] ";
 }
 
-Textures::Textures(std::shared_ptr<Framework> framework) {}
+Textures::Textures(std::shared_ptr<Framework> framework)
+    : uploadQueue_(std::make_shared<std::map<uint32_t, std::vector<VkBufferImageCopy>>>()) {}
 
 void Textures::reset() {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
     textures_.clear();
+    samplers.clear();
+    caches_.clear();
+    uploadQueue_ = std::make_shared<std::map<uint32_t, std::vector<VkBufferImageCopy>>>();
+    freeList_.clear();
     nextID = 0;
 }
 
-void Textures::resetFrame() {
+void Textures::resetFrame(uint32_t frameIndex) {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
     auto framework = Renderer::instance().framework();
 
     framework->gc().collect(uploadQueue_);
@@ -30,7 +37,7 @@ void Textures::resetFrame() {
 
     for (auto &entry : caches_) {
         auto &cache = entry.second;
-        cache->reset();
+        cache->reset(frameIndex);
     }
     uploadBytes_ = 0;
     uploadRegions_ = 0;
@@ -395,7 +402,8 @@ VkBuffer &ImageBufferCache::vkBuffer() {
     return caches_[current_]->vkBuffer();
 }
 
-void ImageBufferCache::reset() {
-    current_ = (current_ + 1) % caches_.size();
+void ImageBufferCache::reset(uint32_t frameIndex) {
+    if (caches_.empty()) return;
+    current_ = frameIndex % static_cast<uint32_t>(caches_.size());
     bases_[current_] = 0;
 }

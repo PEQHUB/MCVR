@@ -12,6 +12,7 @@
 #include <cmath>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 const TextureSystem::SpriteBounds TextureSystem::DEFAULT_BOUNDS = {0.0f, 1.0f, 0.0f, 1.0f};
 
@@ -25,9 +26,15 @@ uint64_t fnv1a64(const uint8_t* data, size_t size) {
     return hash;
 }
 
+void appendArrayId(std::vector<uint32_t>& ids, uint32_t id) {
+    if (id == UINT32_MAX) return;
+    if (std::find(ids.begin(), ids.end(), id) != ids.end()) return;
+    ids.push_back(id);
 }
 
-void TextureSystem::retireGpuResourcesLocked(std::shared_ptr<vk::Device> device, const char* reason) {
+}
+
+void TextureSystem::waitForGpuIdleLocked(std::shared_ptr<vk::Device> device, const char* reason) {
     auto* renderer = Renderer::try_instance();
     auto framework = renderer ? renderer->framework() : nullptr;
 
@@ -52,6 +59,18 @@ void TextureSystem::retireGpuResourcesLocked(std::shared_ptr<vk::Device> device,
         vkDeviceWaitIdle(device->vkDevice());
     }
 
+    if (scheduler && schedulerPaused) {
+        scheduler->resume();
+    }
+}
+
+void TextureSystem::retireGpuResourcesLocked(std::shared_ptr<vk::Device> device, const char* reason) {
+    auto* renderer = Renderer::try_instance();
+    auto framework = renderer ? renderer->framework() : nullptr;
+
+    finalized_ = false;
+    waitForGpuIdleLocked(device, reason);
+
     if (framework) {
         auto& gc = framework->gc();
         arrayManager_.retire(gc);
@@ -72,15 +91,34 @@ void TextureSystem::retireGpuResourcesLocked(std::shared_ptr<vk::Device> device,
     normMipsInitialized_ = false;
     flagMipsInitialized_ = false;
     finalized_ = false;
-
-    if (scheduler && schedulerPaused) {
-        scheduler->resume();
-    }
 }
 
 void TextureSystem::receiveSpriteTable(const SpriteMetadata* table, uint32_t count,
                                         uint32_t atlasWidth, uint32_t atlasHeight) {
     std::lock_guard<std::mutex> lock(mutex_);
+
+    generation_.fetch_add(1, std::memory_order_acq_rel);
+    finalized_ = false;
+    arrayManager_.discardPendingUploads();
+    spritePixels_.clear();
+    specularPixels_.clear();
+    normalPixels_.clear();
+    flagPixels_.clear();
+    animEntries_.clear();
+    albedoChecksums_.clear();
+    specularChecksums_.clear();
+    normalChecksums_.clear();
+    flagChecksums_.clear();
+
+    if (!table || count == 0) {
+        sprites_.clear();
+        spriteBounds_.clear();
+        atlasWidth_ = 0;
+        atlasHeight_ = 0;
+        layerSize_ = 0;
+        std::cerr << "[TextureSystem] Received empty sprite table" << std::endl;
+        return;
+    }
 
     sprites_.assign(table, table + count);
     atlasWidth_ = atlasWidth;
@@ -231,14 +269,26 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         return;
     }
 
+    std::vector<uint32_t> oldArrayIds;
+    appendArrayId(oldArrayIds, blockAlbedoArrayId_.load(std::memory_order_acquire));
+    appendArrayId(oldArrayIds, blockSpecularArrayId_.load(std::memory_order_acquire));
+    appendArrayId(oldArrayIds, blockNormalArrayId_.load(std::memory_order_acquire));
+    appendArrayId(oldArrayIds, blockFlagArrayId_.load(std::memory_order_acquire));
+
+    auto framework = Renderer::instance().framework();
+    if (!oldArrayIds.empty() || registry_.getBuffer() || textureRules_.getBuffer()) {
+        std::cout << "[TextureSystem] Re-initializing (preserving old published textures until swap)" << std::endl;
+        waitForGpuIdleLocked(device, "texture reinitialization");
+    }
+
     // Handle re-initialization (F3+T reload): retire old arrays before creating new ones.
-    if (finalized_) {
+/*
         std::cout << "[TextureSystem] Re-initializing (retiring old arrays)" << std::endl;
         // Wait all queues and keep old arrays/SSBO alive through frame GC.
         // Without this, in-flight command buffers still reference old texture arrays
         // via descriptors — destroying them causes GPU access violation (exit -805306369).
         retireGpuResourcesLocked(device, "texture reinitialization");
-    }
+*/
 
     uint32_t count = static_cast<uint32_t>(sprites_.size());
     uint32_t spriteSize = layerSize_;
@@ -258,7 +308,6 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     }
 
     // Validate against hardware limit
-    auto framework = Renderer::instance().framework();
     auto physDevice = framework->physicalDevice();
     VkPhysicalDeviceProperties props = physDevice->properties();
     uint32_t maxLayers = props.limits.maxImageArrayLayers;
@@ -276,19 +325,39 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
               << spriteSize << "x" << spriteSize
               << ", max layers=" << maxLayers << std::endl;
 
+    uint32_t newAlbedoArrayId = UINT32_MAX;
+    uint32_t newSpecularArrayId = UINT32_MAX;
+    uint32_t newNormalArrayId = UINT32_MAX;
+    uint32_t newFlagArrayId = UINT32_MAX;
+    std::vector<uint32_t> newArrayIds;
+
     // Create block albedo texture array
-    blockAlbedoArrayId_ = arrayManager_.createArray(
+    newAlbedoArrayId = arrayManager_.createArray(
         vma, device, spriteSize, count,
         VK_FORMAT_R8G8B8A8_SRGB, true /* generateMips */);
+    appendArrayId(newArrayIds, newAlbedoArrayId);
 
     // Stage frame-0 pixels for each sprite into the texture array.
     // Pixels are concatenated in sorted order in spritePixels_.
     // Java uses FIXED offset: i * spriteSize * spriteSize * 4 (all sprites assumed same size).
     size_t bytesPerSprite = static_cast<size_t>(spriteSize) * spriteSize * 4;
+    const std::vector<uint8_t> defaultSpecular(bytesPerSprite, 0);
+    std::vector<uint8_t> defaultNormal(bytesPerSprite, 0);
+    std::vector<uint8_t> defaultFlag(bytesPerSprite, 0);
+    for (size_t px = 0; px + 3 < defaultNormal.size(); px += 4) {
+        defaultNormal[px + 0] = 128;
+        defaultNormal[px + 1] = 128;
+        defaultNormal[px + 2] = 255;
+        defaultNormal[px + 3] = 255;
+    }
     albedoChecksums_.assign(count, 0);
     specularChecksums_.assign(count, 0);
     normalChecksums_.assign(count, 0);
     flagChecksums_.assign(count, 0);
+    uint32_t stagedAlbedoLayers = 0;
+    uint32_t stagedSpecularLayers = 0;
+    uint32_t stagedNormalLayers = 0;
+    uint32_t stagedFlagLayers = 0;
     for (uint32_t i = 0; i < count; i++) {
         // For animated sprites, prefer frame 0 from animation data (more reliable)
         const uint8_t* frameData = nullptr;
@@ -306,69 +375,98 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         }
 
         if (frameData) {
-            arrayManager_.stageLayerPixels(blockAlbedoArrayId_, i, 0,
-                                           frameData, bytesPerSprite);
-            albedoChecksums_[i] = fnv1a64(frameData, bytesPerSprite);
+            if (arrayManager_.stageLayerPixels(newAlbedoArrayId, i, 0,
+                                               frameData, bytesPerSprite)) {
+                stagedAlbedoLayers++;
+                albedoChecksums_[i] = fnv1a64(frameData, bytesPerSprite);
+            }
         } else {
             std::cerr << "[TextureSystem] Missing pixel data for sprite " << i << std::endl;
         }
     }
 
-    std::cout << "[TextureSystem] Staged " << count << " albedo layers" << std::endl;
+    std::cout << "[TextureSystem] Staged " << stagedAlbedoLayers << " / " << count
+              << " albedo layers" << std::endl;
 
     // Create block specular texture array (UNORM — LabPBR values are linear, NOT sRGB)
-    if (!specularPixels_.empty()) {
-        blockSpecularArrayId_ = arrayManager_.createArray(
-            vma, device, spriteSize, count,
-            VK_FORMAT_R8G8B8A8_UNORM, true /* generateMips */);
-        for (uint32_t i = 0; i < count; i++) {
-            size_t pixelOffset = static_cast<size_t>(i) * bytesPerSprite;
-            if (pixelOffset + bytesPerSprite <= specularPixels_.size()) {
-                const uint8_t* layer = specularPixels_.data() + pixelOffset;
-                arrayManager_.stageLayerPixels(blockSpecularArrayId_, i, 0,
-                    layer, bytesPerSprite);
+    newSpecularArrayId = arrayManager_.createArray(
+        vma, device, spriteSize, count,
+        VK_FORMAT_R8G8B8A8_UNORM, true /* generateMips */);
+    appendArrayId(newArrayIds, newSpecularArrayId);
+    for (uint32_t i = 0; i < count; i++) {
+        size_t pixelOffset = static_cast<size_t>(i) * bytesPerSprite;
+        const bool hasLayer = pixelOffset + bytesPerSprite <= specularPixels_.size();
+        const uint8_t* layer = hasLayer ? specularPixels_.data() + pixelOffset : defaultSpecular.data();
+        if (arrayManager_.stageLayerPixels(newSpecularArrayId, i, 0,
+                                           layer, bytesPerSprite)) {
+            stagedSpecularLayers++;
+            if (hasLayer) {
                 specularChecksums_[i] = fnv1a64(layer, bytesPerSprite);
             }
         }
-        std::cout << "[TextureSystem] Staged " << count << " specular layers" << std::endl;
     }
+    std::cout << "[TextureSystem] Staged " << stagedSpecularLayers << " / " << count
+              << " specular layers" << std::endl;
 
     // Create block normal texture array (UNORM — linear normal map data)
-    if (!normalPixels_.empty()) {
-        blockNormalArrayId_ = arrayManager_.createArray(
-            vma, device, spriteSize, count,
-            VK_FORMAT_R8G8B8A8_UNORM, true /* generateMips */);
-        for (uint32_t i = 0; i < count; i++) {
-            size_t pixelOffset = static_cast<size_t>(i) * bytesPerSprite;
-            if (pixelOffset + bytesPerSprite <= normalPixels_.size()) {
-                const uint8_t* layer = normalPixels_.data() + pixelOffset;
-                arrayManager_.stageLayerPixels(blockNormalArrayId_, i, 0,
-                    layer, bytesPerSprite);
+    newNormalArrayId = arrayManager_.createArray(
+        vma, device, spriteSize, count,
+        VK_FORMAT_R8G8B8A8_UNORM, true /* generateMips */);
+    appendArrayId(newArrayIds, newNormalArrayId);
+    for (uint32_t i = 0; i < count; i++) {
+        size_t pixelOffset = static_cast<size_t>(i) * bytesPerSprite;
+        const bool hasLayer = pixelOffset + bytesPerSprite <= normalPixels_.size();
+        const uint8_t* layer = hasLayer ? normalPixels_.data() + pixelOffset : defaultNormal.data();
+        if (arrayManager_.stageLayerPixels(newNormalArrayId, i, 0,
+                                           layer, bytesPerSprite)) {
+            stagedNormalLayers++;
+            if (hasLayer) {
                 normalChecksums_[i] = fnv1a64(layer, bytesPerSprite);
             }
         }
-        std::cout << "[TextureSystem] Staged " << count << " normal layers" << std::endl;
     }
+    std::cout << "[TextureSystem] Staged " << stagedNormalLayers << " / " << count
+              << " normal layers" << std::endl;
 
     // Create block flag texture array (UNORM raw LabPBR flag bytes)
-    if (!flagPixels_.empty()) {
-        blockFlagArrayId_ = arrayManager_.createArray(
-            vma, device, spriteSize, count,
-            VK_FORMAT_R8G8B8A8_UNORM, true /* generateMips */);
-        for (uint32_t i = 0; i < count; i++) {
-            size_t pixelOffset = static_cast<size_t>(i) * bytesPerSprite;
-            if (pixelOffset + bytesPerSprite <= flagPixels_.size()) {
-                const uint8_t* layer = flagPixels_.data() + pixelOffset;
-                arrayManager_.stageLayerPixels(blockFlagArrayId_, i, 0,
-                    layer, bytesPerSprite);
+    newFlagArrayId = arrayManager_.createArray(
+        vma, device, spriteSize, count,
+        VK_FORMAT_R8G8B8A8_UNORM, true /* generateMips */);
+    appendArrayId(newArrayIds, newFlagArrayId);
+    for (uint32_t i = 0; i < count; i++) {
+        size_t pixelOffset = static_cast<size_t>(i) * bytesPerSprite;
+        const bool hasLayer = pixelOffset + bytesPerSprite <= flagPixels_.size();
+        const uint8_t* layer = hasLayer ? flagPixels_.data() + pixelOffset : defaultFlag.data();
+        if (arrayManager_.stageLayerPixels(newFlagArrayId, i, 0,
+                                           layer, bytesPerSprite)) {
+            stagedFlagLayers++;
+            if (hasLayer) {
                 flagChecksums_[i] = fnv1a64(layer, bytesPerSprite);
             }
         }
-        std::cout << "[TextureSystem] Staged " << count << " flag layers" << std::endl;
+    }
+    std::cout << "[TextureSystem] Staged " << stagedFlagLayers << " / " << count
+              << " flag layers" << std::endl;
+
+    const uint32_t minRequiredLayers = std::max<uint32_t>(1, count / 2);
+    const bool albedoReady = stagedAlbedoLayers >= minRequiredLayers;
+    const bool specularReady = stagedSpecularLayers >= minRequiredLayers;
+    const bool normalReady = stagedNormalLayers >= minRequiredLayers;
+    const bool flagReady = stagedFlagLayers >= minRequiredLayers;
+    if (!albedoReady || !specularReady || !normalReady || !flagReady) {
+        std::cerr << "[TextureSystem] Cannot finalize: staged layer counts too low"
+                  << " albedo=" << stagedAlbedoLayers << "/" << count
+                  << " specular=" << stagedSpecularLayers << "/" << count
+                  << " normal=" << stagedNormalLayers << "/" << count
+                  << " flag=" << stagedFlagLayers << "/" << count << std::endl;
+        if (framework) {
+            arrayManager_.retireArrays(framework->gc(), newArrayIds);
+        }
+        return;
     }
 
     // Build SpriteRegistry SSBO entries. Authored normal alpha remains shader metadata only.
-    registry_.reset();
+    registry_.clearEntries();
     for (uint32_t i = 0; i < count; i++) {
         auto& meta = sprites_[i];
 
@@ -393,6 +491,9 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         if (meta.padding & vk::Data::SPRITE_FLAG_HAS_HEIGHT) {
             flags |= vk::Data::SPRITE_FLAG_HAS_HEIGHT;
         }
+        if (meta.padding & vk::Data::SPRITE_FLAG_EMISSIVE_OVERLAY) {
+            flags |= vk::Data::SPRITE_FLAG_EMISSIVE_OVERLAY;
+        }
         flags |= (meta.padding &
             (vk::Data::SPRITE_FLAG_SPEC_SOURCE_MASK | vk::Data::SPRITE_FLAG_NORMAL_SOURCE_MASK));
         uint32_t normalSource =
@@ -402,8 +503,8 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
             normalSource == vk::Data::SPRITE_SOURCE_USER_CUSTOM;
 
         // All sprites get a layer in aux arrays (defaults for missing)
-        int32_t specLayer = (blockSpecularArrayId_ != UINT32_MAX) ? static_cast<int32_t>(i) : -1;
-        int32_t normLayer = (blockNormalArrayId_ != UINT32_MAX) ? static_cast<int32_t>(i) : -1;
+        int32_t specLayer = (newSpecularArrayId != UINT32_MAX) ? static_cast<int32_t>(i) : -1;
+        int32_t normLayer = (newNormalArrayId != UINT32_MAX) ? static_cast<int32_t>(i) : -1;
         int32_t heightRangePacked = -1;
         if ((flags & vk::Data::SPRITE_FLAG_HAS_HEIGHT) != 0 && authoredHeightSource && normLayer >= 0) {
             size_t pixelOffset = static_cast<size_t>(i) * bytesPerSprite;
@@ -444,8 +545,17 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
             heightRangePacked);                         // packed height range
     }
 
-    registry_.uploadSSBO(vma, device);
-    textureRules_.uploadRules(nullptr, 0, vma, device);
+    if (!registry_.uploadSSBO(vma, device)) {
+        std::cerr << "[TextureSystem] Cannot finalize: sprite registry upload failed" << std::endl;
+        if (framework) {
+            arrayManager_.retireArrays(framework->gc(), newArrayIds);
+        }
+        return;
+    }
+    std::vector<vk::Data::TextureRuleEntry> emptyRules(vk::Data::SPRITE_MAX_ENTRIES);
+    if (!textureRules_.uploadRules(emptyRules.data(), static_cast<uint32_t>(emptyRules.size()), vma, device)) {
+        std::cerr << "[TextureSystem] WARNING: default texture rule upload failed" << std::endl;
+    }
 
     // Free CPU pixel data (no longer needed after staging)
     spritePixels_.clear();
@@ -457,7 +567,19 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     flagPixels_.clear();
     flagPixels_.shrink_to_fit();
 
+    blockAlbedoArrayId_.store(newAlbedoArrayId, std::memory_order_release);
+    blockSpecularArrayId_.store(newSpecularArrayId, std::memory_order_release);
+    blockNormalArrayId_.store(newNormalArrayId, std::memory_order_release);
+    blockFlagArrayId_.store(newFlagArrayId, std::memory_order_release);
+    albedoMipsInitialized_ = false;
+    specMipsInitialized_ = false;
+    normMipsInitialized_ = false;
+    flagMipsInitialized_ = false;
     finalized_ = true;
+
+    if (framework) {
+        arrayManager_.retireArrays(framework->gc(), oldArrayIds);
+    }
 
     // Diagnostic log
     {
@@ -511,8 +633,12 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         << animEntries_.size() << " animated." << std::endl;
 }
 
-bool TextureSystem::tickAnimation(uint32_t gameTick) {
+bool TextureSystem::tickAnimation(uint32_t gameTick, uint64_t generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
     if (!finalized_ || animEntries_.empty()) return false;
+    uint32_t albedoArrayId = blockAlbedoArrayId_.load(std::memory_order_acquire);
+    if (albedoArrayId == UINT32_MAX) return false;
 
     // Per-frame animation upload budget: limit total bytes staged per tick
     // to prevent 51 animated sprites from causing a single-frame upload spike.
@@ -539,14 +665,14 @@ bool TextureSystem::tickAnimation(uint32_t gameTick) {
                 continue;
             }
 
-            arrayManager_.stageLayerPixels(
-                blockAlbedoArrayId_, ae.spriteId, 0,
-                ae.frames[currentFrame].data(),
-                ae.frames[currentFrame].size());
-
-            ae.lastFrame = currentFrame;
-            budgetUsed += frameBytes;
-            anyUpdated = true;
+            if (arrayManager_.stageLayerPixels(
+                    albedoArrayId, ae.spriteId, 0,
+                    ae.frames[currentFrame].data(),
+                    ae.frames[currentFrame].size())) {
+                ae.lastFrame = currentFrame;
+                budgetUsed += frameBytes;
+                anyUpdated = true;
+            }
         }
     }
 
@@ -557,6 +683,7 @@ void TextureSystem::flushPendingUploads(std::shared_ptr<vk::VMA> vma,
 	std::shared_ptr<vk::Device> device,
 	std::shared_ptr<vk::CommandBuffer> cmdBuffer,
 	GarbageCollector& gc) {
+    std::lock_guard<std::mutex> lock(mutex_);
 	if (!finalized_) return;
 	if (!arrayManager_.hasPendingUploads()) return;
 
@@ -598,15 +725,68 @@ const TextureSystem::SpriteBounds& TextureSystem::getSpriteBounds(uint16_t sprit
     return DEFAULT_BOUNDS;
 }
 
+void TextureSystem::setGeneration(uint64_t generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint64_t current = generation_.load(std::memory_order_acquire);
+    if (generation >= current) {
+        generation_.store(generation, std::memory_order_release);
+    }
+}
+
+bool TextureSystem::stageLayerUpdate(LayerKind layerKind, uint32_t spriteId,
+                                     const uint8_t* pixels, size_t pixelSize,
+                                     uint64_t generation) {
+    if (!pixels || pixelSize == 0) return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
+    if (!finalized_ || spriteId >= sprites_.size()) return false;
+
+    uint32_t arrayId = UINT32_MAX;
+    switch (layerKind) {
+        case LayerKind::Albedo:
+            arrayId = blockAlbedoArrayId_.load(std::memory_order_acquire);
+            break;
+        case LayerKind::Specular:
+            arrayId = blockSpecularArrayId_.load(std::memory_order_acquire);
+            break;
+        case LayerKind::Normal:
+            arrayId = blockNormalArrayId_.load(std::memory_order_acquire);
+            break;
+        case LayerKind::Flag:
+            arrayId = blockFlagArrayId_.load(std::memory_order_acquire);
+            break;
+    }
+    if (arrayId == UINT32_MAX) return false;
+
+    return arrayManager_.stageLayerPixels(arrayId, spriteId, 0, pixels, pixelSize);
+}
+
 bool TextureSystem::updateSpriteHeightMetadata(uint32_t spriteId, uint32_t flags, int32_t maskLayer,
+                                               uint64_t generation,
                                                std::shared_ptr<vk::VMA> vma,
                                                std::shared_ptr<vk::Device> device) {
-    if (!isFinalized() || spriteId >= spriteCount() || !vma || !device) return false;
+    if (!vma || !device) return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
+    if (!finalized_ || spriteId >= sprites_.size()) return false;
     if (!registry_.updateHeightMetadata(static_cast<uint16_t>(spriteId), flags, maskLayer)) {
         return false;
     }
-    registry_.uploadSSBO(std::move(vma), std::move(device));
-    return true;
+    return registry_.uploadSSBO(std::move(vma), std::move(device));
+}
+
+bool TextureSystem::uploadTextureRules(const vk::Data::TextureRuleEntry* entries, uint32_t count,
+                                       uint64_t generation,
+                                       std::shared_ptr<vk::VMA> vma,
+                                       std::shared_ptr<vk::Device> device) {
+    if (!entries || count == 0 || !vma || !device) return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
+    if (!finalized_) return false;
+    return textureRules_.uploadRules(entries, count, std::move(vma), std::move(device));
 }
 
 std::string TextureSystem::statusString() const {

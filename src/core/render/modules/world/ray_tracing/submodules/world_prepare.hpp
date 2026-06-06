@@ -112,6 +112,7 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         std::vector<uint64_t> idxBufAddrs;
         std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
         std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
+        bool queueOwnershipPending = false;
         // Per-section biome colors (packed 0x00RRGGBB) for shader-side tinting
         uint32_t biomeGrassColor = 0x91BD59;
         uint32_t biomeFoliageColor = 0x77AB2F;
@@ -121,7 +122,11 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
 
     // Persistent per-context SSBO buffers — reused across frames, grow-only.
     // Safe because acquireContext() waits for previous GPU work on this context before reuse.
+    static constexpr uint32_t SBT_SOURCE_CHUNK = 0u;
+    static constexpr uint32_t SBT_SOURCE_ENTITY = 1u;
     std::vector<uint32_t> lastGeometryTypes_;
+    std::vector<uint32_t> lastGeometryMasks_;
+    std::vector<uint32_t> lastGeometrySources_;
     std::shared_ptr<vk::DeviceLocalBuffer> blasOffsetsBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> vertexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> indexBufferAddr;
@@ -156,6 +161,9 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         inactiveEntityBlas_ = nullptr;
         inactiveEntityVertexBuffer_ = nullptr;
         inactiveEntityIndexBuffer_ = nullptr;
+        lastGeometryTypes_.clear();
+        lastGeometryMasks_.clear();
+        lastGeometrySources_.clear();
         megaChunkCache_.clear();
         cachedChunks_.clear();
         blasOffsetsBuffer = nullptr; blasOffsetsCapacity_ = 0;
