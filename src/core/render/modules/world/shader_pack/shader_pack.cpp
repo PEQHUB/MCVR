@@ -1907,6 +1907,55 @@ void ShaderPack::bindRuntimeResources(const std::shared_ptr<vk::DescriptorTable>
     }
 }
 
+void ShaderPack::transitionRuntimeImagesForUse(const std::shared_ptr<vk::CommandBuffer> &commandBuffer,
+                                               uint32_t frameIndex,
+                                               uint32_t queueIndex) const {
+    if (!runtimeResourcesReady_ || commandBuffer == nullptr) { return; }
+
+    std::vector<vk::CommandBuffer::ImageMemoryBarrier> imageBarriers;
+    imageBarriers.reserve(runtimeTextures_.size());
+
+    for (const auto &texture : runtimeTextures_) {
+        if (texture.config.imported) { continue; }
+        if (texture.frameImages.empty()) { continue; }
+
+        const uint32_t imageIndex = texture.config.shared ? 0u : frameIndex;
+        if (imageIndex >= texture.frameImages.size()) { continue; }
+
+        auto image = texture.frameImages[imageIndex];
+        if (!image) { continue; }
+
+        const bool writable = texture.config.storageBinding.has_value();
+        const VkImageLayout newLayout =
+            writable ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (image->imageLayout() == newLayout) { continue; }
+
+        VkPipelineStageFlags2 srcStage = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkAccessFlags2 srcAccess = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        if (image->imageLayout() == VK_IMAGE_LAYOUT_UNDEFINED) {
+            srcStage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+            srcAccess = 0;
+        }
+
+        imageBarriers.push_back({
+            .srcStageMask = srcStage,
+            .srcAccessMask = srcAccess,
+            .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            .dstAccessMask = writable ? (VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT) :
+                                         VK_ACCESS_2_SHADER_READ_BIT,
+            .oldLayout = image->imageLayout(),
+            .newLayout = newLayout,
+            .srcQueueFamilyIndex = queueIndex,
+            .dstQueueFamilyIndex = queueIndex,
+            .image = image,
+            .subresourceRange = vk::wholeColorSubresourceRange,
+        });
+        image->imageLayout() = newLayout;
+    }
+
+    if (!imageBarriers.empty()) { commandBuffer->barriersBufferImage({}, imageBarriers); }
+}
+
 void ShaderPack::defineRuntimeResourceDescriptorSet(vk::DescriptorTableBuilder &builder,
                                                     VkShaderStageFlags sampledImageStageFlags,
                                                     VkShaderStageFlags storageImageStageFlags,

@@ -114,11 +114,14 @@ void main() {
     float albedoEmission =
         baryCoords.x * v0.albedoEmission + baryCoords.y * v1.albedoEmission + baryCoords.z * v2.albedoEmission;
     uint textureID = v0.textureID;
+    uint materialRuleTextureID = textureID;
     vec4 albedoValue;
     vec4 specularValue;
     vec4 normalValue;
     ivec4 flagValue;
     vec2 textureUV;
+    bool foldBlockOverlay = (v0.flags & PBR_FLAG_OVERLAY_ALPHA_MASK) != 0u;
+    bool blockOverlayComposited = false;
 
     if (useTexture) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
@@ -132,6 +135,12 @@ void main() {
             specularValue = fetchBlockSpecularLod(spriteId, textureUV, lod);
             normalValue = fetchBlockNormalLod(spriteId, textureUV, lod);
             flagValue = fetchBlockFlagLod(spriteId, textureUV, lod);
+            if (foldBlockOverlay) {
+                blockOverlayComposited = applyBlockOverlayMaterialLod(
+                    albedoValue, specularValue, normalValue, flagValue,
+                    spriteId, textureUV, worldUbo.animTick, lod, colorLayer,
+                    materialRuleTextureID);
+            }
         } else {
             // === ENTITY GEOMETRY: legacy atlas sampling via textures[] ===
             int specularTextureID = mapping.entries[textureID].specular;
@@ -185,6 +194,8 @@ void main() {
     vec3 tint;
     if ((v0.flags & PBR_FLAG_USE_OVERLAY) != 0u && !isBlockGeometry) {
         tint = mix(overlayColor.rgb, albedoValue.rgb * colorLayer, overlayColor.a) + glint;
+    } else if (isBlockGeometry && blockOverlayComposited) {
+        tint = albedoValue.rgb + glint;
     } else {
         tint = albedoValue.rgb * colorLayer + glint;
     }
@@ -193,7 +204,7 @@ void main() {
     albedoValue = vec4(tint, albedoValue.a);
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
     if (isBlockGeometry) {
-        applyTextureRule(textureID, mat);
+        applyTextureRule(materialRuleTextureID, mat);
     }
 
     // add glowing radiance

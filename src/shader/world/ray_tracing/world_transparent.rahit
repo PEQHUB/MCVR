@@ -62,6 +62,7 @@ void main() {
 
     bool isBlockGeometry = (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
     bool isFluidGeometry = (v0.flags & PBR_FLAG_FLUID_GEOMETRY) != 0u;
+    bool isWaterGeometry = (v0.flags & PBR_FLAG_WATER_GEOMETRY) != 0u;
 
     bool useTexture = (v0.flags & PBR_FLAG_USE_TEXTURE) != 0u;
     float alpha;
@@ -92,7 +93,7 @@ void main() {
     }
 
     // if insideBoat, then ignore liquid
-    if (prGetInsideBoat(mainRay) && (flags.r & 0x1) > 0) {
+    if (prGetInsideBoat(mainRay) && isWaterGeometry) {
         ignoreIntersectionEXT;
         return;
     }
@@ -106,7 +107,7 @@ void main() {
         colorLayerAlpha = 1.0;
     }
     alpha *= colorLayerAlpha;
-    if (isFluidGeometry) {
+    if (isWaterGeometry) {
         alpha = 1.0;
     }
 

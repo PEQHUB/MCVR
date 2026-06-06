@@ -27,6 +27,7 @@
 #include "../util/ray_payloads.glsl"
 #include "../util/util.glsl"
 #include "common/shared.hpp"
+#include "../util/shader_pack_visual_settings.glsl"
 
 #if SHARC_COMPILE_ENABLE
 #include "SharcGlsl.h"
@@ -160,13 +161,14 @@ void main() {
     mainRay.roughness = 1.0;
 
     // Primary mask: match world.rgen PSR primary (first-person exclusion + BOAT_WATER_MASK)
+    uint sceneCloudMask = shaderPackVisualSettings.cloudMode == 1 ? CLOUD_MASK : 0u;
     uint mask;
     if (worldUBO.isFirstPerson == 1) {
-        mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+        mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | sceneCloudMask | BOAT_WATER_MASK;
     } else if (worldUBO.isFirstPerson == 2) {
-        mask = WORLD_MASK | PLAYER_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+        mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | sceneCloudMask | BOAT_WATER_MASK;
     } else {
-        mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+        mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | sceneCloudMask | BOAT_WATER_MASK;
     }
     traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, 0,
                 mainRay.origin, 0.0, mainRay.direction, 1000.0, 0);
@@ -242,10 +244,10 @@ void main() {
         uint len;
         if (b == 0) {
             len = 1000;
-            bounceMask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+            bounceMask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | sceneCloudMask | BOAT_WATER_MASK;
         } else {
             len = 384;
-            bounceMask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | CLOUD_MASK | BOAT_WATER_MASK;
+            bounceMask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | sceneCloudMask | BOAT_WATER_MASK;
         }
 
         uint bounceFlags = rayFlags;

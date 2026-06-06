@@ -161,6 +161,7 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
     std::shared_ptr<vk::DeviceLocalBuffer> exposureData_;
     std::shared_ptr<vk::HostVisibleBuffer> exposureReadback_;  // 4-byte staging for GPU→CPU readback
     float computedExposure_ = 0.001f;                            // CPU-side mirror, 1-frame delayed (neutral midpoint)
+    uint64_t exposureDiagFrame_ = 0;
     bool pendingExposureReset_ = false;  // deferred GPU buffer zero on world load
 
     std::shared_ptr<vk::Shader> histShader_;

@@ -12,6 +12,7 @@ struct MaterialVertex {
     vec3 norm;
     uint textureID;
     vec4 colorLayer;
+    vec3 postBase;
     vec2 textureUV;
     ivec2 overlayUV;
     vec2 glintUV;
@@ -34,15 +35,15 @@ layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer Mat
 
 
 
-layout(set = 1, binding = 4) readonly buffer PositionBufferAddr {
+layout(set = 1, binding = 2) readonly buffer VertexBufferAddr {
     uint64_t addrs[];
 }
-positionBufferAddrs;
+vertexBufferAddrs;
 
-layout(set = 1, binding = 5) readonly buffer MaterialBufferAddr {
+layout(set = 1, binding = 3) readonly buffer IndexBufferAddr {
     uint64_t addrs[];
 }
-materialBufferAddrs;
+indexBufferAddrs;
 
 uint getGeometryBufferIndex(uint instanceID, uint geometryID) {
     return blasOffsets.offsets[instanceID] + geometryID;
@@ -81,7 +82,11 @@ bool hasNoHeightSurface(uint packedData) {
 }
 
 uint getAlphaMode(uint packedData) {
-    return 0u;
+    return (packedData & PBR_FLAG_ALPHA_MODE_MASK) >> PBR_FLAG_ALPHA_MODE_SHIFT;
+}
+
+uint getTextMode(uint packedData) {
+    return (packedData & PBR_FLAG_TEXT_MODE_MASK) >> PBR_FLAG_TEXT_MODE_SHIFT;
 }
 
 uint getCoordinate(uint packedData) {
@@ -101,6 +106,7 @@ MaterialVertex toMaterialVertex(PBRTriangle v) {
     outV.norm = v.norm;
     outV.textureID = v.textureID;
     outV.colorLayer = v.colorLayer;
+    outV.postBase = v.postBase;
     outV.textureUV = v.textureUV;
     outV.overlayUV = ivec2(int(v.overlayPacked & 0xFFFFu), int(v.overlayPacked >> 16u));
     outV.glintUV = v.glintUV;
@@ -129,7 +135,7 @@ void loadTrianglePositions(uint geometryBufferIndex,
                            out PositionVertex p0,
                            out PositionVertex p1,
                            out PositionVertex p2) {
-    PositionBuffer buf = PositionBuffer(positionBufferAddrs.addrs[geometryBufferIndex]);
+    PositionBuffer buf = PositionBuffer(vertexBufferAddrs.addrs[geometryBufferIndex]);
     p0 = toPositionVertex(buf.vertices[i0]);
     p1 = toPositionVertex(buf.vertices[i1]);
     p2 = toPositionVertex(buf.vertices[i2]);
@@ -141,7 +147,7 @@ void loadTriangleMaterial(uint geometryBufferIndex,
                           out MaterialVertex m0,
                           out MaterialVertex m1,
                           out MaterialVertex m2) {
-    MaterialBuffer buf = MaterialBuffer(materialBufferAddrs.addrs[geometryBufferIndex]);
+    MaterialBuffer buf = MaterialBuffer(vertexBufferAddrs.addrs[geometryBufferIndex]);
     m0 = toMaterialVertex(buf.vertices[i0]);
     m1 = toMaterialVertex(buf.vertices[i1]);
     m2 = toMaterialVertex(buf.vertices[i2]);

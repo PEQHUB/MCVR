@@ -197,7 +197,7 @@ void ToneMappingModule::initBuffers() {
         vk::DeviceLocalBuffer::create(vma, device, sizeof(ToneMappingModuleExposureData),
                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-    exposureReadback_ = vk::HostVisibleBuffer::create(vma, device, sizeof(float),
+    exposureReadback_ = vk::HostVisibleBuffer::create(vma, device, sizeof(ToneMappingModuleExposureData),
                                                        VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
     for (int i = 0; i < size; i++) {
@@ -346,11 +346,20 @@ void ToneMappingModuleContext::render() {
 
     // Read previous frame's computed exposure from staging buffer (GPU→CPU readback)
     if (module->exposureReadback_) {
-        float *mapped = static_cast<float *>(module->exposureReadback_->mappedPtr());
+        auto *mapped = static_cast<ToneMappingModuleExposureData *>(module->exposureReadback_->mappedPtr());
         if (mapped) {
-            float e = *mapped;
+            float e = mapped->exposure;
             if (e > 0.0f && !std::isnan(e) && !std::isinf(e)) {
                 module->computedExposure_ = std::fmin(std::fmax(e, 1e-7f), 100.0f);
+            }
+            if ((module->exposureDiagFrame_++ % 120u) == 0u) {
+                const float avgLogLum = mapped->avgLogLum;
+                const float avgLum = std::exp2(avgLogLum);
+                renderDiag("Tone exposure exposure=%.8g avgLogLum=%.3f avgLum=%.3f min=%.8g max=%.3f comp=%.3f manual=%d",
+                           module->computedExposure_, avgLogLum, avgLum,
+                           Renderer::options.minExposure, Renderer::options.maxExposure,
+                           Renderer::options.exposureCompensation,
+                           Renderer::options.manualExposureEnabled ? 1 : 0);
             }
         }
     }
@@ -523,8 +532,8 @@ void ToneMappingModuleContext::render() {
     bool scrgbOutputEnabled = Renderer::options.hdrEnabled && framework->swapchain()->isScRGB();
 
     ToneMappingModulePushConstant pc{};
-    pc.log2Min = -12.0f;
-    pc.log2Max = 18.0f;
+    pc.log2Min = -24.0f;
+    pc.log2Max = 30.0f;
     pc.epsilon = 1e-6f;
     pc.lowPercent = 0.10f;
     pc.highPercent = 0.90f;
@@ -621,12 +630,11 @@ void ToneMappingModuleContext::render() {
         }},
         {});
 
-    // Copy visual exposure from ExposureBuffer to staging buffer for CPU readback next frame.
-    // This becomes the pre-exposure for DLSS-RR (must match actual visual exposure for stable denoising).
+    // Copy the full exposure block for CPU diagnostics/readback next frame.
     VkBufferCopy exposureCopy{
-        .srcOffset = offsetof(ToneMappingModuleExposureData, exposure),
+        .srcOffset = 0,
         .dstOffset = 0,
-        .size = sizeof(float)};
+        .size = sizeof(ToneMappingModuleExposureData)};
     vkCmdCopyBuffer(worldCommandBuffer->vkCommandBuffer(),
                     module->exposureData_->vkBuffer(),
                     module->exposureReadback_->vkBuffer(),

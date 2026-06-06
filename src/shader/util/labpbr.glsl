@@ -28,6 +28,9 @@ struct LabPBRMat {
     float sheenWeight;
     float sheenTint;
     float sheenRoughness;
+    float subSurfaceRadius;
+    float subSurfaceThickness;
+    vec3 subSurfaceTint;
     float coatWeight;
     float coatRoughness;
     float coatIor;
@@ -132,6 +135,9 @@ LabPBRMat convertLabPBRMaterial(vec4 texAlbedo, vec4 texSpecular, vec4 texNormal
     mat.sheenWeight = 0.0;
     mat.sheenTint = 0.0;
     mat.sheenRoughness = 0.5;
+    mat.subSurfaceRadius = 0.0;
+    mat.subSurfaceThickness = 0.5;
+    mat.subSurfaceTint = vec3(1.0, 0.75, 0.55);
     mat.coatWeight = 0.0;
     mat.coatRoughness = 0.0;
     mat.coatIor = 1.5;

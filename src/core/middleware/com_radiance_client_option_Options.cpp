@@ -20,7 +20,10 @@ static void applyReflexSettings(); // forward decl — defined below
 static void invalidateChunksForDisplacementGeometry() {
     auto* renderer = Renderer::try_instance();
     if (!renderer || !renderer->world() || !renderer->world()->chunks()) return;
-    renderer->world()->chunks()->resetScheduler(true);
+    // Keep old terrain visible until Java publishes replacement chunk builds.
+    // Clearing first can leave WorldPrepare with an entity-only TLAS if the
+    // replacement wave is delayed, cancelled, or rejected as stale.
+    renderer->world()->chunks()->resetScheduler(false);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetMaxFps(JNIEnv *,
@@ -300,6 +303,17 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetEonDiffuse(
     JNIEnv *, jclass, jboolean enabled, jboolean write) {
     Renderer::options.eonDiffuse = enabled;
+    if (!enabled) {
+        Renderer::options.diffuseModel = 2u;
+    } else if (Renderer::options.diffuseModel == 2u) {
+        Renderer::options.diffuseModel = 0u;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDiffuseModel(
+    JNIEnv *, jclass, jint model, jboolean write) {
+    Renderer::options.diffuseModel = static_cast<uint32_t>(std::clamp(static_cast<int>(model), 0, 2));
+    Renderer::options.eonDiffuse = Renderer::options.diffuseModel != 2u;
 }
 
 
@@ -460,7 +474,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     if (!renderer) return;
     auto world = renderer->world();
     if (!world || !world->chunks()) return;
-    world->chunks()->resetScheduler(true);
+    world->chunks()->resetScheduler(false);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeResetExposureAdaptation(
@@ -474,7 +488,12 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetChunkCullDistance(
     JNIEnv *, jclass, jint distance, jboolean) {
-    Renderer::options.chunkCullDistance = static_cast<float>(std::clamp(distance, 64, 1024));
+    if (distance <= 0) {
+        Renderer::options.chunkCullDistance = 1.0e9f;
+    } else {
+        Renderer::options.chunkCullDistance =
+            static_cast<float>(std::clamp(distance, 1, 512) * 16);
+    }
 }
 
 

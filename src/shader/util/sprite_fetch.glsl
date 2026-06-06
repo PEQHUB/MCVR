@@ -149,16 +149,99 @@ ivec4 fetchBlockFlagLod(uint spriteId, vec2 uv, float lod) {
     return ivec4(round(flagValue * 255.0));
 }
 
-// Fetch overlay alpha for grass block sides.
-// Returns overlay alpha (0 = no overlay, >0 = tinted region).
-float fetchOverlayAlpha(uint spriteId, vec2 uv, uint animTick) {
-    SpriteEntry se = safeSpriteEntry(spriteId);
-    if (se.overlaySprite < 0) return 0.0;
+struct BlockOverlayMaterial {
+    bool present;
+    bool hasSpecular;
+    bool hasNormal;
+    bool hasFlags;
+    bool emissiveOverlay;
+    float alpha;
+    uint spriteId;
+    vec4 albedo;
+    vec4 specular;
+    vec4 normal;
+    ivec4 flags;
+};
 
-    SpriteEntry overlaySe = safeSpriteEntry(uint(se.overlaySprite));
+BlockOverlayMaterial fetchBlockOverlayMaterialLod(uint spriteId, vec2 uv, uint animTick, float lod) {
+    BlockOverlayMaterial overlay;
+    overlay.present = false;
+    overlay.hasSpecular = false;
+    overlay.hasNormal = false;
+    overlay.hasFlags = false;
+    overlay.emissiveOverlay = false;
+    overlay.alpha = 0.0;
+    overlay.spriteId = spriteId;
+    overlay.albedo = vec4(0.0);
+    overlay.specular = vec4(0.0);
+    overlay.normal = vec4(0.5, 0.5, 1.0, 1.0);
+    overlay.flags = ivec4(0);
+
+    SpriteEntry se = safeSpriteEntry(spriteId);
+    if (se.overlaySprite < 0) return overlay;
+
+    uint overlaySpriteId = uint(se.overlaySprite);
+    SpriteEntry overlaySe = safeSpriteEntry(overlaySpriteId);
     uint layer;
-    if (!spriteAlbedoLayerInRange(overlaySe, animTick, layer)) return 0.0;
-    return texture(blockAlbedo, vec3(uv, float(layer))).a;
+    if (!spriteAlbedoLayerInRange(overlaySe, animTick, layer)) return overlay;
+
+    overlay.present = true;
+    overlay.spriteId = overlaySpriteId;
+    overlay.albedo = fetchBlockAlbedoLod(overlaySpriteId, uv, animTick, lod);
+    overlay.alpha = clamp(overlay.albedo.a, 0.0, 1.0);
+    overlay.emissiveOverlay = (overlaySe.flags & SPRITE_FLAG_EMISSIVE_OVERLAY) != 0u;
+
+    overlay.hasSpecular = spriteSpecularLayerInRange(overlaySe);
+    if (overlay.hasSpecular) {
+        overlay.specular = fetchBlockSpecularLod(overlaySpriteId, uv, lod);
+    }
+
+    overlay.hasNormal = spriteNormalLayerInRange(overlaySe);
+    if (overlay.hasNormal) {
+        overlay.normal = fetchBlockNormalLod(overlaySpriteId, uv, lod);
+    }
+
+    overlay.hasFlags = spriteFlagLayerInRange(overlaySpriteId);
+    if (overlay.hasFlags) {
+        overlay.flags = fetchBlockFlagLod(overlaySpriteId, uv, lod);
+    }
+
+    return overlay;
+}
+
+bool applyBlockOverlayMaterialLod(inout vec4 albedoValue,
+                                  inout vec4 specularValue,
+                                  inout vec4 normalValue,
+                                  inout ivec4 flagValue,
+                                  uint spriteId,
+                                  vec2 uv,
+                                  uint animTick,
+                                  float lod,
+                                  vec3 overlayTint,
+                                  out uint materialRuleSpriteId) {
+    materialRuleSpriteId = spriteId;
+    BlockOverlayMaterial overlay = fetchBlockOverlayMaterialLod(spriteId, uv, animTick, lod);
+    if (!overlay.present || overlay.alpha <= 0.0) return false;
+
+    float a = overlay.alpha;
+    albedoValue.rgb = mix(albedoValue.rgb, overlay.albedo.rgb * overlayTint, a);
+
+    if (overlay.hasSpecular) {
+        specularValue = mix(specularValue, overlay.specular, a);
+    }
+    if (overlay.hasNormal) {
+        normalValue = mix(normalValue, overlay.normal, a);
+    }
+    if (overlay.hasFlags && a >= 0.5) {
+        flagValue = overlay.flags;
+        materialRuleSpriteId = overlay.spriteId;
+    }
+    if (overlay.emissiveOverlay) {
+        specularValue.a = max(specularValue.a, min(254.0 / 255.0, a * (254.0 / 255.0)));
+        materialRuleSpriteId = overlay.spriteId;
+    }
+
+    return true;
 }
 
 #endif // SPRITE_FETCH_GLSL

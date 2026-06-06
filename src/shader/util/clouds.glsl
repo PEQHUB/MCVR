@@ -1,6 +1,8 @@
 #ifndef CLOUDS_GLSL
 #define CLOUDS_GLSL
 
+#include "shader_pack_visual_settings.glsl"
+
 // Lightweight procedural cloud slab.
 // Designed to be used from raygen (segment integration) and closest-hit (sun transmittance).
 
@@ -228,9 +230,106 @@ bool cloudIntersectSlabY(vec3 ro, vec3 rd, float y0, float y1, out float t0, out
     return t1 > 0.0;
 }
 
+float shaderPackCloudBottomRel(WorldUBO worldUBO) {
+    return shaderPackVisualSettings.volumetricCloudBottomHeight - float(worldUBO.cameraPos.y);
+}
+
+float shaderPackCloudTopRel(WorldUBO worldUBO) {
+    return shaderPackVisualSettings.volumetricCloudTopHeight - float(worldUBO.cameraPos.y);
+}
+
+float shaderPackCloudSigmaT() {
+    return 0.00058 * max(shaderPackVisualSettings.volumetricCloudDensity, 0.0);
+}
+
+float shaderPackCloudClearAmountScale() {
+    if (shaderPackVisualSettings.volumetricCloudClearAmount == 0) return 0.82;
+    if (shaderPackVisualSettings.volumetricCloudClearAmount == 2) return 1.22;
+    return 1.0;
+}
+
+float shaderPackVolumetricCloudDensityAt(vec3 pCam, WorldUBO worldUBO, SkyUBO skyUBO) {
+    if (shaderPackVisualSettings.cloudMode != 2 || shaderPackVisualSettings.volumetricCloudDensity <= 0.0) {
+        return 0.0;
+    }
+
+    float baseYRel = shaderPackCloudBottomRel(worldUBO);
+    float topYRel = shaderPackCloudTopRel(worldUBO);
+    if (topYRel <= baseYRel || pCam.y < baseYRel || pCam.y > topYRel) return 0.0;
+
+    float h = clamp((pCam.y - baseYRel) / max(topYRel - baseYRel, 1e-3), 0.0, 1.0);
+    float altitudeProfile = smoothstep(0.02, 0.16, h) * (1.0 - smoothstep(0.82, 0.98, h));
+    if (altitudeProfile <= 1e-4) return 0.0;
+
+    dvec3 pWorldD = worldUBO.cameraPos.xyz + dvec3(pCam);
+    vec3 pWorldWrapped = vec3(mod(pWorldD, 65536.0));
+    float t = worldUBO.gameTime * 24000.0 * 0.000006;
+    float baseScale = max(shaderPackVisualSettings.volumetricCloudBaseScale, 0.001);
+    float detailScale = max(shaderPackVisualSettings.volumetricCloudDetailScale, 0.001);
+    float weatherScale = max(shaderPackVisualSettings.volumetricCloudWeatherScale, 0.0001);
+
+    vec2 weatherCoord = pWorldWrapped.xz * weatherScale * 0.005 + vec2(t * 0.33, -t * 0.19);
+    float weather = cloudFbm3(vec3(weatherCoord, 0.37));
+
+    vec3 baseCoord = vec3(pWorldWrapped.xz * (0.00022 * baseScale) + vec2(t * 0.07, -t * 0.05),
+                          h * 1.15 + t * 0.04);
+    float baseNoise = cloudFbm3(baseCoord);
+
+    vec3 detailCoord = vec3(pWorldWrapped.xz * (0.00115 * detailScale) + vec2(-t * 0.29, t * 0.21),
+                            h * 4.0 - t * 0.12);
+    float detailNoise = cloudFbm3(detailCoord);
+
+    float cellular = cloudWorleyFbm2_d(pWorldD.xz * (0.00035 * double(baseScale)) +
+                                       dvec2(t * 0.11, -t * 0.09));
+    float shape = baseNoise * 0.58 + weather * 0.22 + cellular * 0.20;
+
+    float rain = clamp(skyUBO.rainGradient * skyUBO.envSky.y, 0.0, 1.0);
+    float clearScale = shaderPackCloudClearAmountScale();
+    float coverage = clamp(shaderPackVisualSettings.volumetricCloudCoverage * clearScale + rain * 0.22, 0.0, 1.0);
+    float threshold = mix(0.78, 0.25, coverage);
+    float body = smoothstep(threshold, threshold + 0.18, shape);
+
+    float detailCut = mix(1.0, smoothstep(0.18, 0.74, detailNoise), clamp(detailScale * 0.65, 0.0, 1.0));
+    float density = body * mix(0.70, 1.18, detailCut) * altitudeProfile;
+
+    return max(density, 0.0);
+}
+
+float shaderPackCloudTransmittance(vec3 ro, vec3 rd, float tMin, float tMax,
+                                   WorldUBO worldUBO, SkyUBO skyUBO, int steps) {
+    float bottomRel = shaderPackCloudBottomRel(worldUBO);
+    float topRel = shaderPackCloudTopRel(worldUBO);
+
+    float slabT0, slabT1;
+    if (!cloudIntersectSlabY(ro, rd, bottomRel, topRel, slabT0, slabT1)) return 1.0;
+
+    float a = max(tMin, slabT0);
+    float b = min(tMax, slabT1);
+    if (b <= a) return 1.0;
+
+    int sampleCount = steps > 0 ? steps : max(shaderPackVisualSettings.volumetricCloudLightSteps, 1);
+    sampleCount = clamp(sampleCount, 1, 64);
+    float dt = (b - a) / float(sampleCount);
+    float sigmaT = shaderPackCloudSigmaT();
+    float tau = 0.0;
+
+    for (int i = 0; i < 64; i++) {
+        if (i >= sampleCount || tau > 24.0) break;
+        float tm = a + (float(i) + 0.5) * dt;
+        float d = shaderPackVolumetricCloudDensityAt(ro + rd * tm, worldUBO, skyUBO);
+        tau += sigmaT * d * dt;
+    }
+
+    return exp(-tau);
+}
+
 // Density field: vanilla Fancy tile mask (hard silhouette) + continuous puffy interior modulation.
 // pCam is camera-relative world position.
 float cloudDensityAt(vec3 pCam, WorldUBO worldUBO, SkyUBO skyUBO) {
+    if (shaderPackVisualSettings.cloudMode == 2) {
+        return shaderPackVolumetricCloudDensityAt(pCam, worldUBO, skyUBO);
+    }
+
     // Fast clouds: uniform extruded slab driven by vanilla Fancy tile occupancy.
     float thickness = skyUBO.envCloud.y;
     float sigmaT = skyUBO.envCloud.z;
@@ -304,6 +403,10 @@ float cloudDensityAt(vec3 pCam, WorldUBO worldUBO, SkyUBO skyUBO) {
 }
 
 float cloudDensityAtVisual(vec3 pCam, WorldUBO worldUBO, SkyUBO skyUBO) {
+    if (shaderPackVisualSettings.cloudMode == 2) {
+        return shaderPackVolumetricCloudDensityAt(pCam, worldUBO, skyUBO);
+    }
+
     float base = cloudDensityAt(pCam, worldUBO, skyUBO);
     if (base <= 0.0) return 0.0;
 
@@ -359,6 +462,10 @@ vec3 cloudMainLightRadiance(SkyUBO skyUBO, out vec3 toLight) {
 }
 
 float cloudTransmittance(vec3 ro, vec3 rd, float tMin, float tMax, WorldUBO worldUBO, SkyUBO skyUBO, int steps) {
+    if (shaderPackVisualSettings.cloudMode == 2) {
+        return shaderPackCloudTransmittance(ro, rd, tMin, tMax, worldUBO, skyUBO, steps);
+    }
+
     float thickness = skyUBO.envCloud.y;
     float sigmaT = skyUBO.envCloud.z;
     if (isnan(skyUBO.envCloud.x) || thickness <= 0.0 || sigmaT <= 0.0) return 1.0;
@@ -573,9 +680,84 @@ void cloudIntegrateRun(vec3 ro, vec3 rd,
     }
 }
 
+CloudSegmentResult integrateShaderPackVolumetricCloudSegment(vec3 ro, vec3 rd, float tMin, float tMax,
+                                                             WorldUBO worldUBO, SkyUBO skyUBO,
+                                                             samplerCube skyFull, inout uint seed,
+                                                             int stepsView, int stepsLight) {
+    CloudSegmentResult o;
+    o.L = vec3(0.0);
+    o.T = vec3(1.0);
+
+    if (shaderPackVisualSettings.cloudMode != 2 || shaderPackVisualSettings.volumetricCloudDensity <= 0.0) return o;
+    if (skyUBO.skyType != 1) return o;
+    if (skyUBO.hasBlindnessOrDarkness > 0) return o;
+    if (skyUBO.cameraSubmersionType != 3) return o;
+
+    float bottomRel = shaderPackCloudBottomRel(worldUBO);
+    float topRel = shaderPackCloudTopRel(worldUBO);
+    float slabT0, slabT1;
+    if (!cloudIntersectSlabY(ro, rd, bottomRel, topRel, slabT0, slabT1)) return o;
+
+    float a = max(tMin, slabT0);
+    float b = min(tMax, slabT1);
+    if (b <= a) return o;
+
+    vec3 toLight;
+    vec3 lightRadiance = CS_BT709_TO_BT2020 * cloudMainLightRadiance(skyUBO, toLight);
+    vec3 skyAmbient = CS_BT709_TO_BT2020 * (texture(skyFull, vec3(0.0, 1.0, 0.0)).rgb * skyUBO.envSky.x);
+    skyAmbient = max(skyAmbient, vec3(0.0));
+
+    int N = clamp(stepsView, 4, 256);
+    int maxLoop = min(N, 256);
+    float dt = (b - a) / float(maxLoop);
+    float sigmaT = shaderPackCloudSigmaT();
+    float sigmaS = sigmaT * 0.92;
+    float Tr = 1.0;
+    float jitter = shaderPackVisualSettings.volumetricCloudTemporalAccumulation != 0 ? rand(seed) : 0.5;
+
+    float g = mix(0.50, 0.76, clamp(shaderPackVisualSettings.volumetricCloudPowderStrength, 0.0, 1.0));
+    float cosTheta = clamp(dot(toLight, -rd), -1.0, 1.0);
+    float phaseSS = phaseHG(cosTheta, g);
+    float phaseISO = 1.0 / (4.0 * PI);
+    float ambientStrength = max(shaderPackVisualSettings.volumetricCloudAmbientStrength, 0.0);
+    float shadowSoftness = clamp(shaderPackVisualSettings.volumetricCloudShadowSoftness, 0.0, 1.0);
+    float powderStrength = clamp(shaderPackVisualSettings.volumetricCloudPowderStrength, 0.0, 1.0);
+
+    for (int i = 0; i < 256; i++) {
+        if (i >= maxLoop || Tr <= 1e-4) break;
+        float tm = a + (float(i) + jitter) * dt;
+        tm = clamp(tm, a, b);
+        vec3 pm = ro + rd * tm;
+        float density = shaderPackVolumetricCloudDensityAt(pm, worldUBO, skyUBO);
+        if (density <= 1e-4) continue;
+
+        float ext = sigmaT * density;
+        float stepT = exp(-ext * dt);
+        float TL = shaderPackCloudTransmittance(pm + toLight * 0.5, toLight, 0.0, 24000.0,
+                                                worldUBO, skyUBO, stepsLight);
+        TL = mix(TL, sqrt(max(TL, 0.0)), shadowSoftness);
+
+        float powder = mix(1.0, 1.0 + (1.0 - exp(-density * 8.0)) * 1.55, powderStrength);
+        float ms = 1.0 - pow(max(Tr, 1e-6), 0.25);
+        float phase = mix(phaseSS, phaseISO, ms * 0.55);
+        vec3 Li = (lightRadiance * TL * powder + skyAmbient * ambientStrength) * max(skyUBO.envSky.x, 0.0);
+        float scatterIntegral = (1.0 - stepT) / max(ext, 1e-6);
+        o.L += Tr * (sigmaS * density * scatterIntegral) * phase * Li;
+        Tr *= stepT;
+    }
+
+    o.T = vec3(Tr);
+    return o;
+}
+
 CloudSegmentResult integrateCloudSegment(vec3 ro, vec3 rd, float tMin, float tMax, WorldUBO worldUBO, SkyUBO skyUBO,
                                          samplerCube skyFull, inout uint seed,
                                          int stepsView, int stepsLight) {
+    if (shaderPackVisualSettings.cloudMode == 2) {
+        return integrateShaderPackVolumetricCloudSegment(ro, rd, tMin, tMax, worldUBO, skyUBO,
+                                                         skyFull, seed, stepsView, stepsLight);
+    }
+
     CloudSegmentResult o;
     o.L = vec3(0.0);
     o.T = vec3(1.0);

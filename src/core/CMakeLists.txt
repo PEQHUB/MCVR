@@ -1,4 +1,10 @@
 file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS "*.cpp")
+foreach(SOURCE_FILE IN LISTS SOURCE_FILES)
+    file(RELATIVE_PATH SOURCE_REL_PATH "${CMAKE_CURRENT_SOURCE_DIR}" "${SOURCE_FILE}")
+    if(SOURCE_REL_PATH MATCHES "^render/modules/world/cloud/")
+        list(REMOVE_ITEM SOURCE_FILES "${SOURCE_FILE}")
+    endif()
+endforeach()
 
 add_library(core SHARED ${SOURCE_FILES})
 target_link_libraries(core PUBLIC ngx ${JNI_LIBRARIES} VulkanMemoryAllocator volk::volk glfw streamline minizip tinyexpr)

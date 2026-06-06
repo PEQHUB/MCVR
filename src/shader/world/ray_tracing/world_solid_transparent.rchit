@@ -12,7 +12,7 @@
 #define RARSER_THIN_PLANT_PRIMARY_FIX 1
 #endif
 
-#include "../util/disney.glsl"
+#include "../util/surface_bsdf.glsl"
 #include "../util/random.glsl"
 #include "../util/blue_noise.glsl"
 #include "../util/ray_cone.glsl"
@@ -29,6 +29,7 @@ layout(set = 0, binding = 0) uniform sampler2D textures[];
 #include "../util/sprite_fetch.glsl"
 
 #include "../util/clouds.glsl"
+#include "../util/fft_water.glsl"
 
 layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
 
@@ -258,6 +259,34 @@ vec3 calculateNormal(vec3 p0, vec3 p1, vec3 p2, vec2 uv0, vec2 uv1, vec2 uv2, ve
         return finalNormal;
 }
 
+vec3 applyWaterNormalToBasis(vec3 matNormal, vec3 tangent, vec3 bitangent, vec3 geometricNormal, vec3 viewDir) {
+    if (any(isnan(matNormal)) || any(isinf(matNormal))) { return geometricNormal; }
+
+    vec3 correctedLocalNormal = matNormal;
+    correctedLocalNormal.y = -correctedLocalNormal.y;
+
+    vec3 normal = tangent * correctedLocalNormal.x + bitangent * correctedLocalNormal.y +
+                  geometricNormal * correctedLocalNormal.z;
+    if (dot(normal, normal) <= 1e-10) { return geometricNormal; }
+    normal = normalize(normal);
+
+    float NdotV = dot(normal, viewDir);
+    if (NdotV >= 0.99999) { return normal; }
+
+    vec3 edgeNormal = normal - viewDir * NdotV;
+    float edgeNormalLen2 = dot(edgeNormal, edgeNormal);
+    if (edgeNormalLen2 <= 1e-10) { return geometricNormal; }
+
+    float weight = 1.0 - NdotV;
+    weight = sin(min(weight, PI * 0.5));
+    weight = clamp(min(max(NdotV, dot(viewDir, geometricNormal)), 1.0 - weight), 0.0, 1.0);
+
+    float tangentWeight2 = max(1.0 - weight * weight, 0.0);
+    if (tangentWeight2 <= 1e-10) { return geometricNormal; }
+
+    return viewDir * weight + edgeNormal * inversesqrt(edgeNormalLen2 / tangentWeight2);
+}
+
 void main() {
     vec3 viewDir = -mainRay.direction;
 
@@ -297,6 +326,7 @@ void main() {
     float albedoEmission =
         baryCoords.x * v0.albedoEmission + baryCoords.y * v1.albedoEmission + baryCoords.z * v2.albedoEmission;
     uint textureID = v0.textureID;
+    uint materialRuleTextureID = textureID;
     vec4 albedoValue;
     vec4 specularValue;
     vec4 normalValue;
@@ -306,6 +336,8 @@ void main() {
     vec2 uvMax = vec2(1.0);
     vec3 rawAlbedoLinear = vec3(1.0);
     bool isBlockGeometry = (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
+    bool foldBlockOverlay = (v0.flags & PBR_FLAG_OVERLAY_ALPHA_MASK) != 0u;
+    bool blockOverlayComposited = false;
     uint coordinateMode = (v0.flags & PBR_FLAG_COORD_MASK) >> PBR_FLAG_COORD_SHIFT;
     bool heightFieldProxyGeometry = isBlockGeometry && coordinateMode == 1u;
     int specularTextureID = -1;
@@ -332,11 +364,12 @@ void main() {
             normalValue = fetchBlockNormalLod(spriteId, textureUV, lod);
             flagValue = fetchBlockFlagLod(spriteId, textureUV, lod);
 
-            // Grass block side overlay: use SpriteRegistry.overlaySprite
-            SpriteEntry se = safeSpriteEntry(spriteId);
-            if (se.overlaySprite >= 0 && biomeTintType != 0u) {
-                float overlayAlpha = fetchOverlayAlpha(spriteId, textureUV, worldUbo.animTick);
-                colorLayer = mix(vec3(1.0), colorLayer, smoothstep(0.1, 0.9, overlayAlpha));
+            if (foldBlockOverlay) {
+                blockOverlayComposited = applyBlockOverlayMaterialLod(
+                    albedoValue, specularValue, normalValue, flagValue,
+                    spriteId, textureUV, worldUbo.animTick, lod, colorLayer,
+                    materialRuleTextureID);
+                rawAlbedoLinear = albedoValue.rgb;
             }
         } else {
             // === ENTITY GEOMETRY: legacy atlas sampling via textures[] ===
@@ -381,6 +414,8 @@ void main() {
 #endif
     uint sourceThinBlockType = thinCutoutPlant ? thinPlantBlockTypeFromPacked(packedBlockType) : 0u;
     uint sourceThinColumnHash = thinCutoutPlant ? thinPlantColumnHash(worldPos) : 0u;
+    bool fluidGeometry = (v0.flags & PBR_FLAG_FLUID_GEOMETRY) != 0u;
+    bool waterGeometry = (v0.flags & PBR_FLAG_WATER_GEOMETRY) != 0u;
 #if RARSER_SHADER_DISPLACEMENT
     bool displacementGlobalEligible = pc.displacementDepthScale > DISPLACEMENT_MIN_DEPTH &&
                                       actualHitT < pc.displacementFadeDistanceBlocks;
@@ -401,7 +436,6 @@ void main() {
     vec3 displacedDpv = vec3(0.0);
     vec3 displacedPlaneAtUv = planeHitWorldPos;
 
-    bool fluidGeometry = (v0.flags & PBR_FLAG_FLUID_GEOMETRY) != 0u;
     bool displacementGeometryEligible =
         displacementGlobalEligible && useTexture && isBlockGeometry &&
         coordinateMode == 0u && !prGetIsHand(mainRay) && !fluidGeometry &&
@@ -466,6 +500,8 @@ void main() {
                 specularValue = fetchBlockSpecularLod(textureID, textureUV, lod);
                 normalValue = fetchBlockNormalLod(textureID, textureUV, lod);
                 flagValue = fetchBlockFlagLod(textureID, textureUV, lod);
+                materialRuleTextureID = textureID;
+                blockOverlayComposited = false;
 
                 if (displacementUsesWorldOffset && mainRay.index == 0u) {
                     uint64_t lastIndexBufferAddr = lastIndexBufferAddrs.addrs[blasOffset + geometryID];
@@ -509,6 +545,8 @@ void main() {
     vec3 tint;
     if ((v0.flags & PBR_FLAG_USE_OVERLAY) != 0u && !isBlockGeometry) {
         tint = mix(overlayColor.rgb, albedoValue.rgb * colorLayer, overlayColor.a) + glint;
+    } else if (isBlockGeometry && blockOverlayComposited) {
+        tint = albedoValue.rgb + glint;
     } else {
         tint = albedoValue.rgb * colorLayer + glint;
     }
@@ -518,7 +556,13 @@ void main() {
     albedoValue = vec4(tint, albedoValue.a);
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
     if (isBlockGeometry) {
-        applyTextureRule(textureID, mat);
+        applyTextureRule(materialRuleTextureID, mat);
+    }
+
+    if (isBlockGeometry && !fluidGeometry && !waterGeometry &&
+        mat.metallic < 0.5 && mat.transmission <= EPS) {
+        mat.roughness = max(mat.roughness, 0.35);
+        mat.coatWeight = min(mat.coatWeight, 0.15);
     }
 
     // The normal blue channel carries legacy LabPBR/raster AO for compatibility and audit.
@@ -546,6 +590,35 @@ void main() {
         mat.normal = vec3(0.0, 0.0, 1.0);
     }
 #endif
+
+    bool useRealisticWaterSurface = waterGeometry && shaderPackVisualSettings.waterSurfaceMode == 1 && abs(geometricNormal.y) > 0.75;
+    if (waterGeometry) {
+        vec3 waterTint = CS_BT709_TO_BT2020 * clamp(skyUBO.envWaterTintFog.rgb, vec3(0.02), vec3(1.0));
+        albedoValue.rgb = waterTint;
+        tint = waterTint;
+        mat.f0 = vec3(0.02);
+        mat.albedo = waterTint;
+        mat.roughness = 0.01;
+        mat.metallic = 0.0;
+        mat.transmission = 1.0;
+        mat.ior = 1.333;
+        mat.refractionRoughness = 0.0;
+        mat.coatWeight = 0.0;
+        mat.coatMask = 0.0;
+
+        if (useRealisticWaterSurface) {
+            vec3 waterCoordNormal = geometricNormal.y >= 0.0 ? geometricNormal : -geometricNormal;
+            vec3 absWorldPos = worldPos + vec3(worldUbo.cameraPos.xyz);
+            vec2 waterCoord = fftWaterSurfaceCoord(absWorldPos, vec3(0.0), vec3(0.0), waterCoordNormal);
+            FftWaterSample waterSample = sampleFftWater(waterCoord, worldUbo.gameTime);
+            vec3 tangent, bitangent;
+            fftWaterStableBasis(geometricNormal, tangent, bitangent);
+            vec3 localWaterNormal = normalize(vec3(-waterSample.slope.x, waterSample.slope.y, 1.0));
+            mat.roughness = clamp(0.005 + 0.012 * min(length(waterSample.slope), 0.45), 0.005, 0.022);
+            normal = applyWaterNormalToBasis(localWaterNormal, tangent, bitangent, geometricNormal, viewDir);
+            mat.normal = vec3(0.0, 0.0, 1.0);
+        }
+    }
 
 #if RARSER_THIN_PLANT_PRIMARY_FIX
     if (thinCutoutPlant) {
@@ -719,8 +792,8 @@ void main() {
     bool skipSecondarySunShadow = RT_DEBUG_DISABLE_SECONDARY_SUN_SHADOW && mainRay.index > 0;
     if (worldUbo.skyType == 1 && !skipSecondarySunShadow) {
         float pdf; // not used
-        vec3 lightBRDF = thinCutoutPlant ? thinPlantDiffuseEval(mat, sampledLightDir)
-                                         : DisneyEval(mat, viewDir, normal, sampledLightDir, pdf, pc.flags);
+            vec3 lightBRDF = thinCutoutPlant ? thinPlantDiffuseEval(mat, sampledLightDir)
+                                         : SurfaceBSDFEval(mat, viewDir, normal, sampledLightDir, pdf, pc.flags);
 
         shadowRay.radiance = vec3(0.0);
         shadowRay.throughput = vec3(1.0);
@@ -753,9 +826,11 @@ void main() {
 
         // Apply cloud shadowing (procedural volumetric slab).
         // This is evaluated at the shading point so it works for primary and reflected paths.
-        if (!(RT_DEBUG_DISABLE_SECONDARY_CLOUD_SHADOW && mainRay.index > 0)) {
-            float cloudT = cloudTransmittance(worldPos + sampledLightDir * 0.01, sampledLightDir, 0.0, 1000.0, worldUbo, skyUBO, 0);
-            float shadowStrength = max(skyUBO.cloudLighting.x, 0.0);
+        if (shaderPackVisualSettings.cloudMode == 2 && shaderPackVisualSettings.volumetricCloudCastShadow != 0 &&
+            !(RT_DEBUG_DISABLE_SECONDARY_CLOUD_SHADOW && mainRay.index > 0)) {
+            float cloudT = cloudTransmittance(worldPos + sampledLightDir * 0.01, sampledLightDir, 0.0, 24000.0, worldUbo, skyUBO, 0);
+            float shadowStrength = max(skyUBO.cloudLighting.x, 0.0) *
+                                   mix(1.0, 0.55, clamp(shaderPackVisualSettings.volumetricCloudShadowSoftness, 0.0, 1.0));
             cloudT = pow(max(cloudT, 1e-6), shadowStrength);
             lightContribution *= cloudT;
         }
@@ -912,7 +987,7 @@ void main() {
         bsdf = thinPlantDiffuseSample(mat, sampleDir, pdf, mainRay.seed);
         lobeType = 0u;
     } else {
-        bsdf = DisneySample(mat, viewDir, normal, sampleDir, pdf, mainRay.seed, lobeType, pc.flags, bsdfXi);
+        bsdf = SurfaceBSDFSample(mat, viewDir, normal, sampleDir, pdf, mainRay.seed, lobeType, pc.flags, bsdfXi);
     }
 
     prSetLobeType(mainRay, lobeType);

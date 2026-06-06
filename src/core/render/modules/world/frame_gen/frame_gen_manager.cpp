@@ -686,7 +686,10 @@ void FrameGenManager::beforeSwapchainRecreate() {
 
 void FrameGenManager::afterSwapchainRecreate() {
 #ifdef _WIN32
-    if (!initialized_ || !StreamlineContext::isDlssGSupported()) return;
+    if (!initialized_ || !StreamlineContext::isDlssGSupported()) {
+        recreateInProgress_ = false;
+        return;
+    }
 
     bool wantActive = Renderer::options.frameGenEnabled;
 
@@ -720,6 +723,7 @@ void FrameGenManager::afterSwapchainRecreate() {
         deferredActivation_ = true;
         fgCout() << "feature loaded + initialized, triggering second recreate (gen="
                  << recreateGeneration_ << ")" << std::endl;
+        recreateInProgress_ = false;
         return;
     }
 

@@ -6,6 +6,12 @@
 #include "core/vulkan/all_core_vulkan.hpp"
 
 #include "core/render/modules/world/world_module.hpp"
+#include "core/render/modules/world/shader_pack/shader_pack.hpp"
+
+#include <atomic>
+#include <mutex>
+#include <unordered_map>
+#include <unordered_set>
 
 class Framework;
 class FrameworkContext;
@@ -56,6 +62,44 @@ struct RayTracingPushConstant {
     float aperture;
     float focalDistance;
     uint64_t reservedAddr;
+};
+
+struct ShaderPackVisualSettings {
+    int32_t cloudMode = 1;                    // 0=off, 1=vanilla geometry clouds, 2=volumetric
+    int32_t captureVolumetricCloudIndirect = 0;
+    int32_t volumetricCloudTemporalAccumulation = 0;
+    int32_t volumetricCloudCastShadow = 0;
+    int32_t waterSurfaceMode = 0;             // 0=vanilla, 1=realistic FFT
+    int32_t waterCausticsEnabled = 0;
+    int32_t volumetricLightMode = 0;          // 0=vanilla fog, 1=volumetric
+    int32_t volumetricCloudClearAmount = 1;   // 0=few, 1=medium, 2=many
+
+    int32_t indirectVolumetricCloudViewSteps = 16;
+    int32_t indirectVolumetricCloudLightSteps = 4;
+    int32_t indirectVolumetricCloudAmbientSteps = 2;
+    int32_t volumetricCloudViewSteps = 24;
+    int32_t volumetricCloudLightSteps = 6;
+    int32_t volumetricCloudAmbientSteps = 4;
+    int32_t volumetricLightSamples = 8;
+    int32_t reservedVisual0 = 0;
+
+    float indirectVolumetricCloudReflectionMaxRoughness = 0.12f;
+    float volumetricCloudBottomHeight = 3000.0f;
+    float volumetricCloudTopHeight = 11000.0f;
+    float volumetricCloudBaseScale = 0.30f;
+    float volumetricCloudDetailScale = 0.60f;
+    float volumetricCloudCoverage = 0.50f;
+    float volumetricCloudDensity = 1.00f;
+    float volumetricCloudShadowSoftness = 0.50f;
+
+    float volumetricCloudAmbientStrength = 1.0f;
+    float volumetricCloudPowderStrength = 1.0f;
+    float volumetricCloudWeatherScale = 0.020f;
+    float volumetricLightScatteringStrength = 1.0f;
+    float volumetricLightMaxDistance = 128.0f;
+    float volumetricLightNearStepSize = 1.75f;
+    float volumetricLightFarStepSize = 5.0f;
+    float volumetricLightLuminanceLimit = 4.0f;
 };
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {
@@ -117,6 +161,19 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     void initSharcUpdatePipeline();
     void initSharcResolvePipeline();
     void initSharcQueryPipeline();
+    void validateShaderPackRuntime();
+    void initShaderPackRuntimeResources();
+    void initShaderPackRayTracingExecutor();
+    void disableShaderPackBackend(const std::string &status, const std::string &reason);
+    bool recordShaderPackRayTracingGraph(uint32_t width, uint32_t height, bool &worldPassRequested);
+    bool recordShaderPackRayTracingExecutor(const std::shared_ptr<vk::CommandBuffer> &commandBuffer,
+                                            const std::shared_ptr<vk::DescriptorTable> &descriptorTable,
+                                            const std::shared_ptr<WorldPrepareContext> &worldPrepareContext,
+                                            const RayTracingPushConstant &pushConstant,
+                                            uint32_t frameIndex,
+                                            uint32_t width,
+                                            uint32_t height);
+    void bindLegacyTexturesForSlot(const std::shared_ptr<vk::DescriptorTable>& descriptorTable, uint32_t frameIndex);
 
   private:
     // input
@@ -166,16 +223,62 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DescriptorTable>> rayTracingDescriptorTables_;
     std::shared_ptr<vk::RayTracingPipeline> rayTracingPipeline_;
     std::vector<std::shared_ptr<vk::SBT>> sbts_;
-    uint64_t lastTextureDescriptorRefreshGeneration_ = UINT64_MAX;
-    VkImageView lastAlbedoTextureView_ = VK_NULL_HANDLE;
-    VkImageView lastSpecularTextureView_ = VK_NULL_HANDLE;
-    VkImageView lastNormalTextureView_ = VK_NULL_HANDLE;
-    VkImageView lastFlagTextureView_ = VK_NULL_HANDLE;
-    VkBuffer lastSpriteRegistryBuffer_ = VK_NULL_HANDLE;
-    VkBuffer lastTextureRuleBuffer_ = VK_NULL_HANDLE;
+    struct TextureDescriptorSlotState {
+        uint64_t generation = UINT64_MAX;
+        VkImageView albedoTextureView = VK_NULL_HANDLE;
+        VkImageView specularTextureView = VK_NULL_HANDLE;
+        VkImageView normalTextureView = VK_NULL_HANDLE;
+        VkImageView flagTextureView = VK_NULL_HANDLE;
+        VkBuffer spriteRegistryBuffer = VK_NULL_HANDLE;
+        VkBuffer textureRuleBuffer = VK_NULL_HANDLE;
+    };
+    std::vector<TextureDescriptorSlotState> textureDescriptorSlotStates_;
+    struct LegacyTextureBinding {
+        std::shared_ptr<vk::Sampler> sampler;
+        std::shared_ptr<vk::DeviceLocalImage> image;
+    };
+    std::mutex legacyTextureBindingsMutex_;
+    std::unordered_map<int, LegacyTextureBinding> legacyTextureBindings_;
+    std::vector<uint64_t> legacyTextureBindingRevisions_;
+    std::atomic<uint64_t> legacyTextureBindingRevision_{1};
 
-    uint32_t numRayBounces_ = 4;
+    uint32_t numRayBounces_ = 2;
     bool useJitter_ = true;
+    int shaderPackCloudMode_ = 1;          // 0=off, 1=vanilla, 2=volumetric
+    int shaderPackWaterSurfaceMode_ = 0;   // 0=vanilla, 1=realistic FFT
+    int shaderPackVolumetricLightMode_ = 0; // 0=vanilla, 1=volumetric pack mode
+    bool shaderPackCloudShadowsEnabled_ = false;
+    bool shaderPackWaterCausticsEnabled_ = false;
+    ShaderPackVisualSettings shaderPackVisualSettings_;
+    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> shaderPackVisualSettingBuffers_;
+    std::string shaderPackRequestedPath_ = "shaders/world/ray_tracing/vanilla-pt.zip";
+    std::string shaderPackPath_ = "shaders/world/ray_tracing/vanilla-pt.zip";
+    bool shaderPackRuntimeValid_ = false;
+    std::string shaderPackRuntimeStatus_ = "not_initialized";
+    std::vector<std::string> shaderPackAttributeKVs_;
+    std::shared_ptr<ShaderPack> shaderPack_;
+    bool shaderPackBackendEnabled_ = false;
+    bool shaderPackRuntimeResourcesReady_ = false;
+    bool shaderPackFirstFrameAttempted_ = false;
+    std::string shaderPackBackendStatus_ = "not_initialized";
+    std::string shaderPackFallbackReason_;
+    uint64_t shaderPackGraphPassesExecuted_ = 0;
+    uint64_t shaderPackGraphUnsupportedPasses_ = 0;
+    uint64_t shaderPackGraphWorldPasses_ = 0;
+    bool shaderPackExecutorReady_ = false;
+    uint32_t shaderPackRuntimeResourceSetIndex_ = 5;
+    uint32_t shaderPackExecutionSetIndex_ = 6;
+    uint64_t shaderPackIntermediatesGenerated_ = 0;
+    uint64_t shaderPackFullScreenPassDispatches_ = 0;
+    uint64_t shaderPackComputePassDispatches_ = 0;
+    uint64_t shaderPackRayTracingPassDispatches_ = 0;
+    std::unordered_map<std::string, uint64_t> shaderPackPassDispatchCounts_;
+    std::unordered_map<std::string, FullScreenPass> shaderPackFullScreenPasses_;
+    std::unordered_map<std::string, ComputePass> shaderPackComputePasses_;
+    std::unordered_map<std::string, RayTracingPass> shaderPackRayTracingPasses_;
+    std::shared_ptr<vk::Shader> shaderPackFullScreenVertexShader_;
+    ShaderPack::ExecutionVariables shaderPackRayTracingVariables_;
+    std::unordered_set<std::string> shaderPackUnsupportedPassesLogged_;
 
     // output
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> hdrNoisyOutputImages_;

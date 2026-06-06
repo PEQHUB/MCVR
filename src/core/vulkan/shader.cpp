@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -23,6 +24,38 @@ std::ostream &shaderCout() {
 
 std::ostream &shaderCerr() {
     return std::cerr << "[Shader] ";
+}
+
+namespace {
+
+std::string toLowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+bool looksLikeShadercOptimizerInternalError(shaderc_compilation_status status, const std::string &message) {
+    if (status == shaderc_compilation_status_internal_error) { return true; }
+
+    const std::string lower = toLowerAscii(message);
+    return lower.find("internal error") != std::string::npos &&
+           (lower.find("failed to optimize") != std::string::npos ||
+            lower.find("expected column type") != std::string::npos);
+}
+
+std::string shaderCompileFailureMessage(const std::string &sourcePath,
+                                        const shaderc::SpvCompilationResult &result,
+                                        const std::string &optimizedError = {}) {
+    std::ostringstream message;
+    message << "failed to compile shader source " << sourcePath << "\n"
+            << result.GetErrorMessage();
+    if (!optimizedError.empty() && optimizedError != result.GetErrorMessage()) {
+        message << "\noptimized compiler error before fallback:\n" << optimizedError;
+    }
+    return message.str();
+}
+
 }
 
 std::string injectSourceAfterVersion(std::string sourceText, const std::string &injectedSource) {
@@ -434,8 +467,10 @@ vk::Shader::compileGlslToSpv(std::string sourcePath,
 
     std::ifstream sourceFile(sourcePath, std::ios::binary);
     if (!sourceFile.is_open()) {
-        shaderCerr() << "Cannot open source file: " << sourcePath << std::endl;
-        exit(EXIT_FAILURE);
+        std::ostringstream message;
+        message << "Cannot open source file: " << sourcePath;
+        shaderCerr() << message.str() << std::endl;
+        throw std::runtime_error(message.str());
     }
     std::string sourceText{std::istreambuf_iterator<char>(sourceFile), std::istreambuf_iterator<char>()};
     sourceText = injectSourceAfterVersion(std::move(sourceText), injectedSource);
@@ -447,25 +482,43 @@ vk::Shader::compileGlslToSpv(std::string sourcePath,
         includePaths.emplace_back(std::filesystem::path(directory));
     }
 
-    shaderc::Compiler compiler;
-    shaderc::CompileOptions options;
-    for (const auto &[name, value] : definitions) { options.AddMacroDefinition(name, value); }
-    options.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_4);
-    options.SetSourceLanguage(shaderc_source_language_glsl);
-    options.SetOptimizationLevel(shaderc_optimization_level_performance);
-    options.SetIncluder(std::make_unique<ShaderIncluder>(includePaths));
+    const auto makeCompileOptions = [&](shaderc_optimization_level optimizationLevel) {
+        shaderc::CompileOptions options;
+        for (const auto &[name, value] : definitions) { options.AddMacroDefinition(name, value); }
+        options.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_4);
+        options.SetSourceLanguage(shaderc_source_language_glsl);
+        options.SetOptimizationLevel(optimizationLevel);
+        options.SetIncluder(std::make_unique<ShaderIncluder>(includePaths));
+        return options;
+    };
 
+    shaderc::Compiler compiler;
+    shaderc::CompileOptions options = makeCompileOptions(shaderc_optimization_level_performance);
     shaderc::SpvCompilationResult result =
         compiler.CompileGlslToSpv(sourceText, shaderKindFromStage(stage), sourcePath.c_str(), options);
+    bool usedUnoptimizedFallback = false;
+    std::string optimizedError;
+    if (looksLikeShadercOptimizerInternalError(result.GetCompilationStatus(), result.GetErrorMessage())) {
+        optimizedError = result.GetErrorMessage();
+        shaderCerr() << "optimized compile hit shaderc internal error for " << sourcePath
+                     << "; retrying without optimization\n"
+                     << optimizedError << std::endl;
+        shaderc::CompileOptions fallbackOptions = makeCompileOptions(shaderc_optimization_level_zero);
+        result = compiler.CompileGlslToSpv(sourceText, shaderKindFromStage(stage), sourcePath.c_str(), fallbackOptions);
+        usedUnoptimizedFallback = result.GetCompilationStatus() == shaderc_compilation_status_success;
+        if (usedUnoptimizedFallback) {
+            shaderCerr() << "unoptimized fallback compile succeeded for " << sourcePath << std::endl;
+        }
+    }
     if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
-        shaderCerr() << "failed to compile shader source " << sourcePath << "\n"
-                     << result.GetErrorMessage() << std::endl;
-        exit(EXIT_FAILURE);
+        const std::string message = shaderCompileFailureMessage(sourcePath, result, optimizedError);
+        shaderCerr() << message << std::endl;
+        throw std::runtime_error(message);
     }
 
     std::vector<uint32_t> spirv(result.cbegin(), result.cend());
 
-    if (!cacheDir.empty() && dependencyHash.has_value()) {
+    if (!usedUnoptimizedFallback && !cacheDir.empty() && dependencyHash.has_value()) {
         std::string hash = vk::ShaderSpirvCache::computeCompiledHash(sourcePath, stage, definitions, includeDirectories,
                                                                     injectedSource, *dependencyHash);
         vk::ShaderSpirvCache::writeCachedSpirv(cacheDir / (hash + ".spv"), spirv);

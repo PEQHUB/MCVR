@@ -589,6 +589,9 @@ class ShaderPack {
     void bindRuntimeResources(const std::shared_ptr<vk::DescriptorTable> &descriptorTable,
                               uint32_t setIndex,
                               uint32_t frameIndex);
+    void transitionRuntimeImagesForUse(const std::shared_ptr<vk::CommandBuffer> &commandBuffer,
+                                       uint32_t frameIndex,
+                                       uint32_t queueIndex) const;
     void defineRuntimeResourceDescriptorSet(vk::DescriptorTableBuilder &builder,
                                             VkShaderStageFlags sampledImageStageFlags,
                                             VkShaderStageFlags storageImageStageFlags,

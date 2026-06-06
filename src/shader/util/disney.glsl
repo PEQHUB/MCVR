@@ -59,6 +59,14 @@
 // BRDF feature flag bits (from push constant flags field)
 #define BRDF_FLAG_MULTISCATTER_GGX 128   // bit 7
 #define BRDF_FLAG_EON_DIFFUSE      256   // bit 8
+#define BRDF_FLAG_VMF_DIFFUSE      65536 // bit 16
+
+#define SURFACE_DIFFUSE_GLOBAL 0u
+#define SURFACE_DIFFUSE_EON 1u
+#define SURFACE_DIFFUSE_VMF 2u
+#define SURFACE_DIFFUSE_LEGACY 3u
+#define SURFACE_DIFFUSE_MODEL_SHIFT 6u
+#define SURFACE_DIFFUSE_MODEL_MASK (0x3u << SURFACE_DIFFUSE_MODEL_SHIFT)
 
 // Energy compensation LUT (64x64 RGBA16F, baked at init)
 // R = GGX E(NdotV, alpha), G = FON E(NdotV, r), B = GGX E_avg, A = FON E_avg
@@ -217,6 +225,106 @@ void ApplyAnisotropicRotation(float rotation, inout vec3 T, inout vec3 B) {
     B = -baseT * s + baseB * c;
 }
 
+uint SurfaceBSDFDiffuseModel(LabPBRMat mat, int brdfFlags) {
+    uint localModel = (mat.materialModeFlags & SURFACE_DIFFUSE_MODEL_MASK) >> SURFACE_DIFFUSE_MODEL_SHIFT;
+    if (localModel != SURFACE_DIFFUSE_GLOBAL) { return localModel; }
+    if ((brdfFlags & BRDF_FLAG_VMF_DIFFUSE) != 0) { return SURFACE_DIFFUSE_VMF; }
+    if ((brdfFlags & BRDF_FLAG_EON_DIFFUSE) != 0) { return SURFACE_DIFFUSE_EON; }
+    return SURFACE_DIFFUSE_LEGACY;
+}
+
+vec3 SurfaceEONDiffuse(LabPBRMat mat, vec3 localV, vec3 localL,
+                       bool msGGX, float msE_o, float msE_i) {
+    float r = sqrt(max(mat.roughness, 0.0));
+    float A_F = 1.0 / (1.0 + (0.5 - 2.0 / (3.0 * PI)) * r);
+    float B_F = r * A_F;
+
+    float mu_i = abs(localL.z);
+    float mu_o = abs(localV.z);
+    float s = dot(localL, localV) - mu_i * mu_o;
+    float t = (s > 0.0) ? max(mu_i, mu_o) : 1.0;
+    float f_FON_value = INV_PI * (A_F + B_F * s / t);
+
+    float E_o, E_avg_d_o;
+    sampleFONEnergy(mu_o, r, E_o, E_avg_d_o);
+    float E_i, E_avg_d_i;
+    sampleFONEnergy(mu_i, r, E_i, E_avg_d_i);
+    float E_avg_d = E_avg_d_o;
+
+    float rho = Luminance(mat.albedo);
+    float f_ms_d = INV_PI * (rho * rho * E_avg_d)
+                 / max(1.0 - rho * (1.0 - E_avg_d), 1e-5)
+                 * (1.0 - E_o) * (1.0 - E_i)
+                 / max(1.0 - E_avg_d, 1e-5);
+
+    vec3 diffuseColor = mat.albedo * (f_FON_value + f_ms_d);
+    vec3 sssTint = mix(vec3(1.0), mat.subSurfaceTint, clamp(mat.subSurface, 0.0, 1.0));
+    float sssShape = mix(0.80, 1.25, clamp(mat.subSurfaceThickness, 0.0, 1.0))
+        * mix(1.0, 1.20, clamp(mat.subSurfaceRadius, 0.0, 1.0));
+    diffuseColor = mix(diffuseColor, diffuseColor * sssTint * sssShape, clamp(mat.subSurface, 0.0, 1.0));
+
+    if (msGGX) {
+        float f0_scalar = Luminance(mat.f0);
+        diffuseColor *= (1.0 - f0_scalar * msE_o) * (1.0 - f0_scalar * msE_i);
+    }
+    return diffuseColor;
+}
+
+vec3 SurfaceVMFDiffuse(LabPBRMat mat, vec3 localV, vec3 localL,
+                       bool msGGX, float msE_o, float msE_i) {
+    vec3 eonFallback = SurfaceEONDiffuse(mat, localV, localL, msGGX, msE_o, msE_i);
+    float r = sqrt(max(mat.roughness, 0.0));
+    float mu_i = abs(localL.z);
+    float mu_o = abs(localV.z);
+    float cosGamma = clamp(dot(normalize(localL), normalize(localV)), -1.0, 1.0);
+    float kappa = mix(48.0, 0.75, clamp(r, 0.0, 1.0));
+    float vmfRetro = exp(kappa * (cosGamma - 1.0));
+    float roughBlend = smoothstep(0.08, 0.85, r);
+    float directionalShape = mix(1.0, clamp(0.70 + 0.75 * vmfRetro, 0.35, 1.35), roughBlend);
+    float grazingShape = mix(1.0, clamp(0.45 + 0.85 * sqrt(max(mu_i * mu_o, 0.0)), 0.45, 1.25), 0.35 * roughBlend);
+    vec3 vmfDiffuse = eonFallback * directionalShape * grazingShape;
+    if (any(isnan(vmfDiffuse)) || any(isinf(vmfDiffuse))) { return eonFallback; }
+    return vmfDiffuse;
+}
+
+vec3 SurfaceLegacyDiffuse(LabPBRMat mat, vec3 localV, vec3 localL, vec3 localH) {
+    float LDotH = dot(localL, localH);
+    float Rr = 2.0 * mat.roughness * LDotH * LDotH;
+    float FL = SchlickWeight(localL.z);
+    float FV = SchlickWeight(localV.z);
+    float Fretro = Rr * (FL + FV + FL * FV * (Rr - 1.0));
+    float Fd = (1.0 - 0.5 * FL) * (1.0 - 0.5 * FV);
+
+    float Fss90 = 0.5 * Rr;
+    float Fss = mix(1.0, Fss90, FL) * mix(1.0, Fss90, FV);
+    float denom = localL.z + localV.z;
+    float ss = (denom > 1e-4) ? 1.25 * (Fss * (1.0 / denom - 0.5) + 0.5) : 1.0;
+
+    vec3 sssTint = mix(vec3(1.0), mat.subSurfaceTint, clamp(mat.subSurface, 0.0, 1.0));
+    float ssShape = ss * mix(0.80, 1.30, clamp(mat.subSurfaceThickness, 0.0, 1.0))
+        * mix(1.0, 1.25, clamp(mat.subSurfaceRadius, 0.0, 1.0));
+    return INV_PI * mix(mat.albedo * (Fd + Fretro),
+        mat.albedo * sssTint * ssShape, clamp(mat.subSurface, 0.0, 1.0));
+}
+
+vec3 SurfaceSheenEval(LabPBRMat mat, vec3 localV, vec3 localL, vec3 localH) {
+    if (mat.sheenWeight <= 0.0) { return vec3(0.0); }
+    float NoL = abs(localL.z);
+    float NoV = abs(localV.z);
+    float NoH = clamp(abs(localH.z), 0.0, 1.0);
+    float LoH = clamp(abs(dot(localL, localH)), 0.0, 1.0);
+    float alpha = max(mat.sheenRoughness * mat.sheenRoughness, 0.015);
+    float invAlpha = 1.0 / alpha;
+    float sin2h = max(1.0 - NoH * NoH, 0.0);
+    float charlieD = (2.0 + invAlpha) * pow(sin2h, 0.5 * invAlpha) / (2.0 * PI);
+    float visibility = 1.0 / max(4.0 * (NoL + NoV - NoL * NoV), 1e-4);
+    float FH = SchlickWeight(LoH);
+    float lum = Luminance(mat.albedo);
+    vec3 Ctint = lum > 0.0 ? mat.albedo / lum : vec3(1.0);
+    vec3 Csheen = mix(vec3(1.0), Ctint, mat.sheenTint);
+    return mat.sheenWeight * Csheen * charlieD * visibility * mix(0.35, 1.0, FH);
+}
+
 vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFlags) {
     pdf = 0.0;
     vec3 f = vec3(0.0);
@@ -285,9 +393,9 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFl
 
     // Diffuse (+ sheen, which rides on diffuse sampling)
     if (diffPr > 0.0 && reflect) {
-        bool eonEnabled = (brdfFlags & BRDF_FLAG_EON_DIFFUSE) != 0;
+        uint diffuseModel = SurfaceBSDFDiffuseModel(mat, brdfFlags);
 
-        if (eonEnabled) {
+        if (diffuseModel == SURFACE_DIFFUSE_EON) {
             // EON energy-preserving rough diffuse [11]
             float r = sqrt(max(mat.roughness, 0.0)); // perceptual roughness
 
@@ -315,6 +423,10 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFl
                          / max(1.0 - E_avg_d, 1e-5);
 
             vec3 diffuseColor = mat.albedo * (f_FON_value + f_ms_d);
+            vec3 sssTint = mix(vec3(1.0), mat.subSurfaceTint, clamp(mat.subSurface, 0.0, 1.0));
+            float sssShape = mix(0.80, 1.25, clamp(mat.subSurfaceThickness, 0.0, 1.0))
+                * mix(1.0, 1.20, clamp(mat.subSurfaceRadius, 0.0, 1.0));
+            diffuseColor = mix(diffuseColor, diffuseColor * sssTint * sssShape, clamp(mat.subSurface, 0.0, 1.0));
 
             // Diffuse-specular energy coupling: attenuate by F0-weighted specular E
             if (msGGX) {
@@ -323,6 +435,8 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFl
             }
 
             f += diffuseColor * dielectricWeight;
+        } else if (diffuseModel == SURFACE_DIFFUSE_VMF) {
+            f += SurfaceVMFDiffuse(mat, localV, localL, msGGX, msE_o, msE_i) * dielectricWeight;
         } else {
             // Original Disney diffuse
             float LDotH = dot(localL, localH);
@@ -338,7 +452,11 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFl
             float denom = localL.z + localV.z;
             float ss = (denom > 1e-4) ? 1.25 * (Fss * (1.0 / denom - 0.5) + 0.5) : 1.0;
 
-            vec3 diffuseColor = INV_PI * mat.albedo * mix(Fd + Fretro, ss, mat.subSurface);
+            vec3 sssTint = mix(vec3(1.0), mat.subSurfaceTint, clamp(mat.subSurface, 0.0, 1.0));
+            float ssShape = ss * mix(0.80, 1.30, clamp(mat.subSurfaceThickness, 0.0, 1.0))
+                * mix(1.0, 1.25, clamp(mat.subSurfaceRadius, 0.0, 1.0));
+            vec3 diffuseColor = INV_PI * mix(mat.albedo * (Fd + Fretro),
+                mat.albedo * sssTint * ssShape, clamp(mat.subSurface, 0.0, 1.0));
 
             f += diffuseColor * dielectricWeight;
         }
@@ -346,15 +464,7 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFl
         pdf += (localL.z * INV_PI) * diffPr; // Cosine weighted PDF
 
         // Sheen lobe (Disney 2015 — retroreflective fabric sheen)
-        if (mat.sheenWeight > 0.0) {
-            float LDotH_sheen = dot(localL, localH);
-            float FH = SchlickWeight(abs(LDotH_sheen));
-            float lum = Luminance(mat.albedo);
-            vec3 Ctint = lum > 0.0 ? mat.albedo / lum : vec3(1.0);
-            vec3 Csheen = mix(vec3(1.0), Ctint, mat.sheenTint);
-            float sheenRough = mix(1.0, 0.45, clamp(mat.sheenRoughness, 0.0, 1.0));
-            f += mat.sheenWeight * Csheen * FH * sheenRough * dielectricWeight;
-        }
+        f += SurfaceSheenEval(mat, localV, localL, localH) * dielectricWeight;
     }
 
     // Dielectric Reflection (anisotropic GGX)
@@ -480,6 +590,14 @@ vec3 DisneyEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
     return DisneyEval(mat, V, N, L, pdf, 0);
 }
 
+vec3 SurfaceBSDFEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf, int brdfFlags) {
+    return DisneyEval(mat, V, N, L, pdf, brdfFlags);
+}
+
+vec3 SurfaceBSDFEval(LabPBRMat mat, vec3 V, vec3 N, vec3 L, out float pdf) {
+    return DisneyEval(mat, V, N, L, pdf, 0);
+}
+
 vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed, out uint lobeType, int brdfFlags, vec3 xi) {
     pdf = 0.0;
     vec3 T, B;
@@ -570,6 +688,20 @@ vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inou
 
 // Overload: no flags, no blue noise
 vec3 DisneySample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed, out uint lobeType) {
+    return DisneySample(mat, V, N, L, pdf, seed, lobeType, 0, vec3(-1.0));
+}
+
+vec3 SurfaceBSDFSample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed, out uint lobeType,
+                       int brdfFlags, vec3 xi) {
+    return DisneySample(mat, V, N, L, pdf, seed, lobeType, brdfFlags, xi);
+}
+
+vec3 SurfaceBSDFSample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed, out uint lobeType,
+                       int brdfFlags) {
+    return DisneySample(mat, V, N, L, pdf, seed, lobeType, brdfFlags, vec3(-1.0));
+}
+
+vec3 SurfaceBSDFSample(LabPBRMat mat, vec3 V, vec3 N, out vec3 L, out float pdf, inout uint seed, out uint lobeType) {
     return DisneySample(mat, V, N, L, pdf, seed, lobeType, 0, vec3(-1.0));
 }
 

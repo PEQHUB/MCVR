@@ -1,6 +1,10 @@
 #ifndef TEXTURE_RULES_GLSL
 #define TEXTURE_RULES_GLSL
 
+#define TEXTURE_RULE_MODE_VOLUME_MASK 0x3u
+#define TEXTURE_RULE_MODE_THICKNESS_MASK (0x3u << 2u)
+#define TEXTURE_RULE_MODE_COAT_MASK (0x3u << 4u)
+
 layout(std430, set = 1, binding = 11) readonly buffer TextureRuleRegistryBuffer {
     TextureRuleEntry textureRuleEntries[];
 };
@@ -32,7 +36,13 @@ void applyTextureRule(uint spriteId, inout LabPBRMat mat) {
         mat.thickness = clamp(rule.thicknessAmount, 0.0, 1.0);
     }
     if ((rule.flags & TEXTURE_RULE_VOLUME_MODE) != 0u) {
-        mat.materialModeFlags = rule.modeFlags;
+        uint modeMask = TEXTURE_RULE_MODE_VOLUME_MASK | TEXTURE_RULE_MODE_THICKNESS_MASK | TEXTURE_RULE_MODE_COAT_MASK;
+        mat.materialModeFlags = (mat.materialModeFlags & ~modeMask) | (rule.modeFlags & modeMask);
+    }
+    if ((rule.flags & TEXTURE_RULE_DIFFUSE_MODEL) != 0u) {
+        mat.materialModeFlags =
+            (mat.materialModeFlags & ~TEXTURE_RULE_MODE_DIFFUSE_MASK) |
+            (rule.modeFlags & TEXTURE_RULE_MODE_DIFFUSE_MASK);
     }
     if ((rule.flags & TEXTURE_RULE_REFRACTION_ROUGHNESS) != 0u) {
         mat.refractionRoughness = clamp(rule.refractionRoughness, 0.0, 1.0);
@@ -67,6 +77,11 @@ void applyTextureRule(uint spriteId, inout LabPBRMat mat) {
     }
     if ((rule.flags & TEXTURE_RULE_SHEEN_ROUGHNESS) != 0u) {
         mat.sheenRoughness = clamp(rule.sheenRoughness, 0.0, 1.0);
+    }
+    if ((rule.flags & TEXTURE_RULE_SUBSURFACE_EXT) != 0u) {
+        mat.subSurfaceRadius = clamp(rule.subSurfaceRadius, 0.0, 1.0);
+        mat.subSurfaceThickness = clamp(rule.subSurfaceThickness, 0.0, 1.0);
+        mat.subSurfaceTint = clamp(vec3(rule.subSurfaceTintR, rule.subSurfaceTintG, rule.subSurfaceTintB), vec3(0.0), vec3(1.0));
     }
     if ((rule.flags & TEXTURE_RULE_COAT) != 0u) {
         mat.coatWeight = clamp(rule.coatWeight, 0.0, 1.0);
