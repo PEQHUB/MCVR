@@ -1,0 +1,1116 @@
+{
+    "radiance": {
+        "shader_pack": true,
+        "display_name": "Vanilla PT"
+    },
+    "requires_emission": false,
+    "sharc": {
+        "update_pass": "world",
+        "resolve_comp": "sharc_resolve.comp"
+    },
+    "attributes": [
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.num_ray_bounces",
+            "type": "int_range:1-128",
+            "default_value": "2",
+            "define": "VPT_NUM_RAY_BOUNCES"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.pbr_sampling_mode",
+            "type": "enum:render_pipeline.module.ray_tracing.attribute.pbr_sampling.nearest-render_pipeline.module.ray_tracing.attribute.pbr_sampling.bilinear",
+            "default_value": "render_pipeline.module.ray_tracing.attribute.pbr_sampling.nearest",
+            "define": {
+                "VPT_PBR_SAMPLING_MODE": "uint(X)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.enable_parallax",
+            "type": "bool",
+            "default_value": "render_pipeline.false",
+            "define": "VPT_ENABLE_PARALLAX"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.cloud_mode",
+            "type": "enum:render_pipeline.module.ray_tracing.attribute.cloud_mode.off-render_pipeline.module.ray_tracing.attribute.cloud_mode.vanilla-render_pipeline.module.ray_tracing.attribute.cloud_mode.volumetric",
+            "default_value": "render_pipeline.module.ray_tracing.attribute.cloud_mode.vanilla",
+            "define": {
+                "VPT_CLOUD_MODE": "uint(X)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.capture_volumetric_cloud_indirect",
+            "type": "bool",
+            "default_value": "render_pipeline.false",
+            "define": "VPT_CAPTURE_VOLUMETRIC_CLOUD_INDIRECT"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_temporal_accumulation",
+            "type": "bool",
+            "default_value": "render_pipeline.false",
+            "define": "VPT_ENABLE_VOLUMETRIC_CLOUD_TEMPORAL"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.indirect_volumetric_cloud_view_steps",
+            "type": "int_range:16-24",
+            "default_value": "16",
+            "define": "VPT_INDIRECT_VOLUMETRIC_CLOUD_VIEW_STEPS"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.indirect_volumetric_cloud_light_steps",
+            "type": "int_range:4-6",
+            "default_value": "4",
+            "define": "VPT_INDIRECT_VOLUMETRIC_CLOUD_LIGHT_STEPS"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.indirect_volumetric_cloud_ambient_steps",
+            "type": "int_range:2-4",
+            "default_value": "2",
+            "define": "VPT_INDIRECT_VOLUMETRIC_CLOUD_AMBIENT_STEPS"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.indirect_volumetric_cloud_reflection_max_roughness",
+            "type": "float_range:0.0-1.0",
+            "default_value": "0.12",
+            "define": "VPT_INDIRECT_VOLUMETRIC_CLOUD_REFLECTION_MAX_ROUGHNESS"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_bottom_height",
+            "type": "float_range:1000.0-20000.0",
+            "default_value": "3000.0",
+            "define": "VPT_VOLUMETRIC_CLOUD_BOTTOM_HEIGHT"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_top_height",
+            "type": "float_range:1000.0-20000.0",
+            "default_value": "11000.0",
+            "define": "VPT_VOLUMETRIC_CLOUD_TOP_HEIGHT"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_base_scale",
+            "type": "float_range:0.05-2.0",
+            "default_value": "0.30",
+            "define": "VPT_VOLUMETRIC_CLOUD_BASE_SCALE"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_detail_scale",
+            "type": "float_range:0.05-2.0",
+            "default_value": "0.60",
+            "define": "VPT_VOLUMETRIC_CLOUD_DETAIL_SCALE"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_coverage",
+            "type": "float_range:0.0-1.0",
+            "default_value": "0.50",
+            "define": "VPT_VOLUMETRIC_CLOUD_COVERAGE"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_clear_amount",
+            "type": "enum:render_pipeline.module.ray_tracing.attribute.volumetric_cloud_clear_amount.few-render_pipeline.module.ray_tracing.attribute.volumetric_cloud_clear_amount.medium-render_pipeline.module.ray_tracing.attribute.volumetric_cloud_clear_amount.many",
+            "default_value": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_clear_amount.medium",
+            "define": {
+                "VPT_VOLUMETRIC_CLOUD_CLEAR_AMOUNT": "uint(X)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_density",
+            "type": "float_range:0.0-4.0",
+            "default_value": "1.00",
+            "define": "VPT_VOLUMETRIC_CLOUD_DENSITY"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_view_steps",
+            "type": "int_range:8-256",
+            "default_value": "24",
+            "define": "VPT_VOLUMETRIC_CLOUD_VIEW_STEPS"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_light_steps",
+            "type": "int_range:1-64",
+            "default_value": "6",
+            "define": "VPT_VOLUMETRIC_CLOUD_LIGHT_STEPS"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_cast_shadow",
+            "type": "bool",
+            "default_value": "render_pipeline.false",
+            "define": "VPT_VOLUMETRIC_CLOUD_CAST_SHADOW"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_shadow_softness",
+            "type": "float_range:0.0-1.0",
+            "default_value": "0.50",
+            "define": "VPT_VOLUMETRIC_CLOUD_SHADOW_SOFTNESS"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_ambient_steps",
+            "type": "int_range:1-64",
+            "default_value": "4",
+            "define": "VPT_VOLUMETRIC_CLOUD_AMBIENT_STEPS"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_ambient_strength",
+            "type": "float_range:0.0-4.0",
+            "default_value": "1.0",
+            "define": "VPT_VOLUMETRIC_CLOUD_AMBIENT_STRENGTH"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_powder_strength",
+            "type": "float_range:0.0-1.0",
+            "default_value": "1.0",
+            "define": "VPT_VOLUMETRIC_CLOUD_POWDER_STRENGTH"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_cloud_weather_scale",
+            "type": "float_range:0.001-0.1",
+            "default_value": "0.020",
+            "define": "VPT_VOLUMETRIC_CLOUD_WEATHER_SCALE"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.water_surface_mode",
+            "type": "enum:render_pipeline.module.ray_tracing.attribute.water_surface_mode.vanilla-render_pipeline.module.ray_tracing.attribute.water_surface_mode.realistic",
+            "default_value": "render_pipeline.module.ray_tracing.attribute.water_surface_mode.realistic",
+            "define": {
+                "VPT_WATER_SURFACE_MODE": "uint(X)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.water_caustics_enabled",
+            "type": "bool",
+            "default_value": "render_pipeline.true",
+            "define": "VPT_WATER_CAUSTICS_ENABLED"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_mode",
+            "type": "enum:render_pipeline.module.ray_tracing.attribute.volumetric_light_mode.vanilla-render_pipeline.module.ray_tracing.attribute.volumetric_light_mode.volumetric",
+            "default_value": "render_pipeline.module.ray_tracing.attribute.volumetric_light_mode.vanilla",
+            "define": "VPT_VOLUMETRIC_LIGHT_MODE"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_samples",
+            "type": "int_range:4-128",
+            "default_value": "8",
+            "define": "VPT_VOLUMETRIC_LIGHT_MAX_STEPS"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_scattering_strength",
+            "type": "float_range:0.0-16.0",
+            "default_value": "1.0",
+            "define": "VPT_VOLUMETRIC_LIGHT_SCATTERING_STRENGTH"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_max_distance",
+            "type": "float_range:32.0-320.0",
+            "default_value": "128.0",
+            "define": "VPT_VOLUMETRIC_LIGHT_MAX_DISTANCE"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_near_step_size",
+            "type": "float_range:0.5-8.0",
+            "default_value": "1.75",
+            "define": "VPT_VOLUMETRIC_LIGHT_NEAR_STEP_SIZE"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_far_step_size",
+            "type": "float_range:1.0-16.0",
+            "default_value": "5.0",
+            "define": "VPT_VOLUMETRIC_LIGHT_FAR_STEP_SIZE"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.volumetric_light_luminance_limit",
+            "type": "float_range:0.25-16.0",
+            "default_value": "4.0",
+            "define": "VPT_VOLUMETRIC_LIGHT_LUMINANCE_LIMIT"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.transparent_split_mode",
+            "type": "enum:render_pipeline.module.ray_tracing.attribute.transparent_split_mode.deterministic-render_pipeline.module.ray_tracing.attribute.transparent_split_mode.stochastic",
+            "default_value": "render_pipeline.module.ray_tracing.attribute.transparent_split_mode.deterministic",
+            "define": {
+                "VPT_TRANSPARENT_SPLIT_MODE": "uint(X)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.direct_light_strength",
+            "type": "float_range:0.0-32.0",
+            "default_value": "1.0",
+            "define": "VPT_DIRECT_LIGHT_STRENGTH"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.indirect_light_strength",
+            "type": "float_range:0.0-64.0",
+            "default_value": "1.0",
+            "define": "VPT_INDIRECT_LIGHT_STRENGTH"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.basic_radiance",
+            "type": "float_range:0.0-10.0",
+            "default_value": "0.5",
+            "define": {
+                "VPT_BASIC_RADIANCE": "((X) * 0.001)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.sun_radiance",
+            "type": "vec3",
+            "default_value": "8.0,8.0,8.0",
+            "define": {
+                "VPT_SUN_RADIANCE": "vec3(X)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.moon_radiance",
+            "type": "vec3",
+            "default_value": "0.64,0.8,1.6",
+            "define": {
+                "VPT_MOON_RADIANCE": "vec3(X)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.atmosphere_planet_radius",
+            "type": "float_range:1000.0-10000.0",
+            "default_value": "6360.0",
+            "define": {
+                "VPT_ATMOSPHERE_RG": "((X) * 1000.0)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.atmosphere_top_radius",
+            "type": "float_range:1000.0-10000.0",
+            "default_value": "6460.0",
+            "define": {
+                "VPT_ATMOSPHERE_RT": "((X) * 1000.0)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.rayleigh_scale_height",
+            "type": "float_range:0.0-100.0",
+            "default_value": "8.0",
+            "define": {
+                "VPT_ATMOSPHERE_HR": "((X) * 1000.0)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.mie_scale_height",
+            "type": "float_range:0.0-20.0",
+            "default_value": "1.2",
+            "define": {
+                "VPT_ATMOSPHERE_HM": "((X) * 1000.0)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.rayleigh_scattering_coefficient",
+            "type": "vec3",
+            "default_value": "0.000005802,0.000013558,0.0000331",
+            "define": {
+                "VPT_ATMOSPHERE_BETA_R": "vec3(X)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.mie_anisotropy",
+            "type": "float_range:-0.99-0.99",
+            "default_value": "0.8",
+            "define": "VPT_ATMOSPHERE_MIE_G"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.mie_scattering_coefficient",
+            "type": "vec3",
+            "default_value": "0.000021,0.000021,0.000021",
+            "define": {
+                "VPT_ATMOSPHERE_BETA_M": "vec3(X)"
+            }
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.minimum_view_cosine",
+            "type": "float_range:-1.0-1.0",
+            "default_value": "0.02",
+            "define": "VPT_ATMOSPHERE_MIN_VIEW_COS"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.post_enable_motion_blur",
+            "type": "bool",
+            "default_value": "render_pipeline.false",
+            "define": "VPT_POST_ENABLE_MOTION_BLUR"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.post_motion_blur_strength",
+            "type": "float_range:0.0-3.0",
+            "default_value": "1.35",
+            "define": "VPT_POST_MOTION_BLUR_STRENGTH"
+        },
+        {
+            "name": "render_pipeline.module.ray_tracing.attribute.post_motion_blur_samples",
+            "type": "int_range:4-16",
+            "default_value": "10",
+            "define": "VPT_POST_MOTION_BLUR_SAMPLE_COUNT"
+        }
+    ],
+    "textures": [
+        {
+            "name": "trans_lut",
+            "type": "intermediate",
+            "shared": true,
+            "format": "R16G16B16A16_SFLOAT",
+            "width": 256,
+            "height": 64,
+            "sampled_binding": 0,
+            "storage_binding": 1
+        },
+        {
+            "name": "sky_cube",
+            "type": "intermediate",
+            "dimension": "cube",
+            "format": "R16G16B16A16_SFLOAT",
+            "width": 128,
+            "height": 128,
+            "sampled_binding": 2
+        },
+        {
+            "name": "material_state",
+            "type": "intermediate",
+            "dimension": "2d_array",
+            "format": "R16G16B16A16_SFLOAT",
+            "width": "RENDER_WIDTH",
+            "height": "RENDER_HEIGHT",
+            "depth": 3,
+            "storage_binding": 3
+        },
+        {
+            "name": "post_motion",
+            "type": "intermediate",
+            "format": "R16G16B16A16_SFLOAT",
+            "scale": 1,
+            "sampled_binding": 4,
+            "filter": "linear",
+            "address_mode": "clamp_to_edge"
+        },
+        {
+            "name": "post_dof_blur",
+            "type": "intermediate",
+            "format": "R16G16B16A16_SFLOAT",
+            "scale": 1,
+            "sampled_binding": 33,
+            "filter": "linear",
+            "address_mode": "clamp_to_edge"
+        },
+        {
+            "name": "volumetric_cloud_basic_noise",
+            "type": "file",
+            "path": "textures/volumetric_cloud_basic_noise.raw",
+            "dimension": "3d",
+            "format": "R8_UNORM",
+            "width": 128,
+            "height": 128,
+            "depth": 128,
+            "sampled_binding": 22,
+            "filter": "linear",
+            "address_mode": "repeat"
+        },
+        {
+            "name": "volumetric_cloud_detail_noise",
+            "type": "file",
+            "path": "textures/volumetric_cloud_detail_noise.raw",
+            "dimension": "3d",
+            "format": "R8_UNORM",
+            "width": 64,
+            "height": 64,
+            "depth": 64,
+            "sampled_binding": 23,
+            "filter": "linear",
+            "address_mode": "repeat"
+        },
+        {
+            "name": "volumetric_cloud_weather",
+            "type": "file",
+            "path": "textures/cloudweather.png",
+            "sampled_binding": 24,
+            "filter": "linear",
+            "address_mode": "repeat"
+        },
+        {
+            "name": "volumetric_cloud_curl",
+            "type": "file",
+            "path": "textures/T_CurlNoise.png",
+            "sampled_binding": 25,
+            "filter": "linear",
+            "address_mode": "repeat"
+        },
+        {
+            "name": "volumetric_cloud_coverage_noise",
+            "type": "file",
+            "path": "textures/cloudnoise.png",
+            "sampled_binding": 26,
+            "filter": "linear",
+            "address_mode": "repeat"
+        },
+        {
+            "name": "fft_water_flow",
+            "type": "file",
+            "path": "textures/fft_water_flow.png",
+            "sampled_binding": 27,
+            "filter": "linear",
+            "address_mode": "repeat"
+        },
+        {
+            "name": "fft_water_normal_a",
+            "type": "file",
+            "path": "textures/fft_water_normal_a.png",
+            "sampled_binding": 28,
+            "filter": "linear",
+            "address_mode": "repeat"
+        },
+        {
+            "name": "fft_water_normal_b",
+            "type": "file",
+            "path": "textures/fft_water_normal_b.png",
+            "sampled_binding": 29,
+            "filter": "linear",
+            "address_mode": "repeat"
+        },
+        {
+            "name": "post_dof_focus_ping",
+            "type": "intermediate",
+            "shared": true,
+            "format": "R32_SFLOAT",
+            "width": 1,
+            "height": 1,
+            "sampled_binding": 5,
+            "filter": "nearest",
+            "address_mode": "clamp_to_edge"
+        },
+        {
+            "name": "post_dof_focus_pong",
+            "type": "intermediate",
+            "shared": true,
+            "format": "R32_SFLOAT",
+            "width": 1,
+            "height": 1,
+            "sampled_binding": 6,
+            "filter": "nearest",
+            "address_mode": "clamp_to_edge"
+        },
+        {
+            "name": "post_star_cloud_transmittance",
+            "type": "intermediate",
+            "format": "R16_SFLOAT",
+            "scale": 1,
+            "sampled_binding": 31,
+            "storage_binding": 32,
+            "filter": "linear",
+            "address_mode": "clamp_to_edge"
+        },
+        {
+            "name": "volumetric_cloud_temporal",
+            "type": "intermediate",
+            "format": "R16G16B16A16_SFLOAT",
+            "scale": 1,
+            "storage_binding": 34
+        },
+        {
+            "name": "volumetric_cloud_history",
+            "type": "intermediate",
+            "shared": true,
+            "dimension": "2d_array",
+            "format": "R16G16B16A16_SFLOAT",
+            "width": "RENDER_WIDTH",
+            "height": "RENDER_HEIGHT",
+            "depth": 2,
+            "storage_binding": 35
+        }
+    ],
+    "execution": {
+        "global_variables": [
+            {
+                "VPT_TRANS_LUT_READY": false
+            },
+            {
+                "VPT_VOLUMETRIC_CLOUD_HISTORY_PING_INPUT": true
+            },
+            {
+                "VPT_VOLUMETRIC_CLOUD_HISTORY_READY": false
+            }
+        ],
+        "commands": [
+            {
+                "if_else": {
+                    "condition": "!VPT_TRANS_LUT_READY",
+                    "then": [
+                        {
+                            "pass": "trans_lut"
+                        },
+                        {
+                            "assign": {
+                                "VPT_TRANS_LUT_READY": true
+                            }
+                        }
+                    ],
+                    "else": []
+                }
+            },
+            {
+                "pass": "sky_cube"
+            },
+            {
+                "pass": "world"
+            },
+            {
+                "if_else": {
+                    "condition": "VPT_CLOUD_MODE == 2",
+                    "then": [
+                        {
+                            "if_else": {
+                                "condition": "VPT_ENABLE_VOLUMETRIC_CLOUD_TEMPORAL",
+                                "then": [
+                                    {
+                                        "pass": "volumetric_cloud_temporal"
+                                    },
+                                    {
+                                        "pass": "volumetric_cloud_apply"
+                                    },
+                                    {
+                                        "assign": {
+                                            "VPT_VOLUMETRIC_CLOUD_HISTORY_PING_INPUT": "!VPT_VOLUMETRIC_CLOUD_HISTORY_PING_INPUT"
+                                        }
+                                    },
+                                    {
+                                        "assign": {
+                                            "VPT_VOLUMETRIC_CLOUD_HISTORY_READY": true
+                                        }
+                                    }
+                                ],
+                                "else": [
+                                    {
+                                        "assign": {
+                                            "VPT_VOLUMETRIC_CLOUD_HISTORY_READY": false
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "else": [
+                        {
+                            "assign": {
+                                "VPT_VOLUMETRIC_CLOUD_HISTORY_READY": false
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    },
+    "execution_post": {
+        "global_variables": [
+            {
+                "VPT_POST_DOF_FOCUS_PING_INPUT": true
+            },
+            {
+                "VPT_POST_DOF_FOCUS_HISTORY_READY": false
+            }
+        ],
+        "commands": [
+            {
+                "pass": "post_render_particle"
+            },
+            {
+                "pass": "post_render_weather"
+            },
+            {
+                "pass": "post_render_text"
+            },
+            {
+                "pass": "post_render_name_tag"
+            },
+            {
+                "pass": "post_render_star"
+            },
+            {
+                "if_else": {
+                    "condition": "VPT_POST_ENABLE_MOTION_BLUR != 0",
+                    "then": [
+                        {
+                            "pass": "post_motion_blur"
+                        }
+                    ]
+                }
+            },
+            {
+                "if_else": {
+                    "condition": "VPT_POST_ENABLE_MOTION_BLUR != 0",
+                    "then": [
+                        {
+                            "pass": "post_copy_post_motion_to_ldr"
+                        }
+                    ]
+                }
+            }
+        ]
+    },
+    "passes": [
+        {
+            "type": "full_screen",
+            "name": "trans_lut",
+            "fragment": "trans_lut/trans_lut.frag",
+            "inputs": {
+                "images": []
+            },
+            "outputs": {
+                "images": [
+                    "trans_lut"
+                ]
+            },
+            "target": "trans_lut"
+        },
+        {
+            "type": "full_screen",
+            "name": "sky_cube",
+            "fragment": "sky_cube/sky_cube.frag",
+            "inputs": {
+                "images": [
+                    "trans_lut"
+                ]
+            },
+            "outputs": {
+                "images": [
+                    "sky_cube"
+                ]
+            },
+            "target": "sky_cube"
+        },
+        {
+            "type": "ray_tracing",
+            "name": "world",
+            "query_sharc": true,
+            "inputs": {
+                "images": [
+                    "trans_lut",
+                    "sky_cube",
+                    "volumetric_cloud_basic_noise",
+                    "volumetric_cloud_detail_noise",
+                    "volumetric_cloud_weather",
+                    "volumetric_cloud_curl",
+                    "volumetric_cloud_coverage_noise",
+                    "fft_water_flow",
+                    "fft_water_normal_a",
+                    "fft_water_normal_b"
+                ]
+            },
+            "outputs": {
+                "images": [
+                    "out:radiance",
+                    "out:diffuse_albedo_metallic",
+                    "out:specular_albedo",
+                    "out:normal_roughness",
+                    "out:motion_vector",
+                    "out:linear_depth",
+                    "out:specular_hit_depth",
+                    "out:first_hit_depth",
+                    "out:first_hit_diffuse_direct_light",
+                    "out:first_hit_diffuse_indirect_light",
+                    "out:first_hit_specular",
+                    "out:first_hit_clear",
+                    "out:first_hit_base_emission",
+                    "out:fog_image",
+                    "out:first_hit_refraction",
+                    "post_star_cloud_transmittance",
+                    "material_state"
+                ]
+            },
+            "definitions": {
+                "VPT_MATERIAL_STATE_BINDING": "3"
+            },
+            "rgen": "world/world.rgen",
+            "default_hit_group": "default",
+            "hit_groups": {
+                "default": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/default.rchit",
+                        "rahit": "world/default.rahit"
+                    }
+                },
+                "entity_solid_z_offset_forward": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/no_height.rchit",
+                        "rahit": "world/default.rahit"
+                    }
+                },
+                "shadow": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/shadow.rchit",
+                        "rahit": "world/shadow.rahit"
+                    }
+                },
+                "clouds": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/clouds.rchit",
+                        "rahit": "world/clouds.rahit"
+                    }
+                },
+                "end_gateway": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/end_gateway.rchit",
+                        "rahit": "world/end_gateway.rahit"
+                    }
+                },
+                "end_portal": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/end_portal.rchit",
+                        "rahit": "world/end_portal.rahit"
+                    }
+                },
+                "water_mask": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/water_mask.rchit",
+                        "rahit": "world/water_mask.rahit"
+                    }
+                },
+                "world_no_reflect": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/world_no_reflect.rchit",
+                        "rahit": "world/world_no_reflect.rahit"
+                    }
+                },
+                "text_see_through": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/default.rchit",
+                        "rahit": "world/text.rahit"
+                    }
+                },
+                "text_intensity_see_through": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/default.rchit",
+                        "rahit": "world/text.rahit"
+                    }
+                },
+                "text_polygon_offset": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/default.rchit",
+                        "rahit": "world/text.rahit"
+                    }
+                },
+                "text_intensity_polygon_offset": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/default.rchit",
+                        "rahit": "world/text.rahit"
+                    }
+                },
+                "lightning": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/transparent_only.rchit",
+                        "rahit": "world/transparent_only.rahit"
+                    }
+                },
+                "beacon_beam": {
+                    "type": "triangle",
+                    "shaders": {
+                        "rchit": "world/transparent_only.rchit",
+                        "rahit": "world/transparent_only.rahit"
+                    }
+                }
+            },
+            "miss": [
+                {
+                    "name": "shadow",
+                    "shader": "world/shadow.rmiss"
+                },
+                {
+                    "name": "world",
+                    "shader": "world/world.rmiss"
+                },
+                {
+                    "name": "hand",
+                    "shader": "world/hand.rmiss"
+                },
+                {
+                    "name": "world_no_volumetric",
+                    "shader": "world/world_no_volumetric.rmiss"
+                }
+            ]
+        },
+        {
+            "type": "compute",
+            "name": "volumetric_cloud_temporal",
+            "inputs": {
+                "images": [
+                    "out:motion_vector",
+                    "out:first_hit_clear",
+                    "post_star_cloud_transmittance",
+                    "volumetric_cloud_history"
+                ]
+            },
+            "outputs": {
+                "images": [
+                    "volumetric_cloud_temporal",
+                    "volumetric_cloud_history"
+                ]
+            },
+            "compute": "volumetric_cloud/temporal.comp",
+            "gx": "(RENDER_WIDTH + 7) / 8",
+            "gy": "(RENDER_HEIGHT + 7) / 8",
+            "gz": "1"
+        },
+        {
+            "type": "compute",
+            "name": "volumetric_cloud_apply",
+            "inputs": {
+                "images": [
+                    "out:fog_image",
+                    "volumetric_cloud_temporal"
+                ]
+            },
+            "outputs": {
+                "images": [
+                    "out:radiance",
+                    "out:first_hit_clear",
+                    "post_star_cloud_transmittance"
+                ]
+            },
+            "compute": "volumetric_cloud/apply.comp",
+            "gx": "(RENDER_WIDTH + 7) / 8",
+            "gy": "(RENDER_HEIGHT + 7) / 8",
+            "gz": "1"
+        },
+        {
+            "type": "render",
+            "stage": "post_render",
+            "name": "post_render_particle",
+            "content": "particle",
+            "vertex": "post_render/render_world_post.vert",
+            "fragment": "post_render/render_world_post.frag",
+            "outputs": {
+                "images": [
+                    "out:ldr"
+                ]
+            },
+            "depth_write": false
+        },
+        {
+            "type": "render",
+            "stage": "post_render",
+            "name": "post_render_weather",
+            "content": "weather",
+            "vertex": "post_render/render_world_post.vert",
+            "fragment": "post_render/render_world_post.frag",
+            "outputs": {
+                "images": [
+                    "out:ldr"
+                ]
+            },
+            "depth_write": false
+        },
+        {
+            "type": "render",
+            "stage": "post_render",
+            "name": "post_render_text",
+            "content": "text",
+            "vertex": "post_render/render_text.vert",
+            "fragment": "post_render/render_text.frag",
+            "outputs": {
+                "images": [
+                    "out:ldr",
+                    "out:first_hit_depth"
+                ]
+            },
+            "depth_write": true,
+            "depth_compare": "less"
+        },
+        {
+            "type": "render",
+            "stage": "post_render",
+            "name": "post_render_name_tag",
+            "content": "name_tag",
+            "vertex": "post_render/render_text.vert",
+            "fragment": "post_render/render_text.frag",
+            "outputs": {
+                "images": [
+                    "out:ldr",
+                    "out:first_hit_depth"
+                ]
+            },
+            "depth_write": true,
+            "depth_compare": "always"
+        },
+        {
+            "type": "render",
+            "stage": "post_render",
+            "name": "post_render_star",
+            "content": "star",
+            "vertex": "post_render/render_star.vert",
+            "fragment": "post_render/render_star.frag",
+            "inputs": {
+                "images": [
+                    "post_star_cloud_transmittance"
+                ]
+            },
+            "outputs": {
+                "images": [
+                    "out:ldr"
+                ]
+            },
+            "depth_write": true,
+            "depth_compare": "less"
+        },
+        {
+            "type": "full_screen",
+            "stage": "post_render",
+            "name": "post_copy_ldr_to_post_motion",
+            "fragment": "post_render/post_copy.frag",
+            "inputs": {
+                "images": [
+                    "out:ldr"
+                ]
+            },
+            "target": "post_motion"
+        },
+        {
+            "type": "full_screen",
+            "stage": "post_render",
+            "name": "post_motion_blur",
+            "fragment": "post_render/post_motion_blur.frag",
+            "inputs": {
+                "images": [
+                    "out:ldr",
+                    "out:first_hit_depth",
+                    "out:motion_vector"
+                ]
+            },
+            "target": "post_motion"
+        },
+        {
+            "type": "full_screen",
+            "stage": "post_render",
+            "name": "post_copy_post_motion_to_ldr",
+            "fragment": "post_render/post_copy.frag",
+            "inputs": {
+                "images": [
+                    "post_motion"
+                ]
+            },
+            "target": "out:ldr"
+        },
+        {
+            "type": "full_screen",
+            "stage": "post_render",
+            "name": "post_dof_focus_to_pong",
+            "fragment": "post_render/post_dof_focus.frag",
+            "inputs": {
+                "images": [
+                    "out:first_hit_depth",
+                    "post_dof_focus_ping"
+                ]
+            },
+            "target": "post_dof_focus_pong",
+            "defines": {
+                "VPT_POST_DOF_PREVIOUS_FOCUS_BINDING": "5"
+            }
+        },
+        {
+            "type": "full_screen",
+            "stage": "post_render",
+            "name": "post_dof_blur_h_from_pong",
+            "fragment": "post_render/post_dof.frag",
+            "inputs": {
+                "images": [
+                    "post_motion",
+                    "out:first_hit_depth",
+                    "post_dof_focus_pong"
+                ]
+            },
+            "target": "post_dof_blur",
+            "defines": {
+                "VPT_POST_DOF_FOCUS_BINDING": "6",
+                "VPT_POST_DOF_SOURCE_BINDING": "4",
+                "VPT_POST_DOF_DIRECTION_X": "1.0",
+                "VPT_POST_DOF_DIRECTION_Y": "0.0"
+            }
+        },
+        {
+            "type": "full_screen",
+            "stage": "post_render",
+            "name": "post_dof_focus_to_ping",
+            "fragment": "post_render/post_dof_focus.frag",
+            "inputs": {
+                "images": [
+                    "out:first_hit_depth",
+                    "post_dof_focus_pong"
+                ]
+            },
+            "target": "post_dof_focus_ping",
+            "defines": {
+                "VPT_POST_DOF_PREVIOUS_FOCUS_BINDING": "6"
+            }
+        },
+        {
+            "type": "full_screen",
+            "stage": "post_render",
+            "name": "post_dof_blur_v_from_pong",
+            "fragment": "post_render/post_dof.frag",
+            "inputs": {
+                "images": [
+                    "post_dof_blur",
+                    "out:first_hit_depth",
+                    "post_dof_focus_pong"
+                ]
+            },
+            "target": "out:ldr",
+            "defines": {
+                "VPT_POST_DOF_FOCUS_BINDING": "6",
+                "VPT_POST_DOF_SOURCE_BINDING": "33",
+                "VPT_POST_DOF_DIRECTION_X": "0.0",
+                "VPT_POST_DOF_DIRECTION_Y": "1.0"
+            }
+        },
+        {
+            "type": "full_screen",
+            "stage": "post_render",
+            "name": "post_dof_blur_h_from_ping",
+            "fragment": "post_render/post_dof.frag",
+            "inputs": {
+                "images": [
+                    "post_motion",
+                    "out:first_hit_depth",
+                    "post_dof_focus_ping"
+                ]
+            },
+            "target": "post_dof_blur",
+            "defines": {
+                "VPT_POST_DOF_FOCUS_BINDING": "5",
+                "VPT_POST_DOF_SOURCE_BINDING": "4",
+                "VPT_POST_DOF_DIRECTION_X": "1.0",
+                "VPT_POST_DOF_DIRECTION_Y": "0.0"
+            }
+        },
+        {
+            "type": "full_screen",
+            "stage": "post_render",
+            "name": "post_dof_blur_v_from_ping",
+            "fragment": "post_render/post_dof.frag",
+            "inputs": {
+                "images": [
+                    "post_dof_blur",
+                    "out:first_hit_depth",
+                    "post_dof_focus_ping"
+                ]
+            },
+            "target": "out:ldr",
+            "defines": {
+                "VPT_POST_DOF_FOCUS_BINDING": "5",
+                "VPT_POST_DOF_SOURCE_BINDING": "33",
+                "VPT_POST_DOF_DIRECTION_X": "0.0",
+                "VPT_POST_DOF_DIRECTION_Y": "1.0"
+            }
+        }
+    ]
+}

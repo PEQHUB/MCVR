@@ -1,0 +1,109 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+#include "util/alpha_mode.glsl"
+#include "util/random.glsl"
+#include "util/ray_cone.glsl"
+#include "util/ray.glsl"
+#include "util/util.glsl"
+#include "common/shared.hpp"
+
+layout(set = 0, binding = 0) uniform sampler2D textures[];
+
+#include "util/sprite_fetch.glsl"
+
+layout(set = 1, binding = 1) readonly buffer BLASOffsets {
+    uint offsets[];
+}
+blasOffsets;
+
+layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
+    TextureMapping mapping;
+};
+
+layout(set = 2, binding = 0) uniform Uniform {
+    WorldUBO ubo;
+};
+
+layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer IndexBuffer {
+    uint indices[];
+}
+indexBuffer;
+
+#include "util/vertex.glsl"
+
+layout(location = 0) rayPayloadInEXT MainRay mainRay;
+hitAttributeEXT vec2 attribs;
+
+void main() {
+    uint instanceID = gl_InstanceCustomIndexEXT;
+    uint geometryID = gl_GeometryIndexEXT;
+    uint geometryBufferIndex = getGeometryBufferIndex(instanceID, geometryID);
+
+    uint i0, i1, i2;
+    MaterialVertex m0, m1, m2;
+    loadTriangleIndices(geometryBufferIndex, gl_PrimitiveID, i0, i1, i2);
+    loadTriangleMaterial(geometryBufferIndex, i0, i1, i2, m0, m1, m2);
+
+    vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
+    uint packedData = m0.packedData;
+    uint textureID = m0.textureID;
+    bool isBlockGeometry = (packedData & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
+    bool isWaterGeometry = (packedData & PBR_FLAG_WATER_GEOMETRY) != 0u;
+    uint alphaMode = getAlphaMode(packedData);
+
+    float alpha = hasColorLayer(packedData) ?
+                      (baryCoords.x * m0.colorLayer + baryCoords.y * m1.colorLayer + baryCoords.z * m2.colorLayer).a :
+                      1.0;
+    vec2 uv = vec2(0.0);
+    float lod = 0.0;
+    if (hasTexture(packedData)) {
+        uv = baryCoords.x * m0.textureUV + baryCoords.y * m1.textureUV + baryCoords.z * m2.textureUV;
+
+        float coneRadiusWorld = mainRay.coneWidth + gl_HitTEXT * mainRay.coneSpread;
+        PositionVertex p0, p1, p2;
+        loadTrianglePositions(geometryBufferIndex, i0, i1, i2, p0, p1, p2);
+        vec3 dposdu, dposdv;
+        computedposduDv(p0.pos, p1.pos, p2.pos, m0.textureUV, m1.textureUV, m2.textureUV, dposdu, dposdv);
+        lod = isBlockGeometry ? 0.0 : lodWithCone(textures[nonuniformEXT(textureID)], uv, coneRadiusWorld, dposdu, dposdv);
+
+        alpha *= isBlockGeometry ?
+                     fetchBlockAlbedoLod(textureID, uv, ubo.animTick, lod).a :
+                     sampleTexture(textures[nonuniformEXT(textureID)], uv, lod, false).a;
+    }
+
+    alpha = resolveSurfaceAlpha(alpha, alphaMode);
+    if (alpha < 0.05) {
+        ignoreIntersectionEXT;
+        return;
+    }
+
+    if (!hasTexture(packedData)) { return; }
+
+    if (isWaterGeometry && rayIgnoreWaterSelf(mainRay)) {
+        ignoreIntersectionEXT;
+        return;
+    }
+    if (rayInsideBoat(mainRay) && isWaterGeometry) {
+        ignoreIntersectionEXT;
+        return;
+    }
+
+    ivec4 flags = ivec4(0);
+    if (isBlockGeometry) {
+        flags = fetchBlockFlagLod(textureID, uv, lod);
+    } else {
+        int flagTextureID = mapping.entries[textureID].flag;
+        if (flagTextureID < 0) { return; }
+        flags = ivec4(round(sampleTexture(textures[nonuniformEXT(flagTextureID)], uv, ceil(lod), false) * 255.0));
+    }
+    if ((flags.r & 0x1) > 0 && rayIgnoreWaterSelf(mainRay)) {
+        ignoreIntersectionEXT;
+        return;
+    }
+    if (rayInsideBoat(mainRay) && (flags.r & 0x1) > 0) { ignoreIntersectionEXT; }
+}
