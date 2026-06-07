@@ -306,6 +306,78 @@ bool displacementBuildBlockChart(vec3 blockBase,
     return true;
 }
 
+float displacementMaterialDepthScale(uint spriteId) {
+    TextureRuleEntry rule = safeTextureRuleEntry(spriteId);
+    return ((rule.flags & TEXTURE_RULE_ENABLED) != 0u &&
+            (rule.flags & TEXTURE_RULE_DISPLACEMENT_SCALE) != 0u)
+        ? clamp(rule.displacementScale, 0.0, 4.0)
+        : 1.0;
+}
+
+bool displacementPrepareAuthoredBlockSource(uint packedFlags,
+                                            uint packedBlockType,
+                                            uint textureID,
+                                            vec3 wp0,
+                                            vec3 wp1,
+                                            vec3 wp2,
+                                            vec2 uv0,
+                                            vec2 uv1,
+                                            vec2 uv2,
+                                            vec3 blockBase,
+                                            uint animTick,
+                                            float hitT,
+                                            float depthScale,
+                                            float fadeDistanceBlocks,
+                                            vec3 viewDir,
+                                            bool rejectFluidGeometry,
+                                            bool rejectThinCutoutPlant,
+                                            out DisplacementSource src,
+                                            out vec3 dPdu,
+                                            out vec3 dPdv,
+                                            out vec3 baseNormal,
+                                            out vec2 chartOffset) {
+    displacementInitSource(src);
+    dPdu = vec3(0.0);
+    dPdv = vec3(0.0);
+    baseNormal = vec3(0.0, 1.0, 0.0);
+    chartOffset = vec2(0.0);
+
+    if (depthScale <= DISPLACEMENT_MIN_DEPTH ||
+        fadeDistanceBlocks <= DISPLACEMENT_MIN_DEPTH ||
+        hitT >= fadeDistanceBlocks ||
+        (packedFlags & PBR_FLAG_USE_TEXTURE) == 0u ||
+        (packedFlags & PBR_FLAG_BLOCK_GEOMETRY) == 0u ||
+        (rejectFluidGeometry && (packedFlags & PBR_FLAG_FLUID_GEOMETRY) != 0u) ||
+        (rejectThinCutoutPlant && (packedBlockType & PBR_PACKED_THIN_CUTOUT_PLANT) != 0u) ||
+        !displacementBlockHasAuthoredHeight(textureID)) {
+        return false;
+    }
+
+    uint coordinateMode = (packedFlags & PBR_FLAG_COORD_MASK) >> PBR_FLAG_COORD_SHIFT;
+    if (coordinateMode != 0u) return false;
+
+    if (!displacementBuildBasis(wp0, wp1, wp2, uv0, uv1, uv2, dPdu, dPdv, baseNormal)) {
+        return false;
+    }
+    if (dot(baseNormal, viewDir) < 0.0) {
+        baseNormal = -baseNormal;
+    }
+
+    displacementBuildBlockChart(blockBase, dPdu, dPdv, chartOffset);
+
+    float fade = 1.0 - smoothstep(fadeDistanceBlocks * 0.75, fadeDistanceBlocks, hitT);
+    src.isBlock = true;
+    src.textureID = textureID;
+    src.normalTextureID = -1;
+    src.animTick = animTick;
+    src.uvMin = min(min(uv0, uv1), uv2) + chartOffset;
+    src.uvMax = max(max(uv0, uv1), uv2) + chartOffset;
+    src.maxDepth = max(depthScale, 0.0) * fade * displacementMaterialDepthScale(textureID);
+    src.mode = DISPLACEMENT_SOURCE_AUTHORED_NORMAL_ALPHA;
+    src.boundaryWalls = false;
+    return src.maxDepth > DISPLACEMENT_MIN_DEPTH;
+}
+
 float displacementAxisExitT(float origin, float rate, float boundsMin, float boundsMax) {
     if (rate > 1e-9) return (boundsMax - origin) / rate;
     if (rate < -1e-9) return (boundsMin - origin) / rate;

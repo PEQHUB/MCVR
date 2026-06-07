@@ -15,6 +15,7 @@
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
 #include "util/sprite_fetch.glsl"
+#include "util/displacement.glsl"
 
 layout(set = 1, binding = 1) readonly buffer BLASOffsets {
     uint offsets[];
@@ -28,6 +29,45 @@ layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
 layout(set = 2, binding = 0) uniform Uniform {
     WorldUBO ubo;
 };
+
+layout(push_constant) uniform PushConstant {
+    int numRayBounces;
+    int flags;
+    int reservedLighting0;
+    float reservedLighting1;
+    int reservedLighting2;
+    int reservedLighting3;
+    int reservedLighting4;
+    float preExposure;
+    float displacementDepthScale;
+    int displacementPrimarySteps;
+    int displacementRefinementSteps;
+    float displacementFadeDistanceBlocks;
+    uint blueNoiseFrame;
+    uint rtDebugFlags;
+    uint handInstanceCount;
+    uint reservedPc0;
+    uint64_t sharcHashEntries;
+    uint64_t sharcAccumulation;
+    uint64_t sharcResolved;
+    float sharcCameraX;
+    float sharcCameraY;
+    float sharcCameraZ;
+    float sharcSceneScale;
+    uint sharcCapacity;
+    float sharcRadianceScale;
+    uint sharcFrameIndex;
+    float sharcRoughnessThreshold;
+    int sharcUpdateBlockSize;
+    int sharcUpdateBounces;
+    int sharcQueryMode;
+    int sharcQueryReserved;
+    int offlineFlags;
+    int accumFrameCount;
+    float aperture;
+    float focalDistance;
+    uint64_t reservedAddr;
+} pc;
 
 layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer IndexBuffer {
     uint indices[];
@@ -45,14 +85,15 @@ void main() {
     uint geometryBufferIndex = getGeometryBufferIndex(instanceID, geometryID);
 
     uint i0, i1, i2;
+    PositionVertex p0, p1, p2;
     MaterialVertex m0, m1, m2;
-    loadTriangleIndices(geometryBufferIndex, gl_PrimitiveID, i0, i1, i2);
-    loadTriangleMaterial(geometryBufferIndex, i0, i1, i2, m0, m1, m2);
+    loadTriangle(geometryBufferIndex, gl_PrimitiveID, i0, i1, i2, p0, p1, p2, m0, m1, m2);
 
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     uint packedData = m0.packedData;
     uint textureID = m0.textureID;
     bool isBlockGeometry = (packedData & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
+    bool isFluidGeometry = (packedData & PBR_FLAG_FLUID_GEOMETRY) != 0u;
     bool isWaterGeometry = (packedData & PBR_FLAG_WATER_GEOMETRY) != 0u;
     uint alphaMode = getAlphaMode(packedData);
 
@@ -65,8 +106,6 @@ void main() {
         uv = baryCoords.x * m0.textureUV + baryCoords.y * m1.textureUV + baryCoords.z * m2.textureUV;
 
         float coneRadiusWorld = mainRay.coneWidth + gl_HitTEXT * mainRay.coneSpread;
-        PositionVertex p0, p1, p2;
-        loadTrianglePositions(geometryBufferIndex, i0, i1, i2, p0, p1, p2);
         vec3 dposdu, dposdv;
         computedposduDv(p0.pos, p1.pos, p2.pos, m0.textureUV, m1.textureUV, m2.textureUV, dposdu, dposdv);
         lod = isBlockGeometry ? 0.0 : lodWithCone(textures[nonuniformEXT(textureID)], uv, coneRadiusWorld, dposdu, dposdv);
@@ -106,4 +145,36 @@ void main() {
         return;
     }
     if (rayInsideBoat(mainRay) && (flags.r & 0x1) > 0) { ignoreIntersectionEXT; }
+
+    if (isBlockGeometry && !isFluidGeometry) {
+        vec3 wp0 = vec3(gl_ObjectToWorldEXT * vec4(p0.pos, 1.0));
+        vec3 wp1 = vec3(gl_ObjectToWorldEXT * vec4(p1.pos, 1.0));
+        vec3 wp2 = vec3(gl_ObjectToWorldEXT * vec4(p2.pos, 1.0));
+        vec3 rayDir = gl_WorldRayDirectionEXT;
+        vec3 viewDir = -rayDir;
+        DisplacementSource displacementSource;
+        vec3 dPdu;
+        vec3 dPdv;
+        vec3 baseNormal;
+        vec2 displacementChartOffset;
+        if (displacementPrepareAuthoredBlockSource(packedData, m0.emissiveBlockType, textureID,
+                                                   wp0, wp1, wp2,
+                                                   m0.textureUV, m1.textureUV, m2.textureUV,
+                                                   m0.postBase, ubo.animTick, gl_HitTEXT,
+                                                   pc.displacementDepthScale,
+                                                   pc.displacementFadeDistanceBlocks, viewDir,
+                                                   true, false,
+                                                   displacementSource, dPdu, dPdv, baseNormal,
+                                                   displacementChartOffset)) {
+            vec3 planeWorldPos = gl_WorldRayOriginEXT + rayDir * gl_HitTEXT;
+            DisplacementHit displacementHit;
+            if (!displacementTracePrimary(displacementSource, uv + displacementChartOffset, planeWorldPos,
+                                          rayDir, viewDir, dPdu, dPdv, baseNormal,
+                                          clamp(pc.displacementPrimarySteps, 1, 512),
+                                          pc.displacementRefinementSteps, displacementHit)) {
+                ignoreIntersectionEXT;
+                return;
+            }
+        }
+    }
 }

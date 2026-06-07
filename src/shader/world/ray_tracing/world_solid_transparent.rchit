@@ -446,34 +446,16 @@ void main() {
         vec3 wp0 = vec3(gl_ObjectToWorldEXT * vec4(v0.pos, 1.0));
         vec3 wp1 = vec3(gl_ObjectToWorldEXT * vec4(v1.pos, 1.0));
         vec3 wp2 = vec3(gl_ObjectToWorldEXT * vec4(v2.pos, 1.0));
-        bool basisValid = displacementBuildBasis(wp0, wp1, wp2, v0.textureUV, v1.textureUV, v2.textureUV,
-                                                 displacedDpu, displacedDpv, displacedBaseNormal);
-        if (dot(displacedBaseNormal, viewDir) < 0.0) {
-            displacedBaseNormal = -displacedBaseNormal;
-        }
-
-        if (basisValid) {
-            vec2 displacementChartOffset = vec2(0.0);
-            displacementBuildBlockChart(v0.postBase, displacedDpu, displacedDpv, displacementChartOffset);
-
-            displacementSource.isBlock = isBlockGeometry;
-            displacementSource.textureID = textureID;
-            displacementSource.normalTextureID = normalTextureID;
-            displacementSource.animTick = worldUbo.animTick;
-            displacementSource.uvMin = min(min(v0.textureUV, v1.textureUV), v2.textureUV) + displacementChartOffset;
-            displacementSource.uvMax = max(max(v0.textureUV, v1.textureUV), v2.textureUV) + displacementChartOffset;
-            displacementSource.boundaryWalls = false;
-
-            float fade = 1.0 - smoothstep(pc.displacementFadeDistanceBlocks * 0.75, pc.displacementFadeDistanceBlocks, actualHitT);
-            TextureRuleEntry displacementRule = safeTextureRuleEntry(textureID);
-            float materialDisplacementScale = ((displacementRule.flags & TEXTURE_RULE_ENABLED) != 0u
-                && (displacementRule.flags & TEXTURE_RULE_DISPLACEMENT_SCALE) != 0u)
-                ? clamp(displacementRule.displacementScale, 0.0, 4.0)
-                : 1.0;
-            displacementSource.maxDepth = max(pc.displacementDepthScale, 0.0) * fade * materialDisplacementScale;
-
-            displacementSource.mode = DISPLACEMENT_SOURCE_AUTHORED_NORMAL_ALPHA;
-
+        vec2 displacementChartOffset = vec2(0.0);
+        if (displacementPrepareAuthoredBlockSource(v0.flags, packedBlockType, textureID,
+                                                   wp0, wp1, wp2,
+                                                   v0.textureUV, v1.textureUV, v2.textureUV,
+                                                   v0.postBase, worldUbo.animTick, actualHitT,
+                                                   pc.displacementDepthScale,
+                                                   pc.displacementFadeDistanceBlocks, viewDir,
+                                                   true, false,
+                                                   displacementSource, displacedDpu, displacedDpv,
+                                                   displacedBaseNormal, displacementChartOffset)) {
             DisplacementHit displacementHit;
             int primarySteps = clamp(pc.displacementPrimarySteps, 1, 512);
             vec2 planeTextureUV = textureUVRaw + displacementChartOffset;

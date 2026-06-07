@@ -80,63 +80,29 @@ bool solidAuthoredDisplacementBlockHit(UnpackedVertex v0,
                                        UnpackedVertex v2,
                                        vec2 textureUV,
                                        uint textureID) {
-    if (pc.displacementDepthScale <= DISPLACEMENT_MIN_DEPTH ||
-        pc.displacementFadeDistanceBlocks <= DISPLACEMENT_MIN_DEPTH ||
-        gl_HitTEXT >= pc.displacementFadeDistanceBlocks ||
-        prGetIsHand(mainRay) ||
-        (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) == 0u ||
-        (v0.flags & PBR_FLAG_FLUID_GEOMETRY) != 0u ||
-        (v0.emissiveBlockType & PBR_PACKED_THIN_CUTOUT_PLANT) != 0u ||
-        (v0.flags & PBR_FLAG_USE_TEXTURE) == 0u ||
-        !displacementBlockHasAuthoredHeight(textureID)) {
+    if (prGetIsHand(mainRay)) {
         return true;
     }
-
-    uint coordinateMode = (v0.flags & PBR_FLAG_COORD_MASK) >> PBR_FLAG_COORD_SHIFT;
-    if (coordinateMode != 0u) return true;
 
     vec3 wp0 = vec3(gl_ObjectToWorldEXT * vec4(v0.pos, 1.0));
     vec3 wp1 = vec3(gl_ObjectToWorldEXT * vec4(v1.pos, 1.0));
     vec3 wp2 = vec3(gl_ObjectToWorldEXT * vec4(v2.pos, 1.0));
-
+    vec3 rayDir = gl_WorldRayDirectionEXT;
+    vec3 viewDir = -rayDir;
+    DisplacementSource displacementSource;
     vec3 dPdu;
     vec3 dPdv;
     vec3 baseNormal;
-    if (!displacementBuildBasis(wp0, wp1, wp2, v0.textureUV, v1.textureUV, v2.textureUV,
-                                dPdu, dPdv, baseNormal)) {
-        return true;
-    }
-
-    vec3 rayDir = gl_WorldRayDirectionEXT;
-    vec3 viewDir = -rayDir;
-    if (dot(baseNormal, viewDir) < 0.0) {
-        baseNormal = -baseNormal;
-    }
-
     vec2 displacementChartOffset = vec2(0.0);
-    displacementBuildBlockChart(v0.postBase, dPdu, dPdv, displacementChartOffset);
-
-    float fade = 1.0 - smoothstep(pc.displacementFadeDistanceBlocks * 0.75,
-                                  pc.displacementFadeDistanceBlocks, gl_HitTEXT);
-    TextureRuleEntry displacementRule = safeTextureRuleEntry(textureID);
-    float materialDisplacementScale = ((displacementRule.flags & TEXTURE_RULE_ENABLED) != 0u
-        && (displacementRule.flags & TEXTURE_RULE_DISPLACEMENT_SCALE) != 0u)
-        ? clamp(displacementRule.displacementScale, 0.0, 4.0)
-        : 1.0;
-
-    DisplacementSource displacementSource;
-    displacementInitSource(displacementSource);
-    displacementSource.isBlock = true;
-    displacementSource.textureID = textureID;
-    displacementSource.normalTextureID = -1;
-    displacementSource.animTick = ubo.animTick;
-    displacementSource.uvMin = min(min(v0.textureUV, v1.textureUV), v2.textureUV) + displacementChartOffset;
-    displacementSource.uvMax = max(max(v0.textureUV, v1.textureUV), v2.textureUV) + displacementChartOffset;
-    displacementSource.maxDepth = max(pc.displacementDepthScale, 0.0) * fade * materialDisplacementScale;
-    displacementSource.mode = DISPLACEMENT_SOURCE_AUTHORED_NORMAL_ALPHA;
-    displacementSource.boundaryWalls = false;
-
-    if (displacementSource.maxDepth <= DISPLACEMENT_MIN_DEPTH) {
+    if (!displacementPrepareAuthoredBlockSource(v0.flags, v0.emissiveBlockType, textureID,
+                                                wp0, wp1, wp2,
+                                                v0.textureUV, v1.textureUV, v2.textureUV,
+                                                v0.postBase, ubo.animTick, gl_HitTEXT,
+                                                pc.displacementDepthScale,
+                                                pc.displacementFadeDistanceBlocks, viewDir,
+                                                true, true,
+                                                displacementSource, dPdu, dPdv, baseNormal,
+                                                displacementChartOffset)) {
         return true;
     }
 

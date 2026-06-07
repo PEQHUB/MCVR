@@ -1013,38 +1013,19 @@ void main() {
             vec3 displacementDpu;
             vec3 displacementDpv;
             vec3 displacementBaseNormal;
-            if (displacementBuildBasis(wp0, wp1, wp2, m0.textureUV, m1.textureUV, m2.textureUV,
-                                       displacementDpu, displacementDpv, displacementBaseNormal)) {
-                if (dot(displacementBaseNormal, baseViewDir) < 0.0) {
-                    displacementBaseNormal = -displacementBaseNormal;
-                }
-
-                vec2 displacementChartOffset = vec2(0.0);
-                displacementBuildBlockChart(m0.postBase, displacementDpu, displacementDpv, displacementChartOffset);
-
-                TextureRuleEntry displacementRule = safeTextureRuleEntry(textureID);
-                float materialDisplacementScale =
-                    ((displacementRule.flags & TEXTURE_RULE_ENABLED) != 0u &&
-                     (displacementRule.flags & TEXTURE_RULE_DISPLACEMENT_SCALE) != 0u)
-                        ? clamp(displacementRule.displacementScale, 0.0, 4.0)
-                        : 1.0;
-                float fade = 1.0 - smoothstep(pc.displacementFadeDistanceBlocks * 0.75,
-                                              pc.displacementFadeDistanceBlocks, gl_HitTEXT);
-
-                displacementInitSource(radserDisplacementSource);
-                radserDisplacementSource.isBlock = true;
-                radserDisplacementSource.textureID = textureID;
-                radserDisplacementSource.normalTextureID = -1;
-                radserDisplacementSource.animTick = worldUBO.animTick;
-                radserDisplacementSource.uvMin = min(min(m0.textureUV, m1.textureUV), m2.textureUV) + displacementChartOffset;
-                radserDisplacementSource.uvMax = max(max(m0.textureUV, m1.textureUV), m2.textureUV) + displacementChartOffset;
-                radserDisplacementSource.maxDepth = max(pc.displacementDepthScale, 0.0) * fade * materialDisplacementScale;
-                radserDisplacementSource.mode = DISPLACEMENT_SOURCE_AUTHORED_NORMAL_ALPHA;
-                radserDisplacementSource.boundaryWalls = false;
-
+            vec2 displacementChartOffset = vec2(0.0);
+            if (displacementPrepareAuthoredBlockSource(packedData, m0.emissiveBlockType, textureID,
+                                                       wp0, wp1, wp2,
+                                                       m0.textureUV, m1.textureUV, m2.textureUV,
+                                                       m0.postBase, worldUBO.animTick, gl_HitTEXT,
+                                                       pc.displacementDepthScale,
+                                                       pc.displacementFadeDistanceBlocks, baseViewDir,
+                                                       true, false,
+                                                       radserDisplacementSource, displacementDpu,
+                                                       displacementDpv, displacementBaseNormal,
+                                                       displacementChartOffset)) {
                 vec2 planeTextureUV = textureUV + displacementChartOffset;
-                if (radserDisplacementSource.maxDepth > DISPLACEMENT_MIN_DEPTH &&
-                    displacementTracePrimary(radserDisplacementSource, planeTextureUV, planeHitWorldPos,
+                if (displacementTracePrimary(radserDisplacementSource, planeTextureUV, planeHitWorldPos,
                                              gl_WorldRayDirectionEXT, baseViewDir, displacementDpu,
                                              displacementDpv, displacementBaseNormal,
                                              clamp(pc.displacementPrimarySteps, 1, 512),
