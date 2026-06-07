@@ -148,6 +148,9 @@ namespace VertexFormat {
     static constexpr uint32_t PBR_TEXT_MODE_RGBA_SEE_THROUGH = 6u;
     static constexpr uint32_t PBR_TEXT_MODE_INTENSITY_POLYGON_OFFSET = 7u;
     static constexpr uint32_t PBR_TEXT_MODE_RGBA_POLYGON_OFFSET = 8u;
+    static constexpr uint32_t PBR_PACKED_EMISSIVE_TYPE_MASK = 0xFFu;
+    static constexpr uint32_t PBR_PACKED_SHADER_BLOCK_ID_SHIFT = 17u;
+    static constexpr uint32_t PBR_PACKED_SHADER_BLOCK_ID_MASK = 0x3FFFu << PBR_PACKED_SHADER_BLOCK_ID_SHIFT;
     static constexpr uint32_t PBR_PACKED_THIN_CUTOUT_PLANT = 1u << 31; // emissiveBlockType bit: exact Minecraft plant cards
 #else
     #define PBR_FLAG_USE_NORM        (1u << 0)
@@ -179,6 +182,9 @@ namespace VertexFormat {
     #define PBR_TEXT_MODE_RGBA_SEE_THROUGH 6u
     #define PBR_TEXT_MODE_INTENSITY_POLYGON_OFFSET 7u
     #define PBR_TEXT_MODE_RGBA_POLYGON_OFFSET 8u
+    #define PBR_PACKED_EMISSIVE_TYPE_MASK 0xFFu
+    #define PBR_PACKED_SHADER_BLOCK_ID_SHIFT 17u
+    #define PBR_PACKED_SHADER_BLOCK_ID_MASK (0x3FFFu << PBR_PACKED_SHADER_BLOCK_ID_SHIFT)
     #define PBR_PACKED_THIN_CUTOUT_PLANT (1u << 31)
 #endif
 
@@ -194,7 +200,7 @@ namespace VertexFormat {
         T_VEC4 colorLayer;          // 32..47
 
         T_VEC3 postBase;            // 48..59  block origin for block geometry, post base otherwise
-        T_UINT emissiveBlockType;   // 60..63  EmissiveBlock ordinal (0-39), 255 = none/LabPBR
+        T_UINT emissiveBlockType;   // 60..63  low 8=EmissiveBlock, bits 17..30=shader block id, bit 31=thin plant
 
         T_VEC2 textureUV;           // 64..71
         T_VEC2 glintUV;             // 72..79
@@ -218,6 +224,9 @@ namespace VertexFormat {
     static_assert(offsetof(PBRTriangle, lightPacked) == 92, "lightPacked offset mismatch");
     static_assert(PBR_FLAG_FLUID_GEOMETRY == (1u << 15), "fluid geometry flag bit mismatch");
     static_assert(PBR_FLAG_WATER_GEOMETRY == (1u << 22), "water geometry flag bit mismatch");
+    static_assert(PBR_PACKED_EMISSIVE_TYPE_MASK == 0xFFu, "emissive block type mask mismatch");
+    static_assert(PBR_PACKED_SHADER_BLOCK_ID_SHIFT == 17u, "shader block id shift mismatch");
+    static_assert(PBR_PACKED_SHADER_BLOCK_ID_MASK == (0x3FFFu << 17u), "shader block id mask mismatch");
 #endif
 
 #ifdef __cplusplus

@@ -153,7 +153,7 @@ vec3 thinPlantRayOrigin(vec3 worldPos, vec3 rayDir, vec3 geometricNormal) {
 }
 
 uint thinPlantBlockTypeFromPacked(uint packedBlockType) {
-    return (packedBlockType >> 17u) & 0x3FFFu;
+    return (packedBlockType & PBR_PACKED_SHADER_BLOCK_ID_MASK) >> PBR_PACKED_SHADER_BLOCK_ID_SHIFT;
 }
 
 uint thinPlantHashInt(int v, uint salt) {
