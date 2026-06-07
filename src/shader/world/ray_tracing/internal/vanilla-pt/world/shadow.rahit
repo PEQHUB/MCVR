@@ -113,9 +113,9 @@ void main() {
 
     if (!isWaterMaterial && alphaMode != ALPHA_MODE_TRANSPARENT) {
         if (hasTexture(packedData) && isBlockGeometry && !isFluidGeometry) {
-            vec3 wp0 = vec3(gl_ObjectToWorldEXT * vec4(p0.pos, 1.0));
-            vec3 wp1 = vec3(gl_ObjectToWorldEXT * vec4(p1.pos, 1.0));
-            vec3 wp2 = vec3(gl_ObjectToWorldEXT * vec4(p2.pos, 1.0));
+            vec3 wp0 = vptObjectToWorldPoint(p0.pos);
+            vec3 wp1 = vptObjectToWorldPoint(p1.pos);
+            vec3 wp2 = vptObjectToWorldPoint(p2.pos);
             vec3 rayDir = gl_WorldRayDirectionEXT;
             vec3 viewDir = -rayDir;
             DisplacementSource displacementSource;

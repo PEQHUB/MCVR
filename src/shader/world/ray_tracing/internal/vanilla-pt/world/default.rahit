@@ -11,6 +11,7 @@
 #include "util/ray.glsl"
 #include "util/util.glsl"
 #include "common/shared.hpp"
+#include "common/raytrace_transforms.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
@@ -147,9 +148,9 @@ void main() {
     if (rayInsideBoat(mainRay) && (flags.r & 0x1) > 0) { ignoreIntersectionEXT; }
 
     if (isBlockGeometry && !isFluidGeometry) {
-        vec3 wp0 = vec3(gl_ObjectToWorldEXT * vec4(p0.pos, 1.0));
-        vec3 wp1 = vec3(gl_ObjectToWorldEXT * vec4(p1.pos, 1.0));
-        vec3 wp2 = vec3(gl_ObjectToWorldEXT * vec4(p2.pos, 1.0));
+        vec3 wp0 = vptObjectToWorldPoint(p0.pos);
+        vec3 wp1 = vptObjectToWorldPoint(p1.pos);
+        vec3 wp2 = vptObjectToWorldPoint(p2.pos);
         vec3 rayDir = gl_WorldRayDirectionEXT;
         vec3 viewDir = -rayDir;
         DisplacementSource displacementSource;
