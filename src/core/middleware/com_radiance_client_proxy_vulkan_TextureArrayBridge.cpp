@@ -2,6 +2,24 @@
 #include "core/render/renderer.hpp"
 #include "core/render/render_framework.hpp"
 
+#include <algorithm>
+
+extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeMaxRenderableSpriteCount(
+    JNIEnv *, jclass) {
+
+    auto renderer = Renderer::try_instance();
+    if (!renderer || !renderer->framework()) {
+        return static_cast<jint>(vk::Data::SPRITE_MAX_ENTRIES);
+    }
+    auto framework = renderer->framework();
+    if (!framework || !framework->physicalDevice()) {
+        return static_cast<jint>(vk::Data::SPRITE_MAX_ENTRIES);
+    }
+    VkPhysicalDeviceProperties props = framework->physicalDevice()->properties();
+    uint32_t capacity = std::min(props.limits.maxImageArrayLayers, vk::Data::SPRITE_MAX_ENTRIES);
+    return static_cast<jint>(capacity);
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeReceiveSpriteTable(
     JNIEnv *, jclass,
     jlong metaPtr, jint count, jint atlasWidth, jint atlasHeight) {
