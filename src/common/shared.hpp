@@ -631,7 +631,14 @@ namespace Data {
         T_FLOAT darknessScale;
         T_FLOAT darkenWorldFactor;
         T_FLOAT brightnessFactor;
-        T_FLOAT pad0;
+        T_INT customLightmapEnabled;
+        T_INT customLightmapIncludesNightVision;
+        T_INT pad0;
+        T_INT pad1;
+        T_INT pad2;
+
+        T_VEC4 customSkyLight[16];
+        T_VEC4 customBlockLight[16];
     };
 #ifdef __cplusplus
 }; // namespace Data
