@@ -21,10 +21,10 @@ layout(std430, set = 1, binding = 13) readonly buffer SpriteRegistryBuffer {
 
 // --- Texture Arrays ---
 
-layout(set = 0, binding = 3) uniform sampler2DArray blockAlbedo;
-layout(set = 0, binding = 4) uniform sampler2DArray blockSpecular;
-layout(set = 0, binding = 5) uniform sampler2DArray blockNormal;
-layout(set = 0, binding = 6) uniform sampler2DArray blockFlag;
+layout(set = 0, binding = 3) uniform sampler2DArray blockAlbedo[MATERIAL_TEXTURE_PAGE_MAX];
+layout(set = 0, binding = 4) uniform sampler2DArray blockSpecular[MATERIAL_TEXTURE_PAGE_MAX];
+layout(set = 0, binding = 5) uniform sampler2DArray blockNormal[MATERIAL_TEXTURE_PAGE_MAX];
+layout(set = 0, binding = 6) uniform sampler2DArray blockFlag[MATERIAL_TEXTURE_PAGE_MAX];
 
 #ifndef TEXTURE_RULES_GLSL
 layout(std430, set = 1, binding = 11) readonly buffer TextureRuleRegistryBuffer {
@@ -64,11 +64,31 @@ bool spriteLayerInRange(int layer, ivec3 textureDims) {
            textureDims.z > 0 && layer < textureDims.z;
 }
 
+uint materialTexturePage(uint page) {
+    return min(page, MATERIAL_TEXTURE_PAGE_MAX - 1u);
+}
+
+ivec3 materialAlbedoTextureSize(MaterialEntry material) {
+    return textureSize(blockAlbedo[nonuniformEXT(materialTexturePage(material.albedoPage))], 0);
+}
+
+ivec3 materialSpecularTextureSize(MaterialEntry material) {
+    return textureSize(blockSpecular[nonuniformEXT(materialTexturePage(material.specularPage))], 0);
+}
+
+ivec3 materialNormalTextureSize(MaterialEntry material) {
+    return textureSize(blockNormal[nonuniformEXT(materialTexturePage(material.normalPage))], 0);
+}
+
+ivec3 materialFlagTextureSize(MaterialEntry material) {
+    return textureSize(blockFlag[nonuniformEXT(materialTexturePage(material.flagPage))], 0);
+}
+
 bool materialAlbedoLayerInRange(uint materialId, SpriteEntry se, uint animTick, out uint layer) {
     MaterialEntry material = safeMaterialEntry(materialId);
     bool useSpriteArray = materialUsesSpriteArray(material) || material.albedoLayer < 0;
     layer = useSpriteArray ? spriteAnimLayer(se, animTick) : uint(material.albedoLayer);
-    return spriteLayerInRange(layer, textureSize(blockAlbedo, 0));
+    return spriteLayerInRange(layer, materialAlbedoTextureSize(material));
 }
 
 int materialSpecularLayer(uint materialId, SpriteEntry se) {
@@ -77,8 +97,9 @@ int materialSpecularLayer(uint materialId, SpriteEntry se) {
 }
 
 bool materialSpecularLayerInRange(uint materialId, SpriteEntry se, out int layer) {
+    MaterialEntry material = safeMaterialEntry(materialId);
     layer = materialSpecularLayer(materialId, se);
-    return layer >= 0 && spriteLayerInRange(layer, textureSize(blockSpecular, 0));
+    return layer >= 0 && spriteLayerInRange(layer, materialSpecularTextureSize(material));
 }
 
 int materialNormalLayer(uint materialId, SpriteEntry se) {
@@ -87,8 +108,9 @@ int materialNormalLayer(uint materialId, SpriteEntry se) {
 }
 
 bool materialNormalLayerInRange(uint materialId, SpriteEntry se, out int layer) {
+    MaterialEntry material = safeMaterialEntry(materialId);
     layer = materialNormalLayer(materialId, se);
-    return layer >= 0 && spriteLayerInRange(layer, textureSize(blockNormal, 0));
+    return layer >= 0 && spriteLayerInRange(layer, materialNormalTextureSize(material));
 }
 
 int materialFlagLayer(uint materialId) {
@@ -98,8 +120,9 @@ int materialFlagLayer(uint materialId) {
 }
 
 bool materialFlagLayerInRange(uint materialId, out int layer) {
+    MaterialEntry material = safeMaterialEntry(materialId);
     layer = materialFlagLayer(materialId);
-    return layer >= 0 && spriteLayerInRange(layer, textureSize(blockFlag, 0));
+    return layer >= 0 && spriteLayerInRange(layer, materialFlagTextureSize(material));
 }
 
 vec2 materialRegistryUv(uint materialId, vec2 uv) {
@@ -136,54 +159,68 @@ float materialRuleLod(uint materialId, float lod) {
 
 // Sample block albedo texture from the sprite array.
 vec4 fetchBlockAlbedoTex(uint materialId, vec2 uv, uint animTick) {
+    MaterialEntry material = safeMaterialEntry(materialId);
     SpriteEntry se = safeMaterialSpriteEntry(materialId);
     uint layer;
     if (!materialAlbedoLayerInRange(materialId, se, animTick, layer)) return vec4(1.0);
-    return texture(blockAlbedo, vec3(materialRuleUv(materialId, uv), float(layer)));
+    return texture(blockAlbedo[nonuniformEXT(materialTexturePage(material.albedoPage))],
+        vec3(materialRuleUv(materialId, uv), float(layer)));
 }
 
 // Sample block albedo with explicit LOD.
 vec4 fetchBlockAlbedoLod(uint materialId, vec2 uv, uint animTick, float lod) {
+    MaterialEntry material = safeMaterialEntry(materialId);
     SpriteEntry se = safeMaterialSpriteEntry(materialId);
     uint layer;
     if (!materialAlbedoLayerInRange(materialId, se, animTick, layer)) return vec4(1.0);
-    return textureLod(blockAlbedo, vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
+    return textureLod(blockAlbedo[nonuniformEXT(materialTexturePage(material.albedoPage))],
+        vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
 }
 
 // Sample block specular from the specular array (static, not animated).
 vec4 fetchBlockSpecularTex(uint materialId, vec2 uv) {
+    MaterialEntry material = safeMaterialEntry(materialId);
     SpriteEntry se = safeMaterialSpriteEntry(materialId);
     int layer;
     if (!materialSpecularLayerInRange(materialId, se, layer)) return vec4(0.0);
-    return texture(blockSpecular, vec3(materialRuleUv(materialId, uv), float(layer)));
+    return texture(blockSpecular[nonuniformEXT(materialTexturePage(material.specularPage))],
+        vec3(materialRuleUv(materialId, uv), float(layer)));
 }
 
 vec4 fetchBlockSpecularLod(uint materialId, vec2 uv, float lod) {
+    MaterialEntry material = safeMaterialEntry(materialId);
     SpriteEntry se = safeMaterialSpriteEntry(materialId);
     int layer;
     if (!materialSpecularLayerInRange(materialId, se, layer)) return vec4(0.0);
-    return textureLod(blockSpecular, vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
+    return textureLod(blockSpecular[nonuniformEXT(materialTexturePage(material.specularPage))],
+        vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
 }
 
 // Sample block normal from the normal array (static, not animated).
 vec4 fetchBlockNormalTex(uint materialId, vec2 uv) {
+    MaterialEntry material = safeMaterialEntry(materialId);
     SpriteEntry se = safeMaterialSpriteEntry(materialId);
     int layer;
     if (!materialNormalLayerInRange(materialId, se, layer)) return vec4(0.5, 0.5, 1.0, 1.0); // flat normal
-    return texture(blockNormal, vec3(materialRuleUv(materialId, uv), float(layer)));
+    return texture(blockNormal[nonuniformEXT(materialTexturePage(material.normalPage))],
+        vec3(materialRuleUv(materialId, uv), float(layer)));
 }
 
 vec4 fetchBlockNormalLod(uint materialId, vec2 uv, float lod) {
+    MaterialEntry material = safeMaterialEntry(materialId);
     SpriteEntry se = safeMaterialSpriteEntry(materialId);
     int layer;
     if (!materialNormalLayerInRange(materialId, se, layer)) return vec4(0.5, 0.5, 1.0, 1.0);
-    return textureLod(blockNormal, vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
+    return textureLod(blockNormal[nonuniformEXT(materialTexturePage(material.normalPage))],
+        vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
 }
 
 ivec4 fetchBlockFlagLod(uint materialId, vec2 uv, float lod) {
+    MaterialEntry material = safeMaterialEntry(materialId);
     int layer;
     if (!materialFlagLayerInRange(materialId, layer)) return ivec4(0);
-    vec4 flagValue = textureLod(blockFlag, vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
+    vec4 flagValue = textureLod(blockFlag[nonuniformEXT(materialTexturePage(material.flagPage))],
+        vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
     return ivec4(round(flagValue * 255.0));
 }
 

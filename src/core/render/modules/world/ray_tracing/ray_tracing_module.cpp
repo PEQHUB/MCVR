@@ -2293,7 +2293,7 @@ void RayTracingModule::initDescriptorTables() {
                 .defineDescriptorLayoutSetBinding({
                     .binding = 3, // block sprite albedo sampler2DArray
                     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    .descriptorCount = 1,
+                    .descriptorCount = vk::Data::MATERIAL_TEXTURE_PAGE_MAX,
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
@@ -2301,7 +2301,7 @@ void RayTracingModule::initDescriptorTables() {
                 .defineDescriptorLayoutSetBinding({
                     .binding = 4, // block sprite specular sampler2DArray
                     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    .descriptorCount = 1,
+                    .descriptorCount = vk::Data::MATERIAL_TEXTURE_PAGE_MAX,
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
@@ -2309,7 +2309,7 @@ void RayTracingModule::initDescriptorTables() {
                 .defineDescriptorLayoutSetBinding({
                     .binding = 5, // block sprite normal sampler2DArray
                     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    .descriptorCount = 1,
+                    .descriptorCount = vk::Data::MATERIAL_TEXTURE_PAGE_MAX,
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
@@ -2317,7 +2317,7 @@ void RayTracingModule::initDescriptorTables() {
                 .defineDescriptorLayoutSetBinding({
                     .binding = 6, // block sprite LabPBR flag sampler2DArray
                     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    .descriptorCount = 1,
+                    .descriptorCount = vk::Data::MATERIAL_TEXTURE_PAGE_MAX,
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
@@ -3898,20 +3898,28 @@ void RayTracingModuleContext::render() {
     auto bindBlockTextureArrays = [&](const std::shared_ptr<vk::DescriptorTable>& table) {
         if (!table) return;
         if (hasAlbedo) {
-            table->bindSamplerImage(albedoInfo.sampler, albedoInfo.image,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 3, 0);
+            for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+                table->bindSamplerImage(albedoInfo.sampler, albedoInfo.image,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 3, page);
+            }
         }
         if (hasSpec) {
-            table->bindSamplerImage(specInfo.sampler, specInfo.image,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 4, 0);
+            for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+                table->bindSamplerImage(specInfo.sampler, specInfo.image,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 4, page);
+            }
         }
         if (hasNorm) {
-            table->bindSamplerImage(normInfo.sampler, normInfo.image,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 5, 0);
+            for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+                table->bindSamplerImage(normInfo.sampler, normInfo.image,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 5, page);
+            }
         }
         if (hasFlag) {
-            table->bindSamplerImage(flagInfo.sampler, flagInfo.image,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 6, 0);
+            for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+                table->bindSamplerImage(flagInfo.sampler, flagInfo.image,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 6, page);
+            }
         }
     };
     auto bindSpriteRegistry = [&](const std::shared_ptr<vk::DescriptorTable>& table) {

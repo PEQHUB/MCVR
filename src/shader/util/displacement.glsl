@@ -152,6 +152,9 @@ int displacementHeightRangePacked(uint materialId) {
     return se.maskLayer;
 }
 
+ivec3 displacementNormalTextureSize(uint materialId, int lodLevel);
+int displacementNormalMipCount(uint materialId);
+
 bool displacementBlockHasAuthoredHeight(uint materialId) {
     MaterialEntry material = safeMaterialEntry(materialId);
     if ((material.flags & MATERIAL_FLAG_DISPLACEMENT_ELIGIBLE) == 0u) return false;
@@ -169,7 +172,7 @@ bool displacementBlockHasAuthoredHeight(uint materialId) {
         return false;
     }
 
-    ivec3 normalSize = textureSize(blockNormal, 0);
+    ivec3 normalSize = displacementNormalTextureSize(materialId, 0);
     return normalSize.x > 0 && normalSize.y > 0 && normalLayer < normalSize.z;
 }
 
@@ -182,7 +185,7 @@ bool displacementSourceValid(DisplacementSource src) {
 
 ivec2 displacementTextureSize(DisplacementSource src) {
     if (!displacementSourceValid(src)) return ivec2(0);
-    return max(textureSize(blockNormal, 0).xy, ivec2(1));
+    return max(displacementNormalTextureSize(src.textureID, 0).xy, ivec2(1));
 }
 
 ivec2 displacementWrapTexel(ivec2 p, ivec2 size) {
@@ -198,47 +201,55 @@ vec2 displacementSampleUv(DisplacementSource src, vec2 uv) {
     return materialRuleUv(src.textureID, fract(displacementUvToUnit(src, uv)));
 }
 
-int displacementNormalMipCount() {
-    return max(textureQueryLevels(blockNormal), 1);
+ivec3 displacementNormalTextureSize(uint materialId, int lodLevel) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    return textureSize(blockNormal[nonuniformEXT(materialTexturePage(material.normalPage))], lodLevel);
+}
+
+int displacementNormalMipCount(uint materialId) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    return max(textureQueryLevels(blockNormal[nonuniformEXT(materialTexturePage(material.normalPage))]), 1);
 }
 
 float displacementClampedRuleLod(uint spriteId, float lod) {
-    int mipCount = displacementNormalMipCount();
+    int mipCount = displacementNormalMipCount(spriteId);
     float maxMip = float(max(mipCount - 1, 0));
     return clamp(materialRuleLod(spriteId, lod), 0.0, maxMip);
 }
 
-float displacementFetchNormalAlpha(int layer, ivec2 texel, int lodLevel) {
-    int level = clamp(lodLevel, 0, displacementNormalMipCount() - 1);
-    ivec3 dims = textureSize(blockNormal, level);
+float displacementFetchNormalAlpha(uint materialId, int layer, ivec2 texel, int lodLevel) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    int level = clamp(lodLevel, 0, displacementNormalMipCount(materialId) - 1);
+    ivec3 dims = displacementNormalTextureSize(materialId, level);
     ivec2 size = max(dims.xy, ivec2(1));
     ivec2 p = displacementWrapTexel(texel, size);
-    return clamp(texelFetch(blockNormal, ivec3(p, layer), level).a, 0.0, 1.0);
+    return clamp(texelFetch(blockNormal[nonuniformEXT(materialTexturePage(material.normalPage))],
+        ivec3(p, layer), level).a, 0.0, 1.0);
 }
 
-float displacementSampleNormalAlphaBilinear(int layer, vec2 uv, int lodLevel) {
-    int level = clamp(lodLevel, 0, displacementNormalMipCount() - 1);
-    ivec2 size = max(textureSize(blockNormal, level).xy, ivec2(1));
+float displacementSampleNormalAlphaBilinear(uint materialId, int layer, vec2 uv, int lodLevel) {
+    int level = clamp(lodLevel, 0, displacementNormalMipCount(materialId) - 1);
+    ivec2 size = max(displacementNormalTextureSize(materialId, level).xy, ivec2(1));
     vec2 texel = fract(uv) * vec2(size) - vec2(0.5);
     ivec2 p0 = ivec2(floor(texel));
     vec2 f = fract(texel);
 
-    float a00 = displacementFetchNormalAlpha(layer, p0, level);
-    float a10 = displacementFetchNormalAlpha(layer, p0 + ivec2(1, 0), level);
-    float a01 = displacementFetchNormalAlpha(layer, p0 + ivec2(0, 1), level);
-    float a11 = displacementFetchNormalAlpha(layer, p0 + ivec2(1, 1), level);
+    float a00 = displacementFetchNormalAlpha(materialId, layer, p0, level);
+    float a10 = displacementFetchNormalAlpha(materialId, layer, p0 + ivec2(1, 0), level);
+    float a01 = displacementFetchNormalAlpha(materialId, layer, p0 + ivec2(0, 1), level);
+    float a11 = displacementFetchNormalAlpha(materialId, layer, p0 + ivec2(1, 1), level);
 
     float ax0 = mix(a00, a10, f.x);
     float ax1 = mix(a01, a11, f.x);
     return mix(ax0, ax1, f.y);
 }
 
-float displacementSampleNormalAlphaTrilinear(int layer, vec2 uv, float lod) {
-    float clampedLod = clamp(lod, 0.0, float(max(displacementNormalMipCount() - 1, 0)));
+float displacementSampleNormalAlphaTrilinear(uint materialId, int layer, vec2 uv, float lod) {
+    float clampedLod = clamp(lod, 0.0, float(max(displacementNormalMipCount(materialId) - 1, 0)));
     int level0 = int(floor(clampedLod));
-    int level1 = min(level0 + 1, displacementNormalMipCount() - 1);
-    float alpha0 = displacementSampleNormalAlphaBilinear(layer, uv, level0);
-    float alpha1 = displacementSampleNormalAlphaBilinear(layer, uv, level1);
+    int level1 = min(level0 + 1, displacementNormalMipCount(materialId) - 1);
+    float alpha0 = displacementSampleNormalAlphaBilinear(materialId, layer, uv, level0);
+    float alpha1 = displacementSampleNormalAlphaBilinear(materialId, layer, uv, level1);
     return mix(alpha0, alpha1, clampedLod - float(level0));
 }
 
@@ -249,7 +260,7 @@ float displacementSampleHeight01(DisplacementSource src, vec2 uv, float lod) {
     if (normalLayer < 0) return 1.0;
     vec2 sampleUv = displacementSampleUv(src, uv);
     float sampleLod = displacementClampedRuleLod(src.textureID, lod);
-    return displacementSampleNormalAlphaTrilinear(normalLayer, sampleUv, sampleLod);
+    return displacementSampleNormalAlphaTrilinear(src.textureID, normalLayer, sampleUv, sampleLod);
 }
 
 float displacementSampleDepthAt(DisplacementSource src, vec2 uv, float lod) {
