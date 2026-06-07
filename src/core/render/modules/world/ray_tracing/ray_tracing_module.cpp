@@ -2400,6 +2400,13 @@ void RayTracingModule::initDescriptorTables() {
                     .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
                                   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                                   VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
+                })                .defineDescriptorLayoutSetBinding({
+                    .binding = 14, // binding 14: MaterialRegistry SSBO (global material id indirection)
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .descriptorCount = 1,
+                    .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                                  VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
+                                  VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
                 })
                 .endDescriptorLayoutSetBinding()
                 .endDescriptorLayoutSet()
@@ -3805,6 +3812,11 @@ void RayTracingModuleContext::render() {
     if (spriteRegBuffer) {
         bufferBindings.push_back({spriteRegBuffer, 1, 13});
     }
+    auto materialRegBuffer = Renderer::textureSystem.materials().getBuffer();
+    const VkBuffer materialRegistryBuffer = materialRegBuffer ? materialRegBuffer->vkBuffer() : VK_NULL_HANDLE;
+    if (materialRegBuffer) {
+        bufferBindings.push_back({materialRegBuffer, 1, 14});
+    }
     auto textureRuleBuffer = Renderer::textureSystem.textureRules().getBuffer();
     const VkBuffer textureRuleVkBuffer = textureRuleBuffer ? textureRuleBuffer->vkBuffer() : VK_NULL_HANDLE;
     if (textureRuleBuffer) {
@@ -3871,10 +3883,11 @@ void RayTracingModuleContext::render() {
     const VkImageView flagView = hasFlag ? flagInfo.image->vkImageView() : VK_NULL_HANDLE;
 
     if (!texSystem.isFinalized() || !hasAlbedo || !hasSpec || !hasNorm || !hasFlag ||
-        !spriteRegBuffer || !textureRuleBuffer) {
-        renderDiag("RT descriptors missing texture resources finalized=%d albedo=%d spec=%d norm=%d flag=%d spriteReg=%d rules=%d; skipping RT",
+        !spriteRegBuffer || !materialRegBuffer || !textureRuleBuffer) {
+        renderDiag("RT descriptors missing texture resources finalized=%d albedo=%d spec=%d norm=%d flag=%d spriteReg=%d materialReg=%d rules=%d; skipping RT",
                    texSystem.isFinalized() ? 1 : 0, hasAlbedo ? 1 : 0, hasSpec ? 1 : 0,
                    hasNorm ? 1 : 0, hasFlag ? 1 : 0, spriteRegBuffer ? 1 : 0,
+                   materialRegBuffer ? 1 : 0,
                    textureRuleBuffer ? 1 : 0);
         g_crashRing.record("RT:descriptors_missing_textures");
         textureProfile.close();
@@ -3905,6 +3918,10 @@ void RayTracingModuleContext::render() {
         if (!table || !spriteRegBuffer) return;
         table->bindBuffer(spriteRegBuffer, 1, 13);
     };
+    auto bindMaterialRegistry = [&](const std::shared_ptr<vk::DescriptorTable>& table) {
+        if (!table || !materialRegBuffer) return;
+        table->bindBuffer(materialRegBuffer, 1, 14);
+    };
     auto bindTextureRules = [&](const std::shared_ptr<vk::DescriptorTable>& table) {
         if (!table || !textureRuleBuffer) return;
         table->bindBuffer(textureRuleBuffer, 1, 11);
@@ -3922,18 +3939,20 @@ void RayTracingModuleContext::render() {
         normView != descriptorSlotState.normalTextureView ||
         flagView != descriptorSlotState.flagTextureView ||
         spriteRegistryBuffer != descriptorSlotState.spriteRegistryBuffer ||
+        materialRegistryBuffer != descriptorSlotState.materialRegistryBuffer ||
         textureRuleVkBuffer != descriptorSlotState.textureRuleBuffer;
 
     if (textureDescriptorGenerationChanged) {
         bindBlockTextureArrays(rayTracingDescriptorTable);
         bindSpriteRegistry(rayTracingDescriptorTable);
+        bindMaterialRegistry(rayTracingDescriptorTable);
         bindTextureRules(rayTracingDescriptorTable);
         RadianceLogger::log(
             "TextureDescriptors", "INFO",
             "refresh-slot gen=%llu frame=%u albedoId=%u image=0x%llx view=0x%llx sampler=0x%llx "
             "specId=%u image=0x%llx view=0x%llx sampler=0x%llx normId=%u image=0x%llx view=0x%llx sampler=0x%llx "
             "flagId=%u image=0x%llx view=0x%llx sampler=0x%llx "
-            "spriteRegistry=0x%llx",
+            "spriteRegistry=0x%llx materialRegistry=0x%llx",
             static_cast<unsigned long long>(textureGeneration),
             context->frameIndex,
             texSystem.blockAlbedoArrayId(),
@@ -3952,16 +3971,19 @@ void RayTracingModuleContext::render() {
             hasFlag ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(flagInfo.image->vkImage())) : 0ull,
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(flagView)),
             hasFlag ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(flagInfo.sampler->vkSamper())) : 0ull,
-            static_cast<unsigned long long>(vk::DebugUtils::objectHandle(spriteRegistryBuffer)));
+            static_cast<unsigned long long>(vk::DebugUtils::objectHandle(spriteRegistryBuffer)),
+            static_cast<unsigned long long>(vk::DebugUtils::objectHandle(materialRegistryBuffer)));
         descriptorSlotState.generation = textureGeneration;
         descriptorSlotState.albedoTextureView = albedoView;
         descriptorSlotState.specularTextureView = specView;
         descriptorSlotState.normalTextureView = normView;
         descriptorSlotState.flagTextureView = flagView;
         descriptorSlotState.spriteRegistryBuffer = spriteRegistryBuffer;
+        descriptorSlotState.materialRegistryBuffer = materialRegistryBuffer;
         descriptorSlotState.textureRuleBuffer = textureRuleVkBuffer;
     } else {
         bindBlockTextureArrays(rayTracingDescriptorTable);
+        bindMaterialRegistry(rayTracingDescriptorTable);
         bindTextureRules(rayTracingDescriptorTable);
     }
     textureProfile.close();

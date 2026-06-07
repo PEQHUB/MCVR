@@ -17,6 +17,8 @@ layout(std430, set = 1, binding = 13) readonly buffer SpriteRegistryBuffer {
     SpriteEntry spriteEntries[];
 };
 
+#include "material_fetch.glsl"
+
 // --- Texture Arrays ---
 
 layout(set = 0, binding = 3) uniform sampler2DArray blockAlbedo;
@@ -29,7 +31,8 @@ layout(std430, set = 1, binding = 11) readonly buffer TextureRuleRegistryBuffer 
     TextureRuleEntry textureRuleEntries[];
 };
 
-TextureRuleEntry safeTextureRuleEntry(uint spriteId) {
+TextureRuleEntry safeTextureRuleEntry(uint materialId) {
+    uint spriteId = materialRuleSpriteId(materialId);
     return textureRuleEntries[min(spriteId, SPRITE_MAX_ENTRIES - 1u)];
 }
 #endif
@@ -38,6 +41,10 @@ TextureRuleEntry safeTextureRuleEntry(uint spriteId) {
 
 SpriteEntry safeSpriteEntry(uint spriteId) {
     return spriteEntries[min(spriteId, SPRITE_MAX_ENTRIES - 1u)];
+}
+
+SpriteEntry safeMaterialSpriteEntry(uint materialId) {
+    return safeSpriteEntry(materialBaseSpriteId(materialId));
 }
 
 // Compute the current animation layer for a sprite.
@@ -57,37 +64,63 @@ bool spriteLayerInRange(int layer, ivec3 textureDims) {
            textureDims.z > 0 && layer < textureDims.z;
 }
 
-bool spriteAlbedoLayerInRange(SpriteEntry se, uint animTick, out uint layer) {
-    layer = spriteAnimLayer(se, animTick);
+bool materialAlbedoLayerInRange(uint materialId, SpriteEntry se, uint animTick, out uint layer) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    bool useSpriteArray = materialUsesSpriteArray(material) || material.albedoLayer < 0;
+    layer = useSpriteArray ? spriteAnimLayer(se, animTick) : uint(material.albedoLayer);
     return spriteLayerInRange(layer, textureSize(blockAlbedo, 0));
 }
 
-bool spriteSpecularLayerInRange(SpriteEntry se) {
-    if (se.specularLayer < 0) return false;
-    return spriteLayerInRange(se.specularLayer, textureSize(blockSpecular, 0));
+int materialSpecularLayer(uint materialId, SpriteEntry se) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    return material.specularLayer >= 0 ? material.specularLayer : se.specularLayer;
 }
 
-bool spriteNormalLayerInRange(SpriteEntry se) {
-    if (se.normalLayer < 0) return false;
-    return spriteLayerInRange(se.normalLayer, textureSize(blockNormal, 0));
+bool materialSpecularLayerInRange(uint materialId, SpriteEntry se, out int layer) {
+    layer = materialSpecularLayer(materialId, se);
+    return layer >= 0 && spriteLayerInRange(layer, textureSize(blockSpecular, 0));
 }
 
-bool spriteFlagLayerInRange(uint spriteId) {
-    return spriteLayerInRange(spriteId, textureSize(blockFlag, 0));
+int materialNormalLayer(uint materialId, SpriteEntry se) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    return material.normalLayer >= 0 ? material.normalLayer : se.normalLayer;
 }
 
-vec2 materialRuleUv(uint spriteId, vec2 uv) {
-    TextureRuleEntry rule = safeTextureRuleEntry(spriteId);
+bool materialNormalLayerInRange(uint materialId, SpriteEntry se, out int layer) {
+    layer = materialNormalLayer(materialId, se);
+    return layer >= 0 && spriteLayerInRange(layer, textureSize(blockNormal, 0));
+}
+
+int materialFlagLayer(uint materialId) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    if (material.flagLayer >= 0) return material.flagLayer;
+    return int(materialBaseSpriteId(materialId));
+}
+
+bool materialFlagLayerInRange(uint materialId, out int layer) {
+    layer = materialFlagLayer(materialId);
+    return layer >= 0 && spriteLayerInRange(layer, textureSize(blockFlag, 0));
+}
+
+vec2 materialRegistryUv(uint materialId, vec2 uv) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    vec2 scale = clamp(vec2(material.uvScaleU, material.uvScaleV), vec2(0.01), vec2(16.0));
+    return fract(uv * scale + vec2(material.uvOffsetU, material.uvOffsetV));
+}
+
+vec2 materialRuleUv(uint materialId, vec2 uv) {
+    TextureRuleEntry rule = safeTextureRuleEntry(materialId);
+    vec2 materialUv = materialRegistryUv(materialId, uv);
     if ((rule.flags & TEXTURE_RULE_ENABLED) == 0u ||
         (rule.flags & TEXTURE_RULE_UV_TRANSFORM) == 0u) {
-        return uv;
+        return materialUv;
     }
     vec2 scale = clamp(vec2(rule.uvScaleU, rule.uvScaleV), vec2(0.01), vec2(16.0));
-    return fract(uv * scale + vec2(rule.uvOffsetU, rule.uvOffsetV));
+    return fract(materialUv * scale + vec2(rule.uvOffsetU, rule.uvOffsetV));
 }
 
-float materialRuleLod(uint spriteId, float lod) {
-    TextureRuleEntry rule = safeTextureRuleEntry(spriteId);
+float materialRuleLod(uint materialId, float lod) {
+    TextureRuleEntry rule = safeTextureRuleEntry(materialId);
     if ((rule.flags & TEXTURE_RULE_ENABLED) == 0u) {
         return lod;
     }
@@ -102,50 +135,55 @@ float materialRuleLod(uint spriteId, float lod) {
 }
 
 // Sample block albedo texture from the sprite array.
-vec4 fetchBlockAlbedoTex(uint spriteId, vec2 uv, uint animTick) {
-    SpriteEntry se = safeSpriteEntry(spriteId);
+vec4 fetchBlockAlbedoTex(uint materialId, vec2 uv, uint animTick) {
+    SpriteEntry se = safeMaterialSpriteEntry(materialId);
     uint layer;
-    if (!spriteAlbedoLayerInRange(se, animTick, layer)) return vec4(1.0);
-    return texture(blockAlbedo, vec3(materialRuleUv(spriteId, uv), float(layer)));
+    if (!materialAlbedoLayerInRange(materialId, se, animTick, layer)) return vec4(1.0);
+    return texture(blockAlbedo, vec3(materialRuleUv(materialId, uv), float(layer)));
 }
 
 // Sample block albedo with explicit LOD.
-vec4 fetchBlockAlbedoLod(uint spriteId, vec2 uv, uint animTick, float lod) {
-    SpriteEntry se = safeSpriteEntry(spriteId);
+vec4 fetchBlockAlbedoLod(uint materialId, vec2 uv, uint animTick, float lod) {
+    SpriteEntry se = safeMaterialSpriteEntry(materialId);
     uint layer;
-    if (!spriteAlbedoLayerInRange(se, animTick, layer)) return vec4(1.0);
-    return textureLod(blockAlbedo, vec3(materialRuleUv(spriteId, uv), float(layer)), materialRuleLod(spriteId, lod));
+    if (!materialAlbedoLayerInRange(materialId, se, animTick, layer)) return vec4(1.0);
+    return textureLod(blockAlbedo, vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
 }
 
 // Sample block specular from the specular array (static, not animated).
-vec4 fetchBlockSpecularTex(uint spriteId, vec2 uv) {
-    SpriteEntry se = safeSpriteEntry(spriteId);
-    if (!spriteSpecularLayerInRange(se)) return vec4(0.0);
-    return texture(blockSpecular, vec3(materialRuleUv(spriteId, uv), float(se.specularLayer)));
+vec4 fetchBlockSpecularTex(uint materialId, vec2 uv) {
+    SpriteEntry se = safeMaterialSpriteEntry(materialId);
+    int layer;
+    if (!materialSpecularLayerInRange(materialId, se, layer)) return vec4(0.0);
+    return texture(blockSpecular, vec3(materialRuleUv(materialId, uv), float(layer)));
 }
 
-vec4 fetchBlockSpecularLod(uint spriteId, vec2 uv, float lod) {
-    SpriteEntry se = safeSpriteEntry(spriteId);
-    if (!spriteSpecularLayerInRange(se)) return vec4(0.0);
-    return textureLod(blockSpecular, vec3(materialRuleUv(spriteId, uv), float(se.specularLayer)), materialRuleLod(spriteId, lod));
+vec4 fetchBlockSpecularLod(uint materialId, vec2 uv, float lod) {
+    SpriteEntry se = safeMaterialSpriteEntry(materialId);
+    int layer;
+    if (!materialSpecularLayerInRange(materialId, se, layer)) return vec4(0.0);
+    return textureLod(blockSpecular, vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
 }
 
 // Sample block normal from the normal array (static, not animated).
-vec4 fetchBlockNormalTex(uint spriteId, vec2 uv) {
-    SpriteEntry se = safeSpriteEntry(spriteId);
-    if (!spriteNormalLayerInRange(se)) return vec4(0.5, 0.5, 1.0, 1.0); // flat normal
-    return texture(blockNormal, vec3(materialRuleUv(spriteId, uv), float(se.normalLayer)));
+vec4 fetchBlockNormalTex(uint materialId, vec2 uv) {
+    SpriteEntry se = safeMaterialSpriteEntry(materialId);
+    int layer;
+    if (!materialNormalLayerInRange(materialId, se, layer)) return vec4(0.5, 0.5, 1.0, 1.0); // flat normal
+    return texture(blockNormal, vec3(materialRuleUv(materialId, uv), float(layer)));
 }
 
-vec4 fetchBlockNormalLod(uint spriteId, vec2 uv, float lod) {
-    SpriteEntry se = safeSpriteEntry(spriteId);
-    if (!spriteNormalLayerInRange(se)) return vec4(0.5, 0.5, 1.0, 1.0);
-    return textureLod(blockNormal, vec3(materialRuleUv(spriteId, uv), float(se.normalLayer)), materialRuleLod(spriteId, lod));
+vec4 fetchBlockNormalLod(uint materialId, vec2 uv, float lod) {
+    SpriteEntry se = safeMaterialSpriteEntry(materialId);
+    int layer;
+    if (!materialNormalLayerInRange(materialId, se, layer)) return vec4(0.5, 0.5, 1.0, 1.0);
+    return textureLod(blockNormal, vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
 }
 
-ivec4 fetchBlockFlagLod(uint spriteId, vec2 uv, float lod) {
-    if (!spriteFlagLayerInRange(spriteId)) return ivec4(0);
-    vec4 flagValue = textureLod(blockFlag, vec3(materialRuleUv(spriteId, uv), float(spriteId)), materialRuleLod(spriteId, lod));
+ivec4 fetchBlockFlagLod(uint materialId, vec2 uv, float lod) {
+    int layer;
+    if (!materialFlagLayerInRange(materialId, layer)) return ivec4(0);
+    vec4 flagValue = textureLod(blockFlag, vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
     return ivec4(round(flagValue * 255.0));
 }
 
@@ -163,7 +201,7 @@ struct BlockOverlayMaterial {
     ivec4 flags;
 };
 
-BlockOverlayMaterial fetchBlockOverlayMaterialLod(uint spriteId, vec2 uv, uint animTick, float lod) {
+BlockOverlayMaterial fetchBlockOverlayMaterialLod(uint materialId, vec2 uv, uint animTick, float lod) {
     BlockOverlayMaterial overlay;
     overlay.present = false;
     overlay.hasSpecular = false;
@@ -171,39 +209,44 @@ BlockOverlayMaterial fetchBlockOverlayMaterialLod(uint spriteId, vec2 uv, uint a
     overlay.hasFlags = false;
     overlay.emissiveOverlay = false;
     overlay.alpha = 0.0;
-    overlay.spriteId = spriteId;
+    overlay.spriteId = materialId;
     overlay.albedo = vec4(0.0);
     overlay.specular = vec4(0.0);
     overlay.normal = vec4(0.5, 0.5, 1.0, 1.0);
     overlay.flags = ivec4(0);
 
-    SpriteEntry se = safeSpriteEntry(spriteId);
-    if (se.overlaySprite < 0) return overlay;
+    MaterialEntry material = safeMaterialEntry(materialId);
+    SpriteEntry se = safeMaterialSpriteEntry(materialId);
+    int overlayMaterial = material.overlayMaterialId >= 0 ? material.overlayMaterialId : se.overlaySprite;
+    if (overlayMaterial < 0) return overlay;
 
-    uint overlaySpriteId = uint(se.overlaySprite);
-    SpriteEntry overlaySe = safeSpriteEntry(overlaySpriteId);
+    uint overlayMaterialId = uint(overlayMaterial);
+    SpriteEntry overlaySe = safeMaterialSpriteEntry(overlayMaterialId);
     uint layer;
-    if (!spriteAlbedoLayerInRange(overlaySe, animTick, layer)) return overlay;
+    if (!materialAlbedoLayerInRange(overlayMaterialId, overlaySe, animTick, layer)) return overlay;
 
     overlay.present = true;
-    overlay.spriteId = overlaySpriteId;
-    overlay.albedo = fetchBlockAlbedoLod(overlaySpriteId, uv, animTick, lod);
+    overlay.spriteId = overlayMaterialId;
+    overlay.albedo = fetchBlockAlbedoLod(overlayMaterialId, uv, animTick, lod);
     overlay.alpha = clamp(overlay.albedo.a, 0.0, 1.0);
     overlay.emissiveOverlay = (overlaySe.flags & SPRITE_FLAG_EMISSIVE_OVERLAY) != 0u;
 
-    overlay.hasSpecular = spriteSpecularLayerInRange(overlaySe);
+    int specularLayer;
+    overlay.hasSpecular = materialSpecularLayerInRange(overlayMaterialId, overlaySe, specularLayer);
     if (overlay.hasSpecular) {
-        overlay.specular = fetchBlockSpecularLod(overlaySpriteId, uv, lod);
+        overlay.specular = fetchBlockSpecularLod(overlayMaterialId, uv, lod);
     }
 
-    overlay.hasNormal = spriteNormalLayerInRange(overlaySe);
+    int normalLayer;
+    overlay.hasNormal = materialNormalLayerInRange(overlayMaterialId, overlaySe, normalLayer);
     if (overlay.hasNormal) {
-        overlay.normal = fetchBlockNormalLod(overlaySpriteId, uv, lod);
+        overlay.normal = fetchBlockNormalLod(overlayMaterialId, uv, lod);
     }
 
-    overlay.hasFlags = spriteFlagLayerInRange(overlaySpriteId);
+    int flagLayer;
+    overlay.hasFlags = materialFlagLayerInRange(overlayMaterialId, flagLayer);
     if (overlay.hasFlags) {
-        overlay.flags = fetchBlockFlagLod(overlaySpriteId, uv, lod);
+        overlay.flags = fetchBlockFlagLod(overlayMaterialId, uv, lod);
     }
 
     return overlay;
@@ -213,14 +256,14 @@ bool applyBlockOverlayMaterialLod(inout vec4 albedoValue,
                                   inout vec4 specularValue,
                                   inout vec4 normalValue,
                                   inout ivec4 flagValue,
-                                  uint spriteId,
+                                  uint materialId,
                                   vec2 uv,
                                   uint animTick,
                                   float lod,
                                   vec3 overlayTint,
                                   out uint materialRuleSpriteId) {
-    materialRuleSpriteId = spriteId;
-    BlockOverlayMaterial overlay = fetchBlockOverlayMaterialLod(spriteId, uv, animTick, lod);
+    materialRuleSpriteId = materialId;
+    BlockOverlayMaterial overlay = fetchBlockOverlayMaterialLod(materialId, uv, animTick, lod);
     if (!overlay.present || overlay.alpha <= 0.0) return false;
 
     float a = overlay.alpha;

@@ -127,18 +127,18 @@ void main() {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
 
         if (isBlockGeometry) {
-            // === BLOCK GEOMETRY: texture array sampling via SpriteRegistry ===
-            uint spriteId = textureID;
+            // === BLOCK GEOMETRY: material-id sampling via MaterialRegistry ===
+            uint materialId = textureID;
 
             float lod = 0;
-            albedoValue = fetchBlockAlbedoLod(spriteId, textureUV, worldUbo.animTick, lod);
-            specularValue = fetchBlockSpecularLod(spriteId, textureUV, lod);
-            normalValue = fetchBlockNormalLod(spriteId, textureUV, lod);
-            flagValue = fetchBlockFlagLod(spriteId, textureUV, lod);
+            albedoValue = fetchBlockAlbedoLod(materialId, textureUV, worldUbo.animTick, lod);
+            specularValue = fetchBlockSpecularLod(materialId, textureUV, lod);
+            normalValue = fetchBlockNormalLod(materialId, textureUV, lod);
+            flagValue = fetchBlockFlagLod(materialId, textureUV, lod);
             if (foldBlockOverlay) {
                 blockOverlayComposited = applyBlockOverlayMaterialLod(
                     albedoValue, specularValue, normalValue, flagValue,
-                    spriteId, textureUV, worldUbo.animTick, lod, colorLayer,
+                    materialId, textureUV, worldUbo.animTick, lod, colorLayer,
                     materialRuleTextureID);
             }
         } else {

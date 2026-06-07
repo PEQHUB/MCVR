@@ -510,6 +510,31 @@ namespace Data {
         T_FLOAT reserved2;
     };
 
+    // Global material-id table. PBRTriangle.textureID carries this material id
+    // for block geometry; the first backend wraps current sprite-array layers.
+    struct MaterialEntry {
+        T_UINT materialId;
+        T_INT  baseSpriteId;
+        T_INT  fallbackMaterialId;
+        T_UINT flags;
+        T_UINT albedoPage;
+        T_INT  albedoLayer;
+        T_UINT specularPage;
+        T_INT  specularLayer;
+        T_UINT normalPage;
+        T_INT  normalLayer;
+        T_UINT flagPage;
+        T_INT  flagLayer;
+        T_INT  overlayMaterialId;
+        T_UINT displacementPolicy;
+        T_FLOAT displacementScale;
+        T_INT  heightRangePacked;
+        T_FLOAT uvScaleU;
+        T_FLOAT uvScaleV;
+        T_FLOAT uvOffsetU;
+        T_FLOAT uvOffsetV;
+    };
+
 #ifdef __cplusplus
     static constexpr uint32_t SPRITE_FLAG_HAS_SPECULAR = 1u << 0;
     static constexpr uint32_t SPRITE_FLAG_HAS_NORMAL   = 1u << 1;
@@ -525,6 +550,20 @@ namespace Data {
     static constexpr uint32_t SPRITE_SOURCE_USER_CUSTOM = 2u;
     static constexpr uint32_t SPRITE_SOURCE_FLAT = 3u;
     static constexpr uint32_t SPRITE_MAX_ENTRIES        = 4096u;
+    static constexpr uint32_t MATERIAL_MAX_ENTRIES      = 65536u;
+    static constexpr uint32_t MATERIAL_FLAG_VALID = 1u << 0;
+    static constexpr uint32_t MATERIAL_FLAG_VANILLA_SPRITE = 1u << 1;
+    static constexpr uint32_t MATERIAL_FLAG_COMPAT_VIRTUAL = 1u << 2;
+    static constexpr uint32_t MATERIAL_FLAG_GPU_RESIDENT = 1u << 3;
+    static constexpr uint32_t MATERIAL_FLAG_PENDING_RESIDENCY = 1u << 4;
+    static constexpr uint32_t MATERIAL_FLAG_FALLBACK = 1u << 5;
+    static constexpr uint32_t MATERIAL_FLAG_HAS_SPECULAR = 1u << 6;
+    static constexpr uint32_t MATERIAL_FLAG_HAS_NORMAL = 1u << 7;
+    static constexpr uint32_t MATERIAL_FLAG_DISPLACEMENT_ELIGIBLE = 1u << 8;
+    static constexpr uint32_t MATERIAL_FLAG_CUTOUT_DISPLACEMENT_BLOCKED = 1u << 9;
+    static constexpr uint32_t MATERIAL_DISPLACEMENT_DISABLED = 0u;
+    static constexpr uint32_t MATERIAL_DISPLACEMENT_AUTHORED_HEIGHT = 1u;
+    static constexpr uint32_t MATERIAL_DISPLACEMENT_BLOCKED_CUTOUT = 2u;
     static_assert(sizeof(SpriteEntry) == 32, "SpriteEntry must be exactly 32 bytes");
     static constexpr uint32_t TEXTURE_RULE_ENABLED = 1u << 0;
     static constexpr uint32_t TEXTURE_RULE_TRANSMISSION = 1u << 1;
@@ -558,6 +597,7 @@ namespace Data {
     static constexpr uint32_t TEXTURE_RULE_DIFFUSE_VMF = 2u;
     static constexpr uint32_t TEXTURE_RULE_DIFFUSE_LEGACY = 3u;
     static_assert(sizeof(TextureRuleEntry) == 192, "TextureRuleEntry must be exactly 192 bytes");
+    static_assert(sizeof(MaterialEntry) == 80, "MaterialEntry must be exactly 80 bytes");
 #else
     #define SPRITE_FLAG_HAS_SPECULAR (1u << 0)
     #define SPRITE_FLAG_HAS_NORMAL   (1u << 1)
@@ -573,6 +613,20 @@ namespace Data {
     #define SPRITE_SOURCE_USER_CUSTOM 2u
     #define SPRITE_SOURCE_FLAT 3u
     #define SPRITE_MAX_ENTRIES       4096u
+    #define MATERIAL_MAX_ENTRIES     65536u
+    #define MATERIAL_FLAG_VALID (1u << 0)
+    #define MATERIAL_FLAG_VANILLA_SPRITE (1u << 1)
+    #define MATERIAL_FLAG_COMPAT_VIRTUAL (1u << 2)
+    #define MATERIAL_FLAG_GPU_RESIDENT (1u << 3)
+    #define MATERIAL_FLAG_PENDING_RESIDENCY (1u << 4)
+    #define MATERIAL_FLAG_FALLBACK (1u << 5)
+    #define MATERIAL_FLAG_HAS_SPECULAR (1u << 6)
+    #define MATERIAL_FLAG_HAS_NORMAL (1u << 7)
+    #define MATERIAL_FLAG_DISPLACEMENT_ELIGIBLE (1u << 8)
+    #define MATERIAL_FLAG_CUTOUT_DISPLACEMENT_BLOCKED (1u << 9)
+    #define MATERIAL_DISPLACEMENT_DISABLED 0u
+    #define MATERIAL_DISPLACEMENT_AUTHORED_HEIGHT 1u
+    #define MATERIAL_DISPLACEMENT_BLOCKED_CUTOUT 2u
     #define TEXTURE_RULE_ENABLED (1u << 0)
     #define TEXTURE_RULE_TRANSMISSION (1u << 1)
     #define TEXTURE_RULE_IOR (1u << 2)
@@ -612,6 +666,10 @@ namespace Data {
 
     struct TextureRuleRegistry {
         TextureRuleEntry entries[SPRITE_MAX_ENTRIES];
+    };
+
+    struct MaterialRegistry {
+        MaterialEntry entries[MATERIAL_MAX_ENTRIES];
     };
 
     struct ExposureData {

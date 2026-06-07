@@ -230,6 +230,7 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
         VkImageView normalTextureView = VK_NULL_HANDLE;
         VkImageView flagTextureView = VK_NULL_HANDLE;
         VkBuffer spriteRegistryBuffer = VK_NULL_HANDLE;
+        VkBuffer materialRegistryBuffer = VK_NULL_HANDLE;
         VkBuffer textureRuleBuffer = VK_NULL_HANDLE;
     };
     std::vector<TextureDescriptorSlotState> textureDescriptorSlotStates_;

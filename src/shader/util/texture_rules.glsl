@@ -5,23 +5,26 @@
 #define TEXTURE_RULE_MODE_THICKNESS_MASK (0x3u << 2u)
 #define TEXTURE_RULE_MODE_COAT_MASK (0x3u << 4u)
 
+#include "material_fetch.glsl"
+
 layout(std430, set = 1, binding = 11) readonly buffer TextureRuleRegistryBuffer {
     TextureRuleEntry textureRuleEntries[];
 };
 
-TextureRuleEntry safeTextureRuleEntry(uint spriteId) {
+TextureRuleEntry safeTextureRuleEntry(uint materialId) {
+    uint spriteId = materialRuleSpriteId(materialId);
     return textureRuleEntries[min(spriteId, SPRITE_MAX_ENTRIES - 1u)];
 }
 
-bool textureRuleHasTransmission(uint spriteId) {
-    TextureRuleEntry rule = safeTextureRuleEntry(spriteId);
+bool textureRuleHasTransmission(uint materialId) {
+    TextureRuleEntry rule = safeTextureRuleEntry(materialId);
     return (rule.flags & TEXTURE_RULE_ENABLED) != 0u &&
            (rule.flags & TEXTURE_RULE_TRANSMISSION) != 0u &&
            rule.transmission > 0.0;
 }
 
-void applyTextureRule(uint spriteId, inout LabPBRMat mat) {
-    TextureRuleEntry rule = safeTextureRuleEntry(spriteId);
+void applyTextureRule(uint materialId, inout LabPBRMat mat) {
+    TextureRuleEntry rule = safeTextureRuleEntry(materialId);
     if ((rule.flags & TEXTURE_RULE_ENABLED) == 0u) {
         return;
     }

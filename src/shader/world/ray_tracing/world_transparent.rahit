@@ -71,10 +71,10 @@ void main() {
         float lod = 0;
 
         if (isBlockGeometry) {
-            // Block geometry: texture array sampling via SpriteRegistry
-            uint spriteId = textureID;
-            alpha = fetchBlockAlbedoLod(spriteId, uv, ubo.animTick, lod).a;
-            flags = fetchBlockFlagLod(spriteId, uv, lod);
+            // Block geometry: material-id sampling via MaterialRegistry
+            uint materialId = textureID;
+            alpha = fetchBlockAlbedoLod(materialId, uv, ubo.animTick, lod).a;
+            flags = fetchBlockFlagLod(materialId, uv, lod);
         } else {
             // Entity geometry: legacy atlas sampling via textures[]
             alpha = textureLod(textures[nonuniformEXT(textureID)], uv, lod).a;

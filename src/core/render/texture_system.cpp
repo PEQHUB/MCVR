@@ -75,10 +75,12 @@ void TextureSystem::retireGpuResourcesLocked(std::shared_ptr<vk::Device> device,
         auto& gc = framework->gc();
         arrayManager_.retire(gc);
         registry_.retire(gc);
+        materials_.retire(gc);
         textureRules_.retire(gc);
     } else {
         arrayManager_.reset();
         registry_.reset();
+        materials_.reset();
         textureRules_.reset();
     }
 
@@ -276,7 +278,7 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     appendArrayId(oldArrayIds, blockFlagArrayId_.load(std::memory_order_acquire));
 
     auto framework = Renderer::instance().framework();
-    if (!oldArrayIds.empty() || registry_.getBuffer() || textureRules_.getBuffer()) {
+    if (!oldArrayIds.empty() || registry_.getBuffer() || materials_.getBuffer() || textureRules_.getBuffer()) {
         std::cout << "[TextureSystem] Re-initializing (preserving old published textures until swap)" << std::endl;
         waitForGpuIdleLocked(device, "texture reinitialization");
     }
@@ -556,6 +558,46 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     if (!textureRules_.uploadRules(emptyRules.data(), static_cast<uint32_t>(emptyRules.size()), vma, device)) {
         std::cerr << "[TextureSystem] WARNING: default texture rule upload failed" << std::endl;
     }
+    std::vector<vk::Data::MaterialEntry> wrappedMaterials(count);
+    for (uint32_t i = 0; i < count; i++) {
+        auto* se = registry_.getEntry(static_cast<uint16_t>(i));
+        auto& material = wrappedMaterials[i];
+        material.materialId = i;
+        material.baseSpriteId = static_cast<int32_t>(i);
+        material.fallbackMaterialId = 0;
+        material.flags = vk::Data::MATERIAL_FLAG_VALID |
+                         vk::Data::MATERIAL_FLAG_VANILLA_SPRITE |
+                         vk::Data::MATERIAL_FLAG_GPU_RESIDENT;
+        if (se && se->specularLayer >= 0) material.flags |= vk::Data::MATERIAL_FLAG_HAS_SPECULAR;
+        if (se && se->normalLayer >= 0) material.flags |= vk::Data::MATERIAL_FLAG_HAS_NORMAL;
+        if (se && (se->flags & vk::Data::SPRITE_FLAG_HAS_HEIGHT) != 0u) {
+            material.flags |= vk::Data::MATERIAL_FLAG_DISPLACEMENT_ELIGIBLE;
+        }
+        material.albedoPage = 0;
+        material.albedoLayer = static_cast<int32_t>(i);
+        material.specularPage = 0;
+        material.specularLayer = se ? se->specularLayer : -1;
+        material.normalPage = 0;
+        material.normalLayer = se ? se->normalLayer : -1;
+        material.flagPage = 0;
+        material.flagLayer = static_cast<int32_t>(i);
+        material.overlayMaterialId = se ? se->overlaySprite : -1;
+        material.displacementPolicy =
+            (material.flags & vk::Data::MATERIAL_FLAG_DISPLACEMENT_ELIGIBLE) != 0u
+                ? vk::Data::MATERIAL_DISPLACEMENT_AUTHORED_HEIGHT
+                : vk::Data::MATERIAL_DISPLACEMENT_DISABLED;
+        material.displacementScale =
+            material.displacementPolicy == vk::Data::MATERIAL_DISPLACEMENT_AUTHORED_HEIGHT ? 1.0f : 0.0f;
+        material.heightRangePacked = se ? se->maskLayer : -1;
+        material.uvScaleU = 1.0f;
+        material.uvScaleV = 1.0f;
+        material.uvOffsetU = 0.0f;
+        material.uvOffsetV = 0.0f;
+    }
+    if (!materials_.uploadMaterials(wrappedMaterials.data(), static_cast<uint32_t>(wrappedMaterials.size()),
+                                    vma, device)) {
+        std::cerr << "[TextureSystem] WARNING: default material table upload failed" << std::endl;
+    }
 
     // Free CPU pixel data (no longer needed after staging)
     spritePixels_.clear();
@@ -789,6 +831,18 @@ bool TextureSystem::uploadTextureRules(const vk::Data::TextureRuleEntry* entries
     return textureRules_.uploadRules(entries, count, std::move(vma), std::move(device));
 }
 
+bool TextureSystem::uploadMaterialTable(const vk::Data::MaterialEntry* entries, uint32_t count,
+                                        uint64_t generation,
+                                        std::shared_ptr<vk::VMA> vma,
+                                        std::shared_ptr<vk::Device> device) {
+    if (!entries || count == 0 || !vma || !device) return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
+    if (!finalized_) return false;
+    return materials_.uploadMaterials(entries, count, std::move(vma), std::move(device));
+}
+
 std::string TextureSystem::statusString() const {
     std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
     if (!lock.owns_lock()) return "texturesBusy:1,generation:" + std::to_string(generation());
@@ -800,6 +854,7 @@ std::string TextureSystem::statusString() const {
         << ",atlasHeight:" << atlasHeight_
         << ",layerSize:" << layerSize_
         << ",animated:" << animEntries_.size()
+        << ",materials:" << materials_.count()
         << ",albedoArray:" << blockAlbedoArrayId_
         << ",specularArray:" << blockSpecularArrayId_
         << ",normalArray:" << blockNormalArrayId_

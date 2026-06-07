@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/render/sprite_registry.hpp"
+#include "core/render/material_registry.hpp"
 #include "core/render/texture_rule_registry.hpp"
 #include "core/render/texture_arrays.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
@@ -130,6 +131,7 @@ class TextureSystem {
     /// Access underlying managers for descriptor binding.
     TextureArrayManager& arrayManager() { return arrayManager_; }
     SpriteRegistry& registry() { return registry_; }
+    MaterialRegistry& materials() { return materials_; }
     TextureRuleRegistry& textureRules() { return textureRules_; }
     bool stageLayerUpdate(LayerKind layerKind, uint32_t spriteId,
                           const uint8_t* pixels, size_t pixelSize,
@@ -142,6 +144,10 @@ class TextureSystem {
                             uint64_t generation,
                             std::shared_ptr<vk::VMA> vma,
                             std::shared_ptr<vk::Device> device);
+    bool uploadMaterialTable(const vk::Data::MaterialEntry* entries, uint32_t count,
+                             uint64_t generation,
+                             std::shared_ptr<vk::VMA> vma,
+                             std::shared_ptr<vk::Device> device);
 
     /// Get texture array IDs (for descriptor binding).
     uint32_t blockAlbedoArrayId() const { return blockAlbedoArrayId_.load(std::memory_order_acquire); }
@@ -186,6 +192,7 @@ class TextureSystem {
     // GPU resources (owned)
     TextureArrayManager arrayManager_;
     SpriteRegistry registry_;
+    MaterialRegistry materials_;
     TextureRuleRegistry textureRules_;
     std::atomic<uint32_t> blockAlbedoArrayId_{UINT32_MAX};
     std::atomic<uint32_t> blockSpecularArrayId_{UINT32_MAX};

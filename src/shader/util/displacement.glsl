@@ -140,10 +140,28 @@ bool displacementUvInside(vec2 uv, vec2 boundsMin, vec2 boundsMax) {
            uv.y <= boundsMax.y + DISPLACEMENT_TRACE_BIAS;
 }
 
-bool displacementBlockHasAuthoredHeight(uint spriteId) {
-    SpriteEntry se = safeSpriteEntry(spriteId);
-    if (se.normalLayer < 0) return false;
-    if (se.maskLayer < 0) return false;
+int displacementNormalLayer(uint materialId) {
+    SpriteEntry se = safeMaterialSpriteEntry(materialId);
+    return materialNormalLayer(materialId, se);
+}
+
+int displacementHeightRangePacked(uint materialId) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    if (material.heightRangePacked >= 0) return material.heightRangePacked;
+    SpriteEntry se = safeMaterialSpriteEntry(materialId);
+    return se.maskLayer;
+}
+
+bool displacementBlockHasAuthoredHeight(uint materialId) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    if ((material.flags & MATERIAL_FLAG_DISPLACEMENT_ELIGIBLE) == 0u) return false;
+    if (material.displacementPolicy != MATERIAL_DISPLACEMENT_AUTHORED_HEIGHT) return false;
+
+    SpriteEntry se = safeMaterialSpriteEntry(materialId);
+    int normalLayer = displacementNormalLayer(materialId);
+    int heightRange = displacementHeightRangePacked(materialId);
+    if (normalLayer < 0) return false;
+    if (heightRange < 0) return false;
     if ((se.flags & SPRITE_FLAG_HAS_HEIGHT) == 0u) return false;
 
     uint normalSource = (se.flags >> SPRITE_FLAG_NORMAL_SOURCE_SHIFT) & SPRITE_FLAG_SOURCE_MASK;
@@ -152,7 +170,7 @@ bool displacementBlockHasAuthoredHeight(uint spriteId) {
     }
 
     ivec3 normalSize = textureSize(blockNormal, 0);
-    return normalSize.x > 0 && normalSize.y > 0 && se.normalLayer < normalSize.z;
+    return normalSize.x > 0 && normalSize.y > 0 && normalLayer < normalSize.z;
 }
 
 bool displacementSourceValid(DisplacementSource src) {
@@ -227,10 +245,11 @@ float displacementSampleNormalAlphaTrilinear(int layer, vec2 uv, float lod) {
 float displacementSampleHeight01(DisplacementSource src, vec2 uv, float lod) {
     if (!displacementSourceValid(src)) return 1.0;
 
-    SpriteEntry se = safeSpriteEntry(src.textureID);
+    int normalLayer = displacementNormalLayer(src.textureID);
+    if (normalLayer < 0) return 1.0;
     vec2 sampleUv = displacementSampleUv(src, uv);
     float sampleLod = displacementClampedRuleLod(src.textureID, lod);
-    return displacementSampleNormalAlphaTrilinear(se.normalLayer, sampleUv, sampleLod);
+    return displacementSampleNormalAlphaTrilinear(normalLayer, sampleUv, sampleLod);
 }
 
 float displacementSampleDepthAt(DisplacementSource src, vec2 uv, float lod) {
@@ -306,12 +325,15 @@ bool displacementBuildBlockChart(vec3 blockBase,
     return true;
 }
 
-float displacementMaterialDepthScale(uint spriteId) {
-    TextureRuleEntry rule = safeTextureRuleEntry(spriteId);
-    return ((rule.flags & TEXTURE_RULE_ENABLED) != 0u &&
+float displacementMaterialDepthScale(uint materialId) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    TextureRuleEntry rule = safeTextureRuleEntry(materialId);
+    float materialScale = max(material.displacementScale, 0.0);
+    float ruleScale = ((rule.flags & TEXTURE_RULE_ENABLED) != 0u &&
             (rule.flags & TEXTURE_RULE_DISPLACEMENT_SCALE) != 0u)
         ? clamp(rule.displacementScale, 0.0, 4.0)
         : 1.0;
+    return materialScale * ruleScale;
 }
 
 bool displacementPrepareAuthoredBlockSource(uint packedFlags,

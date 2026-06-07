@@ -140,6 +140,23 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_Text
         framework->device()) ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeReceiveMaterialTable(
+    JNIEnv *, jclass, jlong dataPtr, jint count, jlong generation) {
+
+    auto& ts = Renderer::textureSystem;
+    if (dataPtr == 0 || count <= 0) return JNI_FALSE;
+
+    auto renderer = Renderer::try_instance();
+    if (!renderer || !renderer->framework()) return JNI_FALSE;
+    auto framework = renderer->framework();
+    return ts.uploadMaterialTable(
+        reinterpret_cast<const vk::Data::MaterialEntry*>(dataPtr),
+        static_cast<uint32_t>(count),
+        static_cast<uint64_t>(generation),
+        framework->vma(),
+        framework->device()) ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeTextureFinalize(
     JNIEnv *, jclass) {
 

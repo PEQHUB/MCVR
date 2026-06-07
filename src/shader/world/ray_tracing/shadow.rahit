@@ -251,20 +251,20 @@ void main() {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
 
         if (isBlockGeometry) {
-            // Block geometry: texture array sampling via SpriteRegistry
-            uint spriteId = textureID;
+            // Block geometry: material-id sampling via MaterialRegistry
+            uint materialId = textureID;
 
-            albedo = fetchBlockAlbedoLod(spriteId, textureUV, ubo.animTick, 0.0);
+            albedo = fetchBlockAlbedoLod(materialId, textureUV, ubo.animTick, 0.0);
 
             if (!SIMPLIFY_THIS_RAY) {
-                specular = fetchBlockSpecularLod(spriteId, textureUV, 0.0);
+                specular = fetchBlockSpecularLod(materialId, textureUV, 0.0);
             }
 
-            flags = fetchBlockFlagLod(spriteId, textureUV, 0.0);
+            flags = fetchBlockFlagLod(materialId, textureUV, 0.0);
             if (foldBlockOverlay) {
                 blockOverlayComposited = applyBlockOverlayMaterialLod(
                     albedo, specular, normalVal, flags,
-                    spriteId, textureUV, ubo.animTick, 0.0, colorLayer.rgb,
+                    materialId, textureUV, ubo.animTick, 0.0, colorLayer.rgb,
                     materialRuleTextureID);
             }
         } else {
