@@ -3846,6 +3846,7 @@ void RayTracingModuleContext::render() {
     // Bind block sprite texture arrays (set 0, bindings 3-5)
     auto& texSystem = Renderer::textureSystem;
     const uint64_t textureGeneration = texSystem.generation();
+    const uint64_t materialTexturePageRevision = texSystem.materialTexturePageRevision();
     std::string textureDescriptorLabel = "RT:TexturePublishAndDescriptors gen=" +
         std::to_string(textureGeneration) + " frame=" + std::to_string(context->frameIndex);
     worldCommandBuffer->beginLabel(textureDescriptorLabel.c_str(), 0.95f, 0.35f, 0.1f);
@@ -3897,29 +3898,23 @@ void RayTracingModuleContext::render() {
 
     auto bindBlockTextureArrays = [&](const std::shared_ptr<vk::DescriptorTable>& table) {
         if (!table) return;
-        if (hasAlbedo) {
-            for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
-                table->bindSamplerImage(albedoInfo.sampler, albedoInfo.image,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 3, page);
+        auto bindPage = [&](uint32_t binding, uint32_t page, uint32_t arrayId,
+                            const TextureArrayManager::ArrayInfo& fallbackInfo) {
+            TextureArrayManager::ArrayInfo pageInfo{};
+            const TextureArrayManager::ArrayInfo* selected = &fallbackInfo;
+            if (arrayId != UINT32_MAX &&
+                texArrayMgr.getArraySnapshot(arrayId, pageInfo) &&
+                pageInfo.image && pageInfo.sampler) {
+                selected = &pageInfo;
             }
-        }
-        if (hasSpec) {
-            for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
-                table->bindSamplerImage(specInfo.sampler, specInfo.image,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 4, page);
-            }
-        }
-        if (hasNorm) {
-            for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
-                table->bindSamplerImage(normInfo.sampler, normInfo.image,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 5, page);
-            }
-        }
-        if (hasFlag) {
-            for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
-                table->bindSamplerImage(flagInfo.sampler, flagInfo.image,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, 6, page);
-            }
+            table->bindSamplerImage(selected->sampler, selected->image,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, binding, page);
+        };
+        for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+            bindPage(3, page, texSystem.materialAlbedoPageArrayId(page), albedoInfo);
+            bindPage(4, page, texSystem.materialSpecularPageArrayId(page), specInfo);
+            bindPage(5, page, texSystem.materialNormalPageArrayId(page), normInfo);
+            bindPage(6, page, texSystem.materialFlagPageArrayId(page), flagInfo);
         }
     };
     auto bindSpriteRegistry = [&](const std::shared_ptr<vk::DescriptorTable>& table) {
@@ -3942,6 +3937,7 @@ void RayTracingModuleContext::render() {
     auto& descriptorSlotState = module->textureDescriptorSlotStates_[context->frameIndex];
     const bool textureDescriptorGenerationChanged =
         textureGeneration != descriptorSlotState.generation ||
+        materialTexturePageRevision != descriptorSlotState.materialTexturePageRevision ||
         albedoView != descriptorSlotState.albedoTextureView ||
         specView != descriptorSlotState.specularTextureView ||
         normView != descriptorSlotState.normalTextureView ||
@@ -3960,7 +3956,7 @@ void RayTracingModuleContext::render() {
             "refresh-slot gen=%llu frame=%u albedoId=%u image=0x%llx view=0x%llx sampler=0x%llx "
             "specId=%u image=0x%llx view=0x%llx sampler=0x%llx normId=%u image=0x%llx view=0x%llx sampler=0x%llx "
             "flagId=%u image=0x%llx view=0x%llx sampler=0x%llx "
-            "spriteRegistry=0x%llx materialRegistry=0x%llx",
+            "spriteRegistry=0x%llx materialRegistry=0x%llx materialPageRevision=%llu",
             static_cast<unsigned long long>(textureGeneration),
             context->frameIndex,
             texSystem.blockAlbedoArrayId(),
@@ -3980,8 +3976,10 @@ void RayTracingModuleContext::render() {
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(flagView)),
             hasFlag ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(flagInfo.sampler->vkSamper())) : 0ull,
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(spriteRegistryBuffer)),
-            static_cast<unsigned long long>(vk::DebugUtils::objectHandle(materialRegistryBuffer)));
+            static_cast<unsigned long long>(vk::DebugUtils::objectHandle(materialRegistryBuffer)),
+            static_cast<unsigned long long>(materialTexturePageRevision));
         descriptorSlotState.generation = textureGeneration;
+        descriptorSlotState.materialTexturePageRevision = materialTexturePageRevision;
         descriptorSlotState.albedoTextureView = albedoView;
         descriptorSlotState.specularTextureView = specView;
         descriptorSlotState.normalTextureView = normView;

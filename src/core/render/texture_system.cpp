@@ -34,6 +34,56 @@ void appendArrayId(std::vector<uint32_t>& ids, uint32_t id) {
 
 }
 
+TextureSystem::TextureSystem() {
+    resetMaterialTexturePagesLocked();
+}
+
+void TextureSystem::resetMaterialTexturePagesLocked() {
+    for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+        materialAlbedoPageArrayIds_[page].store(UINT32_MAX, std::memory_order_release);
+        materialSpecularPageArrayIds_[page].store(UINT32_MAX, std::memory_order_release);
+        materialNormalPageArrayIds_[page].store(UINT32_MAX, std::memory_order_release);
+        materialFlagPageArrayIds_[page].store(UINT32_MAX, std::memory_order_release);
+        materialPageReady_[page].store(false, std::memory_order_release);
+        materialPageMipsDirty_[page] = false;
+    }
+}
+
+bool TextureSystem::hasMaterialPageMipsDirtyLocked() const {
+    for (bool dirty : materialPageMipsDirty_) {
+        if (dirty) return true;
+    }
+    return false;
+}
+
+uint32_t TextureSystem::materialAlbedoPageArrayId(uint32_t page) const {
+    if (page == 0) return blockAlbedoArrayId();
+    if (page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return UINT32_MAX;
+    if (!materialPageReady_[page].load(std::memory_order_acquire)) return UINT32_MAX;
+    return materialAlbedoPageArrayIds_[page].load(std::memory_order_acquire);
+}
+
+uint32_t TextureSystem::materialSpecularPageArrayId(uint32_t page) const {
+    if (page == 0) return blockSpecularArrayId();
+    if (page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return UINT32_MAX;
+    if (!materialPageReady_[page].load(std::memory_order_acquire)) return UINT32_MAX;
+    return materialSpecularPageArrayIds_[page].load(std::memory_order_acquire);
+}
+
+uint32_t TextureSystem::materialNormalPageArrayId(uint32_t page) const {
+    if (page == 0) return blockNormalArrayId();
+    if (page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return UINT32_MAX;
+    if (!materialPageReady_[page].load(std::memory_order_acquire)) return UINT32_MAX;
+    return materialNormalPageArrayIds_[page].load(std::memory_order_acquire);
+}
+
+uint32_t TextureSystem::materialFlagPageArrayId(uint32_t page) const {
+    if (page == 0) return blockFlagArrayId();
+    if (page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return UINT32_MAX;
+    if (!materialPageReady_[page].load(std::memory_order_acquire)) return UINT32_MAX;
+    return materialFlagPageArrayIds_[page].load(std::memory_order_acquire);
+}
+
 void TextureSystem::waitForGpuIdleLocked(std::shared_ptr<vk::Device> device, const char* reason) {
     auto* renderer = Renderer::try_instance();
     auto framework = renderer ? renderer->framework() : nullptr;
@@ -88,6 +138,8 @@ void TextureSystem::retireGpuResourcesLocked(std::shared_ptr<vk::Device> device,
     blockSpecularArrayId_ = UINT32_MAX;
     blockNormalArrayId_ = UINT32_MAX;
     blockFlagArrayId_ = UINT32_MAX;
+    resetMaterialTexturePagesLocked();
+    materialTexturePageRevision_.fetch_add(1, std::memory_order_acq_rel);
     albedoMipsInitialized_ = false;
     specMipsInitialized_ = false;
     normMipsInitialized_ = false;
@@ -613,6 +665,13 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     blockSpecularArrayId_.store(newSpecularArrayId, std::memory_order_release);
     blockNormalArrayId_.store(newNormalArrayId, std::memory_order_release);
     blockFlagArrayId_.store(newFlagArrayId, std::memory_order_release);
+    resetMaterialTexturePagesLocked();
+    materialAlbedoPageArrayIds_[0].store(newAlbedoArrayId, std::memory_order_release);
+    materialSpecularPageArrayIds_[0].store(newSpecularArrayId, std::memory_order_release);
+    materialNormalPageArrayIds_[0].store(newNormalArrayId, std::memory_order_release);
+    materialFlagPageArrayIds_[0].store(newFlagArrayId, std::memory_order_release);
+    materialPageReady_[0].store(true, std::memory_order_release);
+    materialTexturePageRevision_.fetch_add(1, std::memory_order_acq_rel);
     albedoMipsInitialized_ = false;
     specMipsInitialized_ = false;
     normMipsInitialized_ = false;
@@ -727,12 +786,16 @@ void TextureSystem::flushPendingUploads(std::shared_ptr<vk::VMA> vma,
 	GarbageCollector& gc) {
     std::lock_guard<std::mutex> lock(mutex_);
 	if (!finalized_) return;
-	if (!arrayManager_.hasPendingUploads()) return;
+    const bool hasPendingUploads = arrayManager_.hasPendingUploads();
+	if (!hasPendingUploads && !hasMaterialPageMipsDirtyLocked()) return;
 
 	// Flush all staged uploads (snapshot-and-process: mutex held only ~1us)
-	auto dirty = arrayManager_.flushUploads(
-		vma, device, cmdBuffer,
-		blockAlbedoArrayId_, blockSpecularArrayId_, blockNormalArrayId_, blockFlagArrayId_);
+	TextureArrayManager::DirtyLayers dirty{};
+    if (hasPendingUploads) {
+        dirty = arrayManager_.flushUploads(
+            vma, device, cmdBuffer,
+            blockAlbedoArrayId_, blockSpecularArrayId_, blockNormalArrayId_, blockFlagArrayId_);
+    }
     // Route staging buffers through GarbageCollector for proper lifetime management.
     // GC keeps resources alive for imageCount*3 frames (matching all other GPU resources).
     for (auto& buf : arrayManager_.takeStagingBuffers()) {
@@ -758,6 +821,21 @@ void TextureSystem::flushPendingUploads(std::shared_ptr<vk::VMA> vma,
     mipgen(blockSpecularArrayId_, dirty.specular, specMipsInitialized_);
     mipgen(blockNormalArrayId_, dirty.normal, normMipsInitialized_);
     mipgen(blockFlagArrayId_, dirty.flag, flagMipsInitialized_);
+
+    for (uint32_t page = 1; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+        if (!materialPageMipsDirty_[page]) continue;
+        uint32_t albedoId = materialAlbedoPageArrayIds_[page].load(std::memory_order_acquire);
+        uint32_t specId = materialSpecularPageArrayIds_[page].load(std::memory_order_acquire);
+        uint32_t normalId = materialNormalPageArrayIds_[page].load(std::memory_order_acquire);
+        uint32_t flagId = materialFlagPageArrayIds_[page].load(std::memory_order_acquire);
+        if (albedoId != UINT32_MAX) arrayManager_.generateMipmaps(albedoId, cmdBuffer);
+        if (specId != UINT32_MAX) arrayManager_.generateMipmaps(specId, cmdBuffer);
+        if (normalId != UINT32_MAX) arrayManager_.generateMipmaps(normalId, cmdBuffer);
+        if (flagId != UINT32_MAX) arrayManager_.generateMipmaps(flagId, cmdBuffer);
+        materialPageMipsDirty_[page] = false;
+        materialPageReady_[page].store(true, std::memory_order_release);
+        materialTexturePageRevision_.fetch_add(1, std::memory_order_acq_rel);
+    }
 }
 
 const TextureSystem::SpriteBounds& TextureSystem::getSpriteBounds(uint16_t spriteId) const {
@@ -843,9 +921,105 @@ bool TextureSystem::uploadMaterialTable(const vk::Data::MaterialEntry* entries, 
     return materials_.uploadMaterials(entries, count, std::move(vma), std::move(device));
 }
 
+bool TextureSystem::uploadMaterialTexturePage(uint32_t page, uint32_t spriteSize, uint32_t layerCount,
+                                              const uint8_t* albedoData,
+                                              const uint8_t* specularData,
+                                              const uint8_t* normalData,
+                                              const uint8_t* flagData,
+                                              uint64_t generation,
+                                              std::shared_ptr<vk::VMA> vma,
+                                              std::shared_ptr<vk::Device> device) {
+    if (page == 0 || page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return false;
+    if (spriteSize == 0 || layerCount == 0) return false;
+    if (!albedoData || !specularData || !normalData || !flagData || !vma || !device) return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
+    if (!finalized_) return false;
+
+    const size_t bytesPerLayer = static_cast<size_t>(spriteSize) * spriteSize * 4u;
+    if (bytesPerLayer == 0) return false;
+
+    std::vector<uint32_t> oldArrayIds;
+    appendArrayId(oldArrayIds, materialAlbedoPageArrayIds_[page].load(std::memory_order_acquire));
+    appendArrayId(oldArrayIds, materialSpecularPageArrayIds_[page].load(std::memory_order_acquire));
+    appendArrayId(oldArrayIds, materialNormalPageArrayIds_[page].load(std::memory_order_acquire));
+    appendArrayId(oldArrayIds, materialFlagPageArrayIds_[page].load(std::memory_order_acquire));
+
+    std::vector<uint32_t> newArrayIds;
+    uint32_t newAlbedoArrayId = arrayManager_.createArray(
+        vma, device, spriteSize, layerCount, VK_FORMAT_R8G8B8A8_SRGB, true);
+    uint32_t newSpecularArrayId = arrayManager_.createArray(
+        vma, device, spriteSize, layerCount, VK_FORMAT_R8G8B8A8_UNORM, true);
+    uint32_t newNormalArrayId = arrayManager_.createArray(
+        vma, device, spriteSize, layerCount, VK_FORMAT_R8G8B8A8_UNORM, true);
+    uint32_t newFlagArrayId = arrayManager_.createArray(
+        vma, device, spriteSize, layerCount, VK_FORMAT_R8G8B8A8_UNORM, true);
+    appendArrayId(newArrayIds, newAlbedoArrayId);
+    appendArrayId(newArrayIds, newSpecularArrayId);
+    appendArrayId(newArrayIds, newNormalArrayId);
+    appendArrayId(newArrayIds, newFlagArrayId);
+
+    auto stageAllLayers = [&](uint32_t arrayId, const uint8_t* data) -> uint32_t {
+        uint32_t staged = 0;
+        for (uint32_t layer = 0; layer < layerCount; layer++) {
+            const uint8_t* layerData = data + static_cast<size_t>(layer) * bytesPerLayer;
+            if (arrayManager_.stageLayerPixels(arrayId, layer, 0, layerData, bytesPerLayer)) {
+                staged++;
+            }
+        }
+        return staged;
+    };
+
+    const uint32_t stagedAlbedo = stageAllLayers(newAlbedoArrayId, albedoData);
+    const uint32_t stagedSpecular = stageAllLayers(newSpecularArrayId, specularData);
+    const uint32_t stagedNormal = stageAllLayers(newNormalArrayId, normalData);
+    const uint32_t stagedFlag = stageAllLayers(newFlagArrayId, flagData);
+    if (stagedAlbedo != layerCount || stagedSpecular != layerCount ||
+        stagedNormal != layerCount || stagedFlag != layerCount) {
+        auto* renderer = Renderer::try_instance();
+        auto framework = renderer ? renderer->framework() : nullptr;
+        if (framework) {
+            arrayManager_.retireArrays(framework->gc(), newArrayIds);
+        }
+        std::cerr << "[TextureSystem] Material page upload failed for page " << page
+                  << " staged albedo=" << stagedAlbedo << "/" << layerCount
+                  << " specular=" << stagedSpecular << "/" << layerCount
+                  << " normal=" << stagedNormal << "/" << layerCount
+                  << " flag=" << stagedFlag << "/" << layerCount << std::endl;
+        return false;
+    }
+
+    materialPageReady_[page].store(false, std::memory_order_release);
+    materialAlbedoPageArrayIds_[page].store(newAlbedoArrayId, std::memory_order_release);
+    materialSpecularPageArrayIds_[page].store(newSpecularArrayId, std::memory_order_release);
+    materialNormalPageArrayIds_[page].store(newNormalArrayId, std::memory_order_release);
+    materialFlagPageArrayIds_[page].store(newFlagArrayId, std::memory_order_release);
+    materialPageMipsDirty_[page] = true;
+    materialTexturePageRevision_.fetch_add(1, std::memory_order_acq_rel);
+
+    auto* renderer = Renderer::try_instance();
+    auto framework = renderer ? renderer->framework() : nullptr;
+    if (framework) {
+        arrayManager_.retireArrays(framework->gc(), oldArrayIds);
+    }
+
+    std::cout << "[TextureSystem] Uploaded material texture page " << page
+              << " layers=" << layerCount
+              << " size=" << spriteSize << "x" << spriteSize << std::endl;
+    return true;
+}
+
 std::string TextureSystem::statusString() const {
     std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
     if (!lock.owns_lock()) return "texturesBusy:1,generation:" + std::to_string(generation());
+    uint32_t materialPages = 0;
+    for (uint32_t page = 1; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+        if (materialPageReady_[page].load(std::memory_order_acquire) &&
+            materialAlbedoPageArrayIds_[page].load(std::memory_order_acquire) != UINT32_MAX) {
+            materialPages++;
+        }
+    }
     std::ostringstream out;
     out << "finalized:" << (finalized_ ? 1 : 0)
         << ",generation:" << generation()
@@ -855,6 +1029,8 @@ std::string TextureSystem::statusString() const {
         << ",layerSize:" << layerSize_
         << ",animated:" << animEntries_.size()
         << ",materials:" << materials_.count()
+        << ",materialPages:" << materialPages
+        << ",materialPageRevision:" << materialTexturePageRevision()
         << ",albedoArray:" << blockAlbedoArrayId_
         << ",specularArray:" << blockSpecularArrayId_
         << ",normalArray:" << blockNormalArrayId_

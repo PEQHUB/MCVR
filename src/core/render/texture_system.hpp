@@ -7,6 +7,7 @@
 #include "core/vulkan/all_core_vulkan.hpp"
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -64,7 +65,7 @@ class TextureSystem {
         Flag,
     };
 
-    TextureSystem() = default;
+    TextureSystem();
 
     // ---- Data reception from Java (called on game thread via JNI) ----
 
@@ -148,18 +149,35 @@ class TextureSystem {
                              uint64_t generation,
                              std::shared_ptr<vk::VMA> vma,
                              std::shared_ptr<vk::Device> device);
+    bool uploadMaterialTexturePage(uint32_t page, uint32_t spriteSize, uint32_t layerCount,
+                                   const uint8_t* albedoData,
+                                   const uint8_t* specularData,
+                                   const uint8_t* normalData,
+                                   const uint8_t* flagData,
+                                   uint64_t generation,
+                                   std::shared_ptr<vk::VMA> vma,
+                                   std::shared_ptr<vk::Device> device);
 
     /// Get texture array IDs (for descriptor binding).
     uint32_t blockAlbedoArrayId() const { return blockAlbedoArrayId_.load(std::memory_order_acquire); }
     uint32_t blockSpecularArrayId() const { return blockSpecularArrayId_.load(std::memory_order_acquire); }
     uint32_t blockNormalArrayId() const { return blockNormalArrayId_.load(std::memory_order_acquire); }
     uint32_t blockFlagArrayId() const { return blockFlagArrayId_.load(std::memory_order_acquire); }
+    uint32_t materialAlbedoPageArrayId(uint32_t page) const;
+    uint32_t materialSpecularPageArrayId(uint32_t page) const;
+    uint32_t materialNormalPageArrayId(uint32_t page) const;
+    uint32_t materialFlagPageArrayId(uint32_t page) const;
+    uint64_t materialTexturePageRevision() const {
+        return materialTexturePageRevision_.load(std::memory_order_acquire);
+    }
     /// Reset on resource reload.
     void reset();
 
   private:
     void waitForGpuIdleLocked(std::shared_ptr<vk::Device> device, const char* reason);
     void retireGpuResourcesLocked(std::shared_ptr<vk::Device> device, const char* reason);
+    void resetMaterialTexturePagesLocked();
+    bool hasMaterialPageMipsDirtyLocked() const;
 
     // Sprite metadata (sorted by identifier, spriteId = index)
     std::vector<SpriteMetadata> sprites_;
@@ -198,6 +216,13 @@ class TextureSystem {
     std::atomic<uint32_t> blockSpecularArrayId_{UINT32_MAX};
     std::atomic<uint32_t> blockNormalArrayId_{UINT32_MAX};
     std::atomic<uint32_t> blockFlagArrayId_{UINT32_MAX};
+    std::array<std::atomic<uint32_t>, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialAlbedoPageArrayIds_{};
+    std::array<std::atomic<uint32_t>, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialSpecularPageArrayIds_{};
+    std::array<std::atomic<uint32_t>, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialNormalPageArrayIds_{};
+    std::array<std::atomic<uint32_t>, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialFlagPageArrayIds_{};
+    std::array<std::atomic<bool>, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialPageReady_{};
+    std::array<bool, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialPageMipsDirty_{};
+    std::atomic<uint64_t> materialTexturePageRevision_{1};
     bool albedoMipsInitialized_ = false;
     bool specMipsInitialized_ = false;
     bool normMipsInitialized_ = false;

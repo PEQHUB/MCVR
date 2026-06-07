@@ -165,11 +165,16 @@ bool displacementBlockHasAuthoredHeight(uint materialId) {
     int heightRange = displacementHeightRangePacked(materialId);
     if (normalLayer < 0) return false;
     if (heightRange < 0) return false;
-    if ((se.flags & SPRITE_FLAG_HAS_HEIGHT) == 0u) return false;
+    bool residentVirtualMaterial =
+        (material.flags & MATERIAL_FLAG_COMPAT_VIRTUAL) != 0u &&
+        (material.flags & MATERIAL_FLAG_GPU_RESIDENT) != 0u;
+    if (!residentVirtualMaterial) {
+        if ((se.flags & SPRITE_FLAG_HAS_HEIGHT) == 0u) return false;
 
-    uint normalSource = (se.flags >> SPRITE_FLAG_NORMAL_SOURCE_SHIFT) & SPRITE_FLAG_SOURCE_MASK;
-    if (normalSource != SPRITE_SOURCE_PACK_AUTHORED && normalSource != SPRITE_SOURCE_USER_CUSTOM) {
-        return false;
+        uint normalSource = (se.flags >> SPRITE_FLAG_NORMAL_SOURCE_SHIFT) & SPRITE_FLAG_SOURCE_MASK;
+        if (normalSource != SPRITE_SOURCE_PACK_AUTHORED && normalSource != SPRITE_SOURCE_USER_CUSTOM) {
+            return false;
+        }
     }
 
     ivec3 normalSize = displacementNormalTextureSize(materialId, 0);

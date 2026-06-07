@@ -225,6 +225,7 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::SBT>> sbts_;
     struct TextureDescriptorSlotState {
         uint64_t generation = UINT64_MAX;
+        uint64_t materialTexturePageRevision = UINT64_MAX;
         VkImageView albedoTextureView = VK_NULL_HANDLE;
         VkImageView specularTextureView = VK_NULL_HANDLE;
         VkImageView normalTextureView = VK_NULL_HANDLE;

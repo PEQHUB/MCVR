@@ -157,6 +157,31 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_Text
         framework->device()) ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeReceiveMaterialTexturePage(
+    JNIEnv *, jclass, jint page, jint layerSize, jint layerCount,
+    jlong albedoPtr, jlong specularPtr, jlong normalPtr, jlong flagPtr,
+    jlong generation) {
+
+    auto& ts = Renderer::textureSystem;
+    if (page <= 0 || layerSize <= 0 || layerCount <= 0) return JNI_FALSE;
+    if (albedoPtr == 0 || specularPtr == 0 || normalPtr == 0 || flagPtr == 0) return JNI_FALSE;
+
+    auto renderer = Renderer::try_instance();
+    if (!renderer || !renderer->framework()) return JNI_FALSE;
+    auto framework = renderer->framework();
+    return ts.uploadMaterialTexturePage(
+        static_cast<uint32_t>(page),
+        static_cast<uint32_t>(layerSize),
+        static_cast<uint32_t>(layerCount),
+        reinterpret_cast<const uint8_t*>(albedoPtr),
+        reinterpret_cast<const uint8_t*>(specularPtr),
+        reinterpret_cast<const uint8_t*>(normalPtr),
+        reinterpret_cast<const uint8_t*>(flagPtr),
+        static_cast<uint64_t>(generation),
+        framework->vma(),
+        framework->device()) ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeTextureFinalize(
     JNIEnv *, jclass) {
 
