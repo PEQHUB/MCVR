@@ -34,6 +34,34 @@ layout(set = 2, binding = 0) uniform Uniform {
     WorldUBO ubo;
 };
 
+layout(push_constant) uniform PushConstant {
+    uint currentFrame;
+    float sunAngularRadiusDeg;
+    float focalLength;
+    float apertureDiameter;
+    float sensorWidth;
+    float _padCamera0;
+    float _padCamera1;
+    float _padCamera2;
+    int flags;
+    float atmosphereBlend;
+    float atmosphereRayleighScale;
+    float atmosphereMieScale;
+    float atmosphereOzoneScale;
+    float atmosphereExposure;
+    float atmosphereSunIntensity;
+    float atmosphereMultiScatter;
+    float atmosphereGroundAlbedo;
+    float atmospherePlanetRadius;
+    float atmosphereHeight;
+    float atmosphereMieAnisotropy;
+    uint rtDebugFlags;
+    float displacementDepthScale;
+    int displacementPrimarySteps;
+    int displacementRefinementSteps;
+    float displacementFadeDistanceBlocks;
+} pc;
+
 layout(std430, buffer_reference, buffer_reference_align = 8) readonly buffer IndexBuffer {
     uint indices[];
 }
