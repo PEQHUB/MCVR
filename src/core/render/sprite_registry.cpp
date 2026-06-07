@@ -37,15 +37,24 @@ void SpriteRegistry::registerSprite(uint16_t spriteId,
         entries_.resize(spriteId + 1, defaultEntry);
     }
 
+    uint32_t effectiveFlags = flags;
+    int32_t effectiveMaskLayer = maskLayer;
+    if (effectiveMaskLayer < 0) {
+        effectiveFlags &= ~vk::Data::SPRITE_FLAG_HAS_HEIGHT;
+    }
+    if ((effectiveFlags & vk::Data::SPRITE_FLAG_HAS_HEIGHT) == 0u) {
+        effectiveMaskLayer = -1;
+    }
+
     auto& e = entries_[spriteId];
     e.baseLayer = baseLayer;
     e.frameCount = std::max(frameCount, 1u);
     e.tickRate = std::max(tickRate, 1u);
-    e.flags = flags;
+    e.flags = effectiveFlags;
     e.specularLayer = specularLayer;
     e.normalLayer = normalLayer;
     e.overlaySprite = overlaySprite;
-    e.maskLayer = maskLayer;
+    e.maskLayer = effectiveMaskLayer;
 
     spriteCount_ = std::max(spriteCount_, static_cast<uint32_t>(spriteId + 1));
 }
@@ -59,6 +68,12 @@ const vk::Data::SpriteEntry* SpriteRegistry::getEntry(uint16_t spriteId) const {
 bool SpriteRegistry::updateHeightMetadata(uint16_t spriteId, uint32_t flags, int32_t maskLayer) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (spriteId >= entries_.size()) return false;
+    if (maskLayer < 0) {
+        flags &= ~vk::Data::SPRITE_FLAG_HAS_HEIGHT;
+    }
+    if ((flags & vk::Data::SPRITE_FLAG_HAS_HEIGHT) == 0u) {
+        maskLayer = -1;
+    }
     auto& e = entries_[spriteId];
     e.flags = flags;
     e.maskLayer = maskLayer;
