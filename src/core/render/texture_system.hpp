@@ -58,6 +58,25 @@ class TextureSystem {
         float minU, maxU, minV, maxV;
     };
 
+#pragma pack(push, 1)
+    struct SparseAuxUpdate {
+        int32_t spriteId;
+        uint32_t channelMask;
+        int32_t specularOffset;
+        int32_t normalOffset;
+        int32_t flagOffset;
+        int32_t reserved;
+    };
+    static_assert(sizeof(SparseAuxUpdate) == 24, "SparseAuxUpdate must be 24 bytes");
+
+    struct SparseAuxMetadata {
+        int32_t spriteId;
+        uint32_t flags;
+        int32_t heightRangePacked;
+    };
+    static_assert(sizeof(SparseAuxMetadata) == 12, "SparseAuxMetadata must be 12 bytes");
+#pragma pack(pop)
+
     enum class LayerKind {
         Albedo,
         Specular,
@@ -141,6 +160,12 @@ class TextureSystem {
                                     uint64_t generation,
                                     std::shared_ptr<vk::VMA> vma,
                                     std::shared_ptr<vk::Device> device);
+    bool receiveSparseAuxBatch(const SparseAuxUpdate* updates, uint32_t updateCount,
+                               const uint8_t* pixels, size_t pixelBytes,
+                               const SparseAuxMetadata* metadata, uint32_t metadataCount,
+                               uint64_t generation,
+                               std::shared_ptr<vk::VMA> vma,
+                               std::shared_ptr<vk::Device> device);
     bool uploadTextureRules(const vk::Data::TextureRuleEntry* entries, uint32_t count,
                             uint64_t generation,
                             std::shared_ptr<vk::VMA> vma,

@@ -897,6 +897,92 @@ bool TextureSystem::updateSpriteHeightMetadata(uint32_t spriteId, uint32_t flags
     return registry_.uploadSSBO(std::move(vma), std::move(device));
 }
 
+bool TextureSystem::receiveSparseAuxBatch(const SparseAuxUpdate* updates, uint32_t updateCount,
+                                          const uint8_t* pixels, size_t pixelBytes,
+                                          const SparseAuxMetadata* metadata, uint32_t metadataCount,
+                                          uint64_t generation,
+                                          std::shared_ptr<vk::VMA> vma,
+                                          std::shared_ptr<vk::Device> device) {
+    if (!updates || updateCount == 0 || !pixels || pixelBytes == 0 || !vma || !device) return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
+    if (!finalized_ || sprites_.empty() || layerSize_ == 0) return false;
+
+    uint32_t specularArrayId = blockSpecularArrayId_.load(std::memory_order_acquire);
+    uint32_t normalArrayId = blockNormalArrayId_.load(std::memory_order_acquire);
+    uint32_t flagArrayId = blockFlagArrayId_.load(std::memory_order_acquire);
+    const size_t bytesPerLayer = static_cast<size_t>(layerSize_) * layerSize_ * 4u;
+    if (bytesPerLayer == 0) return false;
+
+    auto validPayload = [&](int32_t offset) {
+        if (offset < 0) return false;
+        size_t byteOffset = static_cast<size_t>(offset);
+        return byteOffset <= pixelBytes && bytesPerLayer <= pixelBytes - byteOffset;
+    };
+
+    uint32_t stagedSpecular = 0;
+    uint32_t stagedNormal = 0;
+    uint32_t stagedFlag = 0;
+    constexpr uint32_t CHANNEL_SPECULAR = 1u;
+    constexpr uint32_t CHANNEL_NORMAL = 2u;
+    constexpr uint32_t CHANNEL_FLAG = 4u;
+
+    for (uint32_t i = 0; i < updateCount; i++) {
+        const auto& update = updates[i];
+        if (update.spriteId < 0 || static_cast<uint32_t>(update.spriteId) >= sprites_.size()) {
+            continue;
+        }
+        uint32_t spriteId = static_cast<uint32_t>(update.spriteId);
+        if ((update.channelMask & CHANNEL_SPECULAR) != 0u) {
+            if (specularArrayId == UINT32_MAX || !validPayload(update.specularOffset)) return false;
+            if (arrayManager_.stageLayerPixels(specularArrayId, spriteId, 0,
+                    pixels + static_cast<size_t>(update.specularOffset), bytesPerLayer)) {
+                stagedSpecular++;
+            }
+        }
+        if ((update.channelMask & CHANNEL_NORMAL) != 0u) {
+            if (normalArrayId == UINT32_MAX || !validPayload(update.normalOffset)) return false;
+            if (arrayManager_.stageLayerPixels(normalArrayId, spriteId, 0,
+                    pixels + static_cast<size_t>(update.normalOffset), bytesPerLayer)) {
+                stagedNormal++;
+            }
+        }
+        if ((update.channelMask & CHANNEL_FLAG) != 0u) {
+            if (flagArrayId == UINT32_MAX || !validPayload(update.flagOffset)) return false;
+            if (arrayManager_.stageLayerPixels(flagArrayId, spriteId, 0,
+                    pixels + static_cast<size_t>(update.flagOffset), bytesPerLayer)) {
+                stagedFlag++;
+            }
+        }
+    }
+
+    uint32_t metadataApplied = 0;
+    if (metadata && metadataCount > 0) {
+        for (uint32_t i = 0; i < metadataCount; i++) {
+            const auto& entry = metadata[i];
+            if (entry.spriteId < 0 || static_cast<uint32_t>(entry.spriteId) >= sprites_.size()) {
+                continue;
+            }
+            if (registry_.updateHeightMetadata(static_cast<uint16_t>(entry.spriteId),
+                    entry.flags, entry.heightRangePacked)) {
+                metadataApplied++;
+            }
+        }
+        if (metadataApplied > 0 && !registry_.uploadSSBO(vma, device)) {
+            return false;
+        }
+    }
+
+    std::cout << "[TextureSystem] Sparse aux batch staged: updates=" << updateCount
+              << " bytes=" << pixelBytes
+              << " metadataUpdates=" << metadataApplied
+              << " specular=" << stagedSpecular
+              << " normal=" << stagedNormal
+              << " flag=" << stagedFlag << std::endl;
+    return true;
+}
+
 bool TextureSystem::uploadTextureRules(const vk::Data::TextureRuleEntry* entries, uint32_t count,
                                        uint64_t generation,
                                        std::shared_ptr<vk::VMA> vma,

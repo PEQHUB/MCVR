@@ -191,6 +191,29 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_Text
         framework->device()) ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeReceiveSparseAuxBatch(
+    JNIEnv *, jclass, jlong updatePtr, jint updateCount,
+    jlong pixelPtr, jint pixelBytes, jlong metadataPtr, jint metadataCount,
+    jlong generation) {
+
+    auto& ts = Renderer::textureSystem;
+    if (updatePtr == 0 || updateCount <= 0 || pixelPtr == 0 || pixelBytes <= 0) return JNI_FALSE;
+
+    auto renderer = Renderer::try_instance();
+    if (!renderer || !renderer->framework()) return JNI_FALSE;
+    auto framework = renderer->framework();
+    return ts.receiveSparseAuxBatch(
+        reinterpret_cast<const TextureSystem::SparseAuxUpdate*>(updatePtr),
+        static_cast<uint32_t>(updateCount),
+        reinterpret_cast<const uint8_t*>(pixelPtr),
+        static_cast<size_t>(pixelBytes),
+        reinterpret_cast<const TextureSystem::SparseAuxMetadata*>(metadataPtr),
+        static_cast<uint32_t>(std::max(metadataCount, 0)),
+        static_cast<uint64_t>(generation),
+        framework->vma(),
+        framework->device()) ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeReceiveTextureRules(
     JNIEnv *, jclass, jlong dataPtr, jint count, jlong generation) {
 

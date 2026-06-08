@@ -75,7 +75,10 @@ bool SpriteRegistry::updateHeightMetadata(uint16_t spriteId, uint32_t flags, int
         maskLayer = -1;
     }
     auto& e = entries_[spriteId];
-    e.flags = flags;
+    constexpr uint32_t kSourceBits =
+        vk::Data::SPRITE_FLAG_SPEC_SOURCE_MASK | vk::Data::SPRITE_FLAG_NORMAL_SOURCE_MASK;
+    constexpr uint32_t kHeightBits = vk::Data::SPRITE_FLAG_HAS_NORMAL | vk::Data::SPRITE_FLAG_HAS_HEIGHT;
+    e.flags = (e.flags & ~(kSourceBits | kHeightBits)) | (flags & (kSourceBits | kHeightBits));
     e.maskLayer = maskLayer;
     spriteCount_ = std::max(spriteCount_, static_cast<uint32_t>(spriteId + 1));
     return true;
