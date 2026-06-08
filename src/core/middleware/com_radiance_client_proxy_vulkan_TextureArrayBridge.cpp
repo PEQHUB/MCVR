@@ -3,6 +3,13 @@
 #include "core/render/render_framework.hpp"
 
 #include <algorithm>
+#include <sstream>
+
+namespace {
+jstring makeString(JNIEnv* env, const std::string& value) {
+    return env->NewStringUTF(value.c_str());
+}
+}
 
 extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeMaxRenderableSpriteCount(
     JNIEnv *, jclass) {
@@ -18,6 +25,67 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_TextureA
     VkPhysicalDeviceProperties props = framework->physicalDevice()->properties();
     uint32_t capacity = std::min(props.limits.maxImageArrayLayers, vk::Data::SPRITE_MAX_ENTRIES);
     return static_cast<jint>(capacity);
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeTextureUploadCapabilities(
+    JNIEnv *, jclass) {
+    constexpr jint kDefaultAuxTextures = 1 << 0;
+    constexpr jint kSparseSpriteAuxUpload = 1 << 1;
+    constexpr jint kGenerationBeginEndCancel = 1 << 2;
+    return kDefaultAuxTextures | kSparseSpriteAuxUpload | kGenerationBeginEndCancel;
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeTextureStreamingStatusJson(
+    JNIEnv *env, jclass) {
+    auto& ts = Renderer::textureSystem;
+    std::ostringstream out;
+    out << "{"
+        << "\"schema\":\"radser_native_texture_streaming_status_v1\","
+        << "\"generation\":" << ts.generation() << ","
+        << "\"finalized\":" << (ts.isFinalized() ? "true" : "false") << ","
+        << "\"spriteCount\":" << ts.spriteCount() << ","
+        << "\"layerSize\":" << ts.layerSize() << ","
+        << "\"activeUploadMode\":\"fixed_albedo_arrays_sparse_aux_layer_updates\","
+        << "\"nativeDefaultAuxTextures\":true,"
+        << "\"sparseSpriteAuxUpload\":true,"
+        << "\"tieredArrays\":false,"
+        << "\"asyncTransferQueueUpload\":false,"
+        << "\"textureUploadCapabilities\":" << Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeTextureUploadCapabilities(nullptr, nullptr)
+        << "}";
+    return makeString(env, out.str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeTextureMemoryStatusJson(
+    JNIEnv *env, jclass) {
+    auto& ts = Renderer::textureSystem;
+    const uint64_t bytesPerLayer = static_cast<uint64_t>(ts.layerSize()) * ts.layerSize() * 4ull;
+    std::ostringstream out;
+    out << "{"
+        << "\"schema\":\"radser_native_texture_memory_status_v1\","
+        << "\"generation\":" << ts.generation() << ","
+        << "\"spriteCount\":" << ts.spriteCount() << ","
+        << "\"layerSize\":" << ts.layerSize() << ","
+        << "\"bytesPerLayer\":" << bytesPerLayer << ","
+        << "\"fixedAlbedoBytes\":" << (bytesPerLayer * ts.spriteCount()) << ","
+        << "\"javaFullAuxArraysRequired\":false,"
+        << "\"nativeDefaultAuxTextures\":true"
+        << "}";
+    return makeString(env, out.str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeMaterialResidencyStatusJson(
+    JNIEnv *env, jclass) {
+    auto& ts = Renderer::textureSystem;
+    std::ostringstream out;
+    out << "{"
+        << "\"schema\":\"radser_native_material_residency_status_v1\","
+        << "\"generation\":" << ts.generation() << ","
+        << "\"finalized\":" << (ts.isFinalized() ? "true" : "false") << ","
+        << "\"backend\":\"renderer_owned_material_pages\","
+        << "\"dirtyMaterialTableUpdates\":false,"
+        << "\"materialPageRevision\":" << ts.materialTexturePageRevision()
+        << "}";
+    return makeString(env, out.str());
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeReceiveSpriteTable(
