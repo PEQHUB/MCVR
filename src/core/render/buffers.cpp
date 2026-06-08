@@ -255,7 +255,8 @@ void Buffers::buildAndUploadOverlayUniformBuffer() {
 
     if (overlayDrawUniformQueue_->size() > 0) {
         if (overlayDrawUniformBuffer_[context->frameIndex] == nullptr ||
-            overlayDrawUniformBuffer_.size() < overlayDrawUniformQueue_->size() * sizeof(vk::Data::OverlayUBO)) {
+            overlayDrawUniformBuffer_[context->frameIndex]->size() <
+                overlayDrawUniformQueue_->size() * sizeof(vk::Data::OverlayUBO)) {
             uint32_t currentSize = overlayDrawUniformBuffer_[context->frameIndex] == nullptr ?
                                        baseBlockSize :
                                        overlayDrawUniformBuffer_[context->frameIndex]->size();

@@ -1419,8 +1419,7 @@ void WorldPrepareContext::render() {
     cpuAccTotal += cpuMsSince(cpuT0);
     cpuFrameCount++;
 
-    // Per-frame CSV logging (when Renderer::options.perFrameTiming is on)
-    {
+    if (Renderer::options.loggingEnabled) {
         static uint64_t wpFrameIndex = 0;
         static bool wpHeaderWritten = false;
         std::ofstream wpLog("C:/RadSER/results/per_frame_world_prepare.log", std::ios::app);
@@ -1439,9 +1438,9 @@ void WorldPrepareContext::render() {
                 << cpuMsSince(cpuT0) << "\n";
             wpFrameIndex++;
         }
-        pfCheck = pfImportant = pfEntity = 0;
-        pfInstances = pfTlas = 0;
     }
+    pfCheck = pfImportant = pfEntity = 0;
+    pfInstances = pfTlas = 0;
 
     // Save BLAS snapshot: keeps shared_ptrs alive until this context is reused,
     // preventing GC from freeing BLASes while the GPU still references their addresses.

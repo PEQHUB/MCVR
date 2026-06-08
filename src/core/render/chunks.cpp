@@ -199,8 +199,9 @@ void ChunkBuildData::prepareCPU(bool allowMicromapBake, bool skipOMM, glm::vec3 
                 std::map<uint64_t, uint32_t> descHistMap, indexHistMap;
 
                 for (auto &[texId, triList] : texGroups) {
-                    const auto *alphaData = textures->getTextureAlphaData(texId);
-                    if (!alphaData || alphaData->alpha.empty()) {
+                    Textures::TextureAlphaData alphaData;
+                    if (!textures->getTextureAlphaDataSnapshot(texId, alphaData) ||
+                        alphaData.alpha.empty()) {
                         for (uint32_t t : triList) {
                             auto alphaClass = textures->getTextureAlphaClass(texId);
                             cr.ommIndices[t] = (alphaClass == Textures::AlphaClass::FULLY_OPAQUE)
@@ -227,9 +228,9 @@ void ChunkBuildData::prepareCPU(bool allowMicromapBake, bool skipOMM, glm::vec3 
                     }
 
                     OMMBaker::BakeInput input{};
-                    input.alphaData = alphaData->alpha.data();
-                    input.texWidth = alphaData->width;
-                    input.texHeight = alphaData->height;
+                    input.alphaData = alphaData.alpha.data();
+                    input.texWidth = alphaData.width;
+                    input.texHeight = alphaData.height;
                     input.uvData = &vertices[i][0].textureUV;
                     input.uvStrideBytes = sizeof(vk::VertexFormat::PBRTriangle);
                     input.indexData = localIndices.data();
@@ -941,9 +942,17 @@ void ChunkBuildData::uploadGPU() {
                 createInfo.size = sizeInfo.micromapSize;
                 createInfo.buffer = gd.micromapBuffer->vkBuffer();
                 createInfo.offset = 0;
-                vkCreateMicromapEXT(device->vkDevice(), &createInfo, nullptr, &gd.micromap);
-                gd.device = device;
-                gd.hasMicromap = true;
+                VkResult createMicromapResult =
+                    vkCreateMicromapEXT(device->vkDevice(), &createInfo, nullptr, &gd.micromap);
+                if (createMicromapResult == VK_SUCCESS && gd.micromap != VK_NULL_HANDLE) {
+                    gd.device = device;
+                    gd.hasMicromap = true;
+                } else {
+                    gd.micromap = VK_NULL_HANDLE;
+                    gd.hasMicromap = false;
+                    std::cerr << "[OMM] vkCreateMicromapEXT failed result="
+                              << createMicromapResult << "; using opacity indices fallback" << std::endl;
+                }
             }
         } else {
             ommIndexBuffers.push_back(nullptr);

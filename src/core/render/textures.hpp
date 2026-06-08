@@ -7,6 +7,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <vector>
 
 class Framework;
 
@@ -34,6 +35,20 @@ class Textures : public SharedObject<Textures> {
                      uint32_t height,
                      uint32_t level);
     void performQueuedUpload();
+    enum class AlphaClass : uint32_t {
+        FULLY_OPAQUE = 0,
+        FULLY_TRANSPARENT = 1,
+        MIXED = 2,
+    };
+    struct TextureAlphaData {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        std::vector<uint8_t> alpha;
+    };
+    void setTextureAlphaClass(uint32_t id, AlphaClass alphaClass);
+    AlphaClass getTextureAlphaClass(uint32_t id) const;
+    const TextureAlphaData *getTextureAlphaData(uint32_t id) const;
+    bool getTextureAlphaDataSnapshot(uint32_t id, TextureAlphaData &out) const;
     // Per-frame upload diagnostics (reset each frame by resetFrame)
     size_t uploadBytes_ = 0;
     uint32_t uploadRegions_ = 0;
@@ -48,7 +63,9 @@ class Textures : public SharedObject<Textures> {
     std::map<uint32_t, std::shared_ptr<vk::Sampler>> samplers;
     uint32_t nextID = 0;
     std::vector<uint32_t> freeList_;
-    std::recursive_mutex mutex_;
+    mutable std::recursive_mutex mutex_;
+    std::map<uint32_t, AlphaClass> textureAlphaClass_;
+    std::map<uint32_t, TextureAlphaData> textureAlphaData_;
 
     std::map<uint32_t, std::shared_ptr<ImageBufferCache>> caches_;
     std::shared_ptr<std::map<uint32_t, std::vector<VkBufferImageCopy>>> uploadQueue_;

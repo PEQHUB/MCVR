@@ -77,7 +77,7 @@ static uint64_t pfUploadBytes = 0, pfUploadRegions = 0;
         return std::chrono::duration<float, std::milli>(Clock::now() - t0).count();
     }
 
-	static bool perFrameTimingEnabled = true;  // Toggle via Options or config
+	static bool perFrameTimingEnabled = false;  // High-frequency CSV logging is opt-in.
 static void logPerFrame() {
     if (!perFrameTimingEnabled) return;
 		
@@ -486,6 +486,7 @@ Framework::~Framework() {
 
 void Framework::acquireContext() {
     if (!running_) return;
+    currentContext_ = nullptr;
 
     // ── Full-frame profiling: measure frame-to-frame time ──
     auto ftNow = FrameTiming::Clock::now();
@@ -737,6 +738,12 @@ void Framework::acquireContext() {
 void Framework::submitCommand() {
     if (!running_) return;
 
+    auto acquiredContext = Renderer::instance().framework()->safeAcquireCurrentContext();
+    if (!acquiredContext) {
+        renderDiag("submitCommand skipped: no acquired frame context");
+        return;
+    }
+
     // Measure Java-side work between acquireContext() return and submitCommand() call
     FrameTiming::accJavaGap += std::chrono::duration<float, std::milli>(
         FrameTiming::Clock::now() - FrameTiming::acquireEnd).count();
@@ -770,8 +777,6 @@ void Framework::submitCommand() {
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::eSimulationEnd);
 #endif
-
-    Renderer::instance().framework()->safeAcquireCurrentContext(); // ensure context is non nullptr
 
     // Granular GPU checkpoints on the upload command buffer for crash diagnosis
     auto ftUpload0 = FrameTiming::Clock::now();
@@ -971,6 +976,13 @@ void Framework::present() {
     if (!running_) return;
     auto ftPresent0 = FrameTiming::Clock::now();
     renderDiag("present decoupled=%d needRecreate=%d", (int)decoupledPresent_, (int)Renderer::options.needRecreate);
+    if (!currentContext_) {
+        renderDiag("present skipped: no submitted frame context");
+        if (Renderer::options.needRecreate || vk::Window::framebufferResized || pipeline_->needRecreate) {
+            recreate();
+        }
+        return;
+    }
 
     // Decoupled mode: PresentThread handles presenting.
     // Still check for recreation triggers.
@@ -1046,6 +1058,7 @@ void Framework::present() {
     FrameTiming::pfPresent += FrameTiming::ms(ftPresent0);
     FrameTiming::lastFrameEnd = FrameTiming::Clock::now();
     FrameTiming::log();
+    currentContext_ = nullptr;
 }
 
 void Framework::recreate() {
@@ -1654,7 +1667,11 @@ std::vector<std::shared_ptr<FrameworkContext>> &Framework::contexts() {
 std::shared_ptr<FrameworkContext> Framework::safeAcquireCurrentContext() {
     std::unique_lock<std::recursive_mutex> lck(recreateMtx_);
     while (currentContext_ == nullptr) {
+        if (!running_) return nullptr;
         acquireContext();
+        if (Renderer::options.needRecreate || vk::Window::framebufferResized || pipeline_->needRecreate) {
+            return nullptr;
+        }
     }
     return currentContext_;
 }

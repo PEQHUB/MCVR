@@ -22,6 +22,8 @@ void Textures::reset() {
     std::unique_lock<std::recursive_mutex> lck(mutex_);
     textures_.clear();
     samplers.clear();
+    textureAlphaClass_.clear();
+    textureAlphaData_.clear();
     caches_.clear();
     uploadQueue_ = std::make_shared<std::map<uint32_t, std::vector<VkBufferImageCopy>>>();
     freeList_.clear();
@@ -302,6 +304,39 @@ void Textures::performQueuedUpload() {
     }
 
     cmdBuffer->barriersBufferImage({}, uploadPostImageBarriers);
+}
+
+void Textures::setTextureAlphaClass(uint32_t id, AlphaClass alphaClass) {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
+    textureAlphaClass_[id] = alphaClass;
+}
+
+Textures::AlphaClass Textures::getTextureAlphaClass(uint32_t id) const {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
+    auto it = textureAlphaClass_.find(id);
+    if (it != textureAlphaClass_.end()) {
+        return it->second;
+    }
+    return AlphaClass::MIXED;
+}
+
+const Textures::TextureAlphaData *Textures::getTextureAlphaData(uint32_t id) const {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
+    auto it = textureAlphaData_.find(id);
+    if (it != textureAlphaData_.end()) {
+        return &it->second;
+    }
+    return nullptr;
+}
+
+bool Textures::getTextureAlphaDataSnapshot(uint32_t id, TextureAlphaData &out) const {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
+    auto it = textureAlphaData_.find(id);
+    if (it == textureAlphaData_.end()) {
+        return false;
+    }
+    out = it->second;
+    return true;
 }
 
 void Textures::bindAllTextures() {
