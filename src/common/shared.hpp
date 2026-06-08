@@ -552,6 +552,10 @@ namespace Data {
     static constexpr uint32_t SPRITE_MAX_ENTRIES        = 4096u;
     static constexpr uint32_t MATERIAL_MAX_ENTRIES      = 65536u;
     static constexpr uint32_t MATERIAL_TEXTURE_PAGE_MAX = 64u;
+    static constexpr uint32_t MATERIAL_PAGE_NAMESPACE_MASK = 0xF0000000u;
+    static constexpr uint32_t MATERIAL_PAGE_INDEX_MASK = 0x0FFFFFFFu;
+    static constexpr uint32_t MATERIAL_PAGE_NAMESPACE_MATERIAL = 0x00000000u;
+    static constexpr uint32_t MATERIAL_PAGE_NAMESPACE_VANILLA_TIER = 0x80000000u;
     static constexpr uint32_t MATERIAL_FLAG_VALID = 1u << 0;
     static constexpr uint32_t MATERIAL_FLAG_VANILLA_SPRITE = 1u << 1;
     static constexpr uint32_t MATERIAL_FLAG_COMPAT_VIRTUAL = 1u << 2;
@@ -616,6 +620,10 @@ namespace Data {
     #define SPRITE_MAX_ENTRIES       4096u
     #define MATERIAL_MAX_ENTRIES     65536u
     #define MATERIAL_TEXTURE_PAGE_MAX 64u
+    #define MATERIAL_PAGE_NAMESPACE_MASK 0xF0000000u
+    #define MATERIAL_PAGE_INDEX_MASK 0x0FFFFFFFu
+    #define MATERIAL_PAGE_NAMESPACE_MATERIAL 0x00000000u
+    #define MATERIAL_PAGE_NAMESPACE_VANILLA_TIER 0x80000000u
     #define MATERIAL_FLAG_VALID (1u << 0)
     #define MATERIAL_FLAG_VANILLA_SPRITE (1u << 1)
     #define MATERIAL_FLAG_COMPAT_VIRTUAL (1u << 2)

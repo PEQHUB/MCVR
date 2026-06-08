@@ -65,7 +65,12 @@ bool spriteLayerInRange(int layer, ivec3 textureDims) {
 }
 
 uint materialTexturePage(uint page) {
-    return min(page, MATERIAL_TEXTURE_PAGE_MAX - 1u);
+    uint namespaceTag = page & MATERIAL_PAGE_NAMESPACE_MASK;
+    uint pageIndex = page & MATERIAL_PAGE_INDEX_MASK;
+    if (namespaceTag == MATERIAL_PAGE_NAMESPACE_VANILLA_TIER) {
+        return min(pageIndex, MATERIAL_TEXTURE_PAGE_MAX - 1u);
+    }
+    return min(pageIndex, MATERIAL_TEXTURE_PAGE_MAX - 1u);
 }
 
 ivec3 materialAlbedoTextureSize(MaterialEntry material) {
