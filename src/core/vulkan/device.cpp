@@ -461,6 +461,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
 
 void vk::Device::createTimelineSemaphores() {
     blasSemaphore_ = TimelineSemaphore::create(shared_from_this(), 0);
+    materialUploadSemaphore_ = TimelineSemaphore::create(shared_from_this(), 0);
 }
 
 vk::Device::~Device() {
@@ -469,6 +470,7 @@ vk::Device::~Device() {
         vkDestroyPipelineCache(device_, pipelineCache_, nullptr);
     }
     blasSemaphore_.reset();
+    materialUploadSemaphore_.reset();
     vkDestroyDevice(device_, nullptr);
 
 #ifdef DEBUG

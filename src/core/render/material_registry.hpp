@@ -41,11 +41,13 @@ class MaterialRegistry {
         std::shared_ptr<vk::Device> device;
         std::shared_ptr<vk::CommandBuffer> commandBuffer;
         std::shared_ptr<vk::Fence> fence;
+        std::shared_ptr<vk::TimelineSemaphore> timeline;
         std::shared_ptr<vk::DeviceLocalBuffer> deviceLocalStagingOwner;
         std::shared_ptr<vk::DeviceLocalBuffer> targetBuffer;
         std::shared_ptr<vk::HostVisibleBuffer> hostStaging;
         uint64_t bytes = 0;
         uint32_t entries = 0;
+        uint64_t timelineValue = 0;
         bool sparse = false;
     };
 
@@ -57,6 +59,10 @@ class MaterialRegistry {
     uint64_t sparseUpdates_ = 0;
     uint64_t asyncSubmissions_ = 0;
     mutable uint64_t asyncCompletions_ = 0;
+    uint64_t timelineSubmissions_ = 0;
+    uint64_t fenceSubmissions_ = 0;
+    uint64_t materialUploadTimelineValue_ = 0;
+    mutable uint64_t lastCompletedTimelineValue_ = 0;
     mutable uint64_t pendingUploadBytes_ = 0;
     uint32_t lastSparseEntryCount_ = 0;
     uint32_t lastSparseMinMaterialId_ = 0;

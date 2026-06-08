@@ -10,13 +10,22 @@
 
 void MaterialRegistry::pollCompletedUploadsLocked() const {
     for (auto it = pendingUploads_.begin(); it != pendingUploads_.end();) {
-        if (!it->device || !it->fence) {
+        if (!it->device || (!it->fence && !it->timeline)) {
             pendingUploadBytes_ -= std::min<uint64_t>(pendingUploadBytes_, it->bytes);
             it = pendingUploads_.erase(it);
             continue;
         }
-        VkResult status = vkGetFenceStatus(it->device->vkDevice(), it->fence->vkFence());
-        if (status == VK_SUCCESS) {
+        bool complete = false;
+        if (it->timeline && it->timelineValue > 0) {
+            uint64_t currentValue = it->timeline->getValue();
+            complete = currentValue >= it->timelineValue;
+            if (complete) {
+                lastCompletedTimelineValue_ = std::max(lastCompletedTimelineValue_, it->timelineValue);
+            }
+        } else if (it->fence) {
+            complete = vkGetFenceStatus(it->device->vkDevice(), it->fence->vkFence()) == VK_SUCCESS;
+        }
+        if (complete) {
             if (it->deviceLocalStagingOwner) {
                 it->deviceLocalStagingOwner->releaseStagingBuffer();
             }
@@ -80,7 +89,36 @@ bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, u
     cmd->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
     nextSsbo->uploadToBuffer(cmd);
     cmd->end();
-    cmd->submitMainQueueIndividual(device, fence);
+    auto timeline = device->materialUploadSemaphore();
+    uint64_t timelineValue = 0;
+    if (timeline) {
+        timelineValue = ++materialUploadTimelineValue_;
+        VkTimelineSemaphoreSubmitInfo timelineInfo{};
+        timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timelineInfo.signalSemaphoreValueCount = 1;
+        timelineInfo.pSignalSemaphoreValues = &timelineValue;
+
+        VkSemaphore signalSemaphore = timeline->vkSemaphore();
+        VkCommandBuffer commandBuffer = cmd->vkCommandBuffer();
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.pNext = &timelineInfo;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+        submitInfo.signalSemaphoreCount = 1;
+        submitInfo.pSignalSemaphores = &signalSemaphore;
+
+        std::lock_guard<std::mutex> qLock(device->queueMutex());
+        VkResult submitResult = vkQueueSubmit(device->mainVkQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+        if (submitResult != VK_SUCCESS) {
+            --materialUploadTimelineValue_;
+            return false;
+        }
+        timelineSubmissions_++;
+    } else {
+        cmd->submitMainQueueIndividual(device, fence);
+        fenceSubmissions_++;
+    }
 
     if (ssbo_) {
         framework->gc().collect(ssbo_);
@@ -94,11 +132,13 @@ bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, u
     pendingUploads_.push_back(PendingUpload{
         .device = device,
         .commandBuffer = cmd,
-        .fence = fence,
+        .fence = timeline ? nullptr : fence,
+        .timeline = timeline,
         .deviceLocalStagingOwner = ssbo_,
         .targetBuffer = ssbo_,
         .bytes = static_cast<uint64_t>(dataSize),
         .entries = static_cast<uint32_t>(copyCount),
+        .timelineValue = timelineValue,
         .sparse = false,
     });
 
@@ -160,7 +200,36 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
     vkCmdCopyBuffer(cmd->vkCommandBuffer(), staging->vkBuffer(), ssbo_->vkBuffer(),
                     static_cast<uint32_t>(copyRegions.size()), copyRegions.data());
     cmd->end();
-    cmd->submitMainQueueIndividual(device, fence);
+    auto timeline = device->materialUploadSemaphore();
+    uint64_t timelineValue = 0;
+    if (timeline) {
+        timelineValue = ++materialUploadTimelineValue_;
+        VkTimelineSemaphoreSubmitInfo timelineInfo{};
+        timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+        timelineInfo.signalSemaphoreValueCount = 1;
+        timelineInfo.pSignalSemaphoreValues = &timelineValue;
+
+        VkSemaphore signalSemaphore = timeline->vkSemaphore();
+        VkCommandBuffer commandBuffer = cmd->vkCommandBuffer();
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.pNext = &timelineInfo;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+        submitInfo.signalSemaphoreCount = 1;
+        submitInfo.pSignalSemaphores = &signalSemaphore;
+
+        std::lock_guard<std::mutex> qLock(device->queueMutex());
+        VkResult submitResult = vkQueueSubmit(device->mainVkQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+        if (submitResult != VK_SUCCESS) {
+            --materialUploadTimelineValue_;
+            return false;
+        }
+        timelineSubmissions_++;
+    } else {
+        cmd->submitMainQueueIndividual(device, fence);
+        fenceSubmissions_++;
+    }
 
     materialCount_ = std::max(materialCount_, static_cast<uint32_t>(entries_.size()));
     sparseUpdates_++;
@@ -169,11 +238,13 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
     pendingUploads_.push_back(PendingUpload{
         .device = device,
         .commandBuffer = cmd,
-        .fence = fence,
+        .fence = timeline ? nullptr : fence,
+        .timeline = timeline,
         .targetBuffer = ssbo_,
         .hostStaging = staging,
         .bytes = static_cast<uint64_t>(dataSize),
         .entries = updated,
+        .timelineValue = timelineValue,
         .sparse = true,
     });
     lastSparseEntryCount_ = updated;
@@ -207,6 +278,11 @@ std::string MaterialRegistry::statusJson() const {
         << "\"sparseUpdates\":" << sparseUpdates_ << ","
         << "\"blockingFenceUploads\":false,"
         << "\"asyncMainQueueUploads\":true,"
+        << "\"timelineUploadCompletion\":" << (timelineSubmissions_ > 0 ? "true" : "false") << ","
+        << "\"timelineSubmissions\":" << timelineSubmissions_ << ","
+        << "\"fenceSubmissions\":" << fenceSubmissions_ << ","
+        << "\"lastSubmittedTimelineValue\":" << materialUploadTimelineValue_ << ","
+        << "\"lastCompletedTimelineValue\":" << lastCompletedTimelineValue_ << ","
         << "\"asyncSubmissions\":" << asyncSubmissions_ << ","
         << "\"asyncCompletions\":" << asyncCompletions_ << ","
         << "\"pendingAsyncUploads\":" << pendingUploads_.size() << ","
@@ -233,6 +309,8 @@ void MaterialRegistry::reset() {
     sparseUpdates_ = 0;
     asyncSubmissions_ = 0;
     asyncCompletions_ = 0;
+    timelineSubmissions_ = 0;
+    fenceSubmissions_ = 0;
     lastSparseEntryCount_ = 0;
     lastSparseMinMaterialId_ = 0;
     lastSparseMaxMaterialId_ = 0;
@@ -251,6 +329,8 @@ void MaterialRegistry::retire(GarbageCollector& gc) {
     sparseUpdates_ = 0;
     asyncSubmissions_ = 0;
     asyncCompletions_ = 0;
+    timelineSubmissions_ = 0;
+    fenceSubmissions_ = 0;
     lastSparseEntryCount_ = 0;
     lastSparseMinMaterialId_ = 0;
     lastSparseMaxMaterialId_ = 0;

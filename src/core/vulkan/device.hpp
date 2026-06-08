@@ -29,6 +29,7 @@ class Device : public SharedObject<Device> {
     /// (shared_from_this() is not valid inside the constructor).
     void createTimelineSemaphores();
     std::shared_ptr<TimelineSemaphore> blasSemaphore() { return blasSemaphore_; }
+    std::shared_ptr<TimelineSemaphore> materialUploadSemaphore() { return materialUploadSemaphore_; }
 
     bool hasExtendedDynamicState2LogicOp() const { return extendedDynamicState2LogicOp_; }
     bool hasSER() const { return serSupported_; }
@@ -54,6 +55,7 @@ class Device : public SharedObject<Device> {
     bool deviceFaultSupported_ = false;
 
     std::shared_ptr<TimelineSemaphore> blasSemaphore_;
+    std::shared_ptr<TimelineSemaphore> materialUploadSemaphore_;
 
     void loadPipelineCache();
     static std::string pipelineCachePath();
