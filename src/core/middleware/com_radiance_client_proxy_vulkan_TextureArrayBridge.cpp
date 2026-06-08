@@ -53,6 +53,8 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
         << "\"sparseAuxBatchUpload\":true,"
         << "\"materialPagePools\":true,"
         << "\"sparseMaterialTableUpdates\":true,"
+        << "\"blockingMaterialTableUploads\":false,"
+        << "\"asyncMaterialTableMainQueueUpload\":true,"
         << "\"tieredArrays\":true,"
         << "\"vanillaMaterialPageTiers\":true,"
         << "\"asyncTransferQueueUpload\":false,"

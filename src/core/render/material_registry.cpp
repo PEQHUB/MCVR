@@ -8,11 +8,33 @@
 #include <sstream>
 #include <utility>
 
+void MaterialRegistry::pollCompletedUploadsLocked() const {
+    for (auto it = pendingUploads_.begin(); it != pendingUploads_.end();) {
+        if (!it->device || !it->fence) {
+            pendingUploadBytes_ -= std::min<uint64_t>(pendingUploadBytes_, it->bytes);
+            it = pendingUploads_.erase(it);
+            continue;
+        }
+        VkResult status = vkGetFenceStatus(it->device->vkDevice(), it->fence->vkFence());
+        if (status == VK_SUCCESS) {
+            if (it->deviceLocalStagingOwner) {
+                it->deviceLocalStagingOwner->releaseStagingBuffer();
+            }
+            pendingUploadBytes_ -= std::min<uint64_t>(pendingUploadBytes_, it->bytes);
+            asyncCompletions_++;
+            it = pendingUploads_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, uint32_t count,
                                        std::shared_ptr<vk::VMA> vma,
                                        std::shared_ptr<vk::Device> device) {
     if (!entries || count == 0 || !vma || !device) return false;
     std::lock_guard<std::mutex> lock(mutex_);
+    pollCompletedUploadsLocked();
 
     auto renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return false;
@@ -59,7 +81,6 @@ bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, u
     nextSsbo->uploadToBuffer(cmd);
     cmd->end();
     cmd->submitMainQueueIndividual(device, fence);
-    vkWaitForFences(device->vkDevice(), 1, &fence->vkFence(), VK_TRUE, UINT64_MAX);
 
     if (ssbo_) {
         framework->gc().collect(ssbo_);
@@ -68,8 +89,19 @@ bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, u
     entries_.assign(entries, entries + copyCount);
     materialCount_ = static_cast<uint32_t>(copyCount);
     fullUploads_++;
+    asyncSubmissions_++;
+    pendingUploadBytes_ += static_cast<uint64_t>(dataSize);
+    pendingUploads_.push_back(PendingUpload{
+        .device = device,
+        .commandBuffer = cmd,
+        .fence = fence,
+        .deviceLocalStagingOwner = ssbo_,
+        .bytes = static_cast<uint64_t>(dataSize),
+        .entries = static_cast<uint32_t>(copyCount),
+        .sparse = false,
+    });
 
-    std::cout << "[MaterialRegistry] Uploaded " << materialCount_
+    std::cout << "[MaterialRegistry] Queued async full upload for " << materialCount_
               << " materials (" << dataSize << " bytes padded) to GPU SSBO" << std::endl;
     return true;
 }
@@ -79,12 +111,17 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
                                              std::shared_ptr<vk::Device> device) {
     if (!entries || count == 0 || !vma || !device) return false;
     std::lock_guard<std::mutex> lock(mutex_);
+    pollCompletedUploadsLocked();
     if (!ssbo_ || !ssbo_->isValid() || entries_.empty()) return false;
 
     auto renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return false;
     auto framework = renderer->framework();
 
+    std::vector<vk::Data::MaterialEntry> sparseEntries;
+    sparseEntries.reserve(count);
+    std::vector<VkBufferCopy> copyRegions;
+    copyRegions.reserve(count);
     uint32_t updated = 0;
     uint32_t minMaterialId = std::numeric_limits<uint32_t>::max();
     uint32_t maxMaterialId = 0;
@@ -98,38 +135,49 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
             entries_.resize(static_cast<size_t>(entry.materialId) + 1);
         }
         entries_[entry.materialId] = entry;
-        size_t offset = static_cast<size_t>(entry.materialId) * sizeof(vk::Data::MaterialEntry);
-        ssbo_->uploadToStagingBuffer(
-            const_cast<vk::Data::MaterialEntry*>(&entry),
-            sizeof(vk::Data::MaterialEntry),
-            offset);
+        sparseEntries.push_back(entry);
+        VkBufferCopy region{};
+        region.srcOffset = static_cast<VkDeviceSize>(updated) * sizeof(vk::Data::MaterialEntry);
+        region.dstOffset = static_cast<VkDeviceSize>(entry.materialId) * sizeof(vk::Data::MaterialEntry);
+        region.size = sizeof(vk::Data::MaterialEntry);
+        copyRegions.push_back(region);
         updated++;
         minMaterialId = std::min(minMaterialId, entry.materialId);
         maxMaterialId = std::max(maxMaterialId, entry.materialId);
     }
     if (updated == 0) return true;
 
+    const VkDeviceSize dataSize = static_cast<VkDeviceSize>(sparseEntries.size())
+        * sizeof(vk::Data::MaterialEntry);
+    auto staging = vk::HostVisibleBuffer::create(
+        vma, device, static_cast<size_t>(dataSize), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    staging->uploadToBuffer(sparseEntries.data(), static_cast<size_t>(dataSize), 0);
+
     auto fence = vk::Fence::create(device);
     auto cmd = vk::CommandBuffer::create(device, framework->mainCommandPool());
     cmd->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-    for (uint32_t i = 0; i < count; i++) {
-        const auto& entry = entries[i];
-        if (entry.materialId >= vk::Data::MATERIAL_MAX_ENTRIES) {
-            continue;
-        }
-        size_t offset = static_cast<size_t>(entry.materialId) * sizeof(vk::Data::MaterialEntry);
-        ssbo_->uploadToBuffer(cmd, sizeof(vk::Data::MaterialEntry), offset, offset);
-    }
+    vkCmdCopyBuffer(cmd->vkCommandBuffer(), staging->vkBuffer(), ssbo_->vkBuffer(),
+                    static_cast<uint32_t>(copyRegions.size()), copyRegions.data());
     cmd->end();
     cmd->submitMainQueueIndividual(device, fence);
-    vkWaitForFences(device->vkDevice(), 1, &fence->vkFence(), VK_TRUE, UINT64_MAX);
 
     materialCount_ = std::max(materialCount_, static_cast<uint32_t>(entries_.size()));
     sparseUpdates_++;
+    asyncSubmissions_++;
+    pendingUploadBytes_ += static_cast<uint64_t>(dataSize);
+    pendingUploads_.push_back(PendingUpload{
+        .device = device,
+        .commandBuffer = cmd,
+        .fence = fence,
+        .hostStaging = staging,
+        .bytes = static_cast<uint64_t>(dataSize),
+        .entries = updated,
+        .sparse = true,
+    });
     lastSparseEntryCount_ = updated;
     lastSparseMinMaterialId_ = minMaterialId == std::numeric_limits<uint32_t>::max() ? 0 : minMaterialId;
     lastSparseMaxMaterialId_ = maxMaterialId;
-    std::cout << "[MaterialRegistry] Sparse updated " << updated
+    std::cout << "[MaterialRegistry] Queued async sparse update for " << updated
               << " material entries minId=" << lastSparseMinMaterialId_
               << " maxId=" << lastSparseMaxMaterialId_ << std::endl;
     return true;
@@ -137,12 +185,19 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
 
 std::string MaterialRegistry::statusJson() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    pollCompletedUploadsLocked();
     std::ostringstream out;
     out << "{"
         << "\"schema\":\"radser_material_table_status_v1\","
         << "\"materialCount\":" << materialCount_ << ","
         << "\"fullUploads\":" << fullUploads_ << ","
         << "\"sparseUpdates\":" << sparseUpdates_ << ","
+        << "\"blockingFenceUploads\":false,"
+        << "\"asyncMainQueueUploads\":true,"
+        << "\"asyncSubmissions\":" << asyncSubmissions_ << ","
+        << "\"asyncCompletions\":" << asyncCompletions_ << ","
+        << "\"pendingAsyncUploads\":" << pendingUploads_.size() << ","
+        << "\"pendingAsyncUploadBytes\":" << pendingUploadBytes_ << ","
         << "\"lastSparseEntryCount\":" << lastSparseEntryCount_ << ","
         << "\"lastSparseMinMaterialId\":" << lastSparseMinMaterialId_ << ","
         << "\"lastSparseMaxMaterialId\":" << lastSparseMaxMaterialId_ << ","
@@ -157,10 +212,14 @@ void MaterialRegistry::reset() {
     materialCount_ = 0;
     fullUploads_ = 0;
     sparseUpdates_ = 0;
+    asyncSubmissions_ = 0;
+    asyncCompletions_ = 0;
+    pendingUploadBytes_ = 0;
     lastSparseEntryCount_ = 0;
     lastSparseMinMaterialId_ = 0;
     lastSparseMaxMaterialId_ = 0;
     rejectedSparseEntries_ = 0;
+    pendingUploads_.clear();
     ssbo_.reset();
 }
 
@@ -171,9 +230,13 @@ void MaterialRegistry::retire(GarbageCollector& gc) {
     materialCount_ = 0;
     fullUploads_ = 0;
     sparseUpdates_ = 0;
+    asyncSubmissions_ = 0;
+    asyncCompletions_ = 0;
+    pendingUploadBytes_ = 0;
     lastSparseEntryCount_ = 0;
     lastSparseMinMaterialId_ = 0;
     lastSparseMaxMaterialId_ = 0;
     rejectedSparseEntries_ = 0;
+    pendingUploads_.clear();
     ssbo_.reset();
 }
