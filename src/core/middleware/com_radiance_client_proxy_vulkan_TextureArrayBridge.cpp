@@ -3,6 +3,7 @@
 #include "core/render/render_framework.hpp"
 
 #include <algorithm>
+#include <iostream>
 #include <sstream>
 
 namespace {
@@ -332,9 +333,32 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_Text
 
     auto& ts = Renderer::textureSystem;
     if (page <= 0 || layerSize <= 0 || startLayer < 0 || layerCount <= 0 || layerCapacity <= 0) {
+        std::cerr << "[TextureSystem] Rejected material layer upload: invalid args page=" << page
+                  << " layerSize=" << layerSize
+                  << " startLayer=" << startLayer
+                  << " layerCount=" << layerCount
+                  << " layerCapacity=" << layerCapacity << std::endl;
         return JNI_FALSE;
     }
-    if (albedoPtr == 0 || specularPtr == 0 || normalPtr == 0 || flagPtr == 0) return JNI_FALSE;
+    if (page >= static_cast<jint>(vk::Data::MATERIAL_TEXTURE_PAGE_MAX)
+        || startLayer > layerCapacity
+        || layerCount > layerCapacity - startLayer) {
+        std::cerr << "[TextureSystem] Rejected material layer upload: out-of-range page=" << page
+                  << " startLayer=" << startLayer
+                  << " layerCount=" << layerCount
+                  << " layerCapacity=" << layerCapacity
+                  << " maxPages=" << vk::Data::MATERIAL_TEXTURE_PAGE_MAX << std::endl;
+        return JNI_FALSE;
+    }
+    if (layerSize > 4096) {
+        std::cerr << "[TextureSystem] Rejected material layer upload: unsupported layerSize="
+                  << layerSize << std::endl;
+        return JNI_FALSE;
+    }
+    if (albedoPtr == 0 || specularPtr == 0 || normalPtr == 0 || flagPtr == 0) {
+        std::cerr << "[TextureSystem] Rejected material layer upload: null pixel pointer" << std::endl;
+        return JNI_FALSE;
+    }
 
     auto renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return JNI_FALSE;

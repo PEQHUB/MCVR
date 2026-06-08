@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <cmath>
+#include <limits>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -1044,13 +1045,25 @@ bool TextureSystem::uploadMaterialTextureLayers(uint32_t page, uint32_t spriteSi
     if (spriteSize == 0 || layerCount == 0 || layerCapacity == 0) return false;
     if (startLayer >= layerCapacity || layerCount > layerCapacity - startLayer) return false;
     if (!albedoData || !specularData || !normalData || !flagData || !vma || !device) return false;
+    const size_t spriteSizeBytes = static_cast<size_t>(spriteSize);
+    if (spriteSizeBytes > std::numeric_limits<size_t>::max() / spriteSizeBytes
+        || spriteSizeBytes * spriteSizeBytes > std::numeric_limits<size_t>::max() / 4u) {
+        std::cerr << "[TextureSystem] Material page upload rejected: byte count overflow size="
+                  << spriteSize << std::endl;
+        return false;
+    }
 
     std::lock_guard<std::mutex> lock(mutex_);
     if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
     if (!finalized_) return false;
 
-    const size_t bytesPerLayer = static_cast<size_t>(spriteSize) * spriteSize * 4u;
-    if (bytesPerLayer == 0) return false;
+    const size_t bytesPerLayer = spriteSizeBytes * spriteSizeBytes * 4u;
+    if (bytesPerLayer == 0
+        || layerCount > std::numeric_limits<size_t>::max() / bytesPerLayer) {
+        std::cerr << "[TextureSystem] Material page upload rejected: upload byte count overflow layers="
+                  << layerCount << " bytesPerLayer=" << bytesPerLayer << std::endl;
+        return false;
+    }
 
     std::vector<uint32_t> oldArrayIds;
     uint32_t albedoArrayId = materialAlbedoPageArrayIds_[page].load(std::memory_order_acquire);
@@ -1125,11 +1138,15 @@ bool TextureSystem::uploadMaterialTextureLayers(uint32_t page, uint32_t spriteSi
         arrayManager_.retireArrays(framework->gc(), oldArrayIds);
     }
 
-    std::cout << "[TextureSystem] Uploaded material texture page " << page
+    if (createdPageArrays) {
+        std::cout << "[TextureArrayManager] Created material page " << page
+                  << ": " << spriteSize << "x" << spriteSize
+                  << " x " << layerCapacity << " layers" << std::endl;
+    }
+    std::cout << "[TextureSystem] Updated material page " << page
               << " startLayer=" << startLayer
               << " layers=" << layerCount
               << " capacity=" << layerCapacity
-              << " createdPageArrays=" << (createdPageArrays ? 1 : 0)
               << " size=" << spriteSize << "x" << spriteSize << std::endl;
     return true;
 }
