@@ -178,6 +178,9 @@ layout(push_constant) uniform PushConstant {
 #define OFFLINE_DISABLE_CLAMP ((pc.offlineFlags & 4) != 0)
 #define RT_DEBUG_DISABLE_REFLECTION_PROBE ((pc.rtDebugFlags & 1u) != 0u)
 #define RT_DEBUG_DISABLE_HAND_PASS        ((pc.rtDebugFlags & 2u) != 0u)
+#define RT_DEBUG_MATERIAL_MODE_SHIFT 24u
+#define RT_DEBUG_MATERIAL_MODE_MASK  15u
+#define RT_DEBUG_MATERIAL_MODE       ((pc.rtDebugFlags >> RT_DEBUG_MATERIAL_MODE_SHIFT) & RT_DEBUG_MATERIAL_MODE_MASK)
 #define HAND_PASS_ACTIVE                  (pc.handInstanceCount != 0u)
 
 layout(location = 0) rayPayloadEXT PrimaryRay mainRay;
@@ -1208,6 +1211,10 @@ void main() {
     // preserves DLSS-RR contract: receives clampedRad*E, undoes /E → clampedRad (exact).
     // Ground truth: use format max (65504) to minimize bias — Welford RGBA32F accumulator
     // handles averaging correctly even with per-sample RGBA16F quantization.
+    if (RT_DEBUG_MATERIAL_MODE != 0u && !psrHitSky) {
+        imageStore(outputImage, ivec2(pixel), vec4(clamp(mainRay.albedoValue.rgb, vec3(0.0), vec3(1.0)), 1.0));
+        return;
+    }
     float maxRadiance = (NO_EMISSION_CLAMP ? 65504.0 : 65000.0) / max(pc.preExposure, 1.0);
     imageStore(outputImage, ivec2(pixel), vec4(min(mainRay.radiance, vec3(maxRadiance)) * pc.preExposure, 1.0));
 }

@@ -138,6 +138,13 @@ layout(push_constant) uniform PushConstant {
 #define RT_DEBUG_DISABLE_SECONDARY_SUN_SHADOW   ((pc.rtDebugFlags & 4u) != 0u)
 #define RT_DEBUG_DISABLE_SECONDARY_CLOUD_SHADOW ((pc.rtDebugFlags & 8u) != 0u)
 #define RT_DEBUG_DISABLE_DIRECT_LIGHTING        ((pc.rtDebugFlags & 16u) != 0u)
+#define RT_DEBUG_MATERIAL_MODE_SHIFT 24u
+#define RT_DEBUG_MATERIAL_MODE_MASK  15u
+#define RT_DEBUG_MATERIAL_MODE       ((pc.rtDebugFlags >> RT_DEBUG_MATERIAL_MODE_SHIFT) & RT_DEBUG_MATERIAL_MODE_MASK)
+#define RT_DEBUG_MATERIAL_ID         1u
+#define RT_DEBUG_MATERIAL_PAGE_LAYER 2u
+#define RT_DEBUG_MATERIAL_DISPLACE_ELIGIBLE 3u
+#define RT_DEBUG_MATERIAL_DISPLACE_HEIGHT   4u
 
 layout(set = 3, binding = 3, rgba32f) uniform readonly image2D normalRoughnessImage;
 layout(set = 3, binding = 4, rg32f) uniform readonly image2D motionVectorImage;
@@ -146,6 +153,59 @@ layout(set = 3, binding = 5, r32f) uniform readonly image2D linearDepthImage;
 layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
 layout(location = 1) rayPayloadEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
+
+vec3 materialDebugHashColor(uint materialId) {
+    uint h = materialId * 1664525u + 1013904223u;
+    h ^= h >> 16u;
+    return vec3(
+        float((h >> 0u) & 255u),
+        float((h >> 8u) & 255u),
+        float((h >> 16u) & 255u)) / 255.0;
+}
+
+vec3 materialDebugPageLayer(uint materialId) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    uint albedoPage = materialTexturePage(material.albedoPage);
+    uint normalPage = materialTexturePage(material.normalPage);
+    uint albedoLayer = uint(max(material.albedoLayer, 0));
+    return vec3(
+        float(albedoPage & 255u) / 255.0,
+        float(albedoLayer & 255u) / 255.0,
+        float(normalPage & 255u) / 255.0);
+}
+
+#if RARSER_SHADER_DISPLACEMENT
+vec3 materialDebugDisplacementEligible(uint materialId) {
+    return displacementBlockHasAuthoredHeight(materialId) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+}
+
+vec3 materialDebugDisplacementHeight(uint materialId, vec2 uv, float lod) {
+    if (!displacementBlockHasAuthoredHeight(materialId)) return vec3(0.0);
+    int layer = displacementNormalLayer(materialId);
+    if (layer < 0) return vec3(0.0);
+    float sampleLod = displacementClampedRuleLod(materialId, lod);
+    vec2 sampleUv = materialRuleUv(materialId, fract(uv));
+    float h = displacementSampleNormalAlphaTrilinear(materialId, layer, sampleUv, sampleLod);
+    return vec3(h);
+}
+#else
+vec3 materialDebugDisplacementEligible(uint materialId) {
+    return vec3(1.0, 0.0, 0.0);
+}
+
+vec3 materialDebugDisplacementHeight(uint materialId, vec2 uv, float lod) {
+    return vec3(0.0);
+}
+#endif
+
+vec3 materialDebugColor(uint materialId, vec2 uv, float lod) {
+    uint mode = RT_DEBUG_MATERIAL_MODE;
+    if (mode == RT_DEBUG_MATERIAL_ID) return materialDebugHashColor(materialId);
+    if (mode == RT_DEBUG_MATERIAL_PAGE_LAYER) return materialDebugPageLayer(materialId);
+    if (mode == RT_DEBUG_MATERIAL_DISPLACE_ELIGIBLE) return materialDebugDisplacementEligible(materialId);
+    if (mode == RT_DEBUG_MATERIAL_DISPLACE_HEIGHT) return materialDebugDisplacementHeight(materialId, uv, lod);
+    return vec3(0.0);
+}
 
 vec3 thinPlantRayOrigin(vec3 worldPos, vec3 rayDir, vec3 geometricNormal) {
     vec3 biasNormal = dot(rayDir, geometricNormal) >= 0.0 ? geometricNormal : -geometricNormal;
@@ -536,6 +596,10 @@ void main() {
     tint = CS_BT709_TO_BT2020 * tint;  // BT.709 -> BT.2020 working space
 
     albedoValue = vec4(tint, albedoValue.a);
+    if (isBlockGeometry && RT_DEBUG_MATERIAL_MODE != 0u) {
+        albedoValue = vec4(materialDebugColor(materialRuleTextureID, textureUV, 0.0), 1.0);
+        tint = albedoValue.rgb;
+    }
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
     if (isBlockGeometry) {
         applyTextureRule(materialRuleTextureID, mat);
