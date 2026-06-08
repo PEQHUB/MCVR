@@ -1,11 +1,23 @@
 #include "core/vulkan/as.hpp"
 
 #include "core/vulkan/command.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/device.hpp"
 #include "core/vulkan/physical_device.hpp"
 #include "core/vulkan/vma.hpp"
 
+#include <atomic>
 #include <iostream>
+#include <string>
+
+namespace {
+std::atomic_uint64_t gBlasId{0};
+std::atomic_uint64_t gTlasId{0};
+
+bool validDeviceBuffer(const std::shared_ptr<vk::DeviceLocalBuffer> &buffer) {
+    return buffer && buffer->isValid();
+}
+}
 
 vk::BLAS::BLAS(std::shared_ptr<Device> device,
                VkAccelerationStructureKHR blas,
@@ -15,6 +27,8 @@ vk::BLAS::BLAS(std::shared_ptr<Device> device,
     deviceAddressInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
     deviceAddressInfo.accelerationStructure = blas_;
     blasDeviceAddress_ = vkGetAccelerationStructureDeviceAddressKHR(device->vkDevice(), &deviceAddressInfo);
+    auto name = std::string("Radiance BLAS #") + std::to_string(++gBlasId);
+    vk::DebugUtils::setObjectName(device->vkDevice(), VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR, blas_, name);
 }
 
 vk::BLAS::~BLAS() {
@@ -41,6 +55,8 @@ vk::TLAS::TLAS(std::shared_ptr<Device> device,
     deviceAddressInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
     deviceAddressInfo.accelerationStructure = tlas_;
     tlasDeviceAddress_ = vkGetAccelerationStructureDeviceAddressKHR(device->vkDevice(), &deviceAddressInfo);
+    auto name = std::string("Radiance TLAS #") + std::to_string(++gTlasId);
+    vk::DebugUtils::setObjectName(device->vkDevice(), VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR, tlas_, name);
 }
 
 vk::TLAS::~TLAS() {
@@ -165,6 +181,11 @@ std::shared_ptr<vk::BLASBuilder> vk::BLASBuilder::allocateBuffers(std::shared_pt
 
 std::shared_ptr<vk::BLAS> vk::BLASBuilder::buildAndSubmit(std::shared_ptr<Device> device,
                                                           std::shared_ptr<CommandBuffer> commandBuffer) {
+    if (!validDeviceBuffer(blasBuffer_) || !validDeviceBuffer(scratchBuffer_)) {
+        std::cerr << "[BLAS] buildAndSubmit skipped: invalid BLAS or scratch buffer" << std::endl;
+        return nullptr;
+    }
+
     VkAccelerationStructureCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
     createInfo.buffer = blasBuffer_->vkBuffer();
@@ -172,8 +193,8 @@ std::shared_ptr<vk::BLAS> vk::BLASBuilder::buildAndSubmit(std::shared_ptr<Device
     createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 
     if (vkCreateAccelerationStructureKHR(device->vkDevice(), &createInfo, nullptr, &dstBLAS_) != VK_SUCCESS) {
-        std::cout << "Cannot create BLAS" << std::endl;
-        exit(EXIT_FAILURE);
+        std::cerr << "[BLAS] Cannot create BLAS" << std::endl;
+        return nullptr;
     }
 
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
@@ -203,6 +224,11 @@ std::shared_ptr<vk::BLAS> vk::BLASBuilder::buildAndSubmit(std::shared_ptr<Device
 }
 
 std::shared_ptr<vk::BLAS> vk::BLASBuilder::build(std::shared_ptr<Device> device) {
+    if (!validDeviceBuffer(blasBuffer_)) {
+        std::cerr << "[BLAS] build skipped: invalid BLAS buffer" << std::endl;
+        return nullptr;
+    }
+
     VkAccelerationStructureCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
     createInfo.buffer = blasBuffer_->vkBuffer();
@@ -210,8 +236,8 @@ std::shared_ptr<vk::BLAS> vk::BLASBuilder::build(std::shared_ptr<Device> device)
     createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 
     if (vkCreateAccelerationStructureKHR(device->vkDevice(), &createInfo, nullptr, &dstBLAS_) != VK_SUCCESS) {
-        std::cout << "Cannot create BLAS" << std::endl;
-        exit(EXIT_FAILURE);
+        std::cerr << "[BLAS] Cannot create BLAS" << std::endl;
+        return nullptr;
     }
 
     return BLAS::create(device, dstBLAS_, blasBuffer_);
@@ -220,6 +246,11 @@ std::shared_ptr<vk::BLAS> vk::BLASBuilder::build(std::shared_ptr<Device> device)
 std::shared_ptr<vk::BLAS> vk::BLASBuilder::buildExternal(std::shared_ptr<Device> device,
                                                          std::shared_ptr<DeviceLocalBuffer> buffer,
                                                          VkDeviceSize offset) {
+    if (!validDeviceBuffer(buffer)) {
+        std::cerr << "[BLAS] buildExternal skipped: invalid external BLAS buffer" << std::endl;
+        return nullptr;
+    }
+
     VkAccelerationStructureCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
     createInfo.buffer = buffer->vkBuffer();
@@ -228,14 +259,19 @@ std::shared_ptr<vk::BLAS> vk::BLASBuilder::buildExternal(std::shared_ptr<Device>
     createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 
     if (vkCreateAccelerationStructureKHR(device->vkDevice(), &createInfo, nullptr, &dstBLAS_) != VK_SUCCESS) {
-        std::cout << "Cannot create BLAS" << std::endl;
-        exit(EXIT_FAILURE);
+        std::cerr << "[BLAS] Cannot create BLAS" << std::endl;
+        return nullptr;
     }
 
     return BLAS::create(device, dstBLAS_, buffer);
 }
 
 void vk::BLASBuilder::submit(std::shared_ptr<vk::CommandBuffer> commandBuffer) {
+    if (!validDeviceBuffer(scratchBuffer_) || dstBLAS_ == VK_NULL_HANDLE) {
+        std::cerr << "[BLAS] submit skipped: invalid scratch buffer or BLAS handle" << std::endl;
+        return;
+    }
+
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
@@ -262,6 +298,11 @@ void vk::BLASBuilder::submit(std::shared_ptr<vk::CommandBuffer> commandBuffer) {
 
 void vk::BLASBuilder::submitExternal(std::shared_ptr<CommandBuffer> commandBuffer,
                                      VkDeviceAddress scratchBufferAddress) {
+    if (scratchBufferAddress == 0 || dstBLAS_ == VK_NULL_HANDLE) {
+        std::cerr << "[BLAS] submitExternal skipped: invalid scratch address or BLAS handle" << std::endl;
+        return;
+    }
+
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
@@ -293,6 +334,11 @@ void vk::BLASBuilder::batchSubmit(std::vector<std::shared_ptr<BLASBuilder>> &bui
     std::vector<VkAccelerationStructureBuildRangeInfoKHR *> pbuildRanges;
 
     for (int i = 0; i < builders.size(); i++) {
+        if (!builders[i] || !validDeviceBuffer(builders[i]->scratchBuffer_) ||
+            builders[i]->dstBLAS_ == VK_NULL_HANDLE) {
+            std::cerr << "[BLAS] batchSubmit skipped invalid builder index=" << i << std::endl;
+            continue;
+        }
         VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
         buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
         buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
@@ -317,8 +363,10 @@ void vk::BLASBuilder::batchSubmit(std::vector<std::shared_ptr<BLASBuilder>> &bui
         pbuildRanges.push_back(buildRanges[buildRanges.size() - 1].data());
     }
 
-    vkCmdBuildAccelerationStructuresKHR(commandBuffer->vkCommandBuffer(), buildInfos.size(), buildInfos.data(),
-                                        pbuildRanges.data());
+    if (!buildInfos.empty()) {
+        vkCmdBuildAccelerationStructuresKHR(commandBuffer->vkCommandBuffer(), buildInfos.size(), buildInfos.data(),
+                                            pbuildRanges.data());
+    }
 }
 
 
@@ -330,6 +378,10 @@ void vk::BLASBuilder::batchSubmitExternal(std::vector<std::shared_ptr<BLASBuilde
     std::vector<VkAccelerationStructureBuildRangeInfoKHR *> pbuildRanges;
 
     for (int i = 0; i < builders.size(); i++) {
+        if (!builders[i] || scratchBufferAddress[i] == 0 || builders[i]->dstBLAS_ == VK_NULL_HANDLE) {
+            std::cerr << "[BLAS] batchSubmitExternal skipped invalid builder index=" << i << std::endl;
+            continue;
+        }
         VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
         buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
         buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
@@ -354,8 +406,10 @@ void vk::BLASBuilder::batchSubmitExternal(std::vector<std::shared_ptr<BLASBuilde
         pbuildRanges.push_back(buildRanges[buildRanges.size() - 1].data());
     }
 
-    vkCmdBuildAccelerationStructuresKHR(commandBuffer->vkCommandBuffer(), buildInfos.size(), buildInfos.data(),
-                                        pbuildRanges.data());
+    if (!buildInfos.empty()) {
+        vkCmdBuildAccelerationStructuresKHR(commandBuffer->vkCommandBuffer(), buildInfos.size(), buildInfos.data(),
+                                            pbuildRanges.data());
+    }
 }
 
 std::shared_ptr<vk::BLASBuilder> vk::BLASBatchBuilder::defineBLASBuilder() {
@@ -399,6 +453,11 @@ std::shared_ptr<vk::BLASBatchBuilder> vk::BLASBatchBuilder::allocateBuffers(
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 0, VMA_MEMORY_USAGE_GPU_ONLY,
         physicalDevice->accelerationStructProperties().minAccelerationStructureScratchOffsetAlignment);
 
+    if (!validDeviceBuffer(blasBuffer_) || !validDeviceBuffer(scratchBuffer_)) {
+        std::cerr << "[BLASBatch] allocateBuffers failed: invalid BLAS or scratch buffer" << std::endl;
+        return shared_from_this();
+    }
+
     for (int i = 0; i < scratchOffsets_.size(); i++) {
         scratchAddresses_.push_back(scratchBuffer_->bufferAddress() + scratchOffsets_[i]);
     }
@@ -418,6 +477,10 @@ std::vector<std::shared_ptr<vk::BLAS>> vk::BLASBatchBuilder::build(std::shared_p
 }
 
 void vk::BLASBatchBuilder::submit(std::shared_ptr<vk::CommandBuffer> commandBuffer) {
+    if (scratchAddresses_.size() != builders_.size()) {
+        std::cerr << "[BLASBatch] submit skipped: scratch address count mismatch" << std::endl;
+        return;
+    }
     BLASBuilder::batchSubmitExternal(builders_, scratchAddresses_, commandBuffer);
 }
 
@@ -434,7 +497,7 @@ vk::TLASBuilder::TLASInstanceBuilder::defineInstance(VkTransformMatrixKHR transf
     return *this;
 }
 
-std::shared_ptr<vk::TLASBuilder>
+void
 vk::TLASBuilder::TLASInstanceBuilder::endInstanceBuilder(std::shared_ptr<Device> device, std::shared_ptr<VMA> vma) {
     // Filter out instances with null BLAS (entity/chunk not yet built)
     instances.erase(
@@ -466,7 +529,6 @@ vk::TLASBuilder::TLASInstanceBuilder::endInstanceBuilder(std::shared_ptr<Device>
     geometry.geometry.instances.data.deviceAddress = instanceBuffer->bufferAddress();
     geometries.push_back(geometry);
 
-    return parent.shared_from_this();
 }
 
 vk::TLASBuilder::TLASBuilder() : tlasInstanceBuilder_(*this) {}
@@ -475,21 +537,18 @@ vk::TLASBuilder::TLASBuilder::TLASInstanceBuilder &vk::TLASBuilder::beginInstanc
     return tlasInstanceBuilder_;
 }
 
-std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::defineBuildProperty(VkBuildAccelerationStructureFlagsKHR flags) {
+void vk::TLASBuilder::defineBuildProperty(VkBuildAccelerationStructureFlagsKHR flags) {
     mode_ = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     flags_ = flags;
-    return shared_from_this();
 }
 
-std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::defineUpdateProperty(VkBuildAccelerationStructureFlagsKHR flags,
-                                                                       VkAccelerationStructureKHR srcTLAS) {
+void vk::TLASBuilder::defineUpdateProperty(VkBuildAccelerationStructureFlagsKHR flags, VkAccelerationStructureKHR srcTLAS) {
     mode_ = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
     flags_ = flags;
     srcTLAS_ = srcTLAS;
-    return shared_from_this();
 }
 
-std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::querySizeInfo(std::shared_ptr<Device> device) {
+void vk::TLASBuilder::querySizeInfo(std::shared_ptr<Device> device) {
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
@@ -502,12 +561,11 @@ std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::querySizeInfo(std::shared_ptr<
     sizeInfo_.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
     vkGetAccelerationStructureBuildSizesKHR(device->vkDevice(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
                                             &buildInfo, &instanceCount, &sizeInfo_);
-    return shared_from_this();
 }
 
-std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::allocateBuffers(std::shared_ptr<PhysicalDevice> physicalDevice,
-                                                                  std::shared_ptr<Device> device,
-                                                                  std::shared_ptr<VMA> vma) {
+void vk::TLASBuilder::allocateBuffers(std::shared_ptr<PhysicalDevice> physicalDevice,
+                                      std::shared_ptr<Device> device,
+                                      std::shared_ptr<VMA> vma) {
     tlasBuffer_ = DeviceLocalBuffer::create(vma, device, false, sizeInfo_.accelerationStructureSize,
                                             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
                                                 VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
@@ -519,8 +577,6 @@ std::shared_ptr<vk::TLASBuilder> vk::TLASBuilder::allocateBuffers(std::shared_pt
                                                                   sizeInfo_.updateScratchSize,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, 0, VMA_MEMORY_USAGE_GPU_ONLY,
         physicalDevice->accelerationStructProperties().minAccelerationStructureScratchOffsetAlignment);
-
-    return shared_from_this();
 }
 
 std::shared_ptr<vk::TLAS> vk::TLASBuilder::buildAndSubmit(std::shared_ptr<Device> device,

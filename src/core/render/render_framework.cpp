@@ -15,39 +15,139 @@
 
 #include "core/render/crash_ring_buffer.hpp"
 #include "core/render/radiance_logger.hpp"
+#include "core/vulkan/vma.hpp"
 #include "core/render/modules/world/frame_gen/frame_gen_manager.hpp"
 #include "core/render/frame_slot_ring.hpp"
 #include "core/render/overlay_compositor.hpp"
 #include "core/render/present_thread.hpp"
+#include "core/vulkan/debug_utils.hpp"
 
 #include <iostream>
 #include <random>
 #include <fstream>
 #include <filesystem>
+#include <algorithm>
 #include <cstdarg>
+#include <cstring>
+#include <thread>
 
 // ── Diagnostic file logger (same pattern as overlay_diag.log) ──
 static std::ofstream sRenderDiag;
 
 // ── Full-frame profiling (logs every 120 frames to frame_timing.log) ──
+// Fence timeout: prevents infinite hang on GPU TDR/driver crash.
+static constexpr uint64_t kFenceTimeoutNs = 5000000000ULL; // 5 seconds
+
 namespace FrameTiming {
     using Clock = std::chrono::steady_clock;
     static Clock::time_point frameStart;
-    static float accReflexSleep = 0, accAcquireImage = 0, accFenceWait = 0;
+    static float accReflexSleep = 0, accAcquireImage = 0, accFenceWait = 0, accDlssgWait = 0;
     static float accJavaGap = 0; // time between acquireContext return and submitCommand call
-    static float accUpload = 0, accWorldRender = 0, accUIEnd = 0;
+    static float accUpload = 0, accTexFlush = 0, accWorldRender = 0, accUIEnd = 0;
     static float accFuse = 0, accCmdEnd = 0, accQueueSubmit = 0;
     static float accPresent = 0, accFrameTotal = 0;
+	static float accWallClock = 0; // frame-to-frame wall-clock time (what RTSS measures)
+static float accLimiterSleep = 0; // native FPS limiter sleep time
     static uint32_t frameCount = 0;
     static Clock::time_point acquireEnd; // set at end of acquireContext
     static Clock::time_point lastFrameEnd;
     static bool hasLastFrame = false;
 
+	// Per-frame CSV accumulators (written every frame when perFrameTiming is on)
+	static float pfReflexSleep = 0, pfAcquireImage = 0, pfFenceWait = 0, pfDlssgWait = 0;
+	static float pfJavaGap = 0;
+	static float pfUpload = 0, pfTexFlush = 0, pfWorldRender = 0, pfUIEnd = 0;
+	static float pfFuse = 0, pfCmdEnd = 0, pfQueueSubmit = 0;
+	static float pfPresent = 0, pfFrameTotal = 0;
+	static float pfWallClock = 0;
+static float pfLimiterSleep = 0;
+	static float pfGpu = 0;
+static uint64_t pfUploadBytes = 0, pfUploadRegions = 0;
+	static uint64_t pfFrameIndex = 0;
+	static std::ofstream sJavaStutterLog;
+	static bool sJavaStutterHeaderWritten = false;
+	static float sJavaStutterMedian = 0;
+	static constexpr size_t JAVA_STUFFER_RING_SIZE = 60;
+	static float sJavaStutterRing[JAVA_STUFFER_RING_SIZE] = {};
+	static size_t sJavaStutterRingIdx = 0;
+	static size_t sJavaStutterRingCount = 0;
+	static bool pfHeaderWritten = false;
+
     static float ms(Clock::time_point t0) {
         return std::chrono::duration<float, std::milli>(Clock::now() - t0).count();
     }
 
+	static bool perFrameTimingEnabled = true;  // Toggle via Options or config
+static void logPerFrame() {
+    if (!perFrameTimingEnabled) return;
+		
+		std::ofstream f("C:/RadSER/results/per_frame_timing.log", std::ios::app);
+		if (!f.is_open()) return;
+		if (!pfHeaderWritten) {
+			f << "frame,reflexSleep,acquireImg,fenceWait,dlssgWait,JAVA,upload,texFlush,worldRender,uiEnd,fuse,cmdEnd,queueSubmit,present,TOTAL,wallClock,gpu,limiterSleep,uploadBytes,uploadRegions\n";
+			pfHeaderWritten = true;
+		}
+		float total = pfReflexSleep + pfAcquireImage + pfFenceWait + pfJavaGap +
+			pfUpload + pfTexFlush + pfWorldRender + pfUIEnd + pfFuse +
+			pfCmdEnd + pfQueueSubmit + pfPresent;
+		f << pfFrameIndex << ","
+			<< pfReflexSleep << ","
+			<< pfAcquireImage << ","
+			<< pfFenceWait << ","
+			<< pfDlssgWait << ","
+			<< pfJavaGap << ","
+			<< pfUpload << ","
+			<< pfTexFlush << ","
+			<< pfWorldRender << ","
+			<< pfUIEnd << ","
+			<< pfFuse << ","
+			<< pfCmdEnd << ","
+			<< pfQueueSubmit << ","
+			<< pfPresent << ","
+			<< total << ","
+			<< pfWallClock << ","
+			<< pfGpu << "," << pfLimiterSleep << "," << pfUploadBytes << "," << pfUploadRegions << "\n";
+		pfFrameIndex++;
+
+		// ── JAVA spike detection ──
+		// Track JAVA time (acquireContext→submitCommand gap) and log spikes
+		// that exceed 2x the rolling median. This catches texture-pack tick work.
+		{
+			sJavaStutterRing[sJavaStutterRingIdx] = pfJavaGap;
+			sJavaStutterRingIdx = (sJavaStutterRingIdx + 1) % JAVA_STUFFER_RING_SIZE;
+			sJavaStutterRingCount = std::min(sJavaStutterRingCount + 1, JAVA_STUFFER_RING_SIZE);
+			// Compute rolling median
+			if (sJavaStutterRingCount >= 10) {
+				float sorted[JAVA_STUFFER_RING_SIZE];
+				size_t n = sJavaStutterRingCount;
+				for (size_t i = 0; i < n; i++) sorted[i] = sJavaStutterRing[i];
+				std::sort(sorted, sorted + n);
+				sJavaStutterMedian = sorted[n / 2];
+				// Log spike if JAVA > 2x median and > 1ms
+				if (pfJavaGap > std::max(sJavaStutterMedian * 2.0f, 1.0f) && pfJavaGap > 0.5f) {
+					if (!sJavaStutterLog.is_open()) {
+						sJavaStutterLog.open("C:/RadSER/results/java_stutter.log", std::ios::app);
+						if (!sJavaStutterHeaderWritten) {
+							sJavaStutterLog << "frame,javaMs,medianMs,ratio,texFlushMs,limiterMs" << std::endl;
+							sJavaStutterHeaderWritten = true;
+						}
+					}
+					sJavaStutterLog << pfFrameIndex << "," << pfJavaGap << "," 
+						<< sJavaStutterMedian << "," << (pfJavaGap / std::max(sJavaStutterMedian, 0.001f))
+						<< "," << pfTexFlush << "," << pfLimiterSleep << std::endl;
+				}
+			}
+		}
+		pfReflexSleep = pfAcquireImage = pfFenceWait = pfDlssgWait = 0;
+		pfJavaGap = 0;
+		accTexFlush += pfTexFlush;
+	pfUpload = pfTexFlush = pfWorldRender = pfUIEnd = 0;
+		pfFuse = pfCmdEnd = pfQueueSubmit = 0;
+		pfPresent = pfFrameTotal = pfWallClock = pfGpu = pfLimiterSleep = 0; pfUploadBytes = pfUploadRegions = 0;
+	}
+
     static void log() {
+		logPerFrame();
         if (++frameCount < 120) return;
         float n = static_cast<float>(frameCount);
         float total = (accReflexSleep + accAcquireImage + accJavaGap + accUpload +
@@ -58,6 +158,7 @@ namespace FrameTiming {
             f << "[FRAME] reflexSleep=" << (accReflexSleep / n)
               << " acquireImg=" << (accAcquireImage / n)
               << " fenceWait=" << (accFenceWait / n)
+              << " dlssgWait=" << (accDlssgWait / n)
               << " JAVA=" << (accJavaGap / n)
               << " upload=" << (accUpload / n)
               << " worldRender=" << (accWorldRender / n)
@@ -67,24 +168,31 @@ namespace FrameTiming {
               << " queueSubmit=" << (accQueueSubmit / n)
               << " present=" << (accPresent / n)
               << " TOTAL=" << total
-              << " gpu=" << accFrameTotal / n
-              << "\n";
+              << " wallClock=" << accWallClock / n
+			<< " gpu=" << accFrameTotal / n
+<< " limiterSleep=" << accLimiterSleep / n << "\n";
         }
         std::cout << "[FRAME] JAVA=" << (accJavaGap / n)
                   << " worldRender=" << (accWorldRender / n)
                   << " fenceWait=" << (accFenceWait / n)
+                  << " dlssgWait=" << (accDlssgWait / n)
                   << " present=" << (accPresent / n)
                   << " TOTAL=" << total << "ms"
-                  << std::endl;
-        accReflexSleep = accAcquireImage = accFenceWait = 0;
+<< " limiterSleep=" << (accLimiterSleep / n) << "ms" << " maxFps=" << Renderer::options.maxFps << std::endl;
+        accReflexSleep = accAcquireImage = accFenceWait = accDlssgWait = 0;
         accJavaGap = 0;
-        accUpload = accWorldRender = accUIEnd = 0;
+        accUpload = accTexFlush = accWorldRender = accUIEnd = 0;
         accFuse = accCmdEnd = accQueueSubmit = 0;
-        accPresent = accFrameTotal = 0;
+        accPresent = accFrameTotal = accWallClock = accLimiterSleep = 0;
         frameCount = 0;
     }
 }
-static void renderDiag(const char *fmt, ...) {
+
+void FrameTiming_addTexFlush(float ms) {
+	FrameTiming::pfTexFlush += ms;
+}
+
+void renderDiag(const char *fmt, ...) {
     char buf[512];
     va_list args;
     va_start(args, fmt);
@@ -384,6 +492,8 @@ void Framework::acquireContext() {
     if (FrameTiming::hasLastFrame) {
         FrameTiming::accFrameTotal += std::chrono::duration<float, std::milli>(
             ftNow - FrameTiming::lastFrameEnd).count();
+        FrameTiming::pfFrameTotal += std::chrono::duration<float, std::milli>(
+            ftNow - FrameTiming::lastFrameEnd).count();
     }
     FrameTiming::frameStart = ftNow;
     FrameTiming::hasLastFrame = true;
@@ -406,15 +516,52 @@ void Framework::acquireContext() {
     //      skipping it while FG is on would overwhelm the SL interposer with 300+ FPS
     //      of untagged presents. Once FG activates (world entered), always respect sleep.
     auto ftReflex0 = FrameTiming::Clock::now();
+    bool reflexSlept = false;
     if (StreamlineContext::isAvailable()) {
         StreamlineContext::advanceFrame();
         bool shouldSleep = Renderer::instance().world()->shouldRender() ||
-                           FrameGenManager::isActive();
+            FrameGenManager::isActive();
         if (StreamlineContext::isReflexAvailable() && shouldSleep) {
             StreamlineContext::reflexSleep();
+            reflexSlept = true;
         }
     }
     FrameTiming::accReflexSleep += FrameTiming::ms(ftReflex0);
+    FrameTiming::pfReflexSleep += FrameTiming::ms(ftReflex0);
+
+    // ── Native FPS limiter ──
+    // When Reflex sleep was NOT called (menu/loading screens, or Reflex disabled),
+    // and VSync is off (IMMEDIATE present mode), the frame loop runs uncapped.
+    // This causes menu stutter because texture animation ticks fire every frame
+    // and Java-side work between acquire/submit becomes the dominant cost.
+    // The native limiter sleeps to hit the target frame interval from Options.maxFps.
+    // 0 = unlimited (no sleep). When FG is active, FG handles pacing internally.
+    auto ftLimiter0 = FrameTiming::Clock::now();
+    if (!reflexSlept && !FrameGenManager::isActive() && !Renderer::options.vsync) {
+        uint32_t maxFps = Renderer::options.maxFps;
+        if (maxFps > 0 && maxFps < 1000000 && FrameTiming::hasLastFrame) {
+            float targetMs = 1000.0f / static_cast<float>(maxFps);
+            float elapsedMs = std::chrono::duration<float, std::milli>(
+                FrameTiming::Clock::now() - FrameTiming::lastFrameEnd).count();
+            if (elapsedMs < targetMs) {
+                float sleepMs = targetMs - elapsedMs;
+                // Spin-wait for the last ~0.5ms for accuracy, sleep for the rest
+                if (sleepMs > 1.0f) {
+                    std::this_thread::sleep_for(
+                        std::chrono::microseconds(static_cast<int64_t>((sleepMs - 0.5f) * 1000.0f)));
+                }
+                // Spin-wait the remainder
+                auto deadline = FrameTiming::lastFrameEnd +
+                    std::chrono::duration<float, std::milli>(targetMs);
+                while (FrameTiming::Clock::now() < deadline) {
+                    std::this_thread::yield();
+                }
+            }
+        }
+    }
+    float limiterMs = FrameTiming::ms(ftLimiter0);
+    FrameTiming::accLimiterSleep += limiterMs;
+    FrameTiming::pfLimiterSleep += limiterMs;
 
     std::shared_ptr<FrameworkContext> lastContext;
     if (currentContext_) lastContext = currentContext_;
@@ -432,8 +579,21 @@ void Framework::acquireContext() {
         std::shared_ptr<vk::Fence> fence = contexts_[imageIndex]->commandFinishedFence;
         g_crashRing.record("waitFence");
         auto ftFence0 = FrameTiming::Clock::now();
-        VkResult fenceResult = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+        VkResult fenceResult = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, kFenceTimeoutNs);
         FrameTiming::accFenceWait += FrameTiming::ms(ftFence0);
+        FrameTiming::pfFenceWait += FrameTiming::ms(ftFence0);
+        if (fenceResult == VK_TIMEOUT) {
+            renderDiag("vkWaitForFences timed out (5s) — GPU may be hung, attempting recreate");
+                std::cerr << "[FRAMEWORK] vkWaitForFences timed out (5s) — GPU may be hung" << std::endl;
+            Renderer::options.needRecreate = true;
+            return;
+        }
+        if (fenceResult == VK_TIMEOUT) {
+            renderDiag("vkWaitForFences timed out (5s) — GPU may be hung, attempting recreate");
+            std::cerr << "[FRAMEWORK] vkWaitForFences timed out (5s) — GPU may be hung" << std::endl;
+            Renderer::options.needRecreate = true;
+            return;
+        }
         if (fenceResult != VK_SUCCESS) {
             waitDeviceIdle();
             crashExitWithQueue(fenceResult, "vkWaitForFences failed (decoupled)", device_->mainVkQueue());
@@ -459,14 +619,38 @@ void Framework::acquireContext() {
         std::shared_ptr<vk::Fence> fence = contexts_[imageIndex]->commandFinishedFence;
         g_crashRing.record("waitFence");
         auto ftFence0 = FrameTiming::Clock::now();
-        VkResult fenceResult = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, UINT64_MAX);
+        VkResult fenceResult = vkWaitForFences(device_->vkDevice(), 1, &fence->vkFence(), true, kFenceTimeoutNs);
         FrameTiming::accFenceWait += FrameTiming::ms(ftFence0);
+        FrameTiming::pfFenceWait += FrameTiming::ms(ftFence0);
+        if (fenceResult == VK_TIMEOUT) {
+            renderDiag("vkWaitForFences timed out (5s) — GPU may be hung, attempting recreate");
+            std::cerr << "[FRAMEWORK] vkWaitForFences timed out" << std::endl;
+            Renderer::options.needRecreate = true;
+            return;
+        }
         if (fenceResult != VK_SUCCESS) {
             waitDeviceIdle();
             crashExitWithQueue(fenceResult, "vkWaitForFences failed", device_->mainVkQueue());
         }
     }
+#ifdef _WIN32
+    uint64_t dlssgWaitUs = 0;
+    const bool dlssgWaitOk = FrameGenManager::waitForInputCompletion(
+        imageIndex, device_->vkDevice(), kFenceTimeoutNs, &dlssgWaitUs);
+    const float dlssgWaitMs = static_cast<float>(dlssgWaitUs) * 0.001f;
+    FrameTiming::accDlssgWait += dlssgWaitMs;
+    FrameTiming::pfDlssgWait += dlssgWaitMs;
+    if (!dlssgWaitOk) {
+        renderDiag("DLSS-G input completion wait failed slot=%u; requesting recreate", imageIndex);
+        if (imageAcquiredSemaphore) {
+            recycleSemaphore(imageAcquiredSemaphore);
+        }
+        Renderer::options.needRecreate = true;
+        return;
+    }
+#endif
     FrameTiming::accAcquireImage += FrameTiming::ms(ftAcquire0);
+    FrameTiming::pfAcquireImage += FrameTiming::ms(ftAcquire0);
 
     currentContextIndex_ = imageIndex;
     currentContext_ = contexts_[imageIndex];
@@ -476,6 +660,7 @@ void Framework::acquireContext() {
     Renderer::gpuProfiler.readResults(imageIndex);
     if (Renderer::gpuProfiler.isEnabled()) {
         FrameTiming::accFrameTotal += Renderer::gpuProfiler.getTotalGpuMs();
+        FrameTiming::pfGpu += Renderer::gpuProfiler.getTotalGpuMs();
     }
     if (indexHistory_.size() > swapchain_->imageCount()) indexHistory_.pop();
 
@@ -521,7 +706,10 @@ void Framework::acquireContext() {
 
     gc_->clear();
     Renderer::instance().buffers()->resetFrame();
-    Renderer::instance().textures()->resetFrame();
+    // Capture per-frame upload diagnostics before resetFrame clears them
+      FrameTiming::pfUploadBytes += Renderer::instance().textures()->uploadBytes();
+      FrameTiming::pfUploadRegions += Renderer::instance().textures()->uploadRegions();
+      Renderer::instance().textures()->resetFrame(currentContextIndex_);
     Renderer::instance().world()->resetFrame();
     Renderer::instance().world()->chunks()->resetFrame();
     Renderer::instance().world()->entities()->resetFrame();
@@ -552,12 +740,33 @@ void Framework::submitCommand() {
     // Measure Java-side work between acquireContext() return and submitCommand() call
     FrameTiming::accJavaGap += std::chrono::duration<float, std::milli>(
         FrameTiming::Clock::now() - FrameTiming::acquireEnd).count();
+    FrameTiming::pfJavaGap += std::chrono::duration<float, std::milli>(
+        FrameTiming::Clock::now() - FrameTiming::acquireEnd).count();
 
     renderDiag("submitCommand shouldRender=%d overlayActive=%d",
-               (int)Renderer::instance().world()->shouldRender(),
-               (int)(overlayCompositor_ && overlayCompositor_->isActive()));
-
-    // PCL: simulation phase ends, render phase begins
+            (int)Renderer::instance().world()->shouldRender(),
+            (int)(overlayCompositor_ && overlayCompositor_->isActive()));
+  // Log VRAM state on every shouldRender=1 transition (first real render frame)
+  static bool sLoggedFirstRender = false;
+  bool shouldRender = Renderer::instance().world()->shouldRender();
+  if (shouldRender && !sLoggedFirstRender) {
+    sLoggedFirstRender = true;
+    auto vma = vma_;
+    if (vma) {
+      VmaTotalStatistics vts{};
+      vmaCalculateStatistics(vma->allocator(), &vts);
+      VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+      vmaGetHeapBudgets(vma->allocator(), budgets);
+      uint64_t totalBudget = 0, totalUsage = 0;
+      for (uint32_t i = 0; i < VK_MAX_MEMORY_HEAPS; ++i) { totalBudget += budgets[i].budget; totalUsage += budgets[i].usage; }
+      float usedGB = (float)totalUsage / (1024.f * 1024.f * 1024.f);
+      float budgetGB = (float)totalBudget / (1024.f * 1024.f * 1024.f);
+      float allocGB = (float)vts.total.statistics.blockBytes / (1024.f * 1024.f * 1024.f);
+      std::cerr << "[Radiance] FIRST RENDER VRAM: usage=" << usedGB << "GB budget=" << budgetGB
+                << "GB allocated=" << allocGB << "GB allocs=" << vts.total.statistics.allocationCount
+                << " blocks=" << vts.total.statistics.blockCount << std::endl;
+    }
+  }
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::eSimulationEnd);
 #endif
@@ -566,35 +775,58 @@ void Framework::submitCommand() {
 
     // Granular GPU checkpoints on the upload command buffer for crash diagnosis
     auto ftUpload0 = FrameTiming::Clock::now();
+    currentContext_->uploadCommandBuffer->beginLabel("Upload", 0.1f, 0.55f, 1.0f);
+    currentContext_->uploadCommandBuffer->beginLabel("Upload:Textures", 0.1f, 0.6f, 1.0f);
     GpuDiag::checkpoint(currentContext_->uploadCommandBuffer->vkCommandBuffer(), GpuDiag::UPLOAD_TEX_BEGIN);
     Renderer::instance().textures()->performQueuedUpload();
     GpuDiag::checkpoint(currentContext_->uploadCommandBuffer->vkCommandBuffer(), GpuDiag::UPLOAD_TEX_END);
+    currentContext_->uploadCommandBuffer->endLabel();
+    currentContext_->uploadCommandBuffer->beginLabel("Upload:Buffers", 0.1f, 0.75f, 1.0f);
     GpuDiag::checkpoint(currentContext_->uploadCommandBuffer->vkCommandBuffer(), GpuDiag::UPLOAD_BUF_BEGIN);
     Renderer::instance().buffers()->performQueuedUpload();
     GpuDiag::checkpoint(currentContext_->uploadCommandBuffer->vkCommandBuffer(), GpuDiag::UPLOAD_BUF_END);
     Renderer::instance().buffers()->buildAndUploadOverlayUniformBuffer();
+    currentContext_->uploadCommandBuffer->endLabel();
+    currentContext_->uploadCommandBuffer->endLabel();
     FrameTiming::accUpload += FrameTiming::ms(ftUpload0);
+    FrameTiming::pfUpload += FrameTiming::ms(ftUpload0);
 
     auto ftWorld0 = FrameTiming::Clock::now();
     auto pipelineContext = pipeline_->acquirePipelineContext(currentContext_);
     if (Renderer::instance().world()->shouldRender() && pipelineContext->worldPipelineContext) {
         Renderer::gpuProfiler.beginFrame(
             currentContext_->worldCommandBuffer->vkCommandBuffer(), currentContextIndex_);
-        pipelineContext->worldPipelineContext->render();
+        try {
+            pipelineContext->worldPipelineContext->render();
+        } catch (const std::exception& e) {
+            renderDiag("FATAL: WorldPipelineContext::render() threw: %s", e.what());
+            renderDiag("FATAL: render() threw: %s", e.what());
+            throw; // re-throw so JVM still sees the failure
+        } catch (...) {
+            renderDiag("FATAL: WorldPipelineContext::render() threw unknown exception");
+            renderDiag("FATAL: render() threw unknown exception");
+            throw;
+        }
         Renderer::gpuProfiler.endFrame(
             currentContext_->worldCommandBuffer->vkCommandBuffer());
     }
     FrameTiming::accWorldRender += FrameTiming::ms(ftWorld0);
+    FrameTiming::pfWorldRender += FrameTiming::ms(ftWorld0);
 
     auto ftUI0 = FrameTiming::Clock::now();
+    currentContext_->overlayCommandBuffer->beginLabel("UI", 0.7f, 0.4f, 1.0f);
     pipelineContext->uiModuleContext->end();
+    currentContext_->overlayCommandBuffer->endLabel();
     FrameTiming::accUIEnd += FrameTiming::ms(ftUI0);
+    FrameTiming::pfUIEnd += FrameTiming::ms(ftUI0);
 
     // Composite world+UI to swapchain (standard mode only).
     // In decoupled mode, PresentThread handles compositing.
     auto ftFuse0 = FrameTiming::Clock::now();
     if (!decoupledPresent_) {
+        currentContext_->fuseCommandBuffer->beginLabel("Fuse:WorldUIToSwapchain", 0.1f, 0.9f, 0.35f);
         currentContext_->fuseFinal();
+        currentContext_->fuseCommandBuffer->endLabel();
     }
 
     // Tag resources for DLSS-G frame generation (after composite).
@@ -605,6 +837,7 @@ void Framework::submitCommand() {
         FrameGenManager::tagFrame(currentContext_, worldOutput);
     }
     FrameTiming::accFuse += FrameTiming::ms(ftFuse0);
+    FrameTiming::pfFuse += FrameTiming::ms(ftFuse0);
 
     auto ftCmdEnd0 = FrameTiming::Clock::now();
     currentContext_->uploadCommandBuffer->end();
@@ -612,6 +845,7 @@ void Framework::submitCommand() {
     currentContext_->overlayCommandBuffer->end();
     currentContext_->fuseCommandBuffer->end();
     FrameTiming::accCmdEnd += FrameTiming::ms(ftCmdEnd0);
+    FrameTiming::pfCmdEnd += FrameTiming::ms(ftCmdEnd0);
 
     // Standard mode: wait on acquire semaphore, signal processed semaphore.
     // Decoupled mode: no semaphores — fence handles sync with PresentThread.
@@ -686,9 +920,12 @@ void Framework::submitCommand() {
     VkResult submitResult;
     {
         std::lock_guard<std::mutex> qLock(device_->queueMutex());
+        vk::DebugUtils::ScopedQueueLabel queueLabel(
+            device_->mainVkQueue(), "Radiance QueueSubmit: Frame", 0.3f, 0.8f, 0.3f);
         submitResult = vkQueueSubmit(device_->mainVkQueue(), 1, &vkSubmitInfo, fence->vkFence());
     }
     FrameTiming::accQueueSubmit += FrameTiming::ms(ftSubmit0);
+    FrameTiming::pfQueueSubmit += FrameTiming::ms(ftSubmit0);
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::eRenderSubmitEnd);
 #endif
@@ -742,6 +979,7 @@ void Framework::present() {
             recreate();
         }
         FrameTiming::accPresent += FrameTiming::ms(ftPresent0);
+        FrameTiming::pfPresent += FrameTiming::ms(ftPresent0);
         FrameTiming::lastFrameEnd = FrameTiming::Clock::now();
         FrameTiming::log();
         return;
@@ -765,16 +1003,27 @@ void Framework::present() {
 #endif
     g_crashRing.record("present");
     renderDiag("  vkQueuePresentKHR...");
-    VkResult result = vkQueuePresentKHR(device_->mainVkQueue(), &presentInfo);
+    VkResult result;
+    {
+        vk::DebugUtils::ScopedQueueLabel queueLabel(
+            device_->mainVkQueue(), "Radiance Present", 0.2f, 0.6f, 1.0f);
+        result = vkQueuePresentKHR(device_->mainVkQueue(), &presentInfo);
+    }
     renderDiag("  vkQueuePresentKHR -> %d", result);
 #ifdef _WIN32
     StreamlineContext::pclSetMarker(sl::PCLMarker::ePresentEnd);
+    if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
+        FrameGenManager::captureInputCompletion(
+            currentContext_ ? currentContext_->frameIndex : UINT32_MAX,
+            "standard-present");
+    }
 #endif
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || vk::Window::framebufferResized ||
         Renderer::options.needRecreate || pipeline_->needRecreate) {
         renderDiag("  triggering recreate (result=%d needRecreate=%d)", result, (int)Renderer::options.needRecreate);
         FrameTiming::accPresent += FrameTiming::ms(ftPresent0);
+        FrameTiming::pfPresent += FrameTiming::ms(ftPresent0);
         FrameTiming::lastFrameEnd = FrameTiming::Clock::now();
         FrameTiming::log();
         recreate();
@@ -794,6 +1043,7 @@ void Framework::present() {
         crashExitWithQueue(result, "vkQueuePresentKHR failed", device_->mainVkQueue());
     }
     FrameTiming::accPresent += FrameTiming::ms(ftPresent0);
+    FrameTiming::pfPresent += FrameTiming::ms(ftPresent0);
     FrameTiming::lastFrameEnd = FrameTiming::Clock::now();
     FrameTiming::log();
 }
@@ -809,9 +1059,11 @@ void Framework::recreate() {
     // waits for the thread to acknowledge, but the thread may be holding recreateMtx_
     // inside its loop body. Pausing first ensures the thread releases recreateMtx_
     // and enters its pause wait before we try to acquire the lock.
+    bool presentThreadPausedForRecreate = false;
     if (presentThread_ && presentThread_->isRunning() && !presentThread_->isPaused()) {
         renderDiag("  pausing PresentThread...");
         presentThread_->pause();
+        presentThreadPausedForRecreate = true;
         renderDiag("  PresentThread paused");
     }
 
@@ -846,10 +1098,27 @@ void Framework::recreate() {
     {
         auto world = Renderer::instance().world();
         if (world && world->chunks() && world->chunks()->chunkBuildScheduler()) {
-            world->chunks()->chunkBuildScheduler()->pause();
+            if (!world->chunks()->chunkBuildScheduler()->pause()) {
+                renderDiag("  BLAS thread pause timed out; deferring recreate");
+                Renderer::options.needRecreate = true;
+                vk::Window::framebufferResized = true;
+                pipeline_->needRecreate = true;
+                if (presentThreadPausedForRecreate && presentThread_) {
+                    presentThread_->resume();
+                }
+                return;
+            }
         }
     }
     renderDiag("  BLAS thread paused, waiting device idle...");
+#ifdef _WIN32
+    FrameGenManager::captureInputCompletion(
+        currentContext_ ? currentContext_->frameIndex : currentContextIndex_,
+        "recreate");
+    if (!FrameGenManager::waitForAllInputCompletions(device_->vkDevice(), kFenceTimeoutNs)) {
+        renderDiag("  DLSS-G input completion drain failed before recreate; continuing to device idle");
+    }
+#endif
     waitDeviceIdle();
     renderDiag("  device idle");
 
@@ -995,6 +1264,17 @@ void Framework::close() {
         presentThread_.reset();
     }
     frameSlotRing_.reset();
+
+#ifdef _WIN32
+    if (device_) {
+        FrameGenManager::captureInputCompletion(
+            currentContext_ ? currentContext_->frameIndex : currentContextIndex_,
+            "close");
+        if (!FrameGenManager::waitForAllInputCompletions(device_->vkDevice(), kFenceTimeoutNs)) {
+            renderDiag("DLSS-G input completion drain failed during close");
+        }
+    }
+#endif
 
     if (running_) { pipeline_->close(); }
     running_ = false;
@@ -1445,8 +1725,7 @@ GarbageCollector::GarbageCollector(std::shared_ptr<Framework> framework) : frame
 }
 
 void GarbageCollector::clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
     index_ = (index_ + 1) % collectors_.size();
-
-    auto framework = framework_.lock();
     collectors_[index_].clear();
 }

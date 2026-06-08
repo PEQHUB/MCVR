@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "common/shared.hpp"
 #include "common/singleton.hpp"
@@ -6,6 +6,12 @@
 #include "core/vulkan/all_core_vulkan.hpp"
 
 #include "core/render/modules/world/world_module.hpp"
+#include "core/render/modules/world/shader_pack/shader_pack.hpp"
+
+#include <atomic>
+#include <mutex>
+#include <unordered_map>
+#include <unordered_set>
 
 class Framework;
 class FrameworkContext;
@@ -21,49 +27,79 @@ class WorldPrepareContext;
 
 struct RayTracingPushConstant {
     int numRayBounces;
-    int flags;           // bit 0: simplified indirect, bit 1: area lights enabled
-                         // bit 2: restir, bit 3: simplified BRDF, bit 4: restir bounce
-                         // bit 5: SHARC enabled, bit 6: noise LOD
-                         // bit 7: multi-scatter GGX, bit 8: EON diffuse
-    int areaLightCount;  // number of active area lights this frame
-    float shadowSoftness;
-    int risCandidates;   // total RIS candidates per pixel
-    int temporalMClamp;  // temporal reservoir M clamp (used as float in shader)
-    int wClamp;          // importance weight W clamp (used as float in shader)
-    float preExposure;   // pre-exposure multiplier for DLSS-RR normalization
-    // POM fields (fields 8-11, 16 bytes)
-    float pomHeightScale;        // 0 = disabled, else depth scale (0.01-0.50)
-    int   pomSteps;              // linear search steps (8-512)
-    int   pomRefinement;         // binary refinement iterations (0-8)
-    float pomFadeDistance;       // distance in blocks to fade POM out (8-256)
-    // Color expansion (offset 48)
-    float colorExpansion;        // per-block vivid color chroma boost (0.0-2.0, 1.0=neutral)
-    uint32_t blueNoiseFrame;     // monotonic frame counter for blue noise temporal offset
-    // SHARC fields (offset 56, 52 bytes) — buffer device addresses + grid params
-    uint64_t sharcHashEntries;   // BDA of hash entry buffer
-    uint64_t sharcAccumulation;  // BDA of accumulation buffer
-    uint64_t sharcResolved;      // BDA of resolved radiance buffer
-    float sharcCameraX;          // camera world position for LOD grid
+    int flags;
+    int reservedLighting0;
+    float reservedLighting1;
+    int reservedLighting2;
+    int reservedLighting3;
+    int reservedLighting4;
+    float preExposure;
+    float displacementDepthScale;
+    int displacementPrimarySteps;
+    int displacementRefinementSteps;
+    float displacementFadeDistanceBlocks;
+    uint32_t blueNoiseFrame;
+    uint32_t rtDebugFlags;
+    uint32_t handInstanceCount;
+    uint32_t reservedPc0;
+    uint64_t sharcHashEntries;
+    uint64_t sharcAccumulation;
+    uint64_t sharcResolved;
+    float sharcCameraX;
     float sharcCameraY;
     float sharcCameraZ;
-    float sharcSceneScale;       // scene scale for voxel sizing (default 4.0)
-    uint32_t sharcCapacity;      // hash map capacity (2^21 = 2M entries)
-    float sharcRadianceScale;    // quantization scale for accumulation atomics
-    uint32_t sharcFrameIndex;    // frame counter for resolve
-    float sharcRoughnessThreshold; // min roughness for cache query (0=all, 1=diffuse only)
-    int sharcUpdateBlockSize;      // sparse update NxN block size (2-8)
-    int sharcUpdateBounces;        // max bounces in SHARC update pass (2-8)
-    // Offline accumulation fields (offset 112, 16 bytes)
-    int offlineFlags;              // bit 0: accumulating, bit 1: disable RR, bit 2: disable clamp
-    int accumFrameCount;           // frame index for jitter sequence during accumulation
-    float aperture;                // thin lens aperture radius (0 = pinhole)
-    float focalDistance;           // focal distance in blocks
-    // Material SSBO BDA — avoids descriptor lookup for material reads
-    uint64_t materialClassAddr;    // BDA of MaterialClassMapping buffer
-    // DDA displacement BDA
-    uint64_t displacedFaceDataAddr; // BDA of merged DisplacedFaceData buffer (0 = no displaced faces)
-    T_INT displacedFaceCount;       // Total displaced faces across all chunks
-    T_INT displacementQuality;      // 0=Off, 1=DDA, 2=Tess, 3=Hybrid, 4=CLAS
+    float sharcSceneScale;
+    uint32_t sharcCapacity;
+    float sharcRadianceScale;
+    uint32_t sharcFrameIndex;
+    float sharcRoughnessThreshold;
+    int sharcUpdateBlockSize;
+    int sharcUpdateBounces;
+    int sharcQueryMode;
+    int sharcQueryReserved;
+    int offlineFlags;
+    int accumFrameCount;
+    float aperture;
+    float focalDistance;
+    uint64_t reservedAddr;
+};
+
+struct ShaderPackVisualSettings {
+    int32_t cloudMode = 1;                    // 0=off, 1=vanilla geometry clouds, 2=volumetric
+    int32_t captureVolumetricCloudIndirect = 0;
+    int32_t volumetricCloudTemporalAccumulation = 0;
+    int32_t volumetricCloudCastShadow = 0;
+    int32_t waterSurfaceMode = 0;             // 0=vanilla, 1=realistic FFT
+    int32_t waterCausticsEnabled = 0;
+    int32_t volumetricLightMode = 0;          // 0=vanilla fog, 1=volumetric
+    int32_t volumetricCloudClearAmount = 1;   // 0=few, 1=medium, 2=many
+
+    int32_t indirectVolumetricCloudViewSteps = 16;
+    int32_t indirectVolumetricCloudLightSteps = 4;
+    int32_t indirectVolumetricCloudAmbientSteps = 2;
+    int32_t volumetricCloudViewSteps = 24;
+    int32_t volumetricCloudLightSteps = 6;
+    int32_t volumetricCloudAmbientSteps = 4;
+    int32_t volumetricLightSamples = 8;
+    int32_t reservedVisual0 = 0;
+
+    float indirectVolumetricCloudReflectionMaxRoughness = 0.12f;
+    float volumetricCloudBottomHeight = 3000.0f;
+    float volumetricCloudTopHeight = 11000.0f;
+    float volumetricCloudBaseScale = 0.30f;
+    float volumetricCloudDetailScale = 0.60f;
+    float volumetricCloudCoverage = 0.50f;
+    float volumetricCloudDensity = 1.00f;
+    float volumetricCloudShadowSoftness = 0.50f;
+
+    float volumetricCloudAmbientStrength = 1.0f;
+    float volumetricCloudPowderStrength = 1.0f;
+    float volumetricCloudWeatherScale = 0.020f;
+    float volumetricLightScatteringStrength = 1.0f;
+    float volumetricLightMaxDistance = 128.0f;
+    float volumetricLightNearStepSize = 1.75f;
+    float volumetricLightFarStepSize = 5.0f;
+    float volumetricLightLuminanceLimit = 4.0f;
 };
 
 class RayTracingModule : public WorldModule, public SharedObject<RayTracingModule> {
@@ -75,6 +111,22 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     constexpr static std::string_view NAME = "render_pipeline.module.ray_tracing.name";
     constexpr static uint32_t inputImageNum = 0;
     constexpr static uint32_t outputImageNum = 29;
+
+    constexpr static std::string_view TARGET_RADIANCE = "out:radiance";
+    constexpr static std::string_view TARGET_DIFFUSE_ALBEDO_METALLIC = "out:diffuse_albedo_metallic";
+    constexpr static std::string_view TARGET_SPECULAR_ALBEDO = "out:specular_albedo";
+    constexpr static std::string_view TARGET_NORMAL_ROUGHNESS = "out:normal_roughness";
+    constexpr static std::string_view TARGET_MOTION_VECTOR = "out:motion_vector";
+    constexpr static std::string_view TARGET_LINEAR_DEPTH = "out:linear_depth";
+    constexpr static std::string_view TARGET_SPECULAR_HIT_DEPTH = "out:specular_hit_depth";
+    constexpr static std::string_view TARGET_FIRST_HIT_DEPTH = "out:first_hit_depth";
+    constexpr static std::string_view TARGET_FIRST_HIT_DIFFUSE_DIRECT_LIGHT = "out:first_hit_diffuse_direct_light";
+    constexpr static std::string_view TARGET_FIRST_HIT_DIFFUSE_INDIRECT_LIGHT = "out:first_hit_diffuse_indirect_light";
+    constexpr static std::string_view TARGET_FIRST_HIT_SPECULAR = "out:first_hit_specular";
+    constexpr static std::string_view TARGET_FIRST_HIT_CLEAR = "out:first_hit_clear";
+    constexpr static std::string_view TARGET_FIRST_HIT_BASE_EMISSION = "out:first_hit_base_emission";
+    constexpr static std::string_view TARGET_FOG_IMAGE = "out:fog_image";
+    constexpr static std::string_view TARGET_FIRST_HIT_REFRACTION = "out:first_hit_refraction";
 
     RayTracingModule();
 
@@ -96,6 +148,8 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     void
     bindTexture(std::shared_ptr<vk::Sampler> sampler, std::shared_ptr<vk::DeviceLocalImage> image, int index) override;
 
+    std::string diagnosticFeatureTruth() const;
+
     void preClose() override;
 
   private:
@@ -103,11 +157,23 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     void initImages();
     void initPipeline();
     void initSBT();
-    void initSpatialPipeline();
-    void initClusterPipeline();
     void initSharcBuffers();
     void initSharcUpdatePipeline();
     void initSharcResolvePipeline();
+    void initSharcQueryPipeline();
+    void validateShaderPackRuntime();
+    void initShaderPackRuntimeResources();
+    void initShaderPackRayTracingExecutor();
+    void disableShaderPackBackend(const std::string &status, const std::string &reason);
+    bool recordShaderPackRayTracingGraph(uint32_t width, uint32_t height, bool &worldPassRequested);
+    bool recordShaderPackRayTracingExecutor(const std::shared_ptr<vk::CommandBuffer> &commandBuffer,
+                                            const std::shared_ptr<vk::DescriptorTable> &descriptorTable,
+                                            const std::shared_ptr<WorldPrepareContext> &worldPrepareContext,
+                                            const RayTracingPushConstant &pushConstant,
+                                            uint32_t frameIndex,
+                                            uint32_t width,
+                                            uint32_t height);
+    void bindLegacyTexturesForSlot(const std::shared_ptr<vk::DescriptorTable>& descriptorTable, uint32_t frameIndex);
 
   private:
     // input
@@ -125,6 +191,8 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::shared_ptr<vk::Shader> shadowAnyHitShader_;
 
     std::shared_ptr<vk::Shader> worldSolidTransparentClosestHitShader_;
+    std::shared_ptr<vk::Shader> worldSolidTransparentNoDisplacementClosestHitShader_;
+    std::shared_ptr<vk::Shader> worldSolidAnyHitShader_;
     std::shared_ptr<vk::Shader> worldTransparentAnyHitShader_;
 
     std::shared_ptr<vk::Shader> worldNoReflectClosestHitShader_;
@@ -142,11 +210,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::shared_ptr<vk::Shader> endGatewayClosestHitShader_;
     std::shared_ptr<vk::Shader> endGatewayAnyHitShader_;
 
-    // DDA displacement procedural hit group
-    std::shared_ptr<vk::Shader> displacedIntersectionShader_;  // .rint
-    std::shared_ptr<vk::Shader> displacedClosestHitShader_;    // .rchit
-    std::shared_ptr<vk::Shader> displacedShadowClosestHitShader_; // .rchit (shadow)
-
     std::shared_ptr<vk::Shader> worldPostColorToDepthVertShader_;
     std::shared_ptr<vk::Shader> worldPostColorToDepthFragShader_;
     std::shared_ptr<vk::Shader> worldPostVertShader_;
@@ -160,9 +223,64 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DescriptorTable>> rayTracingDescriptorTables_;
     std::shared_ptr<vk::RayTracingPipeline> rayTracingPipeline_;
     std::vector<std::shared_ptr<vk::SBT>> sbts_;
+    struct TextureDescriptorSlotState {
+        uint64_t generation = UINT64_MAX;
+        uint64_t materialTexturePageRevision = UINT64_MAX;
+        VkImageView albedoTextureView = VK_NULL_HANDLE;
+        VkImageView specularTextureView = VK_NULL_HANDLE;
+        VkImageView normalTextureView = VK_NULL_HANDLE;
+        VkImageView flagTextureView = VK_NULL_HANDLE;
+        VkBuffer spriteRegistryBuffer = VK_NULL_HANDLE;
+        VkBuffer materialRegistryBuffer = VK_NULL_HANDLE;
+        VkBuffer textureRuleBuffer = VK_NULL_HANDLE;
+    };
+    std::vector<TextureDescriptorSlotState> textureDescriptorSlotStates_;
+    struct LegacyTextureBinding {
+        std::shared_ptr<vk::Sampler> sampler;
+        std::shared_ptr<vk::DeviceLocalImage> image;
+    };
+    std::mutex legacyTextureBindingsMutex_;
+    std::unordered_map<int, LegacyTextureBinding> legacyTextureBindings_;
+    std::vector<uint64_t> legacyTextureBindingRevisions_;
+    std::atomic<uint64_t> legacyTextureBindingRevision_{1};
 
-    uint32_t numRayBounces_ = 4;
+    uint32_t numRayBounces_ = 2;
     bool useJitter_ = true;
+    int shaderPackCloudMode_ = 1;          // 0=off, 1=vanilla, 2=volumetric
+    int shaderPackWaterSurfaceMode_ = 0;   // 0=vanilla, 1=realistic FFT
+    int shaderPackVolumetricLightMode_ = 0; // 0=vanilla, 1=volumetric pack mode
+    bool shaderPackCloudShadowsEnabled_ = false;
+    bool shaderPackWaterCausticsEnabled_ = false;
+    ShaderPackVisualSettings shaderPackVisualSettings_;
+    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> shaderPackVisualSettingBuffers_;
+    std::string shaderPackRequestedPath_ = "shaders/world/ray_tracing/vanilla-pt.zip";
+    std::string shaderPackPath_ = "shaders/world/ray_tracing/vanilla-pt.zip";
+    bool shaderPackRuntimeValid_ = false;
+    std::string shaderPackRuntimeStatus_ = "not_initialized";
+    std::vector<std::string> shaderPackAttributeKVs_;
+    std::shared_ptr<ShaderPack> shaderPack_;
+    bool shaderPackBackendEnabled_ = false;
+    bool shaderPackRuntimeResourcesReady_ = false;
+    bool shaderPackFirstFrameAttempted_ = false;
+    std::string shaderPackBackendStatus_ = "not_initialized";
+    std::string shaderPackFallbackReason_;
+    uint64_t shaderPackGraphPassesExecuted_ = 0;
+    uint64_t shaderPackGraphUnsupportedPasses_ = 0;
+    uint64_t shaderPackGraphWorldPasses_ = 0;
+    bool shaderPackExecutorReady_ = false;
+    uint32_t shaderPackRuntimeResourceSetIndex_ = 5;
+    uint32_t shaderPackExecutionSetIndex_ = 6;
+    uint64_t shaderPackIntermediatesGenerated_ = 0;
+    uint64_t shaderPackFullScreenPassDispatches_ = 0;
+    uint64_t shaderPackComputePassDispatches_ = 0;
+    uint64_t shaderPackRayTracingPassDispatches_ = 0;
+    std::unordered_map<std::string, uint64_t> shaderPackPassDispatchCounts_;
+    std::unordered_map<std::string, FullScreenPass> shaderPackFullScreenPasses_;
+    std::unordered_map<std::string, ComputePass> shaderPackComputePasses_;
+    std::unordered_map<std::string, RayTracingPass> shaderPackRayTracingPasses_;
+    std::shared_ptr<vk::Shader> shaderPackFullScreenVertexShader_;
+    ShaderPack::ExecutionVariables shaderPackRayTracingVariables_;
+    std::unordered_set<std::string> shaderPackUnsupportedPassesLogged_;
 
     // output
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> hdrNoisyOutputImages_;
@@ -196,33 +314,15 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerImages_;         // [26] glass/water foreground color
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerOpacityImages_;  // [27] glass/water per-channel opacity
     std::vector<std::shared_ptr<vk::DeviceLocalImage>> transparencyLayerMvecsImages_;    // [28] glass/water surface MVs
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> upstreamFogImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> upstreamFirstHitRefractionImages_;
 
-    // ReSTIR DI reservoir images (fixed roles)
-    // [0] = temporal output (CHS writes), [1] = spatial output (compute writes)
-    std::shared_ptr<vk::DeviceLocalImage> reservoirImages_[2];
+    // Private SHARC query-pass candidate images. These are internal to RayTracingModule.
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidatePosHitTImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidateNormalRoughnessImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidateThroughputImages_;
+    std::vector<std::shared_ptr<vk::DeviceLocalImage>> sharcCandidatePrefixRadianceFlagsImages_;
 
-    // Bounce ReSTIR DI reservoir images (per-bounce temporal reuse)
-    // [0] = bounce 1, [1] = bounce 2, [2] = bounce 3
-    std::shared_ptr<vk::DeviceLocalImage> bounceReservoirImages_[3];
-
-    // Spatial reuse compute pipeline
-    VkPipeline spatialPipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout spatialPipelineLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout spatialDescSetLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool spatialDescPool_ = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSet> spatialDescSets_;
-    std::shared_ptr<vk::Shader> spatialShader_;
-
-    // Light clustering compute pipeline
-    VkPipeline clusterPipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout clusterPipelineLayout_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout clusterDescSetLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool clusterDescPool_ = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSet> clusterDescSets_;
-    std::shared_ptr<vk::Shader> clusterShader_;
-    std::shared_ptr<vk::DeviceLocalBuffer> tileLightBuffer_;
-    static constexpr int TILE_SIZE = 16;
-    static constexpr int MAX_LIGHTS_PER_TILE = 512;
 
     // SHARC radiance cache
     uint32_t sharcCapacity_ = 1u << 21; // dynamic: 2^exponent entries
@@ -231,6 +331,8 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     std::shared_ptr<vk::DeviceLocalBuffer> sharcResolved_;
     bool sharcBuffersInitialized_ = false;
     bool sharcResizePending_ = false;
+    bool sharcDispatchReady_ = false;
+    uint32_t sharcStreamStableFrames_ = 0;
     uint32_t sharcFrameIndex_ = 0;
     float sharcPrevCameraX_ = 0.0f, sharcPrevCameraY_ = 0.0f, sharcPrevCameraZ_ = 0.0f;
 
@@ -243,6 +345,16 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
     VkPipeline sharcResolvePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout sharcResolvePipelineLayout_ = VK_NULL_HANDLE;
     std::shared_ptr<vk::Shader> sharcResolveShader_;
+
+    // SHARC isolated query compute pipeline (keeps hash/BDA traversal out of world.rgen)
+    VkPipeline sharcQueryPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout sharcQueryPipelineLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout sharcQueryDescSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool sharcQueryDescPool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> sharcQueryDescSets_;
+    std::shared_ptr<vk::Shader> sharcQueryShader_;
+    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> sharcQueryCounterBuffers_;
+    uint32_t sharcQueryLastCounters_[8] = {};
 
     // Offline accumulation compute pipeline (resources stored in Renderer statics)
     std::shared_ptr<vk::Shader> accumShader_;

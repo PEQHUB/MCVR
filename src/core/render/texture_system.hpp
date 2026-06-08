@@ -1,11 +1,16 @@
 #pragma once
 
 #include "core/render/sprite_registry.hpp"
+#include "core/render/material_registry.hpp"
+#include "core/render/texture_rule_registry.hpp"
 #include "core/render/texture_arrays.hpp"
 #include "core/vulkan/all_core_vulkan.hpp"
 
+#include <atomic>
+#include <array>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <vector>
 
 class Framework;
@@ -53,7 +58,33 @@ class TextureSystem {
         float minU, maxU, minV, maxV;
     };
 
-    TextureSystem() = default;
+#pragma pack(push, 1)
+    struct SparseAuxUpdate {
+        int32_t spriteId;
+        uint32_t channelMask;
+        int32_t specularOffset;
+        int32_t normalOffset;
+        int32_t flagOffset;
+        int32_t reserved;
+    };
+    static_assert(sizeof(SparseAuxUpdate) == 24, "SparseAuxUpdate must be 24 bytes");
+
+    struct SparseAuxMetadata {
+        int32_t spriteId;
+        uint32_t flags;
+        int32_t heightRangePacked;
+    };
+    static_assert(sizeof(SparseAuxMetadata) == 12, "SparseAuxMetadata must be 12 bytes");
+#pragma pack(pop)
+
+    enum class LayerKind {
+        Albedo,
+        Specular,
+        Normal,
+        Flag,
+    };
+
+    TextureSystem();
 
     // ---- Data reception from Java (called on game thread via JNI) ----
 
@@ -62,19 +93,20 @@ class TextureSystem {
     void receiveSpriteTable(const SpriteMetadata* table, uint32_t count,
                             uint32_t atlasWidth, uint32_t atlasHeight);
 
-    /// Receive concatenated frame-0 pixel data for all sprites (sorted order).
-    /// Total bytes = sum of (width * height * 4) for each sprite.
+    /// Receive concatenated fixed-layer frame-0 pixel data for all sprites (sorted order).
+    /// Java resamples every frame into the selected square texture-array layer size.
     /// Pixels are RGBA8, in the same order as the sprite table.
     void receiveSpritePixels(const uint8_t* data, uint32_t totalBytes);
 
-    /// Receive concatenated specular + normal pixel data for all sprites (sorted order).
-    /// Each buffer is count * (spriteSize * spriteSize * 4) bytes, RGBA8 UNORM.
+    /// Receive concatenated specular + normal + flag pixel data for all sprites (sorted order).
+    /// Each buffer is count * (layerSize * layerSize * 4) bytes, RGBA8 UNORM.
     void receiveAuxPixels(const uint8_t* specularData, const uint8_t* normalData,
+                          const uint8_t* flagData,
                           uint32_t totalBytesPerType);
 
     /// Receive bulk animation frame data for all animated sprites.
-    /// Format: repeated entries of [spriteId(uint16), frameIndex(uint16), pixels(w*h*4 bytes)]
-    /// where w and h come from the sprite's metadata.
+    /// Format: repeated entries of
+    /// [spriteId(uint16), frameIndex(uint16), pixels(layerSize*layerSize*4 bytes)].
     void receiveAnimationFrames(const uint8_t* data, uint32_t totalBytes);
 
     // ---- Finalization (called on game thread, creates GPU resources) ----
@@ -85,12 +117,12 @@ class TextureSystem {
     void finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device);
 
     /// Whether finalize() has been called and textures are ready.
-    bool isFinalized() const { return finalized_; }
+    bool isFinalized() const { return finalized_.load(std::memory_order_acquire); }
 
     // ---- Per-frame operations (called on render thread) ----
 
     /// Tick animation: stage changed frames for upload. Returns true if any layers changed.
-    bool tickAnimation(uint32_t gameTick);
+    bool tickAnimation(uint32_t gameTick, uint64_t generation);
 
     /// Flush any pending texture uploads + selective mipgen.
     /// Must be called within a valid command buffer recording (render thread).
@@ -106,34 +138,108 @@ class TextureSystem {
 
     /// Sprite count.
     uint32_t spriteCount() const { return static_cast<uint32_t>(sprites_.size()); }
+    uint32_t layerSize() const { return layerSize_; }
+    uint32_t atlasWidth() const { return atlasWidth_; }
+    uint32_t atlasHeight() const { return atlasHeight_; }
+    bool hasPendingTextureUploads() const { return arrayManager_.hasPendingUploads(); }
+
+    void setGeneration(uint64_t generation);
+    uint64_t generation() const { return generation_.load(std::memory_order_acquire); }
+
+    std::string statusString() const;
+    bool dumpDebug(const std::string& path, uint32_t limit) const;
 
     /// Access underlying managers for descriptor binding.
     TextureArrayManager& arrayManager() { return arrayManager_; }
     SpriteRegistry& registry() { return registry_; }
+    MaterialRegistry& materials() { return materials_; }
+    TextureRuleRegistry& textureRules() { return textureRules_; }
+    bool stageLayerUpdate(LayerKind layerKind, uint32_t spriteId,
+                          const uint8_t* pixels, size_t pixelSize,
+                          uint64_t generation);
+    bool updateSpriteHeightMetadata(uint32_t spriteId, uint32_t flags, int32_t maskLayer,
+                                    uint64_t generation,
+                                    std::shared_ptr<vk::VMA> vma,
+                                    std::shared_ptr<vk::Device> device);
+    bool receiveSparseAuxBatch(const SparseAuxUpdate* updates, uint32_t updateCount,
+                               const uint8_t* pixels, size_t pixelBytes,
+                               const SparseAuxMetadata* metadata, uint32_t metadataCount,
+                               uint64_t generation,
+                               std::shared_ptr<vk::VMA> vma,
+                               std::shared_ptr<vk::Device> device);
+    bool uploadTextureRules(const vk::Data::TextureRuleEntry* entries, uint32_t count,
+                            uint64_t generation,
+                            std::shared_ptr<vk::VMA> vma,
+                            std::shared_ptr<vk::Device> device);
+    bool uploadMaterialTable(const vk::Data::MaterialEntry* entries, uint32_t count,
+                             uint64_t generation,
+                             std::shared_ptr<vk::VMA> vma,
+                             std::shared_ptr<vk::Device> device);
+    bool updateMaterialTableSparse(const vk::Data::MaterialEntry* entries, uint32_t count,
+                                   uint64_t generation,
+                                   std::shared_ptr<vk::VMA> vma,
+                                   std::shared_ptr<vk::Device> device);
+    bool uploadMaterialTexturePage(uint32_t page, uint32_t spriteSize, uint32_t layerCount,
+                                   const uint8_t* albedoData,
+                                   const uint8_t* specularData,
+                                   const uint8_t* normalData,
+                                   const uint8_t* flagData,
+                                   uint64_t generation,
+                                   std::shared_ptr<vk::VMA> vma,
+                                   std::shared_ptr<vk::Device> device);
+    bool uploadMaterialTextureLayers(uint32_t page, uint32_t spriteSize, uint32_t startLayer,
+                                     uint32_t layerCount, uint32_t layerCapacity,
+                                     const uint8_t* albedoData,
+                                     const uint8_t* specularData,
+                                     const uint8_t* normalData,
+                                     const uint8_t* flagData,
+                                     uint64_t generation,
+                                     std::shared_ptr<vk::VMA> vma,
+                                     std::shared_ptr<vk::Device> device);
 
     /// Get texture array IDs (for descriptor binding).
-    uint32_t blockAlbedoArrayId() const { return blockAlbedoArrayId_; }
-    uint32_t blockSpecularArrayId() const { return blockSpecularArrayId_; }
-    uint32_t blockNormalArrayId() const { return blockNormalArrayId_; }
-
+    uint32_t blockAlbedoArrayId() const { return blockAlbedoArrayId_.load(std::memory_order_acquire); }
+    uint32_t blockSpecularArrayId() const { return blockSpecularArrayId_.load(std::memory_order_acquire); }
+    uint32_t blockNormalArrayId() const { return blockNormalArrayId_.load(std::memory_order_acquire); }
+    uint32_t blockFlagArrayId() const { return blockFlagArrayId_.load(std::memory_order_acquire); }
+    uint32_t materialAlbedoPageArrayId(uint32_t page) const;
+    uint32_t materialSpecularPageArrayId(uint32_t page) const;
+    uint32_t materialNormalPageArrayId(uint32_t page) const;
+    uint32_t materialFlagPageArrayId(uint32_t page) const;
+    uint64_t materialTexturePageRevision() const {
+        return materialTexturePageRevision_.load(std::memory_order_acquire);
+    }
+    std::string materialPagePoolStatusJson() const;
+    std::string materialTableStatusJson() const;
+    std::string nativeUploadSafetyStatusJson() const;
     /// Reset on resource reload.
     void reset();
 
   private:
+    void waitForGpuIdleLocked(std::shared_ptr<vk::Device> device, const char* reason);
+    void retireGpuResourcesLocked(std::shared_ptr<vk::Device> device, const char* reason);
+    void resetMaterialTexturePagesLocked();
+    bool hasMaterialPageMipsDirtyLocked() const;
+
     // Sprite metadata (sorted by identifier, spriteId = index)
     std::vector<SpriteMetadata> sprites_;
     std::vector<SpriteBounds> spriteBounds_;
     uint32_t atlasWidth_ = 0;
     uint32_t atlasHeight_ = 0;
+    uint32_t layerSize_ = 0;
     static const SpriteBounds DEFAULT_BOUNDS;
 
     // Frame-0 pixel data for all sprites (concatenated, RGBA8)
     std::vector<uint8_t> spritePixels_;
 
-    // Auxiliary pixel data (specular + normal, concatenated per sprite, RGBA8)
+    // Auxiliary pixel data (specular + normal + flags, concatenated per sprite, RGBA8)
     std::vector<uint8_t> specularPixels_;
     std::vector<uint8_t> normalPixels_;
-
+    std::vector<uint8_t> flagPixels_;
+    std::vector<uint64_t> albedoChecksums_;
+    std::vector<uint64_t> specularChecksums_;
+    std::vector<uint64_t> normalChecksums_;
+    std::vector<uint64_t> flagChecksums_;
     // Animation: per-sprite frame data (RGBA pixels per frame)
     struct AnimEntry {
         uint16_t spriteId;
@@ -146,13 +252,33 @@ class TextureSystem {
     // GPU resources (owned)
     TextureArrayManager arrayManager_;
     SpriteRegistry registry_;
-    uint32_t blockAlbedoArrayId_ = UINT32_MAX;
-    uint32_t blockSpecularArrayId_ = UINT32_MAX;
-    uint32_t blockNormalArrayId_ = UINT32_MAX;
+    MaterialRegistry materials_;
+    TextureRuleRegistry textureRules_;
+    std::atomic<uint32_t> blockAlbedoArrayId_{UINT32_MAX};
+    std::atomic<uint32_t> blockSpecularArrayId_{UINT32_MAX};
+    std::atomic<uint32_t> blockNormalArrayId_{UINT32_MAX};
+    std::atomic<uint32_t> blockFlagArrayId_{UINT32_MAX};
+    std::array<std::atomic<uint32_t>, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialAlbedoPageArrayIds_{};
+    std::array<std::atomic<uint32_t>, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialSpecularPageArrayIds_{};
+    std::array<std::atomic<uint32_t>, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialNormalPageArrayIds_{};
+    std::array<std::atomic<uint32_t>, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialFlagPageArrayIds_{};
+    std::array<std::atomic<bool>, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialPageReady_{};
+    std::array<bool, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialPageMipsDirty_{};
+    std::array<uint32_t, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialPageLayerCapacity_{};
+    std::array<uint32_t, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialPageLayersUsed_{};
+    std::atomic<uint64_t> materialTexturePageRevision_{1};
+    uint64_t materialPageUpdates_ = 0;
+    uint64_t materialPageImageAllocations_ = 0;
+    uint32_t lastMaterialPage_ = 0;
+    uint32_t lastMaterialPageStartLayer_ = 0;
+    uint32_t lastMaterialPageLayerCount_ = 0;
+    uint32_t lastMaterialPageLayerCapacity_ = 0;
     bool albedoMipsInitialized_ = false;
     bool specMipsInitialized_ = false;
     bool normMipsInitialized_ = false;
+    bool flagMipsInitialized_ = false;
 
-    bool finalized_ = false;
+    std::atomic<bool> finalized_{false};
+    std::atomic<uint64_t> generation_{0};
     mutable std::mutex mutex_;
 };

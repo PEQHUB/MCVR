@@ -29,9 +29,9 @@ class Device : public SharedObject<Device> {
     /// (shared_from_this() is not valid inside the constructor).
     void createTimelineSemaphores();
     std::shared_ptr<TimelineSemaphore> blasSemaphore() { return blasSemaphore_; }
+    std::shared_ptr<TimelineSemaphore> materialUploadSemaphore() { return materialUploadSemaphore_; }
 
     bool hasExtendedDynamicState2LogicOp() const { return extendedDynamicState2LogicOp_; }
-    bool hasOMM() const { return ommSupported_; }
     bool hasSER() const { return serSupported_; }
     bool hasShaderClock() const { return shaderClockSupported_; }
     bool hasCheckpoints() const { return checkpointsSupported_; }
@@ -49,13 +49,13 @@ class Device : public SharedObject<Device> {
 
     std::mutex queueMtx_;  // protects mainVkQueue submits from multiple threads
     bool extendedDynamicState2LogicOp_ = false;
-    bool ommSupported_ = false;
     bool serSupported_ = false;
     bool shaderClockSupported_ = false;
     bool checkpointsSupported_ = false;
     bool deviceFaultSupported_ = false;
 
     std::shared_ptr<TimelineSemaphore> blasSemaphore_;
+    std::shared_ptr<TimelineSemaphore> materialUploadSemaphore_;
 
     void loadPipelineCache();
     static std::string pipelineCachePath();

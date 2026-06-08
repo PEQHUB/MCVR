@@ -51,7 +51,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
                                                                                      jlong vertexFormats,
                                                                                      jlong vertexCounts,
                                                                                      jlong vertexAddrs,
-                                                                                     jboolean important) {
+                                                                                     jboolean important,
+                                                                                     jlong textureGeneration) {
     if (Renderer::is_initialized()) {
         auto world = Renderer::instance().world();
         if (world != nullptr) {
@@ -67,6 +68,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
                 .vertexCounts = reinterpret_cast<int *>(vertexCounts),
                 .vertices = reinterpret_cast<vk::VertexFormat::PBRTriangle **>(vertexAddrs),
                 .isImportant = static_cast<bool>(important),
+                .textureGeneration = static_cast<uint64_t>(textureGeneration),
             });
         }
     }

@@ -6,6 +6,7 @@
 #include "core/vulkan/all_core_vulkan.hpp"
 #include "core/render/world.hpp"
 
+#include <array>
 #include <unordered_map>
 
 class Framework;
@@ -53,11 +54,29 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         std::vector<std::shared_ptr<vk::BLAS>> blases;
         std::vector<uint64_t> generations;  // Chunk1::blasGeneration per instance
         uint32_t instanceCount = 0;
+        uint32_t entitySourceCount = 0;
+        uint32_t entityInstanceCount = 0;
+        uint32_t entitySlotCapacity = 0;
+        uint32_t entitySkippedNoBlas = 0;
+        uint32_t entitySkippedPrebuilt = 0;
+        uint32_t chunkInstanceCount = 0;
+        uint32_t megaInstanceCount = 0;
+        std::array<uint32_t, 9> entityRtFlagCounts{};
+        // Entity BLAS handles can change for animated entities. Keep them alive
+        // for this TLAS window without using them in chunk-stability equality.
+        std::vector<std::shared_ptr<vk::BLAS>> entityBlasesForLifetime;
         // Keep vertex/index buffers alive — RT shader reads them via BDA from SSBO
         std::vector<std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>> vertexBuffers;
         std::vector<std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>>> indexBuffers;
     };
     TlasBlasSnapshot prevBlasSnapshot_;
+
+    // Fixed entity prefix keeps chunk TLAS indices stable when mobs/entities
+    // appear or disappear. Inactive slots use inactiveEntityBlas_ with mask=0.
+    uint32_t entityTlasSlotCapacity_ = 0;
+    std::shared_ptr<vk::BLAS> inactiveEntityBlas_;
+    std::shared_ptr<vk::HostVisibleBuffer> inactiveEntityVertexBuffer_;
+    std::shared_ptr<vk::HostVisibleBuffer> inactiveEntityIndexBuffer_;
 
     // Mega-chunk system: groups distant chunks into single BLASes
     struct MegaChunk {
@@ -86,8 +105,6 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     struct CachedChunkData {
         uint64_t blasGeneration = UINT64_MAX; // invalid → forces rebuild
         std::shared_ptr<vk::BLAS> blas;
-        std::shared_ptr<vk::BLAS> displacedBlas;
-        std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
         int x, y, z;
         uint32_t geometryCount = 0;
         std::vector<World::GeometryTypes> geoTypes; // SHADOW prefix + chunk types
@@ -95,8 +112,7 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         std::vector<uint64_t> idxBufAddrs;
         std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
         std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
-        bool hasDisplaced = false;
-        uint8_t vertexFormat = 0; // 0=full, 1=compact, 2=lossless
+        bool queueOwnershipPending = false;
         // Per-section biome colors (packed 0x00RRGGBB) for shader-side tinting
         uint32_t biomeGrassColor = 0x91BD59;
         uint32_t biomeFoliageColor = 0x77AB2F;
@@ -106,6 +122,11 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
 
     // Persistent per-context SSBO buffers — reused across frames, grow-only.
     // Safe because acquireContext() waits for previous GPU work on this context before reuse.
+    static constexpr uint32_t SBT_SOURCE_CHUNK = 0u;
+    static constexpr uint32_t SBT_SOURCE_ENTITY = 1u;
+    std::vector<uint32_t> lastGeometryTypes_;
+    std::vector<uint32_t> lastGeometryMasks_;
+    std::vector<uint32_t> lastGeometrySources_;
     std::shared_ptr<vk::DeviceLocalBuffer> blasOffsetsBuffer;
     std::shared_ptr<vk::DeviceLocalBuffer> vertexBufferAddr;
     std::shared_ptr<vk::DeviceLocalBuffer> indexBufferAddr;
@@ -119,8 +140,7 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
     VkDeviceSize lastIndexBufferAddrCapacity_ = 0;
     VkDeviceSize lastObjToWorldMatCapacity_ = 0;
 
-    std::shared_ptr<vk::DeviceLocalBuffer> areaLightBuffer;
-    int areaLightCount = 0;
+    uint32_t handInstanceCount = 0;
 
     // Per-instance biome colors for shader-side tinting (binding 10)
     std::shared_ptr<vk::DeviceLocalBuffer> biomeColorBuffer;
@@ -137,6 +157,13 @@ struct WorldPrepareContext : public SharedObject<WorldPrepareContext> {
         prevTlasInstanceCount_ = 0;
         tlasScratchBuffer_ = nullptr;
         tlasScratchSize_ = 0;
+        entityTlasSlotCapacity_ = 0;
+        inactiveEntityBlas_ = nullptr;
+        inactiveEntityVertexBuffer_ = nullptr;
+        inactiveEntityIndexBuffer_ = nullptr;
+        lastGeometryTypes_.clear();
+        lastGeometryMasks_.clear();
+        lastGeometrySources_.clear();
         megaChunkCache_.clear();
         cachedChunks_.clear();
         blasOffsetsBuffer = nullptr; blasOffsetsCapacity_ = 0;

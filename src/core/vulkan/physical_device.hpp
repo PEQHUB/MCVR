@@ -14,6 +14,7 @@ class PhysicalDevice : public SharedObject<PhysicalDevice> {
     VkPhysicalDevice &vkPhysicalDevice();
     uint32_t mainQueueIndex();
     uint32_t secondaryQueueIndex();
+    uint32_t mainQueueCount();
 
     void findPhysicalDevice();
     void findQueueFamilies();
@@ -29,6 +30,7 @@ class PhysicalDevice : public SharedObject<PhysicalDevice> {
     VkPhysicalDevice physicalDevice_ = VK_NULL_HANDLE;
     uint32_t mainQueueIndex_ = -1;
     uint32_t secondaryQueueIndex_ = -1;
+    uint32_t mainQueueCount_ = 0;
 
     VkPhysicalDeviceProperties properties_;
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingProperties_;

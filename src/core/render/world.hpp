@@ -13,7 +13,6 @@
 class Framework;
 class Chunks;
 class Entities;
-#include "core/render/extended_chunk_manager.hpp"
 
 class World : public SharedObject<World> {
   public:
@@ -43,7 +42,6 @@ class World : public SharedObject<World> {
         BOAT_WATER_MASK,
         END_PORTAL,
         END_GATE_WAY,
-        WORLD_DISPLACED,      // DDA intersection shader — procedural AABB geometry
         NUM_GEOMETRY_TYPES,
     };
 
@@ -75,16 +73,11 @@ class World : public SharedObject<World> {
     void setCameraPos(glm::dvec3 cameraPos);
     glm::dvec3 getCameraPos();
 
-    /// Start extended chunk loading if configured. Called after world init.
-    void startExtendedChunkLoading(uint32_t javaRenderDistance, uint32_t javaChunkCount);
-    ExtendedChunkManager* extendedChunkManager() { return extendedChunkMgr_.get(); }
-
     void close();
 
   private:
     std::shared_ptr<Chunks> chunks_;
     std::shared_ptr<Entities> entities_;
-    std::unique_ptr<ExtendedChunkManager> extendedChunkMgr_;
 
     glm::dvec3 cameraPos_ = {0, 0, 0};
 

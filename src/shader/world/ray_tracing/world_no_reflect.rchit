@@ -12,6 +12,7 @@
 #include "../util/util.glsl"
 #include "common/shared.hpp"
 #include "../util/colorspace.glsl"
+#include "../util/texture_rules.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
@@ -96,7 +97,8 @@ void main() {
     vec3 edge1 = v1.pos - v0.pos;
     vec3 edge2 = v2.pos - v0.pos;
     vec3 normal = normalize(cross(edge1, edge2));
-    if (coordinate == 1) {
+    bool isBlockGeometry = (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
+    if (coordinate == 1 && !isBlockGeometry) {
         normal = normalize(mat3(worldUbo.cameraViewMatInv) * normal);
     }
 
@@ -112,30 +114,33 @@ void main() {
     float albedoEmission =
         baryCoords.x * v0.albedoEmission + baryCoords.y * v1.albedoEmission + baryCoords.z * v2.albedoEmission;
     uint textureID = v0.textureID;
+    uint materialRuleTextureID = textureID;
     vec4 albedoValue;
     vec4 specularValue;
     vec4 normalValue;
     ivec4 flagValue;
     vec2 textureUV;
-    bool isBlockGeometry = (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
+    bool foldBlockOverlay = (v0.flags & PBR_FLAG_OVERLAY_ALPHA_MASK) != 0u;
+    bool blockOverlayComposited = false;
 
     if (useTexture) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
 
         if (isBlockGeometry) {
-            // === BLOCK GEOMETRY: texture array sampling via SpriteRegistry ===
-            uint spriteId = textureID;
-
-            // Greedy-merged quads: UVs extend beyond [0,1]. fract() tiles them.
-            if ((v0.flags & PBR_FLAG_GREEDY_MERGED) != 0u) {
-                textureUV = fract(textureUV);
-            }
+            // === BLOCK GEOMETRY: material-id sampling via MaterialRegistry ===
+            uint materialId = textureID;
 
             float lod = 0;
-            albedoValue = fetchBlockAlbedoLod(spriteId, textureUV, worldUbo.animTick, lod);
-            specularValue = fetchBlockSpecularLod(spriteId, textureUV, lod);
-            normalValue = fetchBlockNormalLod(spriteId, textureUV, lod);
-            flagValue = ivec4(0);
+            albedoValue = fetchBlockAlbedoLod(materialId, textureUV, worldUbo.animTick, lod);
+            specularValue = fetchBlockSpecularLod(materialId, textureUV, lod);
+            normalValue = fetchBlockNormalLod(materialId, textureUV, lod);
+            flagValue = fetchBlockFlagLod(materialId, textureUV, lod);
+            if (foldBlockOverlay) {
+                blockOverlayComposited = applyBlockOverlayMaterialLod(
+                    albedoValue, specularValue, normalValue, flagValue,
+                    materialId, textureUV, worldUbo.animTick, lod, colorLayer,
+                    materialRuleTextureID);
+            }
         } else {
             // === ENTITY GEOMETRY: legacy atlas sampling via textures[] ===
             int specularTextureID = mapping.entries[textureID].specular;
@@ -189,6 +194,8 @@ void main() {
     vec3 tint;
     if ((v0.flags & PBR_FLAG_USE_OVERLAY) != 0u && !isBlockGeometry) {
         tint = mix(overlayColor.rgb, albedoValue.rgb * colorLayer, overlayColor.a) + glint;
+    } else if (isBlockGeometry && blockOverlayComposited) {
+        tint = albedoValue.rgb + glint;
     } else {
         tint = albedoValue.rgb * colorLayer + glint;
     }
@@ -196,6 +203,9 @@ void main() {
     tint = CS_BT709_TO_BT2020 * tint;  // BT.709 -> BT.2020 working space
     albedoValue = vec4(tint, albedoValue.a);
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
+    if (isBlockGeometry) {
+        applyTextureRule(materialRuleTextureID, mat);
+    }
 
     // add glowing radiance
     float combinedEmission = max(mat.emission, albedoEmission);

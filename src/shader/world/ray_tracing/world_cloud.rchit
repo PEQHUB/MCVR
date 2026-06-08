@@ -4,7 +4,6 @@
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
-#extension GL_EXT_opacity_micromap : require
 
 #include "../util/disney.glsl"
 #include "../util/random.glsl"
@@ -106,16 +105,6 @@ void main() {
     } else {
         normal = normalize(normal);
     }
-    LabPBRMat mat;
-    mat.albedo = vec3(0);
-    mat.f0 = mat.albedo;
-    mat.roughness = 1.0;
-    mat.metallic = 0.0;
-    mat.subSurface = 0.0;
-    mat.transmission = 0.0;
-    mat.ior = 0.0;
-    mat.emission = 0.0;
-
     bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
     vec3 colorLayer;
     if (useColorLayer) {
@@ -139,21 +128,23 @@ void main() {
     if (sunDir.y < 0) { lightDir = normalize(skyUBO.moonDirection); }
     vec3 sampledLightDir = lightDir;
 
-    // check if sample is above surface
-    if (dot(sampledLightDir, normal) > 0.0) {
-    } else {
-        normal = -normal;
-    }
-    float pdf; // not used
-    vec3 lightBRDF = DisneyEval(mat, viewDir, normal, sampledLightDir, pdf);
-    lightBRDF.r = max(lightBRDF.r, 0.1);
-    lightBRDF.g = max(lightBRDF.g, 0.1);
-    lightBRDF.b = max(lightBRDF.b, 0.1);
+    // Vanilla-pt cloud mesh response: two-sided, backlit-friendly diffuse
+    // so cloud undersides do not collapse to black when viewed from below.
+    float ndotl = dot(normal, sampledLightDir);
+    float ndotv = dot(normal, viewDir);
+    float frontLit = max(ndotl, 0.0);
+    float wrappedLit = clamp((abs(ndotl) + 0.4) / 1.4, 0.0, 1.0);
+    float backLit = max(-ndotl, 0.0) * max(-ndotv, 0.0);
+    float cloudPhase = max(frontLit, max(wrappedLit * 0.6, backLit * 1.35));
+    vec3 lightBRDF = tint * (INV_PI * cloudPhase);
 
     shadowRay.radiance = vec3(0.0);
     shadowRay.throughput = vec3(1.0);
     shadowRay.seed = mainRay.seed;
     shadowRay.bounceIndex = mainRay.index;
+    shadowRay.originThinBlockType = 0u;
+    shadowRay.originThinColumnHash = 0u;
+    shadowRay.lastThinPlantHitKey = 0u;
 
     traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT,
                 WORLD_MASK, // masks
@@ -166,9 +157,13 @@ void main() {
 
     float progress = clamp(skyUBO.rainGradient * skyUBO.envSky.y, 0.0, 1.0);
     vec3 lightRadiance = lightContribution * mainRay.throughput * lightBRDF;
-    vec3 rainyRadiance = mix(vec3(0.04, 0.05, 0.1) * 0.8, vec3(0.1), smoothstep(-0.3, 0.3, lightDir.y));
-    rainyRadiance *= skyUBO.envSky.x;
-    mainRay.radiance += mix(lightRadiance, rainyRadiance, progress);
+    lightRadiance *= alpha * 0.65;
+
+    float dayFactor = smoothstep(-0.3, 0.3, sunDir.y);
+    vec3 rainyRadiance = mix(vec3(0.04, 0.05, 0.1) * 0.8, vec3(0.08), dayFactor);
+    rainyRadiance *= skyUBO.envSky.x * mainRay.throughput;
+    vec3 wetCloudRadiance = lightRadiance * mix(0.2, 0.35, dayFactor) + rainyRadiance;
+    mainRay.radiance += mix(lightRadiance, wetCloudRadiance, progress);
 
     mainRay.hitT = gl_HitTEXT;
 

@@ -2,7 +2,11 @@
 
 #include "core/all_extern.hpp"
 #include "core/render/buffers.hpp"
+#include "core/render/chunks.hpp"
+#include "core/render/entities.hpp"
 #include "core/render/modules/ui_module.hpp"
+#include "core/render/modules/world/frame_gen/frame_gen_manager.hpp"
+#include "core/render/modules/world/ray_tracing/ray_tracing_module.hpp"
 #include "core/render/pipeline.hpp"
 #include "core/render/overlay_compositor.hpp"
 #include "core/render/render_framework.hpp"
@@ -12,7 +16,10 @@
 #include "core/vulkan/vma.hpp"
 
 #include <atomic>
+#include <map>
 #include <mutex>
+#include <sstream>
+#include <string>
 
 #if defined(_WIN32)
 #    include <windows.h>
@@ -56,6 +63,41 @@ namespace {
 std::recursive_mutex g_rendererJniMtx;
 std::atomic<bool> g_rendererShuttingDown{false};
 std::atomic<bool> g_rendererClosed{false};
+
+#ifndef MCVR_BUILD_GIT_SHA
+#define MCVR_BUILD_GIT_SHA "unknown"
+#endif
+#ifndef MCVR_BUILD_CONFIG
+#define MCVR_BUILD_CONFIG "unknown"
+#endif
+#ifndef MCVR_BUILD_COMPILER_ID
+#define MCVR_BUILD_COMPILER_ID "unknown"
+#endif
+#ifndef MCVR_BUILD_COMPILER_VERSION
+#define MCVR_BUILD_COMPILER_VERSION "unknown"
+#endif
+#ifndef MCVR_BUILD_VULKAN_SDK
+#define MCVR_BUILD_VULKAN_SDK "unknown"
+#endif
+#ifndef MCVR_BUILD_TIMESTAMP
+#define MCVR_BUILD_TIMESTAMP "unknown"
+#endif
+
+std::string json_escape(const char *text) {
+    std::string out;
+    if (text == nullptr) return out;
+    for (const char c : std::string(text)) {
+        switch (c) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out += c; break;
+        }
+    }
+    return out;
+}
 
 inline bool rendererUsable() {
     return Renderer::is_initialized() &&
@@ -161,6 +203,42 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
     if (!rendererUsable()) return 16384; // V2 mode: return safe default for texture atlas sizing
     auto maxImageSize = Renderer::instance().framework()->physicalDevice()->properties().limits.maxImageDimension2D;
     return maxImageSize;
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeBuildInfoJson(JNIEnv *env,
+                                                                                                            jclass) {
+    std::ostringstream json;
+    json << "{";
+    json << "\"repository\":\"radser-mcvr\",";
+    json << "\"commit\":\"" << json_escape(MCVR_BUILD_GIT_SHA) << "\",";
+    json << "\"buildType\":\"" << json_escape(MCVR_BUILD_CONFIG) << "\",";
+    json << "\"compiler\":\"" << json_escape(MCVR_BUILD_COMPILER_ID) << " "
+         << json_escape(MCVR_BUILD_COMPILER_VERSION) << "\",";
+    json << "\"vulkanSdk\":\"" << json_escape(MCVR_BUILD_VULKAN_SDK) << "\",";
+    json << "\"buildTimestamp\":\"" << json_escape(MCVR_BUILD_TIMESTAMP) << "\",";
+    json << "\"features\":{";
+#ifdef MCVR_ENABLE_NRD
+    json << "\"nrd\":true,";
+#else
+    json << "\"nrd\":false,";
+#endif
+#ifdef MCVR_ENABLE_FFX_UPSCALER
+    json << "\"ffxUpscaler\":true,";
+#else
+    json << "\"ffxUpscaler\":false,";
+#endif
+#ifdef MCVR_ENABLE_SHARC
+    json << "\"sharc\":true,";
+#else
+    json << "\"sharc\":false,";
+#endif
+#ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
+    json << "\"sharcMainTraceQuery\":true";
+#else
+    json << "\"sharcMainTraceQuery\":false";
+#endif
+    json << "}}";
+    return env->NewStringUTF(json.str().c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_acquireContext(JNIEnv *, jclass) {
@@ -341,6 +419,150 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
 }
 
 /**
+ * Transient RT.MainTrace diagnostic flags. DebugBridge sweeps these and restores them;
+ * they are intentionally not persisted in Java options.
+ */
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeSetRtDebugFlags(
+    JNIEnv *, jclass, jint flags) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    Renderer::options.rtDebugFlags = flags < 0 ? 0u : static_cast<uint32_t>(flags);
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetRtDebugFlags(
+    JNIEnv *, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    return static_cast<jint>(Renderer::options.rtDebugFlags);
+}
+
+/**
+ * Returns renderer feature truth as a flat string. This reports compiled/native reality,
+ * not just Java option intent.
+ */
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetFeatureTruth(
+    JNIEnv *env, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable() || !Renderer::is_initialized()) {
+        return env->NewStringUTF("rendererUsable:0");
+    }
+
+    auto* renderer = Renderer::try_instance();
+    if (!renderer) return env->NewStringUTF("rendererUsable:0");
+
+    auto framework = renderer->framework();
+    auto device = framework ? framework->device() : nullptr;
+    const bool serDevice = device && device->hasSER();
+    const bool serActive = serDevice && Renderer::options.serEnabled;
+
+    std::ostringstream out;
+    out << "rendererUsable:1"
+        << ",gpuProfilerEnabled:" << (Renderer::gpuProfiler.isEnabled() ? 1 : 0)
+        << ",rayBounces:" << Renderer::options.rayBounces
+        << ",simplifiedIndirectOption:" << (Renderer::options.simplifiedIndirect ? 1 : 0)
+        << ",serDevice:" << (serDevice ? 1 : 0)
+        << ",serOption:" << (Renderer::options.serEnabled ? 1 : 0)
+        << ",serHintsOption:" << (Renderer::options.serHintsEnabled ? 1 : 0)
+        << ",serActive:" << (serActive ? 1 : 0)
+        << ",rtDebugFlags:" << Renderer::options.rtDebugFlags;
+
+    bool rayTracingModuleFound = false;
+    auto pipeline = framework ? framework->pipeline() : nullptr;
+    auto worldPipeline = pipeline ? pipeline->worldPipeline() : nullptr;
+    if (worldPipeline) {
+        for (const auto& module : worldPipeline->worldModules()) {
+            auto rayTracingModule = std::dynamic_pointer_cast<RayTracingModule>(module);
+            if (!rayTracingModule) continue;
+            rayTracingModuleFound = true;
+            out << ",rayTracingModule:1," << rayTracingModule->diagnosticFeatureTruth();
+            break;
+        }
+    }
+    if (!rayTracingModuleFound) {
+        out << ",rayTracingModule:0"
+#ifdef MCVR_ENABLE_SHARC
+            << ",sharcCompiled:1";
+#else
+            << ",sharcCompiled:0";
+#endif
+    }
+
+    auto world = renderer->world();
+    auto entities = world ? world->entities() : nullptr;
+    if (entities) {
+        std::string entityDiag = entities->diagnosticsString();
+        if (!entityDiag.empty()) out << "," << entityDiag;
+    }
+
+    return env->NewStringUTF(out.str().c_str());
+}
+
+/**
+ * Returns color-pipeline state as a flat CSV string.
+ */
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetColorPipelineDiagnostics(
+    JNIEnv *env, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable() || !Renderer::is_initialized()) {
+        return env->NewStringUTF("rendererUsable:0");
+    }
+
+    auto* renderer = Renderer::try_instance();
+    if (!renderer) return env->NewStringUTF("rendererUsable:0");
+
+    auto framework = renderer->framework();
+    auto swapchain = framework ? framework->swapchain() : nullptr;
+    VkSurfaceFormatKHR surfaceFormat{};
+    bool hdrSwapchain = false;
+    bool hdr10Swapchain = false;
+    bool scRgbSwapchain = false;
+    bool transferSrc = false;
+    if (swapchain) {
+        surfaceFormat = swapchain->vkSurfaceFormat();
+        hdrSwapchain = swapchain->isHDR();
+        hdr10Swapchain = swapchain->isHDR10();
+        scRgbSwapchain = swapchain->isScRGB();
+        transferSrc = swapchain->supportsTransferSrc();
+    }
+
+    std::ostringstream out;
+    out << "rendererUsable:1"
+        << ",hdrOption:" << (Renderer::options.hdrEnabled ? 1 : 0)
+        << ",hdrScrgbRequested:" << (Renderer::options.hdrScrgbMode ? 1 : 0)
+        << ",swapchainHdr:" << (hdrSwapchain ? 1 : 0)
+        << ",swapchainHdr10:" << (hdr10Swapchain ? 1 : 0)
+        << ",swapchainScRgb:" << (scRgbSwapchain ? 1 : 0)
+        << ",swapchainFormat:" << surfaceFormat.format
+        << ",swapchainColorSpace:" << surfaceFormat.colorSpace
+        << ",swapchainTransferSrc:" << (transferSrc ? 1 : 0)
+        << ",sdrTonemapMode:" << Renderer::options.tonemappingMode
+        << ",sdrWorkingSpace:BT709"
+        << ",sdrFinalGamutMap:none"
+        << ",sdrHardClamp:1"
+        << ",sdrPsychoWorkingSpace:BT709"
+        << ",hdrTonemapMode:" << Renderer::options.hdrTonemapMode
+        << ",saturation:" << Renderer::options.saturation
+        << ",saturationAdaptive:" << (Renderer::options.saturationAdaptive ? 1 : 0)
+        << ",sdrTransferFunction:" << Renderer::options.sdrTransferFunction
+        << ",paperWhiteNits:" << Renderer::options.hdrPaperWhiteNits
+        << ",peakNits:" << Renderer::options.hdrPeakNits
+        << ",sharpenerMode:" << Renderer::options.sharpenerMode;
+
+    return env->NewStringUTF(out.str().c_str());
+}
+
+/**
+ * Returns DLSS-G latency diagnostics as a flat CSV string.
+ */
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetDlssgLatencyDiag(
+    JNIEnv *env, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable() || !Renderer::is_initialized()) {
+        return env->NewStringUTF("rendererUsable:0");
+    }
+
+    return env->NewStringUTF(FrameGenManager::latencyDiagnostics().c_str());
+}
+
+/**
  * Returns VMA memory statistics as a CSV string.
  */
 extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetVmaStats(
@@ -363,6 +585,71 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Rende
              stats.allocationCount,
              stats.blockCount);
     return env->NewStringUTF(buf);
+}
+
+/**
+ * Returns texture reload diagnostics as a flat CSV string.
+ */
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeGetTextureReloadDiagnostics(
+    JNIEnv *env, jclass) {
+    std::lock_guard<std::recursive_mutex> guard(g_rendererJniMtx);
+    if (!rendererUsable() || !Renderer::is_initialized()) {
+        return env->NewStringUTF("rendererUsable:0");
+    }
+
+    auto* renderer = Renderer::try_instance();
+    if (!renderer) return env->NewStringUTF("rendererUsable:0");
+
+    const uint64_t textureGeneration = Renderer::textureSystem.generation();
+    const bool textureDebugDumped =
+        Renderer::textureSystem.dumpDebug("C:/RadSER/texture_system_full.csv", 0);
+    std::ostringstream out;
+    out << Renderer::textureSystem.statusString()
+        << ",textureDebugDumped:" << (textureDebugDumped ? 1 : 0);
+
+    uint32_t chunkTotal = 0;
+    uint32_t chunksWithBlas = 0;
+    uint32_t chunksMatchingGeneration = 0;
+    uint32_t chunksStaleGeneration = 0;
+    uint32_t chunksWithoutBlas = 0;
+    uint32_t chunkInputQueue = 0;
+    std::map<uint64_t, uint32_t> generationHistogram;
+
+    auto world = renderer->world();
+    auto chunks = world ? world->chunks() : nullptr;
+    if (chunks) {
+        std::unique_lock<std::recursive_mutex> chunkLock(chunks->mutex());
+        auto& chunk1s = chunks->chunks();
+        chunkTotal = static_cast<uint32_t>(chunk1s.size());
+        for (const auto& chunk : chunk1s) {
+            if (!chunk) continue;
+            generationHistogram[chunk->textureGeneration]++;
+            if (!chunk->blas) {
+                chunksWithoutBlas++;
+                continue;
+            }
+            chunksWithBlas++;
+            if (textureGeneration == 0 || chunk->textureGeneration == textureGeneration) {
+                chunksMatchingGeneration++;
+            } else {
+                chunksStaleGeneration++;
+            }
+        }
+        chunkInputQueue = chunks->getInputQueueSize();
+    }
+
+    out << ",chunkTotal:" << chunkTotal
+        << ",chunksWithBlas:" << chunksWithBlas
+        << ",chunksMatchingGeneration:" << chunksMatchingGeneration
+        << ",chunksStaleGeneration:" << chunksStaleGeneration
+        << ",chunksWithoutBlas:" << chunksWithoutBlas
+        << ",chunkInputQueue:" << chunkInputQueue;
+
+    for (const auto& [generation, count] : generationHistogram) {
+        out << ",chunkGen_" << generation << ':' << count;
+    }
+
+    return env->NewStringUTF(out.str().c_str());
 }
 
 /**

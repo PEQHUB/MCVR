@@ -197,7 +197,7 @@ void ToneMappingModule::initBuffers() {
         vk::DeviceLocalBuffer::create(vma, device, sizeof(ToneMappingModuleExposureData),
                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-    exposureReadback_ = vk::HostVisibleBuffer::create(vma, device, sizeof(float),
+    exposureReadback_ = vk::HostVisibleBuffer::create(vma, device, sizeof(ToneMappingModuleExposureData),
                                                        VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
     for (int i = 0; i < size; i++) {
@@ -346,11 +346,20 @@ void ToneMappingModuleContext::render() {
 
     // Read previous frame's computed exposure from staging buffer (GPU→CPU readback)
     if (module->exposureReadback_) {
-        float *mapped = static_cast<float *>(module->exposureReadback_->mappedPtr());
+        auto *mapped = static_cast<ToneMappingModuleExposureData *>(module->exposureReadback_->mappedPtr());
         if (mapped) {
-            float e = *mapped;
+            float e = mapped->exposure;
             if (e > 0.0f && !std::isnan(e) && !std::isinf(e)) {
                 module->computedExposure_ = std::fmin(std::fmax(e, 1e-7f), 100.0f);
+            }
+            if ((module->exposureDiagFrame_++ % 120u) == 0u) {
+                const float avgLogLum = mapped->avgLogLum;
+                const float avgLum = std::exp2(avgLogLum);
+                renderDiag("Tone exposure exposure=%.8g avgLogLum=%.3f avgLum=%.3f min=%.8g max=%.3f comp=%.3f manual=%d",
+                           module->computedExposure_, avgLogLum, avgLum,
+                           Renderer::options.minExposure, Renderer::options.maxExposure,
+                           Renderer::options.exposureCompensation,
+                           Renderer::options.manualExposureEnabled ? 1 : 0);
             }
         }
     }
@@ -399,17 +408,10 @@ void ToneMappingModuleContext::render() {
         descriptorTable->bindSamplerImageForShader(module->emissionSampler_, emissionImage, 0, 3);
     }
 
-    // Bind render-res HDR for histogram metering (DLSS input, before upscaling).
-    // When DLSS-RR is active, its neural network may attenuate extreme HDR values,
-    // weakening the iris cap. Metering from the pre-DLSS image gives accurate brightness.
-    auto &renderResImages = Renderer::renderResHdrImages;
-    std::shared_ptr<vk::DeviceLocalImage> renderResHdrImage;
-    if (frameIdx < renderResImages.size() && renderResImages[frameIdx]) {
-        renderResHdrImage = renderResImages[frameIdx];
-    } else {
-        renderResHdrImage = hdrImage;  // fallback: DLSS off → hdrImage IS render res
-    }
-    descriptorTable->bindSamplerImageForShader(module->renderResHdrSampler_, renderResHdrImage, 0, 4);
+    // Meter the same HDR image that tone_mapping.frag displays. DLSS-D/RR is temporal
+    // and can change reconstructed luminance, so exposure must adapt to the displayed signal.
+    std::shared_ptr<vk::DeviceLocalImage> meteringHdrImage = hdrImage;
+    descriptorTable->bindSamplerImageForShader(module->renderResHdrSampler_, meteringHdrImage, 0, 4);
 
     std::vector<vk::CommandBuffer::ImageMemoryBarrier> imageBarriers = {
         {
@@ -458,18 +460,18 @@ void ToneMappingModuleContext::render() {
         });
     }
 
-    // Add barrier for render-res HDR image (DLSS/NRD wrote it, histogram reads it)
-    if (renderResHdrImage && renderResHdrImage != hdrImage) {
+    // Add barrier for a distinct metering image if future modes bind one.
+    if (meteringHdrImage && meteringHdrImage != hdrImage) {
         imageBarriers.push_back({
             .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
             .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
             .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-            .oldLayout = renderResHdrImage->imageLayout(),
+            .oldLayout = meteringHdrImage->imageLayout(),
             .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .srcQueueFamilyIndex = mainQueueIndex,
             .dstQueueFamilyIndex = mainQueueIndex,
-            .image = renderResHdrImage,
+            .image = meteringHdrImage,
             .subresourceRange = vk::wholeColorSubresourceRange,
         });
     }
@@ -487,8 +489,8 @@ void ToneMappingModuleContext::render() {
         imageBarriers);
     hdrImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (emissionImage) emissionImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (renderResHdrImage && renderResHdrImage != hdrImage)
-        renderResHdrImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (meteringHdrImage && meteringHdrImage != hdrImage)
+        meteringHdrImage->imageLayout() = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 #ifdef USE_AMD
     ldrImage->imageLayout() = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 #else
@@ -530,8 +532,8 @@ void ToneMappingModuleContext::render() {
     bool scrgbOutputEnabled = Renderer::options.hdrEnabled && framework->swapchain()->isScRGB();
 
     ToneMappingModulePushConstant pc{};
-    pc.log2Min = -12.0f;
-    pc.log2Max = 18.0f;
+    pc.log2Min = -24.0f;
+    pc.log2Max = 30.0f;
     pc.epsilon = 1e-6f;
     pc.lowPercent = 0.10f;
     pc.highPercent = 0.90f;
@@ -579,12 +581,9 @@ void ToneMappingModuleContext::render() {
     pc.tonemapParam5 = Renderer::options.tonemapParams[5];
     pc.tonemapParam6 = Renderer::options.tonemapParams[6];
     pc.tonemapParam7 = Renderer::options.tonemapParams[7];
-    // RT pre-exposure — push constant layout parity with hist/exposure shaders.
-    // Currently unused by shaders (histogram meters raw pre-exposed values; auto-exposure
-    // cancels preExposure naturally). Kept for potential future diagnostic use.
-    float rtPreExposure = (Renderer::options.denoiserMode == 1) ? 0.1f : 1.0f;
-    if (Renderer::options.offlineState == 2) rtPreExposure = 1.0f;
-    pc.preExposure = rtPreExposure;
+    // RT/DLSS-D is scene-referred; keep push constant layout parity with hist/exposure
+    // shaders while preserving a neutral scale for diagnostics/future shader use.
+    pc.preExposure = 1.0f;
     pc.highlightWeight = Renderer::options.highlightWeight;
 
     vkCmdPushConstants(worldCommandBuffer->vkCommandBuffer(), descriptorTable->vkPipelineLayout(),
@@ -594,10 +593,9 @@ void ToneMappingModuleContext::render() {
     worldCommandBuffer->bindDescriptorTable(descriptorTable, VK_PIPELINE_BIND_POINT_COMPUTE)
         ->bindComputePipeline(module->histPipeline_);
 
-    // Dispatch histogram at render-res dimensions (binding 4 = render-res HDR for metering).
-    // hist.comp uses textureSize(uHdrRenderRes) for bounds, so dispatch must cover the render-res image.
-    uint32_t histW = renderResHdrImage->width();
-    uint32_t histH = renderResHdrImage->height();
+    // Dispatch histogram over the displayed HDR source bound at binding 4.
+    uint32_t histW = meteringHdrImage->width();
+    uint32_t histH = meteringHdrImage->height();
     uint32_t groupX = (histW + 16 - 1) / 16;
     uint32_t groupY = (histH + 16 - 1) / 16;
     vkCmdDispatch(worldCommandBuffer->vkCommandBuffer(), groupX, groupY, 1);
@@ -632,12 +630,11 @@ void ToneMappingModuleContext::render() {
         }},
         {});
 
-    // Copy visual exposure from ExposureBuffer to staging buffer for CPU readback next frame.
-    // This becomes the pre-exposure for DLSS-RR (must match actual visual exposure for stable denoising).
+    // Copy the full exposure block for CPU diagnostics/readback next frame.
     VkBufferCopy exposureCopy{
-        .srcOffset = offsetof(ToneMappingModuleExposureData, exposure),
+        .srcOffset = 0,
         .dstOffset = 0,
-        .size = sizeof(float)};
+        .size = sizeof(ToneMappingModuleExposureData)};
     vkCmdCopyBuffer(worldCommandBuffer->vkCommandBuffer(),
                     module->exposureData_->vkBuffer(),
                     module->exposureReadback_->vkBuffer(),

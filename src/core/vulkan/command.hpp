@@ -1,7 +1,9 @@
 #pragma once
 
 #include "core/all_extern.hpp"
+#include "core/vulkan/debug_utils.hpp"
 
+#include <cstdlib>
 #include <utility>
 #include <vector>
 
@@ -116,18 +118,15 @@ class CommandBuffer : public SharedObject<CommandBuffer> {
     std::shared_ptr<CommandBuffer> end();
 
     // Debug label helpers for Nsight profiling
+    static bool debugLabelsEnabled() {
+        return DebugUtils::enabled();
+    }
+
     void beginLabel(const char* name, float r = 0.2f, float g = 0.8f, float b = 0.2f) {
-        if (vkCmdBeginDebugUtilsLabelEXT) {
-            VkDebugUtilsLabelEXT label{VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};
-            label.pLabelName = name;
-            label.color[0] = r; label.color[1] = g; label.color[2] = b; label.color[3] = 1.0f;
-            vkCmdBeginDebugUtilsLabelEXT(commandBuffer_, &label);
-        }
+        DebugUtils::beginCommandLabel(commandBuffer_, name, r, g, b);
     }
     void endLabel() {
-        if (vkCmdEndDebugUtilsLabelEXT) {
-            vkCmdEndDebugUtilsLabelEXT(commandBuffer_);
-        }
+        DebugUtils::endCommandLabel(commandBuffer_);
     }
 
     void submitMainQueueIndividual(std::shared_ptr<Device> device);

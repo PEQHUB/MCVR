@@ -2,9 +2,9 @@
 #define NUM_BINS 256
 const vec3 LUMA = vec3(0.2627, 0.6780, 0.0593);
 
-layout(set = 0, binding = 0) uniform sampler2D uHdr;           // DLSS output (display res) — used by tone_mapping.frag, not here
+layout(set = 0, binding = 0) uniform sampler2D uHdr;           // Displayed HDR source, used by tone_mapping.frag
 layout(set = 0, binding = 3) uniform sampler2D uEmission;      // RT emission (layout compatibility)
-layout(set = 0, binding = 4) uniform sampler2D uHdrRenderRes;  // Pre-DLSS render-res HDR (metering source)
+layout(set = 0, binding = 4) uniform sampler2D uHdrRenderRes;  // Displayed HDR source, used for metering
 
 layout(std430, set = 0, binding = 1) buffer HistogramBuffer {
     uint bins[NUM_BINS];
@@ -85,9 +85,8 @@ void main() {
     if (inside) {
         vec3 hdr = texelFetch(uHdrRenderRes, p, 0).rgb;
 
-        // Histogram meters raw pre-exposed HDR values. The auto-exposure formula
-        // (middleGrey / avgLum) naturally cancels the pre-exposure when tone_mapping.frag
-        // applies exposure to the same pre-exposed image. No undo needed.
+        // Histogram meters the same linear HDR source that tone_mapping.frag displays.
+        // This keeps DLSS-D/RR reconstruction and exposure adaptation in one luminance space.
         float lum = dot(hdr, LUMA);
         float logLum = log2(max(lum, pc.epsilon));
 

@@ -29,7 +29,8 @@ void GpuProfiler::init(std::shared_ptr<vk::Device> device, std::shared_ptr<vk::P
             enabled_.store(false);
             return;
         }
-        frame.moduleNames.reserve(maxModules);
+        frame.events.reserve(maxModules);
+        frame.moduleStack.reserve(maxModules);
     }
 
     std::cout << "[GpuProfiler] initialized: " << frameCount << " frames, "
@@ -52,7 +53,8 @@ void GpuProfiler::beginFrame(VkCommandBuffer cmd, uint32_t frameIndex) {
 
     vkCmdResetQueryPool(cmd, frame.queryPool, 0, MAX_TIMESTAMPS);
     frame.queryCount = 0;
-    frame.moduleNames.clear();
+    frame.events.clear();
+    frame.moduleStack.clear();
     activeFrame_.store(frameIndex);
 
     // Query 0: frame start
@@ -67,8 +69,10 @@ void GpuProfiler::beginModule(VkCommandBuffer cmd, const std::string& moduleName
     auto& frame = frames_[fi];
     if (frame.queryCount >= MAX_TIMESTAMPS - 1) return;
 
-    frame.moduleNames.push_back(moduleName);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, frame.queryPool, frame.queryCount);
+    const uint32_t beginQuery = frame.queryCount;
+    frame.events.push_back({moduleName, beginQuery, UINT32_MAX});
+    frame.moduleStack.push_back(static_cast<uint32_t>(frame.events.size() - 1));
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, frame.queryPool, beginQuery);
     frame.queryCount++;
 }
 
@@ -77,8 +81,11 @@ void GpuProfiler::endModule(VkCommandBuffer cmd) {
     uint32_t fi = activeFrame_.load();
     if (fi >= frames_.size()) return;
     auto& frame = frames_[fi];
-    if (frame.queryCount >= MAX_TIMESTAMPS) return;
+    if (frame.queryCount >= MAX_TIMESTAMPS || frame.moduleStack.empty()) return;
 
+    const uint32_t eventIndex = frame.moduleStack.back();
+    frame.moduleStack.pop_back();
+    frame.events[eventIndex].endQuery = frame.queryCount;
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, frame.queryPool, frame.queryCount);
     frame.queryCount++;
 }
@@ -118,17 +125,16 @@ void GpuProfiler::readResults(uint32_t frameIndex) {
         timestamps[i] = data[i].timestamp;
     }
 
-    // Layout: [frame_start, mod0_begin, mod0_end, mod1_begin, mod1_end, ..., frame_end]
+    // Layout: [frame_start, module begin/end timestamps in record order, frame_end]
     float nsToMs = timestampPeriodNs_ / 1e6f;
     std::vector<ModuleTiming> timings;
 
-    uint32_t qi = 1; // skip frame_start
-    for (size_t m = 0; m < frame.moduleNames.size() && qi + 1 < frame.queryCount; m++) {
-        uint64_t begin = timestamps[qi];
-        uint64_t end = timestamps[qi + 1];
+    for (const auto& event : frame.events) {
+        if (event.beginQuery >= frame.queryCount || event.endQuery >= frame.queryCount) continue;
+        uint64_t begin = timestamps[event.beginQuery];
+        uint64_t end = timestamps[event.endQuery];
         float ms = (float)(end - begin) * nsToMs;
-        timings.push_back({frame.moduleNames[m], ms});
-        qi += 2;
+        timings.push_back({event.name, ms});
     }
 
     float totalMs = (float)(timestamps[frame.queryCount - 1] - timestamps[0]) * nsToMs;

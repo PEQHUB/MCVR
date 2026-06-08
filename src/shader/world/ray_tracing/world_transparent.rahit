@@ -61,11 +61,8 @@ void main() {
     uint textureID = v0.textureID;
 
     bool isBlockGeometry = (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
-
-    // Greedy-merged quads: tile UVs for blocks
-    if (isBlockGeometry && (v0.flags & PBR_FLAG_GREEDY_MERGED) != 0u) {
-        uv = fract(uv);
-    }
+    bool isFluidGeometry = (v0.flags & PBR_FLAG_FLUID_GEOMETRY) != 0u;
+    bool isWaterGeometry = (v0.flags & PBR_FLAG_WATER_GEOMETRY) != 0u;
 
     bool useTexture = (v0.flags & PBR_FLAG_USE_TEXTURE) != 0u;
     float alpha;
@@ -74,10 +71,10 @@ void main() {
         float lod = 0;
 
         if (isBlockGeometry) {
-            // Block geometry: texture array sampling via SpriteRegistry
-            uint spriteId = textureID;
-            alpha = fetchBlockAlbedoLod(spriteId, uv, ubo.animTick, lod).a;
-            flags = ivec4(0); // TODO: flag arrays in Phase 4
+            // Block geometry: material-id sampling via MaterialRegistry
+            uint materialId = textureID;
+            alpha = fetchBlockAlbedoLod(materialId, uv, ubo.animTick, lod).a;
+            flags = fetchBlockFlagLod(materialId, uv, lod);
         } else {
             // Entity geometry: legacy atlas sampling via textures[]
             alpha = textureLod(textures[nonuniformEXT(textureID)], uv, lod).a;
@@ -96,7 +93,7 @@ void main() {
     }
 
     // if insideBoat, then ignore liquid
-    if (prGetInsideBoat(mainRay) && (flags.r & 0x1) > 0) {
+    if (prGetInsideBoat(mainRay) && isWaterGeometry) {
         ignoreIntersectionEXT;
         return;
     }
@@ -110,6 +107,9 @@ void main() {
         colorLayerAlpha = 1.0;
     }
     alpha *= colorLayerAlpha;
+    if (isWaterGeometry) {
+        alpha = 1.0;
+    }
 
     if (alpha < 0.05) {
         // cut-out

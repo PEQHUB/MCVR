@@ -7,6 +7,7 @@
 
 #include "core/render/world.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -29,28 +30,12 @@ struct ChunkBuildTask {
     int *vertexFormats;
     int *vertexCounts;
     vk::VertexFormat::PBRTriangle **vertices;
-    bool isImportant;
+ bool isImportant;
+ uint64_t textureGeneration = 0;
 };
-
-/// Block-state-based chunk build task (Phase 2: C++ meshing).
-/// Sends ~12KB of block state data instead of ~200-500KB of pre-meshed vertices.
-struct ChunkBuildTaskV2 {
-    int x, y, z;
-    int64_t id;
-    uint32_t blockStates[4096];    // palette-decoded global state IDs
-    uint16_t biomes[64];           // 4x4x4 biome grid
-    uint32_t neighborStates[6][256]; // neighbor block states per face
-    uint32_t blockAtlasTextureId;  // GL texture ID for block atlas
-    bool isImportant;
-    // Per-section biome colors (packed 0x00RRGGBB) for shader-side tinting
-    uint32_t biomeGrassColor;
-    uint32_t biomeFoliageColor;
-    uint32_t biomeWaterColor;
-};
-
 struct ChunkBuildData : public SharedObject<ChunkBuildData> {
-    int64_t id;
     int x, y, z;
+    int64_t id;
     int64_t version;
     uint32_t allVertexCount;
     uint32_t allIndexCount;
@@ -60,54 +45,18 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
     std::vector<std::vector<uint32_t>> indices;
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> vertexBuffers;
     std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> indexBuffers;
-    std::vector<std::shared_ptr<vk::DeviceLocalBuffer>> ommIndexBuffers; // OMM per-triangle index buffers
-    // Phase 2 OMM: micromap data per geometry
-    struct OMMGeometryData {
-        std::shared_ptr<vk::DeviceLocalBuffer> arrayBuffer;  // raw OMM bit data
-        std::shared_ptr<vk::DeviceLocalBuffer> descBuffer;   // VkMicromapTriangleEXT array
-        std::vector<VkMicromapUsageEXT> descHistogram;       // for micromap build
-        std::vector<VkMicromapUsageEXT> indexHistogram;       // for BLAS attachment
-        VkMicromapEXT micromap = VK_NULL_HANDLE;
-        std::shared_ptr<vk::Device> device;                  // for destroying micromap handle
-        std::shared_ptr<vk::DeviceLocalBuffer> micromapBuffer;
-        std::shared_ptr<vk::DeviceLocalBuffer> micromapScratchBuffer;
-        bool hasMicromap = false;
-    };
-    std::vector<OMMGeometryData> ommGeometryData;
-    uint8_t vertexFormat = 0; // 0=full (96-byte PBRTriangle), 1=compact far, 2=lossless near
-
-    // CPU-side OMM results computed in prepareCPU(), consumed by uploadGPU()
-    struct OMMCpuResult {
-        std::vector<int32_t> ommIndices;           // per-triangle opacity classification
-        std::vector<uint8_t> mergedArrayData;       // Phase 2: baked OMM bit data
-        std::vector<VkMicromapTriangleEXT> mergedDescs; // Phase 2: per-block descriptors
-        std::vector<VkMicromapUsageEXT> descHistogram;
-        std::vector<VkMicromapUsageEXT> indexHistogram;
-        bool bakingDone = false;
-        bool isTransparentOMM = false;              // geometry had OMM processing
-        bool isOpaqueOMM = false;                   // WORLD_SOLID all-opaque shortcut
-    };
-    std::vector<OMMCpuResult> ommCpuResults;
 
     // Per-section biome colors for shader-side tinting (packed 0x00RRGGBB)
     uint32_t biomeGrassColor = 0x91BD59;
     uint32_t biomeFoliageColor = 0x77AB2F;
     uint32_t biomeWaterColor = 0x3F76E4;
 
+    uint64_t textureGeneration = 0;
+
     std::shared_ptr<vk::BLAS> blas;
     std::shared_ptr<vk::BLASBuilder> blasBuilder;
-    std::shared_ptr<vk::BLAS> preCompactionBlas;  // kept alive until render thread GCs via Chunk1::enqueue()
-
-    // DDA displacement: separate AABB BLAS (can't mix with triangle BLAS due to shadow stride=0).
-    // Face data accessible via BDA in the intersection shader.
-    std::vector<VkAabbPositionsKHR> displacedAABBs;
-    std::vector<vk::Data::DisplacedFaceData> displacedFaceData;
-    uint32_t displacedFaceCount = 0; // Cached count, survives releaseHostGeometry()
-    std::shared_ptr<vk::DeviceLocalBuffer> displacedAABBBuffer;
-    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer;
-    std::shared_ptr<vk::BLAS> displacedBlas;
-    std::shared_ptr<vk::BLASBuilder> displacedBlasBuilder;
-
+    std::shared_ptr<vk::BLAS> preCompactionBlas; // kept alive until render thread GCs via Chunk1::enqueue()
+    bool uploadValid = true;
     ChunkBuildData(int64_t id,
                    int x,
                    int y,
@@ -121,12 +70,12 @@ struct ChunkBuildData : public SharedObject<ChunkBuildData> {
                    std::vector<std::vector<uint32_t>> &&indices);
     ~ChunkBuildData();
 
-    void build(bool allowMicromapBake = true, bool skipOMM = false, glm::vec3 cameraPos = glm::vec3(0));
+    void build();
 
     // Split build into two phases for parallelization:
-    // prepareCPU() — greedy meshing, OMM classification, tessellation (no Vulkan calls, thread-safe)
-    // uploadGPU()  — VMA allocation, staging uploads, BLAS builder setup (render thread only)
-    void prepareCPU(bool allowMicromapBake, bool skipOMM, glm::vec3 cameraPos);
+    // prepareCPU() counts full triangle geometry (no Vulkan calls, thread-safe).
+    // uploadGPU() allocates/stages full PBRTriangle buffers and builds BLAS on the render thread.
+    void prepareCPU();
     void uploadGPU();
 
     // Release staging buffers after GPU copy completes (timeline semaphore confirmed).
@@ -162,6 +111,18 @@ struct ChunkBuildDataBatch : public SharedObject<ChunkBuildDataBatch> {
                         glm::vec3 cameraPos);
 };
 
+struct ChunkBuildSchedulerStats {
+    uint32_t inputQueue = 0;
+    uint32_t completedQueue = 0;
+    uint32_t inFlight = 0;
+    uint64_t enqueued = 0;
+    uint64_t submitted = 0;
+    uint64_t completed = 0;
+    uint64_t integrated = 0;
+    uint64_t lastSubmittedTimeline = 0;
+    uint64_t currentTimeline = 0;
+};
+
 class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
   public:
     ChunkBuildScheduler(std::vector<std::shared_ptr<Chunk1>> &chunks,
@@ -182,8 +143,8 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
     uint32_t chunkBuildingBatchSize();
 
     // Pause BLAS thread during swapchain recreate to prevent submits in the critical window.
-    // Blocks until BLAS thread acknowledges pause (no pending submits).
-    void pause();
+    // Returns false if the thread does not acknowledge before the timeout.
+    bool pause(std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
     void resume();
 
     // Last BLAS timeline value submitted to secondary queue (for cross-queue GC sync)
@@ -194,6 +155,9 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
         std::lock_guard<std::mutex> lock(inputMtx_);
         return static_cast<uint32_t>(inputQueue_.size());
     }
+
+    // Diagnostic snapshot — non-blocking, no waits
+    ChunkBuildSchedulerStats stats();
 
   private:
     std::vector<std::shared_ptr<Chunk1>> &chunks_;
@@ -207,6 +171,7 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
     // Hands off fully-built, compacted BLASes to render thread via completedQueue_.
     std::thread blasThread_;
     std::atomic<bool> stop_{false};
+    std::atomic<bool> blasThreadExited_{false};
     std::atomic<bool> paused_{false};
     std::atomic<bool> pausedAck_{false};
     std::atomic<float> cameraPosX_{0}, cameraPosY_{0}, cameraPosZ_{0};
@@ -234,12 +199,19 @@ class ChunkBuildScheduler : public SharedObject<ChunkBuildScheduler> {
         bool isCompaction = false; // true = compaction phase, false = build phase
     };
     std::deque<InFlightBatch> inFlight_;
+    std::atomic<uint32_t> inFlightCount_{0};
 
     // BLAS timeline counter — only incremented by BLAS thread (sole owner, no atomic needed)
     uint64_t blasTimelineCounter_{0};
 
     // Last submitted timeline value — atomic for cross-thread read by render thread GC sync
     std::atomic<uint64_t> lastSubmittedTimeline_{0};
+
+    // Diagnostic counters (atomic for cross-thread reads)
+    std::atomic<uint64_t> totalEnqueued_{0};
+    std::atomic<uint64_t> totalSubmitted_{0};
+    std::atomic<uint64_t> totalCompleted_{0};
+    std::atomic<uint64_t> totalIntegrated_{0};
 
     // BLAS thread cmd pool — owned exclusively, no mutex
     std::queue<std::shared_ptr<vk::CommandBuffer>> cmdPool_;
@@ -258,11 +230,6 @@ struct ChunkRenderData : public SharedObject<ChunkRenderData> {
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
 };
 
-struct ChunkLightEntry {
-    float worldX, worldY, worldZ;
-    int lightTypeId;
-};
-
 struct Chunk1 : public SharedObject<Chunk1> {
     constexpr static float T_HALF = 200; // ms
     constexpr static float T_WEIGHT = 1.0;
@@ -278,7 +245,7 @@ struct Chunk1 : public SharedObject<Chunk1> {
     std::shared_ptr<vk::BLAS> blas;
     int64_t blasVersion = -1;
     uint64_t blasGeneration = 0;  // incremented on each BLAS swap, for TLAS UPDATE change detection
-    uint8_t vertexFormat = 0;     // 0=full (96-byte PBRTriangle), 1=compact far, 2=lossless near
+    bool secondaryQueueOwnershipPending = false;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> vertexBuffers;
     std::shared_ptr<std::vector<std::shared_ptr<vk::DeviceLocalBuffer>>> indexBuffers;
 
@@ -287,22 +254,16 @@ struct Chunk1 : public SharedObject<Chunk1> {
     uint32_t geometryCount;
     std::shared_ptr<std::vector<World::GeometryTypes>> geometryTypes;
 
-    std::shared_ptr<vk::DeviceLocalBuffer> displacedFaceDataBuffer; // DDA face data (BDA access)
-    std::shared_ptr<vk::BLAS> displacedBlas; // Separate AABB BLAS for DDA displacement
-    uint32_t displacedFaceCount = 0;
-
-    std::vector<ChunkLightEntry> lightSources;
-
     // Per-section biome colors for shader-side tinting (packed 0x00RRGGBB)
     uint32_t biomeGrassColor = 0x91BD59;    // default plains green
     uint32_t biomeFoliageColor = 0x77AB2F;  // default foliage
     uint32_t biomeWaterColor = 0x3F76E4;    // default water blue
+    uint64_t textureGeneration = 0;
 
     float buildFactor(std::chrono::steady_clock::time_point currentTime, glm::vec3 cameraPos);
-
-    void enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData);
-    void invalidate();
-    std::shared_ptr<ChunkRenderData> tryGetValid();
+ bool enqueue(std::shared_ptr<ChunkBuildData> chunkBuildData);
+ void invalidate();
+ std::shared_ptr<ChunkRenderData> tryGetValid();
 };
 
 struct ChunkPackedData {
@@ -316,23 +277,14 @@ class Chunks : public SharedObject<Chunks> {
     Chunks(std::shared_ptr<Framework> framework);
 
     void reset(uint32_t numChunks);
-    void resetScheduler();
+    void resetScheduler(bool invalidateExisting = false);
     void resetFrame();
     void invalidateChunk(int id);
     void queueChunkBuild(ChunkBuildTask task);
-    void queueBlockStateBuild(ChunkBuildTaskV2 task);
-
-    /// Submit a pre-built ChunkBuildData for an extended chunk (C++-only, from disk).
-    /// Called from ExtendedChunkManager's worker thread.
-    void submitExtendedBuild(uint32_t extId, std::shared_ptr<ChunkBuildData> cbd);
-
-    /// Grow chunks_ array to accommodate extended chunks. Thread-safe.
-    void ensureCapacity(uint32_t totalSlots);
 
     bool isChunkReady(int64_t id);
     uint32_t getInputQueueSize();
 
-    void setChunkLights(int64_t id, const std::vector<ChunkLightEntry> &lights);
     void close();
 
     std::recursive_mutex &mutex();

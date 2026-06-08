@@ -5,16 +5,27 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
+#ifndef RARSER_SHADER_DISPLACEMENT
+#define RARSER_SHADER_DISPLACEMENT 1
+#endif
+
 #include "../util/labpbr.glsl"
 #include "../util/random.glsl"
+#include "../util/ray_cone.glsl"
 #include "../util/ray_payloads.glsl"
 #include "../util/util.glsl"
 #include "common/shared.hpp"
 #include "../util/colorspace.glsl"
+#include "../util/texture_rules.glsl"
+#include "../util/fft_water.glsl"
+#include "../util/shader_pack_visual_settings.glsl"
 
 layout(set = 0, binding = 0) uniform sampler2D textures[];
 
 #include "../util/sprite_fetch.glsl"
+#if RARSER_SHADER_DISPLACEMENT
+#include "../util/displacement.glsl"
+#endif
 
 layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
 
@@ -38,10 +49,13 @@ layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
 };
 
 #include "../util/vertex_fetch.glsl"
-#include "../util/material_properties.glsl"
 
 layout(set = 2, binding = 0) uniform Uniform {
     WorldUBO ubo;
+};
+
+layout(set = 2, binding = 2) uniform SkyUniform {
+    SkyUBO skyUBO;
 };
 
 // VertexBuffer and IndexBuffer declared in vertex_fetch.glsl
@@ -49,31 +63,40 @@ layout(set = 2, binding = 0) uniform Uniform {
 layout(push_constant) uniform PushConstant {
     int numRayBounces;
     int flags;
-    int areaLightCount;
-    float shadowSoftness;
-    int risCandidates;
-    int temporalMClamp;
-    int wClamp;
+    int reservedLighting0;
+    float reservedLighting1;
+    int reservedLighting2;
+    int reservedLighting3;
+    int reservedLighting4;
     float preExposure;
-    float pomHeightScale;
-    int pomSteps;
-    int pomRefinement;
-    float pomFadeDistance;
-    float colorExpansion;
+    float displacementDepthScale;
+    int displacementPrimarySteps;
+    int displacementRefinementSteps;
+    float displacementFadeDistanceBlocks;
     uint blueNoiseFrame;
-    uint64_t _sharcBDA0, _sharcBDA1, _sharcBDA2;
-    float _sharcPad0, _sharcPad1, _sharcPad2, _sharcPad3;
-    uint _sharcPad4;
-    float _sharcPad5;
-    uint _sharcPad6;
-    float _sharcPad7;
-    int _sharcPad8, _sharcPad9;
+    uint rtDebugFlags;
+    uint handInstanceCount;
+    uint reservedPc0;
+    uint64_t sharcHashEntries;
+    uint64_t sharcAccumulation;
+    uint64_t sharcResolved;
+    float sharcCameraX;
+    float sharcCameraY;
+    float sharcCameraZ;
+    float sharcSceneScale;
+    uint sharcCapacity;
+    float sharcRadianceScale;
+    uint sharcFrameIndex;
+    float sharcRoughnessThreshold;
+    int sharcUpdateBlockSize;
+    int sharcUpdateBounces;
+    int sharcQueryMode;
+    int sharcQueryReserved;
     int offlineFlags;
     int accumFrameCount;
     float aperture;
     float focalDistance;
-    // Material SSBO BDA (offset 128)
-    uint64_t materialClassAddr;
+    uint64_t reservedAddr;
 } pc;
 #define SIMPLIFIED_INDIRECT ((pc.flags & 1) != 0)
 #define SIMPLIFY_THIS_RAY (SIMPLIFIED_INDIRECT && shadowRay.bounceIndex > 1)
@@ -81,6 +104,114 @@ layout(push_constant) uniform PushConstant {
 
 layout(location = 1) rayPayloadInEXT ShadowRay shadowRay;
 hitAttributeEXT vec2 attribs;
+
+uint thinPlantBlockTypeFromPacked(uint packedBlockType) {
+    return (packedBlockType & PBR_PACKED_SHADER_BLOCK_ID_MASK) >> PBR_PACKED_SHADER_BLOCK_ID_SHIFT;
+}
+
+uint thinPlantHashInt(int v, uint salt) {
+    uint x = uint(v) ^ salt;
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    return x ^ (x >> 16u);
+}
+
+ivec3 thinPlantCellFromWorldPos(vec3 cameraRelativeWorldPos) {
+    return ivec3(floor(cameraRelativeWorldPos + vec3(ubo.cameraPos.xyz) + vec3(0.0001)));
+}
+
+uint thinPlantColumnHash(ivec3 cell) {
+    uint h = thinPlantHashInt(cell.x, 0x9e3779b9u) ^ thinPlantHashInt(cell.z, 0x85ebca6bu);
+    return h == 0u ? 1u : h;
+}
+
+uint thinPlantHitKey(ivec3 cell, uint blockType) {
+    uint h = thinPlantColumnHash(cell) ^ thinPlantHashInt(cell.y, 0xc2b2ae35u) ^ (blockType * 0x27d4eb2du);
+    return h == 0u ? 1u : h;
+}
+
+vec3 fluidShadowTransmission(UnpackedVertex v0, UnpackedVertex v1, UnpackedVertex v2) {
+    vec3 wp0 = vec3(gl_ObjectToWorldEXT * vec4(v0.pos, 1.0));
+    vec3 wp1 = vec3(gl_ObjectToWorldEXT * vec4(v1.pos, 1.0));
+    vec3 wp2 = vec3(gl_ObjectToWorldEXT * vec4(v2.pos, 1.0));
+
+    vec3 dPduWorld;
+    vec3 dPdvWorld;
+    computedposduDv(wp0, wp1, wp2, v0.textureUV, v1.textureUV, v2.textureUV, dPduWorld, dPdvWorld);
+
+    vec3 worldNormal = normalize(cross(dPduWorld, dPdvWorld));
+    if (dot(worldNormal, worldNormal) <= 1e-6 || abs(worldNormal.y) <= 0.75) {
+        return vec3(1.0);
+    }
+
+    vec3 hitWorldPos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
+    vec3 absWorldPos = hitWorldPos + vec3(ubo.cameraPos.xyz);
+    vec3 waterCoordNormal = worldNormal.y >= 0.0 ? worldNormal : -worldNormal;
+    vec2 waterCoord = fftWaterSurfaceCoord(absWorldPos, dPduWorld, dPdvWorld, waterCoordNormal);
+    float waterDepth = gl_HitTEXT * max(dot(normalize(gl_WorldRayDirectionEXT), waterCoordNormal), 0.01);
+
+    vec3 waterTintBt2020 = CS_BT709_TO_BT2020 * clamp(skyUBO.envWaterTintFog.rgb, vec3(0.02), vec3(1.0));
+    vec3 absorption = exp(-(vec3(1.0) - waterTintBt2020) * waterDepth * 0.22);
+    float caustic = (shaderPackVisualSettings.waterSurfaceMode == 1 && shaderPackVisualSettings.waterCausticsEnabled != 0)
+        ? sampleFftWaterCaustic(waterCoord, ubo.gameTime, gl_WorldRayDirectionEXT, waterDepth)
+        : 1.0;
+    return absorption * caustic;
+}
+
+vec3 thinPlantShadowTransmittance(vec3 tint) {
+    vec3 plantTint = clamp(tint, vec3(0.0), vec3(1.0));
+    float fill = 0.18;
+    float shadowStrength = 1.0;
+    vec3 coloredTransmission = mix(vec3(1.0), plantTint, clamp(fill * 0.55, 0.0, 0.75));
+    float transmission = clamp(1.0 - shadowStrength * 0.28, 0.28, 0.95);
+    return clamp(coloredTransmission * transmission, vec3(0.25), vec3(0.95));
+}
+
+#if RARSER_SHADER_DISPLACEMENT
+bool shadowAuthoredDisplacementBlocksOpaqueHit(UnpackedVertex v0,
+                                               UnpackedVertex v1,
+                                               UnpackedVertex v2,
+                                               vec2 textureUV,
+                                               uint textureID,
+                                               bool useTexture,
+                                               bool isBlockGeometry,
+                                               bool isFluidGeometry) {
+    if (!useTexture || !isBlockGeometry || isFluidGeometry) {
+        return true;
+    }
+
+    vec3 wp0 = vec3(gl_ObjectToWorldEXT * vec4(v0.pos, 1.0));
+    vec3 wp1 = vec3(gl_ObjectToWorldEXT * vec4(v1.pos, 1.0));
+    vec3 wp2 = vec3(gl_ObjectToWorldEXT * vec4(v2.pos, 1.0));
+    vec3 rayDir = gl_WorldRayDirectionEXT;
+    vec3 viewDir = -rayDir;
+    DisplacementSource displacementSource;
+    vec3 dPdu;
+    vec3 dPdv;
+    vec3 baseNormal;
+    vec2 displacementChartOffset = vec2(0.0);
+    if (!displacementPrepareAuthoredBlockSource(v0.flags, v0.emissiveBlockType, textureID,
+                                                wp0, wp1, wp2,
+                                                v0.textureUV, v1.textureUV, v2.textureUV,
+                                                v0.postBase, ubo.animTick, gl_HitTEXT,
+                                                pc.displacementDepthScale,
+                                                pc.displacementFadeDistanceBlocks, viewDir,
+                                                true, false,
+                                                displacementSource, dPdu, dPdv, baseNormal,
+                                                displacementChartOffset)) {
+        return true;
+    }
+
+    vec3 planeWorldPos = gl_WorldRayOriginEXT + rayDir * gl_HitTEXT;
+    DisplacementHit displacementHit;
+    return displacementTracePrimary(displacementSource, textureUV + displacementChartOffset, planeWorldPos, rayDir,
+                                    viewDir, dPdu, dPdv, baseNormal,
+                                    clamp(pc.displacementPrimarySteps, 1, 512),
+                                    pc.displacementRefinementSteps, displacementHit);
+}
+#endif
 
 void main() {
     uint instanceID = gl_InstanceCustomIndexEXT;
@@ -94,7 +225,10 @@ void main() {
     vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
     vec2 uv = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
     uint textureID = v0.textureID;
+    uint materialRuleTextureID = textureID;
     bool isBlockGeometry = (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
+    bool isFluidGeometry = (v0.flags & PBR_FLAG_FLUID_GEOMETRY) != 0u;
+    bool isWaterGeometry = (v0.flags & PBR_FLAG_WATER_GEOMETRY) != 0u;
 
     bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
     vec4 colorLayer;
@@ -110,25 +244,29 @@ void main() {
     ivec4 flags;
     vec4 specular = vec4(0.0);
     vec4 normalVal = vec4(0.0);
+    bool foldBlockOverlay = (v0.flags & PBR_FLAG_OVERLAY_ALPHA_MASK) != 0u;
+    bool blockOverlayComposited = false;
 
     if (useTexture) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
 
         if (isBlockGeometry) {
-            // Block geometry: texture array sampling via SpriteRegistry
-            uint spriteId = textureID;
+            // Block geometry: material-id sampling via MaterialRegistry
+            uint materialId = textureID;
 
-            if ((v0.flags & PBR_FLAG_GREEDY_MERGED) != 0u) {
-                textureUV = fract(textureUV);
-            }
-
-            albedo = fetchBlockAlbedoLod(spriteId, textureUV, ubo.animTick, 0.0);
+            albedo = fetchBlockAlbedoLod(materialId, textureUV, ubo.animTick, 0.0);
 
             if (!SIMPLIFY_THIS_RAY) {
-                specular = fetchBlockSpecularLod(spriteId, textureUV, 0.0);
+                specular = fetchBlockSpecularLod(materialId, textureUV, 0.0);
             }
 
-            flags = ivec4(0); // flag arrays not yet in texture array system
+            flags = fetchBlockFlagLod(materialId, textureUV, 0.0);
+            if (foldBlockOverlay) {
+                blockOverlayComposited = applyBlockOverlayMaterialLod(
+                    albedo, specular, normalVal, flags,
+                    materialId, textureUV, ubo.animTick, 0.0, colorLayer.rgb,
+                    materialRuleTextureID);
+            }
         } else {
             // Entity geometry: legacy atlas sampling via textures[]
             albedo = texture(textures[nonuniformEXT(textureID)], textureUV);
@@ -152,13 +290,16 @@ void main() {
     }
 
     // if insideBoat, then ignore liquid
-    if (shadowRay.insideBoat > 0 && (flags.r & 0x1) > 0) {
+    if (shadowRay.insideBoat > 0 && isWaterGeometry) {
         ignoreIntersectionEXT;
         return;
     }
 
-    vec3 tint = (albedo * colorLayer).rgb;
+    vec3 tint = blockOverlayComposited ? albedo.rgb : (albedo * colorLayer).rgb;
     float alpha = (albedo * colorLayer).a;
+    if (isWaterGeometry) {
+        alpha = 1.0;
+    }
 
     if (!SIMPLIFY_THIS_RAY) {
         float useGlint = float((v0.flags & PBR_FLAG_USE_GLINT) != 0u);
@@ -180,50 +321,57 @@ void main() {
     }
 
     tint = CS_BT709_TO_BT2020 * tint;  // BT.709 -> BT.2020 working space
+    uint packedBlockType = v0.emissiveBlockType;
+
+    bool thinCutoutPlant = isBlockGeometry && ((v0.emissiveBlockType & PBR_PACKED_THIN_CUTOUT_PLANT) != 0u);
+    if (thinCutoutPlant) {
+        if (alpha < 0.05) {
+            ignoreIntersectionEXT;
+            return;
+        }
+        uint thinBlockType = thinPlantBlockTypeFromPacked(v0.emissiveBlockType);
+        vec3 hitWorldPos = gl_WorldRayOriginEXT + gl_HitTEXT * gl_WorldRayDirectionEXT;
+        ivec3 hitCell = thinPlantCellFromWorldPos(hitWorldPos);
+        uint hitColumnHash = thinPlantColumnHash(hitCell);
+        if (shadowRay.originThinBlockType == thinBlockType &&
+            shadowRay.originThinColumnHash == hitColumnHash) {
+            ignoreIntersectionEXT;
+            return;
+        }
+        uint hitKey = thinPlantHitKey(hitCell, thinBlockType);
+        if (shadowRay.lastThinPlantHitKey == hitKey) {
+            ignoreIntersectionEXT;
+            return;
+        }
+        shadowRay.lastThinPlantHitKey = hitKey;
+        shadowRay.throughput *= thinPlantShadowTransmittance(tint);
+        ignoreIntersectionEXT;
+        return;
+    }
 
     // When simplified, skip LabPBR conversion — only transmission matters,
     // which is equivalent to alpha < (1.0 - 1e-6)
+    if (isWaterGeometry) {
+        shadowRay.throughput *= fluidShadowTransmission(v0, v1, v2);
+        ignoreIntersectionEXT;
+        return;
+    }
+
     bool hasTransmission;
     if (SIMPLIFY_THIS_RAY) {
-        hasTransmission = alpha < 0.95;
+        hasTransmission = isWaterGeometry || alpha < 0.95 ||
+            (isBlockGeometry && textureRuleHasTransmission(textureID));
     } else {
-        LabPBRMat mat = convertLabPBRMaterial(albedo * colorLayer, specular, normalVal);
-        // Material override: vertex materialType → mask texture → SSBO lookup
-        uint packedBlockType = v0.emissiveBlockType;
-        uint materialType = (packedBlockType >> 8u) & 0xFFu;
-        uint shadowMatIdx = 0u;
-        bool shadowHasMat = false;
-        if (materialType > 0u) {
-            shadowMatIdx = materialType - 1u;
-            shadowHasMat = true;
-        } else if (!isBlockGeometry) {
-            // Entity fallback: per-texel mask texture (only valid for bindless textureID)
-            int maskTexID = mapping.entries[textureID].maskTexture;
-            if (maskTexID >= 0) {
-                shadowMatIdx = uint(texture(textures[nonuniformEXT(maskTexID)], uv).r * 255.0 + 0.5);
-                shadowHasMat = (shadowMatIdx < 160u);
-            }
+        vec4 materialAlbedo = blockOverlayComposited ? albedo : albedo * colorLayer;
+        LabPBRMat mat = convertLabPBRMaterial(materialAlbedo, specular, normalVal);
+        if (isBlockGeometry) {
+            applyTextureRule(materialRuleTextureID, mat);
         }
-        if (shadowHasMat && pc.materialClassAddr != 0) {
-            MaterialClassBufferRef matBuf = MaterialClassBufferRef(pc.materialClassAddr);
-            MaterialClassEntry mc = matBuf.materialClassMapping.entries[shadowMatIdx];
-
-            // Override transmission from material slider
-            if (mc.transmission >= 0.0) {
-                mat.transmission = mc.transmission;
-            }
-
-            // Roughness modulates shadow color: smooth glass = clear colored shadow,
-            // rough glass = scattered/dimmer (frosty)
-            // Ground truth: no roughness tint hack — Beer's Law handles absorption correctly
-            if (mat.transmission > 0.0 && !BEER_LAW_SHADOWS) {
-                float matRoughness = mc.roughness * mc.roughness;  // perceptual -> GGX alpha
-                tint = mix(tint, vec3(1.0), clamp(matRoughness * 2.0, 0.0, 1.0));
-            }
-        }
-
         hasTransmission = mat.transmission > 0.0;
     }
+
+    // Authored displacement is a shader-local heightfield, not closed BLAS geometry.
+    // Keep opaque block shadow hits opaque; punching holes here leaks sun through relief.
 
     if (BEER_LAW_SHADOWS) {
         // Ground truth: Beer's Law volumetric absorption for transmissive materials

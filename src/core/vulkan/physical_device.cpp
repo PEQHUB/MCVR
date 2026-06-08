@@ -23,13 +23,15 @@ bool isDeviceSuitable(VkPhysicalDevice device) {
 
     bool hasSwapchain = false;
     bool hasRayTracing = false;
+    bool hasRayQuery = false;
 
     for (const auto &ext : availableExtensions) {
         if (std::string(ext.extensionName) == VK_KHR_SWAPCHAIN_EXTENSION_NAME) { hasSwapchain = true; }
         if (std::string(ext.extensionName) == VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) { hasRayTracing = true; }
+        if (std::string(ext.extensionName) == VK_KHR_RAY_QUERY_EXTENSION_NAME) { hasRayQuery = true; }
     }
 
-    if (!hasSwapchain || !hasRayTracing) return false;
+    if (!hasSwapchain || !hasRayTracing || !hasRayQuery) return false;
 
     // check features
     VkPhysicalDeviceVulkan12Features vulkan12Features{};
@@ -43,16 +45,21 @@ bool isDeviceSuitable(VkPhysicalDevice device) {
     accelerationStructureFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     accelerationStructureFeatures.pNext = &vulkan13Features;
 
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    rayQueryFeatures.pNext = &accelerationStructureFeatures;
+
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures = {};
     rayTracingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-    rayTracingFeatures.pNext = &accelerationStructureFeatures;
+    rayTracingFeatures.pNext = &rayQueryFeatures;
 
     VkPhysicalDeviceFeatures2 features2 = {};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.pNext = &rayTracingFeatures;
 
     vkGetPhysicalDeviceFeatures2(device, &features2);
-    if (!rayTracingFeatures.rayTracingPipeline || !accelerationStructureFeatures.accelerationStructure ||
+    if (!rayTracingFeatures.rayTracingPipeline || !rayQueryFeatures.rayQuery ||
+        !accelerationStructureFeatures.accelerationStructure ||
         !vulkan13Features.synchronization2 || !vulkan12Features.bufferDeviceAddress) {
         return false;
     } else {
@@ -146,6 +153,10 @@ uint32_t vk::PhysicalDevice::secondaryQueueIndex() {
     return secondaryQueueIndex_;
 }
 
+uint32_t vk::PhysicalDevice::mainQueueCount() {
+    return mainQueueCount_;
+}
+
 void vk::PhysicalDevice::findQueueFamilies() {
     uint32_t queueFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &queueFamilyCount, nullptr);
@@ -184,35 +195,28 @@ void vk::PhysicalDevice::findQueueFamilies() {
         // Early exit if all needed queue families are found
         if (presentSupport && graphicsSupport && computeSupport && transferSupport) {
             mainQueueIndex_ = i;
-            // TODO: add more condition
             secondaryQueueIndex_ = i;
+            mainQueueCount_ = queueFamilies[i].queueCount;
             break;
         }
     }
 
-    for (uint32_t i = 0; i < queueFamilyCount; i++) {
-        VkBool32 presentSupport = false;
-        vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice_, i, window_->vkSurface(), &presentSupport);
+    if (mainQueueIndex_ != static_cast<uint32_t>(-1) && mainQueueCount_ < 2) {
+        for (uint32_t i = 0; i < queueFamilyCount; i++) {
+            VkBool32 computeSupport = false;
+            if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+                computeSupport = true;
+            }
 
-        VkBool32 graphicsSupport = false;
-        if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
-            graphicsSupport = true;
-        }
+            VkBool32 transferSupport = false;
+            if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
+                transferSupport = true;
+            }
 
-        VkBool32 computeSupport = false;
-        if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
-            computeSupport = true;
-        }
-
-        VkBool32 transferSupport = false;
-        if (queueFamilies[i].queueCount > 0 && (queueFamilies[i].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
-            transferSupport = true;
-        }
-
-        // Early exit if all needed queue families are found
-        if (computeSupport && transferSupport && i != mainQueueIndex_) {
-            secondaryQueueIndex_ = i;
-            break;
+            if (computeSupport && transferSupport && i != mainQueueIndex_) {
+                secondaryQueueIndex_ = i;
+                break;
+            }
         }
     }
 
@@ -225,6 +229,14 @@ void vk::PhysicalDevice::findQueueFamilies() {
         physicalDeviceCerr() << "No queue family that supports graphics, compute and transfer found." << std::endl;
         exit(EXIT_FAILURE);
     }
+
+    physicalDeviceCout() << "queue families selected main=" << mainQueueIndex_
+                         << " secondary=" << secondaryQueueIndex_
+                         << " mainQueueCount=" << mainQueueCount_
+                         << (mainQueueIndex_ == secondaryQueueIndex_
+                                 ? " (same family; async BLAS avoids ownership transfers)"
+                                 : " (different families; ownership transfers required)")
+                         << std::endl;
 }
 
 VkPhysicalDeviceProperties vk::PhysicalDevice::properties() {

@@ -5,6 +5,8 @@
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
+#include <algorithm>
+
 std::ostream &texturesCout() {
     return std::cout << "[Textures] ";
 }
@@ -13,17 +15,21 @@ std::ostream &texturesCerr() {
     return std::cerr << "[Textures] ";
 }
 
-Textures::Textures(std::shared_ptr<Framework> framework) {}
+Textures::Textures(std::shared_ptr<Framework> framework)
+    : uploadQueue_(std::make_shared<std::map<uint32_t, std::vector<VkBufferImageCopy>>>()) {}
 
 void Textures::reset() {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
     textures_.clear();
-    textureAlphaClass_.clear();
-    textureAlphaData_.clear();
-    textureRGBAData_.clear();
+    samplers.clear();
+    caches_.clear();
+    uploadQueue_ = std::make_shared<std::map<uint32_t, std::vector<VkBufferImageCopy>>>();
+    freeList_.clear();
     nextID = 0;
 }
 
-void Textures::resetFrame() {
+void Textures::resetFrame(uint32_t frameIndex) {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
     auto framework = Renderer::instance().framework();
 
     framework->gc().collect(uploadQueue_);
@@ -31,8 +37,10 @@ void Textures::resetFrame() {
 
     for (auto &entry : caches_) {
         auto &cache = entry.second;
-        cache->reset();
+        cache->reset(frameIndex);
     }
+    uploadBytes_ = 0;
+    uploadRegions_ = 0;
 }
 
 uint32_t Textures::allocateTexture() {
@@ -76,7 +84,6 @@ void Textures::initializeTexture(uint32_t id, uint32_t maxLevel, uint32_t width,
     framework->gc().collect(textures_[id]);
     textures_[id] = vk::DeviceLocalImage::create(device, vma, false, maxLevel, width, height, 1, format,
                                                  VK_IMAGE_USAGE_SAMPLED_BIT, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-
     auto samplerIter = samplers.find(id);
     if (samplerIter == samplers.end()) {
         texturesCerr() << "The given texture id: " << id << " is not allocated for sampler" << std::endl;
@@ -155,6 +162,26 @@ void Textures::queueUpload(uint8_t *srcPointer,
         exit(EXIT_FAILURE);
     }
     auto dstTexture = (*dstTextureIter).second;
+    if (srcPointer == nullptr || width == 0 || height == 0 || srcRowPixels == 0 || srcOffsetX < 0 || srcOffsetY < 0 ||
+        dstOffsetX < 0 || dstOffsetY < 0) {
+        texturesCerr() << "Invalid texture upload parameters for dstID " << dstId << std::endl;
+        return;
+    }
+
+    auto format = dstTexture->vkFormat();
+    uint32_t bytePerPixel = vk::formatToByte(format);
+    uint32_t mipWidth = std::max(1u, dstTexture->width() >> level);
+    uint32_t mipHeight = std::max(1u, dstTexture->height() >> level);
+    uint32_t srcEndX = static_cast<uint32_t>(srcOffsetX) + width;
+    uint32_t srcEndY = static_cast<uint32_t>(srcOffsetY) + height;
+    size_t requiredSourceBytes =
+        (static_cast<size_t>(srcEndY - 1) * srcRowPixels + srcEndX) * bytePerPixel;
+    if (bytePerPixel == 0 || requiredSourceBytes > srcSizeInBytes ||
+        static_cast<uint32_t>(dstOffsetX) + width > mipWidth ||
+        static_cast<uint32_t>(dstOffsetY) + height > mipHeight) {
+        texturesCerr() << "Out-of-bounds texture upload for dstID " << dstId << std::endl;
+        return;
+    }
 
     auto cacheIter = caches_.find(dstId);
     if (cacheIter == caches_.end()) {
@@ -167,14 +194,15 @@ void Textures::queueUpload(uint8_t *srcPointer,
     auto cache = cacheIter->second;
     size_t offset = cache->append(srcPointer, srcSizeInBytes);
 
-    auto format = dstTexture->vkFormat();
-    uint32_t bytePerPixel = vk::formatToByte(format);
-
     VkBufferImageCopy region = {};
     region.bufferRowLength = srcRowPixels;
     region.bufferOffset = offset + srcOffsetY * srcRowPixels * bytePerPixel + srcOffsetX * bytePerPixel;
-    region.imageSubresource = vk::wholeColorSubresourceLayers;
-    region.imageSubresource.mipLevel = level;
+    region.imageSubresource = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .mipLevel = level,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
     region.imageExtent = {width, height, 1};
     region.imageOffset = {dstOffsetX, dstOffsetY, 0};
 
@@ -183,74 +211,9 @@ void Textures::queueUpload(uint8_t *srcPointer,
         dstTextureUploadQueueIter = uploadQueue_->emplace(dstId, std::vector<VkBufferImageCopy>{}).first;
     }
     dstTextureUploadQueueIter->second.emplace_back(region);
+    uploadBytes_ += width * height * bytePerPixel;
+    uploadRegions_++;
 
-#ifdef MCVR_ENABLE_OMM
-    // Extract alpha channel for OMM baking (mip 0 only, RGBA formats = 4 bpp)
-    if (level == 0 && bytePerPixel == 4) {
-        uint32_t texW = dstTexture->width();
-        uint32_t texH = dstTexture->height();
-
-        auto it = textureAlphaData_.find(dstId);
-        if (it != textureAlphaData_.end()) {
-            // Re-upload: alpha data is overwritten below, no special handling needed
-        } else {
-            TextureAlphaData &data = textureAlphaData_[dstId];
-            data.width = texW;
-            data.height = texH;
-            data.alpha.resize(texW * texH, 255);
-            data.animated = false;
-            it = textureAlphaData_.find(dstId);
-        }
-
-        TextureAlphaData &data = it->second;
-        // Copy alpha channel from the uploaded RGBA region
-        for (uint32_t row = 0; row < height; ++row) {
-            uint32_t srcRow = srcOffsetY + row;
-            uint32_t dstRow = dstOffsetY + row;
-            if (dstRow >= texH) break;
-            for (uint32_t col = 0; col < width; ++col) {
-                uint32_t srcCol = srcOffsetX + col;
-                uint32_t dstCol = dstOffsetX + col;
-                if (dstCol >= texW) break;
-                size_t srcIdx = (srcRow * srcRowPixels + srcCol) * 4 + 3; // alpha byte
-                data.alpha[dstRow * texW + dstCol] = srcPointer[srcIdx];
-            }
-        }
-    }
-#endif
-
-    // Cache full RGBA data for displacement tessellation height sampling (mip 0, RGBA formats)
-    if (level == 0 && bytePerPixel == 4) {
-        uint32_t texW = dstTexture->width();
-        uint32_t texH = dstTexture->height();
-
-        auto it = textureRGBAData_.find(dstId);
-        if (it == textureRGBAData_.end()) {
-            TextureRGBAData &data = textureRGBAData_[dstId];
-            data.width = texW;
-            data.height = texH;
-            data.rgba.resize(texW * texH * 4, 0);
-            it = textureRGBAData_.find(dstId);
-        }
-
-        TextureRGBAData &data = it->second;
-        for (uint32_t row = 0; row < height; ++row) {
-            uint32_t srcRow = srcOffsetY + row;
-            uint32_t dstRow = dstOffsetY + row;
-            if (dstRow >= texH) break;
-            for (uint32_t col = 0; col < width; ++col) {
-                uint32_t srcCol = srcOffsetX + col;
-                uint32_t dstCol = dstOffsetX + col;
-                if (dstCol >= texW) break;
-                size_t srcIdx = (srcRow * srcRowPixels + srcCol) * 4;
-                size_t dstIdx = (dstRow * texW + dstCol) * 4;
-                data.rgba[dstIdx + 0] = srcPointer[srcIdx + 0];
-                data.rgba[dstIdx + 1] = srcPointer[srcIdx + 1];
-                data.rgba[dstIdx + 2] = srcPointer[srcIdx + 2];
-                data.rgba[dstIdx + 3] = srcPointer[srcIdx + 3];
-            }
-        }
-    }
 }
 
 void Textures::performQueuedUpload() {
@@ -290,8 +253,8 @@ void Textures::performQueuedUpload() {
             .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
             .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
             .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT,
             .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .srcQueueFamilyIndex = mainQueueIndex,
@@ -318,6 +281,7 @@ void Textures::performQueuedUpload() {
         auto cacheIter = caches_.find(textureId);
         if (cacheIter == caches_.end()) { continue; }
         auto cache = cacheIter->second;
+        cache->flush();
 
         vkCmdCopyBufferToImage(cmdBuffer->vkCommandBuffer(), cache->vkBuffer(), texture->vkImage(),
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regions.size(), regions.data());
@@ -326,8 +290,7 @@ void Textures::performQueuedUpload() {
             {}, {{
                     .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                     .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-                    .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                                    VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                     .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
                     .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -383,44 +346,11 @@ void Textures::destroyTexture(uint32_t id) {
         samplers.erase(samplerIter);
     }
 
-    // Clean up associated caches and metadata
+    // Clean up associated upload cache.
     caches_.erase(id);
-    textureAlphaClass_.erase(id);
-    textureAlphaData_.erase(id);
-    textureRGBAData_.erase(id);
 
     // Return ID to free list for reuse
     freeList_.push_back(id);
-}
-
-void Textures::setTextureAlphaClass(uint32_t id, AlphaClass alphaClass) {
-    std::unique_lock<std::recursive_mutex> lck(mutex_);
-    textureAlphaClass_[id] = alphaClass;
-}
-
-Textures::AlphaClass Textures::getTextureAlphaClass(uint32_t id) const {
-    auto it = textureAlphaClass_.find(id);
-    if (it != textureAlphaClass_.end()) {
-        return it->second;
-    }
-    // Default: assume mixed (needs AHS) for unknown textures
-    return AlphaClass::MIXED;
-}
-
-const Textures::TextureAlphaData *Textures::getTextureAlphaData(uint32_t id) const {
-    auto it = textureAlphaData_.find(id);
-    if (it != textureAlphaData_.end()) {
-        return &it->second;
-    }
-    return nullptr;
-}
-
-const Textures::TextureRGBAData *Textures::getTextureRGBAData(uint32_t id) const {
-    auto it = textureRGBAData_.find(id);
-    if (it != textureRGBAData_.end()) {
-        return &it->second;
-    }
-    return nullptr;
 }
 
 ImageBufferCache::ImageBufferCache(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device, uint32_t frameNum)
@@ -472,7 +402,8 @@ VkBuffer &ImageBufferCache::vkBuffer() {
     return caches_[current_]->vkBuffer();
 }
 
-void ImageBufferCache::reset() {
-    current_ = (current_ + 1) % caches_.size();
+void ImageBufferCache::reset(uint32_t frameIndex) {
+    if (caches_.empty()) return;
+    current_ = frameIndex % static_cast<uint32_t>(caches_.size());
     bases_[current_] = 0;
 }

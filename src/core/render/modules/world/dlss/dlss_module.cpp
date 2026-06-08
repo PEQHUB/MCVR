@@ -6,6 +6,8 @@
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
+#include <algorithm>
+
 std::shared_ptr<NgxContext> DLSSModule::ngxContext_ = nullptr;
 
 bool DLSSModule::initNGXContext() {
@@ -123,7 +125,7 @@ bool DLSSModule::setOrCreateInputImages(std::vector<std::shared_ptr<vk::DeviceLo
 
     if (Renderer::options.upscalerMode == 4) {
         // Custom mode: use resolution override percentage instead of NGX presets
-        float scale = static_cast<float>(Renderer::options.upscalerResOverride) / 100.0f;
+        float scale = static_cast<float>(std::clamp(Renderer::options.upscalerResOverride, 1u, 100u)) / 100.0f;
         inputWidth_ = std::max(1u, static_cast<uint32_t>(outputWidth_ * scale));
         inputHeight_ = std::max(1u, static_cast<uint32_t>(outputHeight_ * scale));
     } else {
@@ -873,10 +875,9 @@ void DLSSModuleContext::render() {
             auto now = std::chrono::steady_clock::now();
             float frameTimeDeltaMs = std::chrono::duration<float, std::milli>(now - lastRenderTime_).count();
             lastRenderTime_ = now;
-            // Pre-exposure: must match RT push constant. Tells DLSS-RR the input
-            // dynamic range for internal normalization. Output is NOT rescaled
-            // (InExposureScale=1.0 in dlss_wrapper.cpp).
-            float preExposure = (Renderer::options.offlineState == 2) ? 1.0f : 0.1f;
+            // Keep DLSS-D/RR scene-referred. RT no longer pre-exposes by 0.1, so
+            // NGX sees the same scale that the histogram and tone mapper use.
+            float preExposure = 1.0f;
             // Use cameraEffectedViewMat — must match the matrix used to compute
             // linearDepthImage and motionVectorImage in world.rgen. Using cameraViewMat
             // (without view bob/camera effects) causes a depth↔matrix mismatch that

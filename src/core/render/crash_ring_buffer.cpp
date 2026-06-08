@@ -25,17 +25,19 @@ void CrashRingBuffer::dumpToFile(const std::filesystem::path& dir) const {
         auto nowTime = std::chrono::system_clock::to_time_t(now);
         f << "=== Radiance Crash Ring Buffer ===" << std::endl;
         f << "Dump time: " << std::put_time(std::localtime(&nowTime), "%Y-%m-%d %H:%M:%S") << std::endl;
-        f << "Total frames: " << frameCounter_ << std::endl;
+        f << "Total frames: " << frameCounter_.load(std::memory_order_relaxed) << std::endl;
         f << "Entries (oldest first):" << std::endl;
         f << std::endl;
 
         // Determine range
-        uint32_t count = (writeIndex_ < CAPACITY) ? writeIndex_ : CAPACITY;
-        uint32_t start = (writeIndex_ < CAPACITY) ? 0 : (writeIndex_ % CAPACITY);
+        uint32_t writeIndex = writeIndex_.load(std::memory_order_acquire);
+        uint32_t count = (writeIndex < CAPACITY) ? writeIndex : CAPACITY;
+        uint32_t start = (writeIndex < CAPACITY) ? 0 : (writeIndex % CAPACITY);
 
         for (uint32_t i = 0; i < count; i++) {
             const auto& e = entries_[(start + i) % CAPACITY];
             f << "  frame=" << std::setw(8) << e.frameNumber
+              << "  t=" << std::setw(16) << e.timestampNs
               << "  vk=" << std::setw(4) << e.vkResult
               << "  " << e.tag
               << std::endl;

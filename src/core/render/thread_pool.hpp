@@ -2,16 +2,20 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <exception>
 #include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <thread>
 #include <vector>
 
+#include "core/vulkan/debug_utils.hpp"
+
 /**
- * Simple thread pool for CPU-bound work (chunk building, greedy meshing, OMM baking).
+ * Simple thread pool for CPU-bound work.
  * Workers stay alive for the lifetime of the pool. Work is submitted via submit() or
  * parallelFor(). Thread count defaults to hardware_concurrency() - 2 (leave headroom
  * for the render thread and Java/Minecraft thread).
@@ -24,7 +28,10 @@ class ThreadPool {
             numThreads = (hw > 4) ? hw - 2 : std::max(hw, 1u);
         }
         for (uint32_t i = 0; i < numThreads; i++) {
-            workers_.emplace_back([this] { workerLoop(); });
+            workers_.emplace_back([this, i] {
+                vk::DebugUtils::setCurrentThreadName("Radiance Worker " + std::to_string(i));
+                workerLoop();
+            });
         }
     }
 
@@ -73,31 +80,48 @@ class ThreadPool {
             std::atomic<uint32_t> completed{0};
             std::mutex doneMtx;
             std::condition_variable doneCv;
+            std::mutex exceptionMtx;
+            std::exception_ptr exception;
             uint32_t count;
         };
         auto state = std::make_shared<SharedState>();
         state->count = count;
 
+        auto runLoop = [state, &f]() {
+            while (true) {
+                uint32_t idx = state->nextIndex.fetch_add(1, std::memory_order_relaxed);
+                if (idx >= state->count) break;
+
+                try {
+                    f(idx);
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(state->exceptionMtx);
+                    if (!state->exception) state->exception = std::current_exception();
+                }
+
+                if (state->completed.fetch_add(1, std::memory_order_acq_rel) + 1 == state->count) {
+                    state->doneCv.notify_one();
+                }
+            }
+        };
+
         uint32_t numTasks = std::min(count, static_cast<uint32_t>(workers_.size()));
         for (uint32_t t = 0; t < numTasks; t++) {
             std::lock_guard<std::mutex> lock(mutex_);
-            tasks_.emplace([state, &f]() {
-                while (true) {
-                    uint32_t idx = state->nextIndex.fetch_add(1, std::memory_order_relaxed);
-                    if (idx >= state->count) break;
-                    f(idx);
-                    if (state->completed.fetch_add(1, std::memory_order_acq_rel) + 1 == state->count) {
-                        state->doneCv.notify_one();
-                    }
-                }
-            });
+            tasks_.emplace(runLoop);
         }
         cv_.notify_all();
+
+        runLoop();
 
         std::unique_lock<std::mutex> doneLock(state->doneMtx);
         state->doneCv.wait(doneLock, [&state] {
             return state->completed.load(std::memory_order_acquire) >= state->count;
         });
+
+        if (state->exception) {
+            std::rethrow_exception(state->exception);
+        }
     }
 
     uint32_t threadCount() const { return static_cast<uint32_t>(workers_.size()); }

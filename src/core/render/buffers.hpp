@@ -32,7 +32,6 @@ class Buffers : public SharedObject<Buffers> {
     void setAndUploadWorldUniformBuffer(vk::Data::WorldUBO &ubo);
     void setAndUploadSkyUniformBuffer(vk::Data::SkyUBO &ubo);
     void setAndUploadTextureMappingBuffer(vk::Data::TextureMapping &mapping);
-    void setAndUploadMaterialClassMappingBuffer(vk::Data::MaterialClassMapping &mapping);
     void setAndUploadExposureDataBuffer(vk::Data::ExposureData &exposureData);
     void setAndUploadLightMapUniformBuffer(vk::Data::LightMapUBO &ubo);
 
@@ -48,7 +47,6 @@ class Buffers : public SharedObject<Buffers> {
     std::shared_ptr<vk::HostVisibleBuffer> lastWorldUniformBuffer();
     std::shared_ptr<vk::HostVisibleBuffer> skyUniformBuffer();
     std::shared_ptr<vk::HostVisibleBuffer> textureMappingBuffer();
-    std::shared_ptr<vk::HostVisibleBuffer> materialClassMappingBuffer();
     std::shared_ptr<vk::HostVisibleBuffer> exposureDataBuffer();
     std::shared_ptr<vk::HostVisibleBuffer> lightMapUniformBuffer();
 
@@ -70,7 +68,6 @@ class Buffers : public SharedObject<Buffers> {
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> lastWorldUniformBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> skyUniformBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> textureMappingBuffer_;
-    std::vector<std::shared_ptr<vk::HostVisibleBuffer>> materialClassMappingBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> exposureDataBuffer_;
     std::vector<std::shared_ptr<vk::HostVisibleBuffer>> lightMapUniformBuffer_;
 

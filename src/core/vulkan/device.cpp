@@ -4,6 +4,7 @@
 #include "core/render/aftermath_integration.hpp"
 #include "core/render/modules/world/dlss/dlss_wrapper.hpp"
 #include "core/render/streamline_context.hpp"
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/instance.hpp"
 #include "core/vulkan/physical_device.hpp"
 #include "core/vulkan/sync.hpp"
@@ -30,6 +31,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     // enabled device extensions
     std::vector<const char *> enabledExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
                                                    VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+                                                   VK_KHR_RAY_QUERY_EXTENSION_NAME,
                                                    VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
                                                    VK_KHR_SPIRV_1_4_EXTENSION_NAME,
                                                    VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
@@ -42,8 +44,6 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                                                    VK_KHR_MAINTENANCE_5_EXTENSION_NAME,
                                                    // HDR10: enables vkSetHdrMetadataEXT for SMPTE ST.2086 mastering display metadata
                                                    VK_EXT_HDR_METADATA_EXTENSION_NAME,
-                                                   // OMM: Opacity Micro Maps for hardware-resolved alpha testing
-                                                   VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME,
                                                    // SER: Shader Execution Reordering for material coherence
                                                    // Try EXT first (promoted), fall back to NV (original)
                                                    VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME,
@@ -54,6 +54,8 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
                                                    VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME,
                                                    VK_NV_DEVICE_DIAGNOSTICS_CONFIG_EXTENSION_NAME,
                                                    VK_EXT_DEVICE_FAULT_EXTENSION_NAME,
+    // Nsight Graphics: NonSemantic Vulkan debug info for source-level shader profiling
+    VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME,
 #ifdef _WIN32
                                                    // External memory: Vulkan-D3D11 texture sharing for DComp overlay
                                                    VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
@@ -120,14 +122,9 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV supportedSERFeatures{};
     supportedSERFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
     supportedSERFeatures.pNext = &supportedShaderClockFeatures;
-
-    VkPhysicalDeviceOpacityMicromapFeaturesEXT supportedOMMFeatures{};
-    supportedOMMFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT;
-    supportedOMMFeatures.pNext = &supportedSERFeatures;
-
     VkPhysicalDeviceMaintenance5Features supportedMaintenance5{};
     supportedMaintenance5.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES;
-    supportedMaintenance5.pNext = &supportedOMMFeatures;
+    supportedMaintenance5.pNext = &supportedSERFeatures;
 
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT supportedVertexInputDynamicState{};
     supportedVertexInputDynamicState.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT;
@@ -154,9 +151,13 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     supportedAccelerationStructureFeatures.pNext = &supportedVulkan12;
 
+    VkPhysicalDeviceRayQueryFeaturesKHR supportedRayQueryFeatures{};
+    supportedRayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    supportedRayQueryFeatures.pNext = &supportedAccelerationStructureFeatures;
+
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR supportedRayTracingFeatures{};
     supportedRayTracingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-    supportedRayTracingFeatures.pNext = &supportedAccelerationStructureFeatures;
+    supportedRayTracingFeatures.pNext = &supportedRayQueryFeatures;
 
     VkPhysicalDeviceFeatures2 supportedFeatures2{};
     supportedFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -168,14 +169,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     selectedExtensions.reserve(filteredExtensions.size());
     for (const auto *ext : filteredExtensions) { selectedExtensions.insert(ext); }
     auto hasExtension = [&](const char *name) { return selectedExtensions.find(name) != selectedExtensions.end(); };
-
     // enabling features
-    ommSupported_ = hasExtension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME) &&
-                    supportedOMMFeatures.micromap == VK_TRUE;
-
-    VkPhysicalDeviceOpacityMicromapFeaturesEXT ommFeatures{};
-    ommFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT;
-    ommFeatures.micromap = ommSupported_ ? VK_TRUE : VK_FALSE;
 
     // SER: Shader Execution Reordering for material coherence in RT
     // Accept either EXT (promoted) or NV (original) extension
@@ -185,7 +179,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
 
     VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV serFeatures{};
     serFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
-    serFeatures.pNext = &ommFeatures;
+    serFeatures.pNext = nullptr;
     serFeatures.rayTracingInvocationReorder = serSupported_ ? VK_TRUE : VK_FALSE;
 
     // Shader clock: per-pixel profiling instrumentation
@@ -219,7 +213,6 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
     faultFeatures.deviceFault = deviceFaultSupported_ ? VK_TRUE : VK_FALSE;
     faultFeatures.deviceFaultVendorBinary = VK_FALSE;
 
-    deviceCout() << "Opacity Micro Maps (OMM): " << (ommSupported_ ? "YES" : "NO") << std::endl;
     deviceCout() << "Shader Execution Reordering (SER): " << (serSupported_ ? "YES" : "NO")
                  << " (EXT=" << hasExtension(VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME)
                  << " NV=" << hasExtension(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME)
@@ -320,9 +313,16 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
             supportedAccelerationStructureFeatures.descriptorBindingAccelerationStructureUpdateAfterBind;
     }
 
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    rayQueryFeatures.pNext = &accelerationStructureFeatures;
+    if (hasExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME)) {
+        rayQueryFeatures.rayQuery = supportedRayQueryFeatures.rayQuery;
+    }
+
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingFeatures = {};
     rayTracingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-    rayTracingFeatures.pNext = &accelerationStructureFeatures;
+    rayTracingFeatures.pNext = &rayQueryFeatures;
     if (hasExtension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME)) {
         rayTracingFeatures.rayTracingPipeline = supportedRayTracingFeatures.rayTracingPipeline;
     }
@@ -376,7 +376,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
         VkDeviceQueueCreateInfo queueCreateInfo = {};
         queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         queueCreateInfo.queueFamilyIndex = physicalDevice_->mainQueueIndex();
-        queueCreateInfo.queueCount = 2;
+        queueCreateInfo.queueCount = physicalDevice_->mainQueueCount() >= 2 ? 2 : 1;
         queueCreateInfo.pQueuePriorities = queuePriorities.data();
 
         deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -443,8 +443,15 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
 
     vkGetDeviceQueue(device_, physicalDevice_->mainQueueIndex(), 0, &mainQueue_);
     vkGetDeviceQueue(device_, physicalDevice_->secondaryQueueIndex(),
-                     physicalDevice_->mainQueueIndex() == physicalDevice_->secondaryQueueIndex() ? 1 : 0,
+                     physicalDevice_->mainQueueIndex() == physicalDevice_->secondaryQueueIndex() &&
+                             physicalDevice_->mainQueueCount() >= 2
+                         ? 1
+                         : 0,
                      &secondaryQueue_);
+
+    vk::DebugUtils::setObjectName(device_, VK_OBJECT_TYPE_DEVICE, device_, "Radiance VkDevice");
+    vk::DebugUtils::setObjectName(device_, VK_OBJECT_TYPE_QUEUE, mainQueue_, "Radiance Main Queue");
+    vk::DebugUtils::setObjectName(device_, VK_OBJECT_TYPE_QUEUE, secondaryQueue_, "Radiance Secondary BLAS Queue");
 
     loadPipelineCache();
 
@@ -454,6 +461,7 @@ vk::Device::Device(std::shared_ptr<Instance> instance,
 
 void vk::Device::createTimelineSemaphores() {
     blasSemaphore_ = TimelineSemaphore::create(shared_from_this(), 0);
+    materialUploadSemaphore_ = TimelineSemaphore::create(shared_from_this(), 0);
 }
 
 vk::Device::~Device() {
@@ -462,6 +470,7 @@ vk::Device::~Device() {
         vkDestroyPipelineCache(device_, pipelineCache_, nullptr);
     }
     blasSemaphore_.reset();
+    materialUploadSemaphore_.reset();
     vkDestroyDevice(device_, nullptr);
 
 #ifdef DEBUG

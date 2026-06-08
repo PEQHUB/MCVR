@@ -1,5 +1,6 @@
 #include "core/vulkan/sync.hpp"
 
+#include "core/vulkan/debug_utils.hpp"
 #include "core/vulkan/device.hpp"
 
 vk::Semaphore::Semaphore(std::shared_ptr<Device> device) : device_(device) {
@@ -7,6 +8,8 @@ vk::Semaphore::Semaphore(std::shared_ptr<Device> device) : device_(device) {
     semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
     vkCreateSemaphore(device_->vkDevice(), &semaphoreInfo, nullptr, &semaphore_);
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_SEMAPHORE,
+                                  semaphore_, "Radiance Binary Semaphore");
 }
 
 vk::Semaphore::~Semaphore() {
@@ -25,6 +28,8 @@ vk::Fence::Fence(std::shared_ptr<Device> device, bool signaled) : device_(device
     if (signaled) { fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; }
 
     vkCreateFence(device_->vkDevice(), &fenceInfo, nullptr, &fence_);
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_FENCE,
+                                  fence_, signaled ? "Radiance Frame Fence signaled" : "Radiance Frame Fence");
 }
 
 vk::Fence::~Fence() {
@@ -48,6 +53,8 @@ vk::TimelineSemaphore::TimelineSemaphore(std::shared_ptr<Device> device, uint64_
     createInfo.pNext = &typeInfo;
 
     vkCreateSemaphore(device_->vkDevice(), &createInfo, nullptr, &semaphore_);
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_SEMAPHORE,
+                                  semaphore_, "Radiance BLAS Timeline Semaphore");
 }
 
 vk::TimelineSemaphore::~TimelineSemaphore() {

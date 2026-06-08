@@ -28,10 +28,27 @@ struct MainRay {
     T_FLOAT t;
     T_UINT seed;
     T_UINT bounces;
+    T_FLOAT hitT;
+    T_FLOAT coneWidth;
+    T_FLOAT coneSpread;
+    T_VEC3 normal;
+    T_VEC3 directLightRadiance;
+    T_VEC3 prevScenePos;
+    T_UINT hasPrevScenePos;
     T_VEC3 intermediateRadiance;
     T_UINT isHand;
     T_UINT bouncedOnSolid;
     T_UINT rayIndex;
+    T_UINT stateBits;
+    T_UINT instanceIndex;
+    T_UINT geometryIndex;
+    T_UINT primitiveIndex;
+    T_VEC3 baryCoords;
+    T_VEC3 worldPos;
+    T_FLOAT directLightHitT;
+    T_FLOAT albedoEmission;
+    T_UINT emissiveBlockType;
+    T_UINT pad0;
 };
 
 struct PrimaryRay {
@@ -76,6 +93,8 @@ struct PrimaryRay {
     T_VEC3 f0;
     T_FLOAT emission;
     T_FLOAT subSurface;
+    T_VEC3 prevWorldPos;
+    T_UINT hasPrevWorldPos;
 };
 
 // ── PrimaryRay.flags bitfield accessors (GLSL only) ──
@@ -118,6 +137,10 @@ struct ShadowRay {
     T_FLOAT hitT;
     T_UINT insideBoat;
     T_UINT bounceIndex;
+    T_UINT originThinBlockType;
+    T_UINT originThinColumnHash;
+    T_UINT lastThinPlantHitKey;
+    T_UINT pad0;
     // Beer's Law medium tracking (active when BEER_LAW_SHADOWS flag is set)
     T_VEC3 mediumAbsorption;  // sigma_a of current medium (vec3(0) = in air)
     T_FLOAT mediumEntryT;     // gl_HitTEXT when entering transmissive medium

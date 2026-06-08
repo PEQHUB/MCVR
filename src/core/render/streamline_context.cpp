@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include "core/render/renderer.hpp"
 
 // ---- static member definitions ----
@@ -76,6 +77,7 @@ static void slLogMessageCallback(sl::LogType type, const char *msg) {
 
 // Wide string storage for pathToLogsAndData (must outlive slInit call)
 static std::wstring slLogDirPath_;
+static std::mutex dlssGApiMutex_;
 
 template <typename T>
 static bool loadProc(HMODULE mod, const char *name, T *&out) {
@@ -583,11 +585,14 @@ static void dlssGErrorCallback(const sl::APIError &e) {
 
 bool StreamlineContext::setDlssGOptions(sl::DLSSGMode mode, uint32_t numFramesToGenerate) {
     if (!dlssGSupported_ || !pfnDLSSGSetOptions) return false;
+    std::lock_guard<std::mutex> lock(dlssGApiMutex_);
 
     sl::DLSSGOptions options{};
     options.mode = mode;
     options.numFramesToGenerate = numFramesToGenerate;
     options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
+    Renderer::options.dlssgQueueParallelism = false;
+    options.queueParallelismMode = sl::DLSSGQueueParallelismMode::eBlockPresentingClientQueue;
     options.onErrorCallback = dlssGErrorCallback;
 
     sl::Result result = pfnDLSSGSetOptions(sl::ViewportHandle(0), options);
@@ -597,12 +602,15 @@ bool StreamlineContext::setDlssGOptions(sl::DLSSGMode mode, uint32_t numFramesTo
     }
 
     slCout() << "DLSS-G mode set to " << static_cast<int>(mode)
-             << " numFramesToGenerate=" << numFramesToGenerate << std::endl;
+             << " numFramesToGenerate=" << numFramesToGenerate
+             << " queueParallelism=default"
+             << std::endl;
     return true;
 }
 
 bool StreamlineContext::getDlssGState(sl::DLSSGState &state) {
     if (!dlssGSupported_ || !pfnDLSSGGetState) return false;
+    std::lock_guard<std::mutex> lock(dlssGApiMutex_);
     return pfnDLSSGGetState(sl::ViewportHandle(0), state, nullptr) == sl::Result::eOk;
 }
 

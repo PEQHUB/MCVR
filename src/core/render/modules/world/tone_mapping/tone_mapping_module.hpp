@@ -103,7 +103,7 @@ struct ToneMappingModulePushConstant {
     float tonemapParam5;
     float tonemapParam6;
     float tonemapParam7;
-    float preExposure;  // RT pre-exposure value — histogram must undo this for correct metering
+    float preExposure;  // RT/DLSS-D scale, currently neutral.
     float highlightWeight; // Highlight-weighted metering strength (0-1, 0=uniform, 1=full highlight bias)
 };
 
@@ -161,6 +161,7 @@ class ToneMappingModule : public WorldModule, public SharedObject<ToneMappingMod
     std::shared_ptr<vk::DeviceLocalBuffer> exposureData_;
     std::shared_ptr<vk::HostVisibleBuffer> exposureReadback_;  // 4-byte staging for GPU→CPU readback
     float computedExposure_ = 0.001f;                            // CPU-side mirror, 1-frame delayed (neutral midpoint)
+    uint64_t exposureDiagFrame_ = 0;
     bool pendingExposureReset_ = false;  // deferred GPU buffer zero on world load
 
     std::shared_ptr<vk::Shader> histShader_;

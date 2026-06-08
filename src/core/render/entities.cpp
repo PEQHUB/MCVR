@@ -1,13 +1,15 @@
 #include "core/render/entities.hpp"
-
 #include "core/render/buffers.hpp"
+#include "core/render/radiance_logger.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/render/renderer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <sstream>
 #include <unordered_map>
 
 using Vertex = glm::vec3;
@@ -26,6 +28,89 @@ struct TriangleHash {
         return seed;
     }
 };
+
+namespace {
+struct RtFlagStats {
+    int flag = 0;
+    const char* name = "unknown";
+    uint32_t entities = 0;
+    uint32_t nonPrebuilt = 0;
+    uint32_t geometries = 0;
+    uint32_t vertices = 0;
+    uint32_t indices = 0;
+};
+
+std::array<RtFlagStats, 8> makeFlagStats() {
+    return {{
+        {1, "world"},
+        {2, "player"},
+        {4, "playerHead"},
+        {8, "hand"},
+        {16, "weather"},
+        {32, "particle"},
+        {64, "cloud"},
+        {128, "boatWaterMask"},
+    }};
+}
+
+RtFlagStats& statsForFlag(std::array<RtFlagStats, 8>& stats, int flag) {
+    for (auto& entry : stats) {
+        if (entry.flag == flag) return entry;
+    }
+    return stats[0];
+}
+
+uint32_t alphaModeBitsFor(World::GeometryTypes geometryType, uint32_t flags) {
+    namespace VF = vk::VertexFormat;
+    if ((flags & VF::PBR_FLAG_ALPHA_MODE_MASK) != 0u) {
+        return flags & VF::PBR_FLAG_ALPHA_MODE_MASK;
+    }
+    const uint32_t mode = geometryType == World::WORLD_TRANSPARENT
+        ? VF::PBR_ALPHA_MODE_TRANSPARENT
+        : VF::PBR_ALPHA_MODE_OPAQUE;
+    return mode << VF::PBR_FLAG_ALPHA_MODE_SHIFT;
+}
+
+void applyAlphaModeFallback(World::GeometryTypes geometryType,
+                            std::vector<vk::VertexFormat::PBRTriangle>& vertices) {
+    for (auto& vertex : vertices) {
+        vertex.flags = (vertex.flags & ~vk::VertexFormat::PBR_FLAG_ALPHA_MODE_MASK) |
+            alphaModeBitsFor(geometryType, vertex.flags);
+    }
+}
+
+void accumulateEntityStats(std::array<RtFlagStats, 8>& byFlag,
+                           const std::shared_ptr<EntityBuildData>& data,
+                           uint32_t& totalGeometries,
+                           uint32_t& totalVertices,
+                           uint32_t& totalIndices,
+                           uint32_t& nonPrebuilt,
+                           uint32_t& prebuilt) {
+    if (!data) return;
+    uint32_t vertices = 0;
+    uint32_t indices = 0;
+    for (uint32_t i = 0; i < data->geometryCount; i++) {
+        if (i < data->vertices.size()) vertices += static_cast<uint32_t>(data->vertices[i].size());
+        if (i < data->indices.size()) indices += static_cast<uint32_t>(data->indices[i].size());
+    }
+
+    totalGeometries += data->geometryCount;
+    totalVertices += vertices;
+    totalIndices += indices;
+    if (data->prebuiltBLAS < 0) {
+        nonPrebuilt++;
+    } else {
+        prebuilt++;
+    }
+
+    auto& stats = statsForFlag(byFlag, data->rtFlag);
+    stats.entities++;
+    if (data->prebuiltBLAS < 0) stats.nonPrebuilt++;
+    stats.geometries += data->geometryCount;
+    stats.vertices += vertices;
+    stats.indices += indices;
+}
+} // namespace
 
 
 EntityBuildData::EntityBuildData(int hashCode,
@@ -564,6 +649,7 @@ void Entities::queueBuild(EntitiesBuildTask task) {
                     geometryVertices.push_back(vertex);
                 }
             }
+            applyAlphaModeFallback(geometryType, geometryVertices);
 
             auto orthonormalBasis = [](const glm::dvec3 &a_unit,
                                        const glm::dvec3 &ref) -> std::pair<glm::dvec3, glm::dvec3> {
@@ -808,8 +894,62 @@ void Entities::queueBuild(EntitiesBuildTask task) {
 
                     break;
                 }
+		case World::DrawMode::TRIANGLES: {
+			for (int j = 0; j < task.vertexCounts[geometryIndex + i]; j += 3) {
+				geometryIndices.push_back(j + 0);
+				geometryIndices.push_back(j + 1);
+				geometryIndices.push_back(j + 2);
+
+				if (task.normalOffset) {
+					if (geometryVertices[j + 0].flags & vk::VertexFormat::PBR_FLAG_USE_NORM)
+						geometryVertices[j + 0].pos += 0.00001f * glm::normalize(geometryVertices[j + 0].norm);
+					if (geometryVertices[j + 1].flags & vk::VertexFormat::PBR_FLAG_USE_NORM)
+						geometryVertices[j + 1].pos += 0.00001f * glm::normalize(geometryVertices[j + 1].norm);
+					if (geometryVertices[j + 2].flags & vk::VertexFormat::PBR_FLAG_USE_NORM)
+						geometryVertices[j + 2].pos += 0.00001f * glm::normalize(geometryVertices[j + 2].norm);
+				}
+
+				geometryVertices[j + 0].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
+				geometryVertices[j + 1].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
+				geometryVertices[j + 2].flags |= (uint32_t(coordinate) << vk::VertexFormat::PBR_FLAG_COORD_SHIFT);
+
+				if (post) {
+					geometryVertices[j + 0].postBase = {x, y, z};
+					geometryVertices[j + 1].postBase = {x, y, z};
+					geometryVertices[j + 2].postBase = {x, y, z};
+				}
+			}
+			// Convert triangle list to quad-indexed format (degenerate 4th vertex per tri)
+			std::vector<vk::VertexFormat::PBRTriangle> quadVertices;
+			std::vector<uint32_t> quadIndices;
+			int accu = 0;
+			for (int j = 0; j + 2 < geometryIndices.size(); j += 3) {
+				quadVertices.push_back(geometryVertices[geometryIndices[j + 0]]);
+				quadVertices.push_back(geometryVertices[geometryIndices[j + 1]]);
+				quadVertices.push_back(geometryVertices[geometryIndices[j + 2]]);
+				quadVertices.push_back(geometryVertices[geometryIndices[j + 2]]); // degenerate
+				quadIndices.push_back(accu + 0); quadIndices.push_back(accu + 1);
+				quadIndices.push_back(accu + 2); quadIndices.push_back(accu + 2);
+				quadIndices.push_back(accu + 3); quadIndices.push_back(accu + 0);
+				accu += 4;
+			}
+			geometryVertices = quadVertices;
+			geometryIndices = quadIndices;
+			break;
+		}
+		case World::DrawMode::DEBUG_LINES:
+		case World::DrawMode::DEBUG_LINE_STRIP: {
+			// Debug line rendering is not supported in RT — skip
+			geometryVertices.clear();
+			break;
+		}
+
                 default: {
-                    throw std::runtime_error("Shouldn't be touched");
+                    // Unsupported draw mode (DEBUG_LINES, DEBUG_LINE_STRIP, TRIANGLES, TRIANGLE_FAN)
+                    // Skip this geometry to avoid crashing the JVM
+                    RadianceLogger::log("entities", "WARN", "Skipping unsupported draw mode: %d", static_cast<int>(task.indexFormats[geometryIndex + i]));
+                    geometryVertices.clear();
+                    break;
                 }
             }
 
@@ -857,6 +997,27 @@ void Entities::build() {
     }
 
     uint32_t fi = context->frameIndex;
+    auto byFlag = makeFlagStats();
+    uint32_t totalGeometries = 0;
+    uint32_t totalVertices = 0;
+    uint32_t totalIndices = 0;
+    uint32_t nonPrebuilt = 0;
+    uint32_t prebuilt = 0;
+    uint32_t postEntities = entityPostBuildDataBatch_
+        ? static_cast<uint32_t>(entityPostBuildDataBatch_->datas.size())
+        : 0;
+
+    if (entityBuildDataBatch_) {
+        for (const auto& data : entityBuildDataBatch_->datas) {
+            accumulateEntityStats(byFlag, data, totalGeometries, totalVertices, totalIndices, nonPrebuilt, prebuilt);
+        }
+    }
+    if (entityPostBuildDataBatch_) {
+        for (const auto& data : entityPostBuildDataBatch_->datas) {
+            accumulateEntityStats(byFlag, data, totalGeometries, totalVertices, totalIndices, nonPrebuilt, prebuilt);
+        }
+    }
+
     entityBuildDataBatch_->build(pooledVertexBuffers_[fi], pooledIndexBuffers_[fi]);
 
     Renderer::instance().buffers()->queueImportantWorldUpload(entityBuildDataBatch_->vertexBuffer,
@@ -871,6 +1032,27 @@ void Entities::build() {
             Renderer::instance().buffers()->queueImportantWorldUpload(entity->vertexBuffers[i],
                                                                       entity->indexBuffers[i]);
         }
+    }
+
+    std::ostringstream diag;
+    diag << "entityBatch:" << (entityBuildDataBatch_ ? entityBuildDataBatch_->datas.size() : 0)
+         << ",entityPostBatch:" << postEntities
+         << ",entityNonPrebuilt:" << nonPrebuilt
+         << ",entityPrebuilt:" << prebuilt
+         << ",entityGeometries:" << totalGeometries
+         << ",entityVertices:" << totalVertices
+         << ",entityIndices:" << totalIndices;
+    for (const auto& stats : byFlag) {
+        if (stats.entities == 0) continue;
+        diag << ",entityFlag_" << stats.name << "_count:" << stats.entities
+             << ",entityFlag_" << stats.name << "_nonPrebuilt:" << stats.nonPrebuilt
+             << ",entityFlag_" << stats.name << "_geometries:" << stats.geometries
+             << ",entityFlag_" << stats.name << "_vertices:" << stats.vertices
+             << ",entityFlag_" << stats.name << "_indices:" << stats.indices;
+    }
+    {
+        std::lock_guard<std::mutex> lock(diagnosticsMutex_);
+        latestDiagnostics_ = diag.str();
     }
 }
 
@@ -894,4 +1076,9 @@ std::shared_ptr<EntityPostBatch> Entities::entityPostBatch() {
 
 std::shared_ptr<vk::BLASBatchBuilder> Entities::blasBatchBuilder() {
     return blasBatchBuilder_;
+}
+
+std::string Entities::diagnosticsString() const {
+    std::lock_guard<std::mutex> lock(diagnosticsMutex_);
+    return latestDiagnostics_;
 }

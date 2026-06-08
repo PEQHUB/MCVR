@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 
-project(minecraft-vulkan-renderer)
+project(minecraft-vulkan-renderer LANGUAGES C CXX)
 
 if(NOT DEFINED JAVA_PROJECT_ROOT_DIR OR "${JAVA_PROJECT_ROOT_DIR}" STREQUAL "")
     message(FATAL_ERROR "JAVA_PROJECT_ROOT_DIR is required. Pass -DJAVA_PROJECT_ROOT_DIR=/path/to/root/of/the/java/project/")
@@ -11,6 +11,7 @@ else()
 endif()
 
 set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_C_STANDARD 99)
 if (MSVC)
     # Generate PDB in Release for crash stack traces (no perf impact — debug info is in separate .pdb)
     add_compile_options($<$<CONFIG:Release>:/Zi>)
@@ -33,6 +34,8 @@ message(STATUS "Install bin dir: ${MCVR_INSTALL_BIN_DIR}")
 
 set(MCVR_INSTALL_LIB_DIR ${JAVA_PROJECT_ROOT_DIR}/src/main/resources/)
 message(STATUS "Install lib dir: ${MCVR_INSTALL_LIB_DIR}")
+
+set(MCVR_BUILT_IN_SHADER_PACKS vanilla-pt CACHE STRING "Built-in ray tracing shader packs to zip and install")
 
 include_directories(${MCVR_INCLUDE_DIR})
 
@@ -58,6 +61,11 @@ set(VK_XML_PATH ${PROJECT_SOURCE_DIR}/extern/vulkan_headers/registry/vk.xml)
 
 # STB
 set(STB_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/extern/stb)
+
+# Runtime shader-pack support (upstream RT executor)
+add_library(tinyexpr STATIC extern/tinyexpr/tinyexpr.c)
+set_target_properties(tinyexpr PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set(TINYEXPR_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/extern/tinyexpr)
 
 # DLSS
 add_subdirectory(extern/DLSS EXCLUDE_FROM_ALL)
@@ -144,57 +152,46 @@ else()
     message(STATUS "NRD Denoiser Disabled")
 endif()
 
-# OMM SDK (Opacity Micro-Map) - CPU baker only
-# We bypass the OMM top-level CMake and add only the library + its deps,
-# providing glm/stb from our existing project to avoid target conflicts.
-option(MCVR_ENABLE_SHARC "Enable SHARC hash grid radiance cache (requires working nvgpucomp64 — broken on 595.97)" OFF)
+# Runtime shader-pack support. Zip packs are not the RadSER production path yet,
+# but upstream's loader is built around minizip, so keep it linked while bringing
+# up the pass executor.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static libraries" FORCE)
+set(MZ_BUILD_TESTS OFF CACHE BOOL "Disable minizip tests" FORCE)
+set(MZ_BUILD_UNIT_TESTS OFF CACHE BOOL "Disable minizip unit tests" FORCE)
+set(MZ_FETCH_ZLIB ON CACHE BOOL "Fetch zlib automatically" FORCE)
+set(MZ_ZSTD OFF CACHE BOOL "Disable zstd in minizip-ng due to upstream target mismatch" FORCE)
+add_subdirectory(extern/minizip-ng EXCLUDE_FROM_ALL)
+set_target_properties(minizip PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-option(MCVR_ENABLE_OMM "Enable Opacity Micro-Map SDK for AHS elimination" ON)
+add_subdirectory(extern/json EXCLUDE_FROM_ALL)
 
-if (MCVR_ENABLE_OMM)
-    message(STATUS "OMM SDK Enabled")
-
-    # glm target (OMM expects a 'glm' CMake target; we provide our existing headers)
-    if(NOT TARGET glm)
-        add_library(glm INTERFACE)
-        target_include_directories(glm INTERFACE ${GLM_INCLUDE_DIR})
-    endif()
-
-    # stb_lib target (OMM expects 'stb_lib' for stb_image.h / stb_image_write.h)
-    if(NOT TARGET stb_lib)
-        add_library(stb_lib INTERFACE)
-        target_include_directories(stb_lib INTERFACE ${STB_INCLUDE_DIR})
-    endif()
-
-    # lz4 (from OMM's external, static only)
-    set(LZ4_BUILD_CLI OFF CACHE BOOL "" FORCE)
-    set(LZ4_BUILD_LEGACY_LZ4C OFF CACHE BOOL "" FORCE)
-    add_subdirectory(extern/omm/external/lz4/build/cmake EXCLUDE_FROM_ALL)
-
-    # xxHash (from OMM's external)
-    set(XXHASH_BUILD_XXHSUM OFF CACHE BOOL "" FORCE)
-    add_subdirectory(extern/omm/external/xxHash/build/cmake EXCLUDE_FROM_ALL)
-
-    # OMM library - static, CPU-only (no precompiled shaders)
-    set(OMM_LIB_TARGET_NAME omm-lib)
-    set(OMM_PROJECT_FOLDER "External/OMM")
-    set(OMM_STATIC_LIBRARY ON CACHE BOOL "" FORCE)
-    set(OMM_ENABLE_PRECOMPILED_SHADERS_DXIL OFF CACHE BOOL "" FORCE)
-    set(OMM_ENABLE_PRECOMPILED_SHADERS_SPIRV OFF CACHE BOOL "" FORCE)
-    set(OMM_ENABLE_OPENMP OFF CACHE BOOL "" FORCE)
-    set(OMM_LIB_INSTALL OFF CACHE BOOL "" FORCE)
-    # OMM lib uses PROJECT_VERSION which requires a version-enabled project scope
-    set(PROJECT_VERSION "1.0.0")
-    add_subdirectory(extern/omm/libraries/omm-lib EXCLUDE_FROM_ALL)
-    unset(PROJECT_VERSION)
-    # Remove stb_lib.cpp (duplicate STB_IMAGE_IMPLEMENTATION) and debug_impl.cpp
-    # (debug visualization, not needed) from omm-lib sources.
-    get_target_property(_omm_sources omm-lib SOURCES)
-    list(FILTER _omm_sources EXCLUDE REGEX "(stb_lib|debug_impl)\\.cpp$")
-    set_target_properties(omm-lib PROPERTIES SOURCES "${_omm_sources}")
-else()
-    message(STATUS "OMM SDK Disabled")
+option(MCVR_ENABLE_SHARC "Enable SHARC hash grid radiance cache build support" ON)
+option(MCVR_ENABLE_SHARC_BUFFERS "Enable SHARC hash grid buffer allocation/init. Off by default until BLAS streaming lifetime is stable." OFF)
+option(MCVR_ENABLE_SHARC_UPDATE_PASS "Enable SHARC sparse update RT pipeline creation/dispatch. Off by default until explicitly profiling SHARC." OFF)
+option(MCVR_ENABLE_SHARC_RESOLVE_PASS "Enable SHARC resolve compute pipeline creation/dispatch. Off by default until explicitly profiling SHARC." OFF)
+option(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY "Compile the small read-only SHARC cache query into the main world RT raygen. Off by default because current NVIDIA drivers crash compiling this path into the main RT pipeline." OFF)
+option(MCVR_ENABLE_SHARC_QUERY_PASS "Compile the isolated SHARC candidate/query compute pass. Runtime default stays Off; this avoids SHARC hash/BDA reads in world.rgen." OFF)
+set(MCVR_SHARC_MAIN_TRACE_QUERY_MODE "off" CACHE STRING "SHARC main trace query compile mode: off, stub, math, hash, or radiance")
+set_property(CACHE MCVR_SHARC_MAIN_TRACE_QUERY_MODE PROPERTY STRINGS off stub math hash radiance)
+string(TOLOWER "${MCVR_SHARC_MAIN_TRACE_QUERY_MODE}" MCVR_SHARC_MAIN_TRACE_QUERY_MODE_LOWER)
+if(MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY AND MCVR_SHARC_MAIN_TRACE_QUERY_MODE_LOWER STREQUAL "off")
+    set(MCVR_SHARC_MAIN_TRACE_QUERY_MODE_LOWER "radiance")
 endif()
+if(MCVR_SHARC_MAIN_TRACE_QUERY_MODE_LOWER STREQUAL "off")
+    set(MCVR_SHARC_MAIN_TRACE_QUERY_MODE_ID 0)
+elseif(MCVR_SHARC_MAIN_TRACE_QUERY_MODE_LOWER STREQUAL "stub")
+    set(MCVR_SHARC_MAIN_TRACE_QUERY_MODE_ID 1)
+elseif(MCVR_SHARC_MAIN_TRACE_QUERY_MODE_LOWER STREQUAL "math")
+    set(MCVR_SHARC_MAIN_TRACE_QUERY_MODE_ID 2)
+elseif(MCVR_SHARC_MAIN_TRACE_QUERY_MODE_LOWER STREQUAL "hash")
+    set(MCVR_SHARC_MAIN_TRACE_QUERY_MODE_ID 3)
+elseif(MCVR_SHARC_MAIN_TRACE_QUERY_MODE_LOWER STREQUAL "radiance")
+    set(MCVR_SHARC_MAIN_TRACE_QUERY_MODE_ID 4)
+else()
+    message(FATAL_ERROR "Invalid MCVR_SHARC_MAIN_TRACE_QUERY_MODE='${MCVR_SHARC_MAIN_TRACE_QUERY_MODE}'. Expected off, stub, math, hash, or radiance.")
+endif()
+
+option(MCVR_SHADER_DEBUG_INFO "Emit NonSemantic Vulkan debug info with source (-gVS) for Nsight Graphics profiling. Off by default: 3x SPIR-V size, may regress RT pipeline performance." OFF)
 
 # --- Config codegen (schema → C++ structs + JNI bridge) ---
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
