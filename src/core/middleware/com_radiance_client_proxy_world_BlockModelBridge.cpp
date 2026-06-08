@@ -73,10 +73,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeUpdateSpecularLayer(
-    JNIEnv *, jclass, jint spriteId, jlong pixelPtr, jint sizeBytes) {
+    JNIEnv *, jclass, jint spriteId, jlong pixelPtr, jint sizeBytes, jlong generation) {
 
     auto& ts = Renderer::textureSystem;
     if (!ts.isFinalized() || ts.blockSpecularArrayId() == UINT32_MAX) return;
+    if (static_cast<uint64_t>(generation) != ts.generation()) return;
     if (spriteId < 0 || static_cast<uint32_t>(spriteId) >= ts.spriteCount()) return;
     if (pixelPtr == 0 || sizeBytes <= 0) return;
     ts.arrayManager().stageLayerPixels(
@@ -85,10 +86,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockMode
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_BlockModelBridge_nativeUpdateNormalLayer(
-    JNIEnv *, jclass, jint spriteId, jlong pixelPtr, jint sizeBytes) {
+    JNIEnv *, jclass, jint spriteId, jlong pixelPtr, jint sizeBytes, jlong generation) {
 
     auto& ts = Renderer::textureSystem;
     if (!ts.isFinalized() || ts.blockNormalArrayId() == UINT32_MAX) return;
+    if (static_cast<uint64_t>(generation) != ts.generation()) return;
     if (spriteId < 0 || static_cast<uint32_t>(spriteId) >= ts.spriteCount()) return;
     if (pixelPtr == 0 || sizeBytes <= 0) return;
     ts.arrayManager().stageLayerPixels(

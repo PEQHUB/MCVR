@@ -429,6 +429,7 @@ void Textures::setTextureAlphaClass(uint32_t id, AlphaClass alphaClass) {
 }
 
 Textures::AlphaClass Textures::getTextureAlphaClass(uint32_t id) const {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
     auto it = textureAlphaClass_.find(id);
     if (it != textureAlphaClass_.end()) {
         return it->second;
@@ -438,6 +439,7 @@ Textures::AlphaClass Textures::getTextureAlphaClass(uint32_t id) const {
 }
 
 const Textures::TextureAlphaData *Textures::getTextureAlphaData(uint32_t id) const {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
     auto it = textureAlphaData_.find(id);
     if (it != textureAlphaData_.end()) {
         return &it->second;
@@ -445,7 +447,18 @@ const Textures::TextureAlphaData *Textures::getTextureAlphaData(uint32_t id) con
     return nullptr;
 }
 
+bool Textures::getTextureAlphaDataSnapshot(uint32_t id, TextureAlphaData &out) const {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
+    auto it = textureAlphaData_.find(id);
+    if (it == textureAlphaData_.end()) {
+        return false;
+    }
+    out = it->second;
+    return true;
+}
+
 const Textures::TextureRGBAData *Textures::getTextureRGBAData(uint32_t id) const {
+    std::unique_lock<std::recursive_mutex> lck(mutex_);
     auto it = textureRGBAData_.find(id);
     if (it != textureRGBAData_.end()) {
         return &it->second;

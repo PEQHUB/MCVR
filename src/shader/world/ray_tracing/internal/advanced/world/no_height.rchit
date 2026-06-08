@@ -492,7 +492,7 @@ void main() {
     uint coordinate = getCoordinate(packedData);
 
     vec2 textureUV = vec2(0.0);
-    TextureMapEntry textureMap = TextureMapEntry(-1, -1, -1);
+    TextureMapEntry textureMap = TextureMapEntry(-1, -1, -1, 0, -1, 0.0, 0.0, 0.0, 0.0);
     vec2 atlasUvMin = vec2(0.0);
     vec2 atlasUvMax = vec2(0.0);
     float lod = 0.0;

@@ -63,6 +63,7 @@ class Textures : public SharedObject<Textures> {
     AlphaClass getTextureAlphaClass(uint32_t id) const;
 
     const TextureAlphaData *getTextureAlphaData(uint32_t id) const;
+    bool getTextureAlphaDataSnapshot(uint32_t id, TextureAlphaData &out) const;
 
     const TextureRGBAData *getTextureRGBAData(uint32_t id) const;
 
@@ -71,7 +72,7 @@ class Textures : public SharedObject<Textures> {
     std::map<uint32_t, std::shared_ptr<vk::Sampler>> samplers;
     uint32_t nextID = 0;
     std::vector<uint32_t> freeList_;
-    std::recursive_mutex mutex_;
+    mutable std::recursive_mutex mutex_;
 
     std::map<uint32_t, std::shared_ptr<ImageBufferCache>> caches_;
     std::shared_ptr<std::map<uint32_t, std::vector<VkBufferImageCopy>>> uploadQueue_;

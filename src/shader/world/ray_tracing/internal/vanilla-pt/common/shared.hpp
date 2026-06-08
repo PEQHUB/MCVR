@@ -273,6 +273,12 @@ namespace Data {
         T_INT specular;
         T_INT normal;
         T_INT flag;
+        T_INT properties;
+        T_INT maskTexture;
+        T_FLOAT _reserved0;
+        T_FLOAT _reserved1;
+        T_FLOAT _reserved2;
+        T_FLOAT _reserved3;
     };
 
     struct TextureMapping {

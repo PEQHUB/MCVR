@@ -177,7 +177,7 @@ void prepareDirectLightSurface(PrimarySurfaceCache cache,
     vec3 colorLayer = colorLayerValue.rgb;
 
     uint textureID = cache.textureID;
-    TextureMapEntry textureMap = TextureMapEntry(-1, -1, -1);
+    TextureMapEntry textureMap = TextureMapEntry(-1, -1, -1, 0, -1, 0.0, 0.0, 0.0, 0.0);
     vec2 textureUV = cache.textureUV;
     vec2 atlasUvMin = cache.atlasUvMin;
     vec2 atlasUvMax = cache.atlasUvMax;
