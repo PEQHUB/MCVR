@@ -1,0 +1,69 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Release",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "JAVA_PROJECT_ROOT_DIR": "C:/RadSER/Radiance",
+        "MCVR_ENABLE_NRD": "ON",
+        "MCVR_SHADER_DEBUG_INFO": "OFF",
+        "SHADERMAKE_FXC_PATH": "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/fxc.exe"
+      }
+    },
+    {
+      "name": "nsight-release",
+      "displayName": "Nsight Release Shader Debug",
+      "inherits": "release",
+      "binaryDir": "${sourceDir}/build-nsight",
+      "cacheVariables": {
+        "MCVR_SHADER_DEBUG_INFO": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release-shaders",
+      "configurePreset": "release",
+      "configuration": "Release",
+      "targets": [
+        "shaders"
+      ]
+    },
+    {
+      "name": "release-core",
+      "configurePreset": "release",
+      "configuration": "Release",
+      "targets": [
+        "core"
+      ]
+    },
+    {
+      "name": "nsight-shaders",
+      "configurePreset": "nsight-release",
+      "configuration": "Release",
+      "targets": [
+        "shaders"
+      ]
+    },
+    {
+      "name": "nsight-core",
+      "configurePreset": "nsight-release",
+      "configuration": "Release",
+      "targets": [
+        "core"
+      ]
+    },
+    {
+      "name": "nsight-verify-shaders",
+      "configurePreset": "nsight-release",
+      "configuration": "Release",
+      "targets": [
+        "verify_nsight_shaders"
+      ]
+    }
+  ]
+}

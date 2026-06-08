@@ -1,0 +1,69 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+// Cloud shadow map for VML fog integration. [Hillaire16 §4.7]
+// Traces vertical columns through cloud layer along sun direction,
+// outputs transmittance map centered on camera.
+// VolumetricModule's scatter shader reads this instead of hash-based shadow.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 6)          uniform sampler3D uNoise3D;
+layout(set = 0, binding = 7, r16f)    uniform writeonly image2D uCloudShadow;
+layout(set = 0, binding = 8)          uniform sampler2D uWeatherMap;
+
+#define CLOUD_HAS_WEATHER_SAMPLER
+#include "cloud_common.glsl"
+#include "cloud_density.glsl"
+
+const uint SHADOW_STEPS = 16;
+
+void main() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (texel.x >= int(pc.shadowMapSize) || texel.y >= int(pc.shadowMapSize)) return;
+
+    vec3 eyePos = getEyePos();
+
+    // Map shadow texel to world XZ position (centered on camera, fixed extent)
+    vec2 uv = (vec2(texel) + 0.5) / float(pc.shadowMapSize);
+    vec2 worldXZ = eyePos.xz + (uv - 0.5) * WEATHER_EXTENT;
+
+    // Light direction: sun or moon (matches raymarch)
+    vec3 sunDir = normalize(skyUBO.sunDirection);
+    vec3 lightDir = sunDir.y > 0.0 ? sunDir : normalize(skyUBO.moonDirection);
+
+    // Use shared effectiveThickness() — must match raymarch
+    float cloudThick = effectiveThickness();
+
+    // Start at cloud base, march upward through thickness
+    float stepSize = cloudThick / float(SHADOW_STEPS);
+    float opticalDepth = 0.0;
+
+    for (uint i = 0; i < SHADOW_STEPS; i++) {
+        float y = pc.cloudBase + (float(i) + 0.5) * stepSize;
+        vec3 pos = vec3(worldXZ.x, y, worldXZ.y);
+
+        // Offset by light angle (shadow projection) + perpendicular spread for soft penumbra
+        float lightT = (y - pc.cloudBase) / max(lightDir.y, 0.05);
+        pos.xz += lightDir.xz * lightT;
+        // Perpendicular spread grows with height — softens shadow edges
+        vec2 perpDir = vec2(-lightDir.z, lightDir.x);
+        pos.xz += perpDir * float(i) * 0.3;
+
+        float hFrac = (float(i) + 0.5) / float(SHADOW_STEPS);
+        vec3 noisePos = pos * NOISE_SCALE + windOffset(pc.windTime, hFrac);
+        vec4 noise = textureLod(uNoise3D, noisePos, 1.0);
+        vec4 weather = sampleWeather(uWeatherMap, pos);
+
+        float density = getBaseDensity(pos, weather.r, weather.g, noise,
+                                       pc.cloudBase, cloudThick, pc.densityMultiplier);
+        opticalDepth += density * EXTINCTION * stepSize;
+
+        // Early termination: fully opaque shadow, remaining steps won't change result
+        if (opticalDepth > 5.0) break;
+    }
+
+    // Output transmittance (Beer's law)
+    float transmittance = exp(-opticalDepth);
+    imageStore(uCloudShadow, texel, vec4(transmittance));
+}

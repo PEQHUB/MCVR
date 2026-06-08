@@ -1,0 +1,259 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_atomic_int64 : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_EXT_shader_16bit_storage : enable
+#extension GL_EXT_control_flow_attributes : require
+
+// SHARC compile-time gate: controlled by CMake MCVR_ENABLE_SHARC option.
+#ifndef SHARC_COMPILE_ENABLE
+#define SHARC_COMPILE_ENABLE 0
+#endif
+
+#if SHARC_COMPILE_ENABLE
+#define SHARC_ENABLE_GLSL 1
+#define SHARC_ENABLE_64_BIT_ATOMICS 1
+#define SHARC_UPDATE 1
+#define SHARC_PROPAGATION_DEPTH 4
+#endif
+
+#include "../util/random.glsl"
+#include "../util/ray_cone.glsl"
+#include "../util/ray_payloads.glsl"
+#include "../util/util.glsl"
+#include "common/shared.hpp"
+#include "../util/shader_pack_visual_settings.glsl"
+
+#if SHARC_COMPILE_ENABLE
+#include "SharcGlsl.h"
+#include "SharcCommon.h"
+#endif
+
+layout(set = 0, binding = 0) uniform sampler2D textures[];
+layout(set = 0, binding = 2) uniform samplerCube skyFull;
+
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
+
+layout(set = 2, binding = 0) uniform WorldUniform {
+    WorldUBO worldUBO;
+};
+
+layout(set = 2, binding = 2) uniform SkyUniform {
+    SkyUBO skyUBO;
+};
+
+layout(push_constant) uniform PushConstant {
+    int numRayBounces;
+    int flags;
+    int reservedLighting0;
+    float reservedLighting1;
+    int reservedLighting2;
+    int reservedLighting3;
+    int reservedLighting4;
+    float preExposure;
+    float displacementDepthScale;
+    int displacementPrimarySteps;
+    int displacementRefinementSteps;
+    float displacementFadeDistanceBlocks;
+    uint blueNoiseFrame;
+    uint rtDebugFlags;
+    uint handInstanceCount;
+    uint reservedPc0;
+    uint64_t sharcHashEntries;
+    uint64_t sharcAccumulation;
+    uint64_t sharcResolved;
+    float sharcCameraX;
+    float sharcCameraY;
+    float sharcCameraZ;
+    float sharcSceneScale;
+    uint sharcCapacity;
+    float sharcRadianceScale;
+    uint sharcFrameIndex;
+    float sharcRoughnessThreshold;
+    int sharcUpdateBlockSize;
+    int sharcUpdateBounces;
+    int sharcQueryMode;
+    int sharcQueryReserved;
+    int offlineFlags;
+    int accumFrameCount;
+    float aperture;
+    float focalDistance;
+    uint64_t reservedAddr;
+} pc;
+
+layout(location = 0) rayPayloadEXT PrimaryRay mainRay;
+
+void main() {
+#if !SHARC_COMPILE_ENABLE
+    return; // SHARC disabled at compile time
+#else
+    uvec2 pixel = gl_LaunchIDEXT.xy;
+    vec2 resolution = vec2(gl_LaunchSizeEXT.xy);
+
+    // Sparse pixel selection: only trace 1 per NxN block
+    uint bs = uint(pc.sharcUpdateBlockSize);
+    uint blockX = pixel.x / bs;
+    uint blockY = pixel.y / bs;
+    uint seed = blockX * 7u + blockY * 13u + pc.sharcFrameIndex * 31u;
+    uint h = xxhash32(uvec3(seed, seed + 1u, seed + 2u));
+    uint selectedX = blockX * bs + (h % bs);
+    uint selectedY = blockY * bs + ((h >> 8u) % bs);
+    if (pixel.x != selectedX || pixel.y != selectedY) return;
+
+    // Camera ray setup (same projection as world.rgen)
+    vec2 pixelCenter = vec2(pixel) + 0.5;
+    pixelCenter += worldUBO.cameraJitter;
+    vec2 ndc = pixelCenter / resolution * 2.0 - 1.0;
+    vec4 viewNear = worldUBO.cameraProjMatInv * vec4(ndc, 0.0, 1.0);
+    viewNear /= viewNear.w;
+    vec3 origin = vec3(worldUBO.cameraEffectedViewMatInv * vec4(0, 0, 0, 1));
+    vec3 direction = normalize(vec3(worldUBO.cameraEffectedViewMatInv * vec4(viewNear.xyz, 0.0)));
+
+    const uint rayFlags = gl_RayFlagsCullBackFacingTrianglesEXT;
+
+    // Initialize ray payload
+    mainRay.seed = xxhash32(uvec3(pixel.x, pixel.y, worldUBO.seed));
+    mainRay.origin = origin;
+    mainRay.direction = direction;
+    mainRay.radiance = vec3(0.0);
+    mainRay.throughput = vec3(1.0);
+    mainRay.coneWidth = 0;
+    float fovY = fovYFromProj(worldUBO.cameraProjMat);
+    float fovX = fovXFromProj(worldUBO.cameraProjMat);
+    mainRay.coneSpread = coneSpreadFromFov(fovY, fovX, resolution);
+    mainRay.flags = 0u; // all flags clear (not hand, not in boat, etc.)
+    mainRay.pixelPacked = pixel.x | (pixel.y << 16u);
+
+    // Initialize SHARC state
+    SharcParameters sharcParams;
+    sharcParams.gridParameters.cameraPosition = float3(pc.sharcCameraX, pc.sharcCameraY, pc.sharcCameraZ);
+    sharcParams.gridParameters.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
+    sharcParams.gridParameters.sceneScale = pc.sharcSceneScale;
+    sharcParams.gridParameters.levelBias = float(SHARC_GRID_LEVEL_BIAS);
+    sharcParams.hashMapData.capacity = pc.sharcCapacity;
+    sharcParams.hashMapData.hashEntriesBuffer = RWStructuredBuffer_uint64_t(pc.sharcHashEntries);
+    sharcParams.radianceScale = pc.sharcRadianceScale;
+    sharcParams.enableAntiFireflyFilter = true;
+    sharcParams.accumulationBuffer = RWStructuredBuffer_SharcAccumulationData(pc.sharcAccumulation);
+    sharcParams.resolvedBuffer = RWStructuredBuffer_SharcPackedData(pc.sharcResolved);
+
+    SharcState sharcState;
+    SharcInit(sharcState);
+
+    // Track per-segment state for correct SHARC throughput/radiance extraction
+    vec3 radianceBefore = vec3(0.0);
+    vec3 throughputBefore = vec3(1.0);
+
+    // Trace primary ray
+    mainRay.index = 0;
+    mainRay.flags = (mainRay.flags & (PR_ISHAND_BIT | PR_INSIDEBOAT_BIT)) | (255u << PR_EMBLOCK_SHIFT);
+    mainRay.hitT = 0;
+    mainRay.prevWorldPos = vec3(0.0);
+    mainRay.hasPrevWorldPos = 0u;
+    mainRay.directLightRadiance = vec3(0.0);
+    mainRay.directLightHitT = 0.0;
+    mainRay.albedoEmission = 0.0;
+    mainRay.roughness = 1.0;
+
+    // Primary mask: match world.rgen PSR primary (first-person exclusion + BOAT_WATER_MASK)
+    uint sceneCloudMask = shaderPackVisualSettings.cloudMode == 1 ? CLOUD_MASK : 0u;
+    uint mask;
+    if (worldUBO.isFirstPerson == 1) {
+        mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | sceneCloudMask | BOAT_WATER_MASK;
+    } else if (worldUBO.isFirstPerson == 2) {
+        mask = WORLD_MASK | WEATHER_MASK | PARTICLE_MASK | sceneCloudMask | BOAT_WATER_MASK;
+    } else {
+        mask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | sceneCloudMask | BOAT_WATER_MASK;
+    }
+    traceRayEXT(topLevelAS, rayFlags, mask, 1, 1, 0,
+                mainRay.origin, 0.0, mainRay.direction, 1000.0, 0);
+
+    // Bounce loop with SHARC update
+    int maxBounces = min(pc.numRayBounces, pc.sharcUpdateBounces);
+    for (int b = 0; b < maxBounces; b++) {
+        // Check sky miss BEFORE stop — miss shader sets both hitT=INF and stop=1
+        if (mainRay.hitT == INF_DISTANCE) {
+            // Extract local sky radiance from the miss shader's contribution
+            // Miss shader adds: skyColor * throughputBefore to mainRay.radiance
+            vec3 radianceDelta = mainRay.radiance - radianceBefore;
+            vec3 localSkyRad = radianceDelta / max(throughputBefore, vec3(0.001));
+            if (any(isnan(localSkyRad)) || any(isinf(localSkyRad))) localSkyRad = vec3(0.0);
+            SharcUpdateMiss(sharcParams, sharcState, localSkyRad);
+            break;
+        }
+
+        // Non-sky stop (CHS early termination — failed BSDF sample, etc.)
+        if (prGetStop(mainRay)) break;
+
+        // Extract LOCAL direct radiance at this hit (emission + sun, WITHOUT path throughput).
+        // The CHS adds radiance contributions as: contribution * cumulativeThroughput.
+        // By dividing the delta by the throughput BEFORE this trace, we get the local value.
+        vec3 radianceDelta = mainRay.radiance - radianceBefore;
+        vec3 localDirectLight = radianceDelta / max(throughputBefore, vec3(0.001));
+        if (any(isnan(localDirectLight)) || any(isinf(localDirectLight))) localDirectLight = vec3(0.0);
+
+        // Firefly clamp on local direct light
+        float dlLum = max(localDirectLight.r, max(localDirectLight.g, localDirectLight.b));
+        if (dlLum > 500.0) localDirectLight *= 500.0 / dlLum;
+
+        // Convert camera-relative hit position to absolute world coords for stable hashing
+        vec3 absoluteHitPos = mainRay.worldPos + vec3(worldUBO.cameraPos.xyz);
+
+        SharcHitData hitData;
+        hitData.positionWorld = absoluteHitPos;
+        hitData.normalWorld = mainRay.normal;
+
+        if (!SharcUpdateHit(sharcParams, sharcState, hitData, localDirectLight, rand(mainRay.seed))) {
+            break; // Cache resampling terminated the path
+        }
+
+        // Extract single-bounce throughput delta (BSDF/PDF ratio for THIS bounce only).
+        // The CHS updates mainRay.throughput cumulatively: T_cumulative = T_prev * (BSDF/PDF).
+        // The per-bounce factor is: T_cumulative / T_prev.
+        vec3 bounceThroughput = mainRay.throughput / max(throughputBefore, vec3(0.001));
+        if (any(isnan(bounceThroughput)) || any(isinf(bounceThroughput))) bounceThroughput = vec3(0.0);
+
+        // Clamp per-bounce throughput to prevent firefly propagation
+        float btMag = max(bounceThroughput.r, max(bounceThroughput.g, bounceThroughput.b));
+        if (btMag > 20.0) bounceThroughput *= 20.0 / btMag;
+
+        SharcSetThroughput(sharcState, bounceThroughput);
+
+        // Save state for next iteration's delta extraction
+        radianceBefore = mainRay.radiance;
+        throughputBefore = mainRay.throughput;
+
+        // Trace next bounce (CHS sets up mainRay.origin/direction for next segment)
+        mainRay.index = b + 1;
+        mainRay.flags = (mainRay.flags & (PR_ISHAND_BIT | PR_INSIDEBOAT_BIT)) | (255u << PR_EMBLOCK_SHIFT);
+        mainRay.hitT = 0;
+        mainRay.prevWorldPos = vec3(0.0);
+        mainRay.hasPrevWorldPos = 0u;
+        mainRay.directLightRadiance = vec3(0.0);
+        mainRay.directLightHitT = 0.0;
+        mainRay.albedoEmission = 0.0;
+        mainRay.roughness = 1.0;
+
+        // Masks matching world.rgen bounce loop
+        uint bounceMask;
+        uint len;
+        if (b == 0) {
+            len = 1000;
+            bounceMask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | WEATHER_MASK | PARTICLE_MASK | sceneCloudMask | BOAT_WATER_MASK;
+        } else {
+            len = 384;
+            bounceMask = WORLD_MASK | PLAYER_MASK | PLAYER_HEAD_MASK | sceneCloudMask | BOAT_WATER_MASK;
+        }
+
+        uint bounceFlags = rayFlags;
+
+        traceRayEXT(topLevelAS, bounceFlags, bounceMask, 1, 1, 0,
+                    mainRay.origin, 0.0, mainRay.direction, len, 0);
+    }
+#endif // SHARC_COMPILE_ENABLE
+}

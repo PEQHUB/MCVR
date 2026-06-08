@@ -1,0 +1,55 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D uRadiance;
+layout(set = 0, binding = 1, r32f)    uniform readonly image2D uLinearDepth;
+layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D uCloudRadiance;
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D uCloudColor;
+
+#include "cloud_common.glsl"
+
+void main() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (texel.x >= int(pc.renderWidth) || texel.y >= int(pc.renderHeight)) return;
+
+    vec4 scene = imageLoad(uRadiance, texel);
+
+    if (pc.densityMultiplier <= 0.0 || pc.cloudBase > 90000.0 ||
+        pc.cloudWidth < 2u || pc.cloudHeight < 2u) {
+        imageStore(uCloudRadiance, texel, scene);
+        return;
+    }
+
+    // Bilinear interpolation from cloud resolution to render resolution.
+    // Nearest-neighbor creates blocky artifacts at half/quarter res.
+    vec2 cloudUV = (vec2(texel) + 0.5) / vec2(pc.renderWidth, pc.renderHeight)
+                 * vec2(pc.cloudWidth, pc.cloudHeight) - 0.5;
+    ivec2 base = ivec2(floor(cloudUV));
+    vec2 f = cloudUV - vec2(base);
+    base = clamp(base, ivec2(0), ivec2(pc.cloudWidth - 2, pc.cloudHeight - 2));
+    vec4 c00 = imageLoad(uCloudColor, base);
+    vec4 c10 = imageLoad(uCloudColor, base + ivec2(1, 0));
+    vec4 c01 = imageLoad(uCloudColor, base + ivec2(0, 1));
+    vec4 c11 = imageLoad(uCloudColor, base + ivec2(1, 1));
+    vec4 cloud = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+    if (cloud.a < 0.001 && dot(cloud.rgb, cloud.rgb) < 1e-10) {
+        imageStore(uCloudRadiance, texel, scene);
+        return;
+    }
+    cloud.a = clamp(cloud.a, 0.0, 1.0);
+
+    // cloud.rgb = scattered light, cloud.a = transmittance
+    // Front-to-back compositing: result = cloud_color + scene * transmittance.
+    // Guard: when transmittance ≈ 0 (fully opaque cloud), skip scene multiply
+    // to avoid NaN from INF * 0 (sky pixels store extreme radiance values).
+    vec3 result;
+    if (cloud.a > 0.001) {
+        result = cloud.rgb + scene.rgb * cloud.a;
+    } else {
+        result = cloud.rgb;
+    }
+
+    imageStore(uCloudRadiance, texel, vec4(result, 1.0));
+}

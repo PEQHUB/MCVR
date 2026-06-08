@@ -1,0 +1,121 @@
+#version 460
+#define NUM_BINS 256
+const vec3 LUMA = vec3(0.2627, 0.6780, 0.0593);
+
+layout(set = 0, binding = 0) uniform sampler2D uHdr;           // Displayed HDR source, used by tone_mapping.frag
+layout(set = 0, binding = 3) uniform sampler2D uEmission;      // RT emission (layout compatibility)
+layout(set = 0, binding = 4) uniform sampler2D uHdrRenderRes;  // Displayed HDR source, used for metering
+
+layout(std430, set = 0, binding = 1) buffer HistogramBuffer {
+    uint bins[NUM_BINS];
+}
+histData;
+
+layout(push_constant) uniform PushB {
+    float log2Min;
+    float log2Max;
+    float epsilon;
+    float lowPercent;
+    float highPercent;
+    float middleGrey;
+    float dt;
+    float brightAdaptSpeed;
+    float darkAdaptSpeed;
+    float minExposure;
+    float maxExposure;
+    float sceneChangeThreshold;
+    float centerWeightStrength;
+    float tonemapMode;
+    float Lwhite;
+    float exposureCompensation;
+    // HDR fields (unused by hist shader, but must match push constant layout)
+    float hdrPipelineEnabled;
+    float hdr10OutputEnabled;
+    float peakNits;
+    float paperWhiteNits;
+    float saturation;
+    float sdrTransferFunction;
+    float psychoPeakSDR;
+    float manualExposureEnabled;
+    float manualExposure;
+    // PsychoV (layout parity with exposure.comp)
+    float psychoEnabled;
+    float psychoHighlights;
+    float psychoShadows;
+    float psychoContrast;
+    float psychoPurity;
+    float psychoBleaching;
+    float psychoClipPoint;
+    float psychoHueRestore;
+    float psychoAdaptContrast;
+    float psychoWhiteCurve;
+    float psychoConeExponent;
+    float saturationAdaptive;
+    float tonemapParam0;
+    float tonemapParam1;
+    float tonemapParam2;
+    float tonemapParam3;
+    float tonemapParam4;
+    float tonemapParam5;
+    float tonemapParam6;
+    float tonemapParam7;
+    float preExposure;  // RT pre-exposure — undo before binning for correct metering
+    float highlightWeight; // Highlight-weighted metering (0=uniform, 1=full highlight bias)
+}
+pc;
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+shared uint sHist[NUM_BINS];
+
+void main() {
+    uint lid = gl_LocalInvocationIndex; // 0 .. (local_size_x*local_size_y - 1)
+    uint lsize = gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z;
+
+    for (uint i = lid; i < NUM_BINS; i += lsize) { sHist[i] = 0u; }
+
+    barrier();
+
+    // Read from render-res HDR (binding 4) — the pre-DLSS composed scene.
+    ivec2 size = textureSize(uHdrRenderRes, 0);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+
+    bool inside = (p.x >= 0) && (p.y >= 0) && (p.x < size.x) && (p.y < size.y);
+
+    if (inside) {
+        vec3 hdr = texelFetch(uHdrRenderRes, p, 0).rgb;
+
+        // Histogram meters the same linear HDR source that tone_mapping.frag displays.
+        // This keeps DLSS-D/RR reconstruction and exposure adaptation in one luminance space.
+        float lum = dot(hdr, LUMA);
+        float logLum = log2(max(lum, pc.epsilon));
+
+        float denom = (pc.log2Max - pc.log2Min);
+        float t = (denom != 0.0) ? (logLum - pc.log2Min) / denom : 0.0;
+        t = clamp(t, 0.0, 1.0);
+
+        uint bin = uint(t * float(NUM_BINS - 1));
+
+        // Center-weighted metering: pixels near center contribute more weight.
+        // Gaussian-like falloff from center; strength controls blend with uniform.
+        vec2 uv = (vec2(p) + 0.5) / vec2(size);
+        float r2 = dot(uv - 0.5, uv - 0.5);
+        float w = mix(1.0, 1.0 + 3.0 * exp(-8.0 * r2), pc.centerWeightStrength);
+
+        // Highlight-weighted metering: brighter pixels get proportionally more weight.
+        // Prevents highlight blowout when player stands in shadow — the bright sky/sun
+        // pixels pull the exposure target up, reducing overexposure.
+        float highlightW = mix(1.0, 1.0 + 3.0 * t * t, pc.highlightWeight);
+        w *= highlightW;
+
+        uint weight = uint(clamp(w, 1.0, 16.0));
+        atomicAdd(sHist[bin], weight);
+    }
+
+    barrier();
+
+    for (uint i = lid; i < NUM_BINS; i += lsize) {
+        uint v = sHist[i];
+        if (v != 0u) { atomicAdd(histData.bins[i], v); }
+    }
+}

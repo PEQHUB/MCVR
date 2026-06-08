@@ -1,0 +1,38 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#define FFX_GLSL 1
+#define FFX_GPU 1
+#define FFX_HALF 0
+
+#include "ffx_core.h"
+
+layout(set = 0, binding = 0) uniform sampler2D r_input;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D rw_output;
+
+layout(push_constant) uniform EasuPC {
+    uvec4 const0;
+    uvec4 const1;
+    uvec4 const2;
+    uvec4 const3;
+} pc;
+
+// Enable float EASU path (not half-precision)
+#define FFX_FSR_EASU_FLOAT 1
+
+// EASU callbacks — textureGather returns 4 texels of a 2x2 footprint per channel
+FfxFloat32x4 FsrEasuRF(FfxFloat32x2 p) { return textureGather(r_input, p, 0); }
+FfxFloat32x4 FsrEasuGF(FfxFloat32x2 p) { return textureGather(r_input, p, 1); }
+FfxFloat32x4 FsrEasuBF(FfxFloat32x2 p) { return textureGather(r_input, p, 2); }
+
+#include "fsr1/ffx_fsr1.h"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    FfxUInt32x2 outPos = FfxUInt32x2(gl_GlobalInvocationID.xy);
+
+    FfxFloat32x3 c;
+    ffxFsrEasuFloat(c, outPos, pc.const0, pc.const1, pc.const2, pc.const3);
+    imageStore(rw_output, FfxInt32x2(outPos), vec4(c, 1.0));
+}

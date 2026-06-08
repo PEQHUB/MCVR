@@ -1,0 +1,39 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+#define FFX_GLSL 1
+#define FFX_GPU 1
+#define FFX_HALF 0
+#define FSR_RCAS_F 1
+#define FSR_RCAS_DENOISE 1
+
+#include "ffx_core.h"
+
+layout(set = 0, binding = 0) uniform sampler2D r_input_color;
+layout(set = 0, binding = 1, rgba8) uniform image2D rw_output_color;
+
+layout(push_constant) uniform RcasPushConstant {
+    uvec4 const0;   // Sharpness config from FsrRcasCon()
+    uvec4 sample0;  // Sample flags (0 = no sRGB conversion)
+} pc;
+
+// RCAS callbacks
+FfxFloat32x4 FsrRcasLoadF(FfxInt32x2 p) {
+    return texelFetch(r_input_color, p, 0);
+}
+
+void FsrRcasInputF(inout FfxFloat32 r, inout FfxFloat32 g, inout FfxFloat32 b) {
+    // No input conversion needed (linear HDR)
+}
+
+#include "fsr1/ffx_fsr1.h"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+void main() {
+    ivec2 outPos = ivec2(gl_GlobalInvocationID.xy);
+
+    FfxFloat32 r, g, b;
+    FsrRcasF(r, g, b, outPos, pc.const0);
+    imageStore(rw_output_color, outPos, vec4(r, g, b, 1.0));
+}

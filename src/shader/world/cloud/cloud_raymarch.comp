@@ -1,0 +1,506 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+
+// Core volumetric cloud ray march. [Schneider15 §4, Frostnova compute.comp]
+// Dispatched at cloud resolution (quarter/half/full).
+// Output: RGBA16F cloud color (rgb) + transmittance (a).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// Set 0: images
+layout(set = 0, binding = 1, r32f)     uniform readonly image2D uLinearDepth;
+layout(set = 0, binding = 3, rgba16f)  uniform writeonly image2D uCloudColor;
+layout(set = 0, binding = 6)           uniform sampler3D uNoise3D;         // 128^3 RGBA8 repeat
+layout(set = 0, binding = 8)           uniform sampler2D uWeatherMap;      // 256x256 RGBA8
+
+#define CLOUD_HAS_WEATHER_SAMPLER
+#include "cloud_common.glsl"
+#include "cloud_density.glsl"
+
+const float MARCH_CLAMP = 4000.0;
+
+// Detail noise frequency ratio. At 8x with noiseScale=1000:
+//   Detail tiles at 125 blocks. Features ~4-8 blocks. Good for Minecraft scale.
+const float DETAIL_FREQ = 8.0;
+
+// Curl displacement strength. Inversely proportional to detail feature size.
+// At DETAIL_FREQ=8, features ~3 blocks, curl displaces ~0.5 features.
+const float CURL_STRENGTH = 1.5;
+const float CURL_EPS = 1.0 / 128.0;  // One texel in noise UV space
+
+// Lighting model toggle
+const bool USE_FROSTNOVA_PHASE  = true;   // true = HG(0.2) single lobe, false = dual-lobe + silver
+
+float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float blueNoiseJitter(uint frame, ivec2 texel) {
+    const float GOLDEN_RATIO_FRAC = 0.6180339887;
+    return fract(float(frame) * GOLDEN_RATIO_FRAC + hash12(vec2(texel)));
+}
+
+vec3 getViewRay(vec2 uv) {
+    vec4 clipPos = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+    vec4 viewPos = worldUBO.cameraProjMatInv * clipPos;
+    viewPos.xyz /= viewPos.w;
+    vec3 worldDir = (worldUBO.cameraEffectedViewMatInv * vec4(viewPos.xyz, 0.0)).xyz;
+    return normalize(worldDir);
+}
+
+bool intersectCloudSlab(vec3 origin, vec3 dir, float thickness, out float tEnter, out float tExit) {
+    float yBot = pc.cloudBase;
+    float yTop = pc.cloudBase + thickness;
+
+    if (abs(dir.y) < 1e-6) {
+        if (origin.y >= yBot && origin.y <= yTop) {
+            tEnter = 0.0;
+            tExit = MARCH_CLAMP;
+            return true;
+        }
+        return false;
+    }
+
+    float t0 = (yBot - origin.y) / dir.y;
+    float t1 = (yTop - origin.y) / dir.y;
+    if (t0 > t1) { float tmp = t0; t0 = t1; t1 = tmp; }
+    tEnter = max(t0, 0.0);
+    tExit = t1;
+    return tExit > tEnter;
+}
+
+// --- Debug visualization ---
+vec3 heatMap(float t) {
+    t = clamp(t, 0.0, 1.0);
+    vec3 c;
+    if (t < 0.2)      c = mix(vec3(0,0,0), vec3(0,0,1), t / 0.2);
+    else if (t < 0.4) c = mix(vec3(0,0,1), vec3(0,1,1), (t - 0.2) / 0.2);
+    else if (t < 0.6) c = mix(vec3(0,1,1), vec3(0,1,0), (t - 0.4) / 0.2);
+    else if (t < 0.8) c = mix(vec3(0,1,0), vec3(1,1,0), (t - 0.6) / 0.2);
+    else              c = mix(vec3(1,1,0), vec3(1,0,0), (t - 0.8) / 0.2);
+    return c;
+}
+
+void debugVisualize(ivec2 texel, vec2 uv, vec3 rayOrigin, vec3 rayDir, float cloudThick) {
+    float tEnter, tExit;
+    if (!intersectCloudSlab(rayOrigin, rayDir, cloudThick, tEnter, tExit)) {
+        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    float tMid = (tEnter + tExit) * 0.5;
+    vec3 pos = rayOrigin + rayDir * tMid;
+
+    vec4 weather = sampleWeather(uWeatherMap, pos);
+    vec3 noiseUV = pos * NOISE_SCALE + windOffset(pc.windTime);
+    vec4 noise = texture(uNoise3D, noiseUV);
+    float h = clamp((pos.y - pc.cloudBase) / cloudThick, 0.0, 1.0);
+    float hProf = heightProfile(h, weather.g);
+
+    // Schneider15 density stages
+    float baseNoise = valueRemapClamped(noise.r, 0.3, 1.0, 0.0, 1.0);
+    float shapeDensity = hProf * baseNoise;
+    float fbm = 0.625 * noise.g + 0.25 * noise.b + 0.125 * noise.a;
+
+    float outH;
+    float baseDensity = getBaseDensity(pos, weather.r, weather.g, noise,
+                                        pc.cloudBase, cloudThick, pc.densityMultiplier, outH);
+
+    // Detail at debug point
+    vec3 detailUV = pos * NOISE_SCALE * DETAIL_FREQ + windOffset(pc.windTime);
+    vec4 detailNoise = texture(uNoise3D, detailUV);
+    float finalDensity = getDetailDensity(baseDensity, detailNoise, h, pc.detailStrength);
+
+    vec3 color;
+    switch (pc.debugMode) {
+        case 1: color = heatMap(weather.r); break;              // Weather coverage
+        case 2: color = heatMap(weather.g); break;              // Weather type
+        case 3: color = vec3(noise.r); break;                   // Noise R (Perlin-Worley)
+        case 4: color = vec3(noise.g); break;                   // Noise G (Worley 2x)
+        case 5: color = vec3(fbm); break;                       // FBM erosion (G/B/A)
+        case 6: color = heatMap(hProf); break;                  // Height profile
+        case 7: color = heatMap(baseDensity); break;            // Base density (pre-detail)
+        case 8: color = heatMap(finalDensity); break;           // Final density (with detail)
+        default: color = vec3(1, 0, 1); break;
+    }
+
+    imageStore(uCloudColor, texel, vec4(color, 0.0));
+}
+
+// --- Sample full density (base + detail) at a point ---
+// Used by both main march and light march [Frostnova calls both in SampleLight]
+float sampleFullDensity(vec3 pos, float cloudThick, out float outHeight) {
+    float hFrac = clamp((pos.y - pc.cloudBase) / cloudThick, 0.0, 1.0);
+    vec3 noiseUV = pos * NOISE_SCALE + windOffset(pc.windTime, hFrac);
+    float dist = length(pos - getEyePos());
+    vec4 noise = textureLod(uNoise3D, noiseUV, 1.0);
+    vec4 weather = sampleWeather(uWeatherMap, pos);
+
+    float baseDensity = getBaseDensity(pos, weather.r, weather.g, noise,
+                                        pc.cloudBase, cloudThick, pc.densityMultiplier, outHeight);
+    if (baseDensity < 0.0001) return 0.0;
+
+    // Curl displacement [Frostnova: 2D curl texture displaces detail sample position]
+    // Finite-difference curl of base noise R channel on XZ plane [Bridson07]
+    float nxp = textureLod(uNoise3D, noiseUV + vec3(CURL_EPS, 0, 0), 2.0).r;
+    float nxm = textureLod(uNoise3D, noiseUV - vec3(CURL_EPS, 0, 0), 2.0).r;
+    float nzp = textureLod(uNoise3D, noiseUV + vec3(0, 0, CURL_EPS), 2.0).r;
+    float nzm = textureLod(uNoise3D, noiseUV - vec3(0, 0, CURL_EPS), 2.0).r;
+    vec3 curlDisp = vec3(nzp - nzm, 0.0, -(nxp - nxm)) * CURL_STRENGTH;
+
+    // Detail erosion [Frostnova GetDetailDensity]
+    vec3 detailPos = (pos + curlDisp) * NOISE_SCALE * DETAIL_FREQ + windOffset(pc.windTime, hFrac);
+    vec4 detailNoise = textureLod(uNoise3D, detailPos, 0.0);
+
+    return getDetailDensity(baseDensity, detailNoise, outHeight, pc.detailStrength);
+}
+
+// Overload without height output
+float sampleFullDensity(vec3 pos, float cloudThick) {
+    float unused;
+    return sampleFullDensity(pos, cloudThick, unused);
+}
+
+// Build orthonormal basis from a direction vector (light direction).
+// Used to orient cone sample offsets relative to light direction.
+mat3 buildLightBasis(vec3 lightDir) {
+    vec3 up = abs(lightDir.y) < 0.999 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+    vec3 right = normalize(cross(up, lightDir));
+    vec3 forward = cross(lightDir, right);
+    return mat3(right, lightDir, forward);
+}
+
+// 6-sample cone light march [Schneider15 §4.4, Frostnova SampleLight]
+// Samples spread in a cone along the light direction. Each offset encodes
+// (lateral_x, distance_along_light, lateral_z) in light-local space.
+// The spreading cone captures light scattering from surrounding cloud mass,
+// not just the straight-line shadow.
+float lightMarchCone(vec3 pos, vec3 lightDir, float cloudThick) {
+    const vec3 CONE_OFFSETS[6] = vec3[6](
+        vec3(0.0,  0.6,  0.0),
+        vec3(0.0,  0.5,  0.05),
+        vec3(0.1,  0.75, 0.0),
+        vec3(0.2,  2.5,  0.3),
+        vec3(0.0,  6.0,  0.0),
+        vec3(-0.1, 1.0, -0.2)
+    );
+
+    mat3 basis = buildLightBasis(lightDir);
+    float scale = cloudThick * 0.1;
+    float rawDensitySum = 0.0;
+
+    for (int i = 0; i < 6; i++) {
+        vec3 offset = basis * (CONE_OFFSETS[i] * scale);
+        vec3 samplePos = pos + offset;
+
+        float lhFrac = clamp((samplePos.y - pc.cloudBase) / cloudThick, 0.0, 1.0);
+        vec3 noisePos = samplePos * NOISE_SCALE + windOffset(pc.windTime, lhFrac);
+        vec4 noise = textureLod(uNoise3D, noisePos, 1.5);
+        vec4 weather = sampleWeather(uWeatherMap, samplePos);
+
+        float sampleH;
+        float density = getBaseDensity(samplePos, weather.r, weather.g, noise,
+                                        pc.cloudBase, cloudThick, pc.densityMultiplier, sampleH);
+        // Detail erosion in light march [Frostnova SampleLight calls both base + detail]
+        if (density > 0.0001) {
+            vec3 detailPos = samplePos * NOISE_SCALE * DETAIL_FREQ + windOffset(pc.windTime, lhFrac);
+            vec4 detailNoise = textureLod(uNoise3D, detailPos, 2.0);
+            density = getDetailDensity(density, detailNoise, sampleH, pc.detailStrength);
+        }
+        rawDensitySum += density;
+    }
+
+    // Return raw density sum as optical depth [Frostnova: lightDensity += detailDensity; exp(-lightDensity)]
+    // No EXTINCTION * meanPath conversion — raw sum IS the OD for beer's law
+    return rawDensitySum;
+}
+
+// Fallback straight-line light march for adjustable step counts (quality presets)
+float lightMarchLinear(vec3 pos, vec3 lightDir, uint steps, float cloudThick) {
+    if (lightDir.y < 0.001) return 0.0;
+
+    float cloudTop = pc.cloudBase + cloudThick;
+    float tMax = min((cloudTop - pos.y) / lightDir.y, cloudThick * 3.0);
+    float stepSize = tMax / float(steps);
+
+    float od = 0.0;
+    vec3 samplePos = pos;
+
+    for (uint i = 0; i < steps; i++) {
+        float lhFrac = clamp((samplePos.y - pc.cloudBase) / cloudThick, 0.0, 1.0);
+        vec3 noisePos = samplePos * NOISE_SCALE + windOffset(pc.windTime, lhFrac);
+        vec4 noise = textureLod(uNoise3D, noisePos, 1.0);
+        vec4 weather = sampleWeather(uWeatherMap, samplePos);
+
+        float sampleH;
+        float density = getBaseDensity(samplePos, weather.r, weather.g, noise,
+                                        pc.cloudBase, cloudThick, pc.densityMultiplier, sampleH);
+        if (density > 0.0001) {
+            vec3 detailPos = samplePos * NOISE_SCALE * DETAIL_FREQ + windOffset(pc.windTime, lhFrac);
+            vec4 detailNoise = textureLod(uNoise3D, detailPos, 2.0);
+            density = getDetailDensity(density, detailNoise, sampleH, pc.detailStrength);
+        }
+        od += density;  // Raw density sum [Frostnova: no EXTINCTION, no stepSize]
+
+        samplePos += lightDir * stepSize;
+        if (od > 5.0) break;
+    }
+
+    return od;
+}
+
+float atmosphericFade(float dist) {
+    return 1.0 - exp(-dist / pc.atmosphereFadeDist);
+}
+
+void main() {
+    ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+    if (texel.x >= int(pc.cloudWidth) || texel.y >= int(pc.cloudHeight)) return;
+
+    vec2 uv = (vec2(texel) + 0.5) / vec2(pc.cloudWidth, pc.cloudHeight);
+    vec3 rayDir = getViewRay(uv);
+    vec3 rayOrigin = getEyePos();
+    float cloudThick = effectiveThickness();
+
+    if (pc.debugMode > 0u) {
+        debugVisualize(texel, uv, rayOrigin, rayDir, cloudThick);
+        return;
+    }
+
+    float tEnter, tExit;
+    if (!intersectCloudSlab(rayOrigin, rayDir, cloudThick, tEnter, tExit)) {
+        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    tExit = min(tExit, tEnter + MARCH_CLAMP);
+    // Clamp to weather map extent — probes/samples beyond this have zero coverage
+    tExit = min(tExit, WEATHER_EXTENT * 0.45);
+    if (tExit <= tEnter) {
+        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    // Scene depth occlusion
+    ivec2 depthTexel = ivec2(uv * vec2(pc.renderWidth, pc.renderHeight));
+    depthTexel = clamp(depthTexel, ivec2(0), ivec2(pc.renderWidth - 1, pc.renderHeight - 1));
+    float viewZ = imageLoad(uLinearDepth, depthTexel).r;
+    vec3 cameraForward = normalize(worldUBO.cameraEffectedViewMatInv[2].xyz);
+    float viewCos = abs(dot(rayDir, cameraForward));
+    float sceneT = (viewCos > 1e-4) ? viewZ / viewCos : 1e6;
+
+    if (viewZ > 0.0 && sceneT < tEnter) {
+        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+    if (viewZ > 0.0 && sceneT < tExit) {
+        tExit = sceneT;
+    }
+
+    // Zero-skip
+    {
+        bool anyCloud = false;
+        for (int probe = 0; probe <= 4; probe++) {
+            float pt = mix(tEnter, tExit, float(probe) / 4.0);
+            vec3 probePos = rayOrigin + rayDir * pt;
+            vec4 probeWeather = sampleWeather(uWeatherMap, probePos);
+            if (probeWeather.r >= 0.01) { anyCloud = true; break; }
+        }
+        if (!anyCloud) {
+            imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0));
+            return;
+        }
+    }
+
+    // March parameters
+    float marchLength = tExit - tEnter;
+    float baseStepSize = marchLength / float(pc.marchSteps);
+
+    float jitter = blueNoiseJitter(pc.frameIndex, texel);
+    float t = tEnter + jitter * baseStepSize;
+
+    vec3 scatteredLight = vec3(0.0);
+    float transmittance = 1.0;
+    float weightedDist = 0.0;
+    float totalWeight = 0.0;
+
+    // Light setup
+    vec3 sunDir = normalize(skyUBO.sunDirection);
+    vec3 lightDir;
+    vec3 lightColor;
+    if (sunDir.y > 0.0) {
+        lightDir = sunDir;
+        lightColor = skyUBO.sunRadiance;
+        lightColor *= smoothstep(-0.05, 0.1, sunDir.y);
+    } else {
+        lightDir = normalize(skyUBO.moonDirection);
+        lightColor = skyUBO.moonRadiance;
+        lightColor *= smoothstep(0.0, 0.2, abs(lightDir.y));
+    }
+    float cosAngle = dot(rayDir, lightDir);
+
+    // Cloud base color [Frostnova: fixed warm white, NOT sky-derived]
+    // sky.a * vec3(0.97, 0.86, 0.8) — sun intensity × warm cream
+    const vec3 CLOUD_BASE_COLOR = vec3(0.97, 0.86, 0.8);
+
+    // Ambient: small fraction of background sky [Frostnova: 0.1 * bgColor]
+    // Ambient: small fraction of background sky [Frostnova: 0.1 * bgColor]
+    // Min floor of 0.03 ensures clouds are visible at night (moonRadiance is ~1M× dimmer than sun)
+    vec3 ambientSky = max(skyUBO.horizonColor.rgb * 0.1, vec3(0.03)) * pc.ambientStrength;
+
+    // Adaptive stepping [Frostnova: noHits/misses system]
+    bool inCloud = false;
+    int misses = 0;
+    int refinementSteps = 0;
+    float stepSize = baseStepSize;
+
+    for (uint i = 0; i < pc.marchSteps; i++) {
+        if (t >= tExit) break;
+
+        vec3 pos = rayOrigin + rayDir * t;
+        float distFromCam = length(pos - rayOrigin);
+
+        // Wind displacement with height shear [Frostnova]
+        float prelimH = clamp((pos.y - pc.cloudBase) / cloudThick, 0.0, 1.0);
+        vec3 noiseUV = pos * NOISE_SCALE + windOffset(pc.windTime, prelimH);
+
+        // Distance-based LOD + anti-tiling
+        float mipLevel = log2(1.0 + distFromCam * 0.002);
+        vec4 noise = textureLod(uNoise3D, noiseUV, mipLevel);
+        vec4 weather = sampleWeather(uWeatherMap, pos);
+
+        // Stage 1: Base density
+        float h;
+        float baseDensity = getBaseDensity(pos, weather.r, weather.g, noise,
+                                            pc.cloudBase, cloudThick, pc.densityMultiplier, h);
+
+        if (baseDensity > 0.0) {
+            misses = 0;
+
+            // Adaptive backstep on cloud entry [Frostnova: t -= stepSize, refine]
+            if (!inCloud) {
+                inCloud = true;
+                t -= stepSize;
+                stepSize = baseStepSize * 0.5;
+                refinementSteps = 4;  // refine for 4 steps, then revert to full
+                continue;  // restart at refined position
+            }
+
+            // Refinement period: fine steps at cloud boundary, then full steps
+            // Ensures march budget covers the entire cloud slab at all angles.
+            if (refinementSteps > 0) {
+                stepSize = baseStepSize * 0.5;
+                refinementSteps--;
+            } else {
+                stepSize = baseStepSize;
+            }
+
+            // Stage 2: Detail erosion [Frostnova, Schneider15]
+            // 3D curl displacement from noise gradient cross-products [Bridson07]
+            float cxp = textureLod(uNoise3D, noiseUV + vec3(CURL_EPS, 0, 0), 2.0).r;
+            float cxm = textureLod(uNoise3D, noiseUV - vec3(CURL_EPS, 0, 0), 2.0).r;
+            float cyp = textureLod(uNoise3D, noiseUV + vec3(0, CURL_EPS, 0), 2.0).r;
+            float cym = textureLod(uNoise3D, noiseUV - vec3(0, CURL_EPS, 0), 2.0).r;
+            float czp = textureLod(uNoise3D, noiseUV + vec3(0, 0, CURL_EPS), 2.0).r;
+            float czm = textureLod(uNoise3D, noiseUV - vec3(0, 0, CURL_EPS), 2.0).r;
+            vec3 curl = vec3(
+                (czp - czm) - (cyp - cym),  // dR/dz - dR/dy
+                (cxp - cxm) - (czp - czm),  // dR/dx - dR/dz (vertical wisps)
+                (cyp - cym) - (cxp - cxm)   // dR/dy - dR/dx
+            ) * CURL_STRENGTH;
+
+            // Detail always active — mip LOD handles distance quality
+            float effectiveDetailStr = pc.detailStrength;
+
+            float detailMip = max(mipLevel - 1.0, 0.0);  // Sharper than base for detail erosion
+            vec3 detailPos = (pos + curl) * NOISE_SCALE * DETAIL_FREQ + windOffset(pc.windTime, prelimH);
+            vec4 detailNoise = textureLod(uNoise3D, detailPos, detailMip);
+
+            float density = getDetailDensity(baseDensity, detailNoise, h, effectiveDetailStr);
+
+            // Distance density fade [Nubis3 §5.3: prevent pop-in during fly-through]
+            density *= valueRemapClamped(distFromCam, 10.0, 120.0, 0.25, 1.0);
+
+            if (density < 0.0001) { t += stepSize; continue; }
+
+            // Lighting: cone light march + Beer+Powder + phase function
+            float lightOD;
+            if (transmittance > 0.05) {
+                // Use cone sampling for quality >= High (lightSteps >= 4), linear otherwise
+                if (pc.lightSteps >= 4) {
+                    lightOD = lightMarchCone(pos, lightDir, cloudThick);
+                } else {
+                    lightOD = lightMarchLinear(pos, lightDir, pc.lightSteps, cloudThick);
+                }
+            } else {
+                lightOD = 5.0;
+            }
+
+            float attenuation = beerPowder(lightOD, cosAngle);
+
+            // In-scatter term [Frostnova line 271]
+            float inScatterExp = valueRemap(h, 0.3, 0.85, 0.5, 2.0);
+            float inScatter = 0.09 + pow(max(baseDensity, 0.001), inScatterExp);
+            // Phase: Frostnova uses single HG(0.2). Our dual-lobe is more physical
+            // but gives different brightness distribution. Use Frostnova's for matching.
+            float phase = USE_FROSTNOVA_PHASE ? phaseHG(cosAngle, 0.2) : cloudPhase(cosAngle);
+
+            // Cloud radiance [Frostnova: inScatter × HG × beer × sunIntensity × cloudColor]
+            // No sky-derived tinting — fixed warm white base color
+            vec3 source = inScatter * phase * attenuation * lightColor * CLOUD_BASE_COLOR;
+
+            // Ambient: small background sky contribution [Frostnova: 0.1 * bgColor * exp(-T)]
+            source += ambientSky * exp(-lightOD);
+
+            // Beer's law transmittance with extinction coefficient
+            float sigma = density * EXTINCTION;
+            float sampleTransmittance = exp(-sigma * stepSize);
+
+            // Standard volumetric integration: source × (1 - T_step)
+            // No density in source, no /sigma — they cancel in the derivation.
+            vec3 integScatter = source * (1.0 - sampleTransmittance);
+            scatteredLight += transmittance * integScatter;
+            transmittance *= sampleTransmittance;
+
+            float sampleWeight = (1.0 - sampleTransmittance) * transmittance;
+            weightedDist += t * sampleWeight;
+            totalWeight += sampleWeight;
+
+            if (transmittance < 0.003) {
+                transmittance = 0.0;
+                break;
+            }
+        } else {
+            // Empty space [Frostnova: count misses, revert to coarse stepping after 10]
+            if (inCloud) {
+                misses++;
+                if (misses >= 10) {
+                    inCloud = false;
+                    stepSize = baseStepSize;
+                }
+            } else {
+                stepSize = baseStepSize * 2.0;
+            }
+        }
+
+        t += stepSize;
+    }
+
+    // Atmospheric perspective
+    if (totalWeight > 0.001) {
+        float avgDist = weightedDist / totalWeight;
+        float fade = atmosphericFade(avgDist);
+        vec3 horizonFog = skyUBO.horizonColor.rgb * 0.5;
+        scatteredLight = mix(scatteredLight, horizonFog, fade);
+    }
+
+    if (transmittance > 0.999) {
+        imageStore(uCloudColor, texel, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+
+    imageStore(uCloudColor, texel, vec4(scatteredLight, transmittance));
+}

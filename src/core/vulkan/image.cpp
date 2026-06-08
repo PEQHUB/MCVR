@@ -1,0 +1,518 @@
+#define STB_IMAGE_IMPLEMENTATION
+#include "core/vulkan/image.hpp"
+
+#include "core/vulkan/buffer.hpp"
+#include "core/vulkan/command.hpp"
+#include "core/vulkan/debug_utils.hpp"
+#include "core/vulkan/device.hpp"
+#include "core/vulkan/vma.hpp"
+
+#include <cstring>
+#include <iostream>
+#include <sstream>
+#include <string>
+
+std::ostream &imageCout() {
+    return std::cout << "[Image] ";
+}
+
+std::ostream &imageCerr() {
+    return std::cerr << "[Image] ";
+}
+
+vk::SwapchainImage::SwapchainImage(
+    std::shared_ptr<Device> device, VkImage image, uint32_t width, uint32_t height, VkFormat format)
+    : device_(device), image_(image), width_(width), height_(height), format_(format) {
+    VkImageViewCreateInfo createInfo = {};
+    createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    createInfo.image = image_;
+    createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    createInfo.format = format_;
+    createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+    createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+    createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+    createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+    createInfo.subresourceRange = wholeColorSubresourceRange;
+
+    if (vkCreateImageView(device_->vkDevice(), &createInfo, nullptr, &imageViews_[0]) != VK_SUCCESS) {
+        imageCerr() << "failed to create image view for image" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+
+vk::SwapchainImage::~SwapchainImage() {
+    for (int i = 0; i < imageViews_.size(); i++) { vkDestroyImageView(device_->vkDevice(), imageViews_[i], nullptr); }
+}
+
+uint32_t vk::SwapchainImage::width() {
+    return width_;
+}
+
+uint32_t vk::SwapchainImage::height() {
+    return height_;
+}
+
+uint32_t vk::SwapchainImage::layer() {
+    return 1;
+}
+
+VkFormat &vk::SwapchainImage::vkFormat() {
+    return format_;
+}
+
+VkImage &vk::SwapchainImage::vkImage() {
+    return image_;
+}
+
+VkImageView &vk::SwapchainImage::vkImageView(int index) {
+    return imageViews_[index];
+}
+
+VkImageLayout &vk::SwapchainImage::imageLayout() {
+    return imageLayout_;
+}
+
+size_t vk::formatToByte(VkFormat format) {
+    switch (format) {
+        // 1 byte
+        case VK_FORMAT_R8_UNORM:
+        case VK_FORMAT_R8_SNORM:
+        case VK_FORMAT_R8_UINT:
+        case VK_FORMAT_R8_SINT: return 1;
+
+        // 2 bytes
+        case VK_FORMAT_R8G8_UNORM:
+        case VK_FORMAT_R8G8_SNORM:
+        case VK_FORMAT_R8G8_UINT:
+        case VK_FORMAT_R8G8_SINT:
+        case VK_FORMAT_R16_UNORM:
+        case VK_FORMAT_R16_SNORM:
+        case VK_FORMAT_R16_UINT:
+        case VK_FORMAT_R16_SINT:
+        case VK_FORMAT_R16_SFLOAT: return 2;
+
+        // 4 bytes
+        case VK_FORMAT_R8G8B8A8_UNORM:
+        case VK_FORMAT_R8G8B8A8_SNORM:
+        case VK_FORMAT_R8G8B8A8_UINT:
+        case VK_FORMAT_R8G8B8A8_SINT:
+        case VK_FORMAT_R8G8B8A8_SRGB:
+        case VK_FORMAT_B8G8R8A8_UNORM:
+        case VK_FORMAT_B8G8R8A8_SNORM:
+        case VK_FORMAT_B8G8R8A8_UINT:
+        case VK_FORMAT_B8G8R8A8_SINT:
+        case VK_FORMAT_B8G8R8A8_SRGB:
+        case VK_FORMAT_R16G16_UNORM:
+        case VK_FORMAT_R16G16_SNORM:
+        case VK_FORMAT_R16G16_UINT:
+        case VK_FORMAT_R16G16_SINT:
+        case VK_FORMAT_R16G16_SFLOAT:
+        case VK_FORMAT_R32_UINT:
+        case VK_FORMAT_R32_SINT:
+        case VK_FORMAT_R32_SFLOAT:
+        case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+        case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+        case VK_FORMAT_D32_SFLOAT: return 4;
+
+        // 8 bytes
+        case VK_FORMAT_R16G16B16A16_UNORM:
+        case VK_FORMAT_R16G16B16A16_SNORM:
+        case VK_FORMAT_R16G16B16A16_UINT:
+        case VK_FORMAT_R16G16B16A16_SINT:
+        case VK_FORMAT_R16G16B16A16_SFLOAT:
+        case VK_FORMAT_R32G32_UINT:
+        case VK_FORMAT_R32G32_SINT:
+        case VK_FORMAT_R32G32_SFLOAT: return 8;
+
+        // 12 bytes
+        case VK_FORMAT_R32G32B32_UINT:
+        case VK_FORMAT_R32G32B32_SINT:
+        case VK_FORMAT_R32G32B32_SFLOAT: return 12;
+
+        // 16 bytes
+        case VK_FORMAT_R32G32B32A32_UINT:
+        case VK_FORMAT_R32G32B32A32_SINT:
+        case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
+
+        // Block-compressed: BC7 = 16 bytes per 4x4 block = 1 byte/texel effective.
+        // For staging buffer sizing (width * height * layer * bpp), returning 1 gives
+        // the correct total when dimensions are multiples of 4.
+        case VK_FORMAT_BC7_UNORM_BLOCK:
+        case VK_FORMAT_BC7_SRGB_BLOCK: return 1;
+
+        default: {
+            throw std::runtime_error("Format not allowed: " + std::to_string(format));
+        }
+    }
+}
+
+bool vk::formatIsBlockCompressed(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_BC7_UNORM_BLOCK:
+        case VK_FORMAT_BC7_SRGB_BLOCK:
+            return true;
+        default:
+            return false;
+    }
+}
+
+vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
+                                       std::shared_ptr<VMA> vma,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint32_t layer,
+                                       VkFormat format,
+                                       VkImageUsageFlags usage)
+    : vk::DeviceLocalImage(device, vma, true, width, height, layer, format, usage) {}
+
+vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
+                                       std::shared_ptr<VMA> vma,
+                                       bool persistStaging,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint32_t layer,
+                                       VkFormat format,
+                                       VkImageUsageFlags usage)
+    : vk::DeviceLocalImage(
+          device, vma, persistStaging, width, height, layer, format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE) {}
+
+
+vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
+                                       std::shared_ptr<VMA> vma,
+                                       bool persistStaging,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint32_t layer,
+                                       VkFormat format,
+                                       VkImageUsageFlags usage,
+                                       VmaAllocationCreateFlags allocationFlags,
+                                       VmaMemoryUsage vmaUsage,
+                                       VkImageCreateFlags imageCreateFlags)
+    : DeviceLocalImage(device,
+                       vma,
+                       persistStaging,
+                       1,
+                       width,
+                       height,
+                       layer,
+                       format,
+                       usage,
+                       allocationFlags,
+                       vmaUsage,
+                       imageCreateFlags) {}
+
+vk::DeviceLocalImage::DeviceLocalImage(std::shared_ptr<Device> device,
+                                       std::shared_ptr<VMA> vma,
+                                       bool persistStaging,
+                                       uint32_t mipLevels,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint32_t layer,
+                                       VkFormat format,
+                                       VkImageUsageFlags usage,
+                                       VmaAllocationCreateFlags allocationFlags,
+                                       VmaMemoryUsage vmaUsage,
+                                       VkImageCreateFlags imageCreateFlags,
+                                       VkImageType imageType)
+    : device_(device),
+      vma_(vma),
+      width_(width),
+      height_(height),
+      layer_(layer),
+      format_(format),
+      imageType_(imageType),
+      persistStaging_(persistStaging),
+      usage_(usage),
+      allocationFlags_(allocationFlags),
+      vmaUsage_(vmaUsage) {
+
+    bool is3D = (imageType_ == VK_IMAGE_TYPE_3D);
+
+#ifdef DEBUG
+    imageCout() << "Creating " << (is3D ? "3D" : "2D") << " image with width: " << width
+                << " height: " << height << (is3D ? " depth: " : " layer: ") << layer
+                << " channel: " << vk::formatToByte(format) << " mip level: " << mipLevels
+                << " staging: " << (persistStaging ? "enabled" : "disabled") << std::endl;
+#endif
+
+    if (persistStaging_) {
+        // staging buffer
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = width_ * height_ * layer_ * vk::formatToByte(format);
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+        VmaAllocationCreateInfo allocationInfo{};
+        allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocationInfo.flags =
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        if (vmaCreateBuffer(vma_->allocator(), &bufferInfo, &allocationInfo, &stagingBuffer_, &stagingAllocation_,
+                            &stagingAllocationInfo_) != VK_SUCCESS) {
+            imageCerr() << "failed to create staging buffer" << std::endl;
+            exit(EXIT_FAILURE);
+        }
+        mappedPtr_ = stagingAllocationInfo_.pMappedData;
+        vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, stagingBuffer_,
+                                      "Image staging buffer " + std::to_string(width_) + "x" +
+                                          std::to_string(height_) + "x" + std::to_string(layer_));
+    }
+
+    // image
+    VkImageCreateInfo imageInfo = {};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.flags = imageCreateFlags;
+    imageInfo.imageType = imageType_;
+    imageInfo.format = format_;
+    imageInfo.extent = is3D ? VkExtent3D{width_, height_, layer_} : VkExtent3D{width_, height_, 1};
+    imageInfo.mipLevels = mipLevels;
+    imageInfo.arrayLayers = is3D ? 1 : layer_;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | usage_;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo allocationInfo{};
+    allocationInfo.flags = allocationFlags_;
+    allocationInfo.usage = vmaUsage;
+    if (vmaCreateImage(vma_->allocator(), &imageInfo, &allocationInfo, &image_, &allocation_, &allocationInfo_) !=
+        VK_SUCCESS) {
+        imageCerr() << "failed to create image" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_IMAGE, image_,
+                                  "DeviceLocalImage " + std::to_string(width_) + "x" +
+                                      std::to_string(height_) + "x" + std::to_string(layer_));
+
+    VkImageViewCreateInfo createInfo = {};
+    createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    createInfo.image = image_;
+    if (is3D) {
+        createInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
+    } else {
+        createInfo.viewType = layer_ == 1 ? VK_IMAGE_VIEW_TYPE_2D : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    }
+    createInfo.format = format_;
+    createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+    createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+    createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+    createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+    if (usage_ == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+        createInfo.subresourceRange = wholeDepthSubresourceRange;
+    } else if (is3D) {
+        createInfo.subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = VK_REMAINING_MIP_LEVELS,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+    } else {
+        createInfo.subresourceRange = wholeColorSubresourceRange;
+    }
+
+    if (vkCreateImageView(device_->vkDevice(), &createInfo, nullptr, &imageViews_[0]) != VK_SUCCESS) {
+        imageCerr() << "failed to create image view for image" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_IMAGE_VIEW, imageViews_[0],
+                                  "DeviceLocalImageView " + std::to_string(width_) + "x" +
+                                      std::to_string(height_) + "x" + std::to_string(layer_));
+}
+
+std::shared_ptr<vk::DeviceLocalImage> vk::DeviceLocalImage::create3D(
+    std::shared_ptr<Device> device, std::shared_ptr<VMA> vma,
+    uint32_t width, uint32_t height, uint32_t depth,
+    VkFormat format, VkImageUsageFlags usage,
+    bool persistStaging) {
+
+    // depth is passed as 'layer' param — constructor handles 3D via imageType
+    return std::make_shared<DeviceLocalImage>(
+        device, vma, persistStaging, 1, width, height, depth, format, usage,
+        0, VMA_MEMORY_USAGE_AUTO, 0, VK_IMAGE_TYPE_3D);
+}
+
+vk::DeviceLocalImage::~DeviceLocalImage() {
+    for (int i = 0; i < imageViews_.size(); i++) { vkDestroyImageView(device_->vkDevice(), imageViews_[i], nullptr); }
+    vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
+    vmaDestroyImage(vma_->allocator(), image_, allocation_);
+
+#ifdef DEBUG
+    imageCout() << "device local image deconstructed" << std::endl;
+#endif
+}
+
+void vk::DeviceLocalImage::uploadToStagingBuffer(void *src) {
+    if (!persistStaging_) {
+        if (stagingBuffer_ != VK_NULL_HANDLE || stagingAllocation_ != VK_NULL_HANDLE || mappedPtr_ != nullptr) {
+            imageCerr() << "if not persist staging, the staging buffer should not exist!" << std::endl;
+            exit(EXIT_FAILURE);
+        }
+
+        // staging buffer
+        VkBufferCreateInfo bufferInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bufferInfo.size = width_ * height_ * layer_ * vk::formatToByte(format_);
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+        VmaAllocationCreateInfo allocationInfo{};
+        allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocationInfo.flags =
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        if (vmaCreateBuffer(vma_->allocator(), &bufferInfo, &allocationInfo, &stagingBuffer_, &stagingAllocation_,
+                            &stagingAllocationInfo_) != VK_SUCCESS) {
+            imageCerr() << "failed to create staging buffer" << std::endl;
+            exit(EXIT_FAILURE);
+        }
+        mappedPtr_ = stagingAllocationInfo_.pMappedData;
+        vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_BUFFER, stagingBuffer_,
+                                      "Image transient staging buffer " + std::to_string(width_) + "x" +
+                                          std::to_string(height_) + "x" + std::to_string(layer_));
+    }
+
+    size_t size = width_ * height_ * layer_ * vk::formatToByte(format_);
+#ifdef DEBUG
+    imageCout() << "Flushed " << size << " bytes into staging buffer" << std::endl;
+#endif
+    std::memcpy(mappedPtr_, src, size);
+    vmaFlushAllocation(vma_->allocator(), stagingAllocation_, 0, size);
+
+    if (!persistStaging_) {
+        vmaDestroyBuffer(vma_->allocator(), stagingBuffer_, stagingAllocation_);
+        stagingBuffer_ = VK_NULL_HANDLE;
+        stagingAllocation_ = VK_NULL_HANDLE;
+        mappedPtr_ = nullptr;
+    }
+}
+
+void vk::DeviceLocalImage::uploadToImage(VkCommandBuffer cmdBuffer) {
+    const bool is3D = imageType_ == VK_IMAGE_TYPE_3D;
+    VkBufferImageCopy region = {};
+    region.imageSubresource = {usage_ == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT ?
+                                   static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_DEPTH_BIT) :
+                                   static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_COLOR_BIT),
+                               0, 0, is3D ? 1u : layer_};
+    region.imageExtent = {width_, height_, is3D ? layer_ : 1u};
+    vkCmdCopyBufferToImage(cmdBuffer, stagingBuffer_, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+}
+
+void vk::DeviceLocalImage::uploadToImage(std::shared_ptr<CommandBuffer> cmdBuffer) {
+    uploadToImage(cmdBuffer->vkCommandBuffer());
+}
+
+void vk::DeviceLocalImage::uploadToImage(VkCommandBuffer cmdBuffer,
+                                         std::shared_ptr<Buffer> buffer,
+                                         std::vector<VkBufferImageCopy> &regions) {
+    vkCmdCopyBufferToImage(cmdBuffer, buffer->vkBuffer(), image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regions.size(),
+                           regions.data());
+}
+
+void vk::DeviceLocalImage::uploadToImage(std::shared_ptr<CommandBuffer> cmdBuffer,
+                                         std::shared_ptr<Buffer> buffer,
+                                         std::vector<VkBufferImageCopy> &regions) {
+    uploadToImage(cmdBuffer->vkCommandBuffer(), buffer, regions);
+}
+
+uint32_t vk::DeviceLocalImage::width() {
+    return width_;
+}
+
+uint32_t vk::DeviceLocalImage::height() {
+    return height_;
+}
+
+uint32_t vk::DeviceLocalImage::layer() {
+    return layer_;
+}
+
+VkFormat &vk::DeviceLocalImage::vkFormat() {
+    return format_;
+}
+
+VkBuffer &vk::DeviceLocalImage::vkStagingBuffer() {
+    return stagingBuffer_;
+}
+
+VkImage &vk::DeviceLocalImage::vkImage() {
+    return image_;
+}
+
+VkImageView &vk::DeviceLocalImage::vkImageView(int index) {
+    return imageViews_[index];
+}
+
+VkImageLayout &vk::DeviceLocalImage::imageLayout() {
+    return imageLayout_;
+}
+
+void *vk::DeviceLocalImage::mappedPtr() {
+    return mappedPtr_;
+}
+
+void vk::DeviceLocalImage::addImageView(VkImageViewCreateInfo info) {
+    VkImageView vkImageView{};
+    if (vkCreateImageView(device_->vkDevice(), &info, nullptr, &vkImageView) != VK_SUCCESS) {
+        imageCerr() << "failed to create image view for image" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+    vk::DebugUtils::setObjectName(device_->vkDevice(), VK_OBJECT_TYPE_IMAGE_VIEW, vkImageView,
+                                  "DeviceLocalImageView extra #" + std::to_string(imageViews_.size()));
+    imageViews_.push_back(vkImageView);
+}
+
+vk::Sampler::Sampler(std::shared_ptr<Device> device)
+    : Sampler(device, VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT) {}
+
+vk::Sampler::Sampler(std::shared_ptr<Device> device,
+                     VkFilter samplingMode,
+                     VkSamplerMipmapMode mipmapMode,
+                     VkSamplerAddressMode addressMode)
+    : device_(device), samplingMode_(samplingMode), mipmapMode_(mipmapMode), addressMode_(addressMode) {
+    VkSamplerCreateInfo samplerInfo = {};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = samplingMode;                       // 放大时的过滤方式
+    samplerInfo.minFilter = samplingMode;                       // 缩小时的过滤方式
+    samplerInfo.addressModeU = addressMode;                     // U方向寻址
+    samplerInfo.addressModeV = addressMode;                     // V方向寻址
+    samplerInfo.addressModeW = addressMode;                     // W方向寻址
+    samplerInfo.anisotropyEnable = VK_FALSE;                    // 先不启用各向异性过滤
+    samplerInfo.maxAnisotropy = 16.0f;                          // 最大各向异性采样数
+    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK; // 边界色
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;             // 使用标准化坐标 [0,1]
+    samplerInfo.compareEnable = VK_FALSE;                       // 禁用深度比较
+    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerInfo.mipmapMode = mipmapMode;    // mipmap插值
+    samplerInfo.mipLodBias = 0.0f;          // mipmap偏移
+    samplerInfo.minLod = 0.0f;              // 最小mip层级
+    samplerInfo.maxLod = VK_LOD_CLAMP_NONE; // 最大mip层级（无限制）
+
+    if (vkCreateSampler(device->vkDevice(), &samplerInfo, nullptr, &samper_) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create sampler!");
+    }
+    vk::DebugUtils::setObjectName(device->vkDevice(), VK_OBJECT_TYPE_SAMPLER, samper_, "Radiance Sampler");
+}
+
+vk::Sampler::~Sampler() {
+    vkDestroySampler(device_->vkDevice(), samper_, nullptr);
+}
+
+VkSampler vk::Sampler::vkSamper() {
+    return samper_;
+}
+
+VkFilter vk::Sampler::vkSamplingMode() {
+    return samplingMode_;
+}
+
+VkSamplerMipmapMode vk::Sampler::vkMipmapMode() {
+    return mipmapMode_;
+}
+
+VkSamplerAddressMode vk::Sampler::vkAddressMode() {
+    return addressMode_;
+}
+
+// ImageLoader class removed — was unused dead code with a pixel transposition bug.
+// linearToSrgb helpers also removed (only used by ImageLoader).
+
+

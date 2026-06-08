@@ -1,0 +1,20 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#include "common/shared.hpp"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D directAlbedoImage;
+layout(set = 0, binding = 1, rgba16f) uniform image2D indirectAlbedoImage;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(indirectAlbedoImage);
+    if (pixel.x >= size.x || pixel.y >= size.y) {
+        return;
+    }
+
+    vec4 albedo = imageLoad(directAlbedoImage, pixel);
+    imageStore(indirectAlbedoImage, pixel, albedo);
+}

@@ -1,0 +1,4 @@
+1. The MSVC Version (including the redistributable) is important. Some old versions will lead to problems (see https://stackoverflow.com/questions/78598141/first-stdmutexlock-crashes-in-application-built-with-latest-visual-studio). Some JDK (JRE) packs the MSVC runtime in its libs (msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll). In this case, either change a different JDS (JRE) or simply rename or delete them.
+2. Windows defines types like INT, UINT, FLOAT, etc. Those types must be avoided.
+3. Use NON_MIN_MAX to avoid the marco of min and max.
+4. long is 32-bit in Windows, but 64-bit in Linux. Use int64_t for sure.

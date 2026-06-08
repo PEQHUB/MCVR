@@ -1,0 +1,121 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+#include "../util/random.glsl"
+#include "../util/ray_cone.glsl"
+#include "../util/ray_payloads.glsl"
+#include "../util/util.glsl"
+#include "common/shared.hpp"
+
+layout(set = 0, binding = 0) uniform sampler2D textures[];
+
+#include "../util/sprite_fetch.glsl"
+
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
+
+layout(set = 1, binding = 1) readonly buffer BLASOffsets {
+    uint offsets[];
+}
+blasOffsets;
+
+layout(set = 1, binding = 2) readonly buffer VertexBufferAddr {
+    uint64_t addrs[];
+}
+vertexBufferAddrs;
+
+layout(set = 1, binding = 3) readonly buffer IndexBufferAddr {
+    uint64_t addrs[];
+}
+indexBufferAddrs;
+
+layout(set = 1, binding = 7) readonly buffer TextureMappingBuffer {
+    TextureMapping mapping;
+};
+
+#include "../util/vertex_fetch.glsl"
+
+layout(set = 2, binding = 0) uniform Uniform {
+    WorldUBO ubo;
+};
+
+// VertexBuffer and IndexBuffer declared in vertex_fetch.glsl
+
+layout(location = 0) rayPayloadInEXT PrimaryRay mainRay;
+hitAttributeEXT vec2 attribs;
+
+void main() {
+    uint instanceID = gl_InstanceCustomIndexEXT;
+    uint geometryID = gl_GeometryIndexEXT;
+
+    uint blasOffset;
+    uint vertexFormat;
+    UnpackedVertex v0, v1, v2;
+    fetchTriangleVertices(instanceID, geometryID, gl_PrimitiveID, v0, v1, v2, blasOffset, vertexFormat);
+
+    vec3 baryCoords = vec3(1.0 - (attribs.x + attribs.y), attribs.x, attribs.y);
+    vec2 uv = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
+    uint textureID = v0.textureID;
+
+    bool isBlockGeometry = (v0.flags & PBR_FLAG_BLOCK_GEOMETRY) != 0u;
+    bool isFluidGeometry = (v0.flags & PBR_FLAG_FLUID_GEOMETRY) != 0u;
+    bool isWaterGeometry = (v0.flags & PBR_FLAG_WATER_GEOMETRY) != 0u;
+
+    bool useTexture = (v0.flags & PBR_FLAG_USE_TEXTURE) != 0u;
+    float alpha;
+    ivec4 flags;
+    if (useTexture) {
+        float lod = 0;
+
+        if (isBlockGeometry) {
+            // Block geometry: material-id sampling via MaterialRegistry
+            uint materialId = textureID;
+            alpha = fetchBlockAlbedoLod(materialId, uv, ubo.animTick, lod).a;
+            flags = fetchBlockFlagLod(materialId, uv, lod);
+        } else {
+            // Entity geometry: legacy atlas sampling via textures[]
+            alpha = textureLod(textures[nonuniformEXT(textureID)], uv, lod).a;
+
+            int flagTextureID = mapping.entries[textureID].flag;
+            if (flagTextureID >= 0) {
+                vec4 floatFlagValue = textureLod(textures[nonuniformEXT(flagTextureID)], uv, ceil(lod));
+                flags = ivec4(round(floatFlagValue * 255.0));
+            } else {
+                flags = ivec4(0);
+            }
+        }
+    } else {
+        alpha = 1.0;
+        flags = ivec4(0);
+    }
+
+    // if insideBoat, then ignore liquid
+    if (prGetInsideBoat(mainRay) && isWaterGeometry) {
+        ignoreIntersectionEXT;
+        return;
+    }
+
+    bool useColorLayer = (v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u;
+    float colorLayerAlpha;
+    if (useColorLayer) {
+        colorLayerAlpha =
+            baryCoords.x * v0.colorLayerAlpha + baryCoords.y * v1.colorLayerAlpha + baryCoords.z * v2.colorLayerAlpha;
+    } else {
+        colorLayerAlpha = 1.0;
+    }
+    alpha *= colorLayerAlpha;
+    if (isWaterGeometry) {
+        alpha = 1.0;
+    }
+
+    if (alpha < 0.05) {
+        // cut-out
+        ignoreIntersectionEXT;
+    } else {
+        // translucent & opaque
+        return;
+    }
+}

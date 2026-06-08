@@ -1,0 +1,247 @@
+#include "core/vulkan/instance.hpp"
+
+#include "core/render/modules/world/dlss/dlss_wrapper.hpp"
+#include "core/render/streamline_context.hpp"
+
+#ifdef _WIN32
+#include <Windows.h>
+#endif
+#include <filesystem>
+#include <iostream>
+#include <set>
+#include <unordered_set>
+#include <vector>
+
+#ifndef NDEBUG
+const bool ENABLE_DEBUGGING = true;
+#else
+const bool ENABLE_DEBUGGING = false;
+#endif
+
+const char *DEBUG_LAYER = "VK_LAYER_KHRONOS_validation";
+
+static bool s_forceValidation = false;
+
+void vk::Instance::setForceValidation(bool enable) {
+    s_forceValidation = enable;
+}
+
+std::ostream &instanceCout() {
+    return std::cout << "[Instance] ";
+}
+
+std::ostream &instanceCerr() {
+    return std::cerr << "[Instance] ";
+}
+
+// Debug callback
+VkBool32 debugCallback(VkDebugReportFlagsEXT flags,
+                       VkDebugReportObjectTypeEXT objType,
+                       uint64_t srcObject,
+                       size_t location,
+                       int32_t msgCode,
+                       const char *pLayerPrefix,
+                       const char *pMsg,
+                       void *pUserData) {
+    if (flags & VK_DEBUG_REPORT_ERROR_BIT_EXT) {
+        instanceCerr() << "ERROR: [" << pLayerPrefix << "] Code " << msgCode << " : " << pMsg << std::endl;
+    } else if (flags & VK_DEBUG_REPORT_WARNING_BIT_EXT) {
+        instanceCerr() << "WARNING: [" << pLayerPrefix << "] Code " << msgCode << " : " << pMsg << std::endl;
+    }
+
+    return VK_FALSE;
+}
+
+vk::Instance::Instance() {
+    GLFW_Init();
+
+    // Try to load Streamline interposer for Reflex + future DLSS-G.
+    // Must happen BEFORE any Vulkan calls. Windows-only (Streamline is not supported on Linux).
+#ifdef _WIN32
+    {
+        wchar_t modulePath[MAX_PATH];
+        HMODULE coreModule = nullptr;
+        // Use address of this static variable to locate core.dll
+        static const int coreAnchor = 0;
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&coreAnchor),
+            &coreModule);
+        GetModuleFileNameW(coreModule, modulePath, MAX_PATH);
+        std::filesystem::path pluginDir = std::filesystem::path(modulePath).parent_path();
+        StreamlineContext::init(pluginDir.wstring().c_str());
+    }
+#endif
+
+    // Initialize Vulkan loader (volk).
+    // If Streamline is available, route through its interposer for present/acquire hooking.
+    auto slVkGIPA = reinterpret_cast<PFN_vkGetInstanceProcAddr>(StreamlineContext::getVkGetInstanceProcAddr());
+    if (slVkGIPA) {
+        volkInitializeCustom(slVkGIPA);
+        instanceCout() << "volk initialized via Streamline interposer" << std::endl;
+    } else {
+        if (volkInitialize() != VK_SUCCESS) {
+            printf("volkInitialize failed!\n");
+            exit(EXIT_SUCCESS);
+        }
+    }
+
+    VkApplicationInfo appInfo = {};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = "VulkanClear";
+    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.pEngineName = "ClearScreenEngine";
+    appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.apiVersion = VK_API_VERSION_1_3;
+
+    std::set<std::string> extStorage;
+
+    // Get instance extensions required by GLFW to draw to window
+    unsigned int glfwExtensionCount;
+    const char **glfwExtensions;
+    glfwExtensions = GLFW_GetRequiredInstanceExtensions(&glfwExtensionCount);
+#ifdef DEBUG
+    instanceCout() << "glfw extensions:" << std::endl;
+#endif
+    for (int i = 0; i < glfwExtensionCount; i++) {
+#ifdef DEBUG
+        instanceCout() << "\t" << glfwExtensions[i] << std::endl;
+#endif
+        extStorage.insert(glfwExtensions[i]);
+    }
+
+    // dlss extensions
+    std::vector<VkExtensionProperties> dlssExtensions;
+    NgxContext::getDlssRRRequiredInstanceExtensions(dlssExtensions);
+#ifdef DEBUG
+    instanceCout() << "dlss extensions:" << std::endl;
+#endif
+    for (int i = 0; i < dlssExtensions.size(); i++) {
+#ifdef DEBUG
+        instanceCout() << "\t" << dlssExtensions[i].extensionName << std::endl;
+#endif
+        extStorage.insert(dlssExtensions[i].extensionName);
+    }
+
+    // dynamic vertex input state ext
+    // repeated for dlss, but make sure
+    extStorage.insert(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+
+    // HDR10 support: enables HDR color spaces like VK_COLOR_SPACE_HDR10_ST2084_EXT
+    // in vkGetPhysicalDeviceSurfaceFormatsKHR results
+    extStorage.insert(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+
+    // Streamline SDK required instance extensions (Reflex, DLSS-G)
+    for (const auto &ext : StreamlineContext::getRequiredInstanceExtensions()) {
+        extStorage.insert(ext);
+    }
+
+    // if (ENABLE_DEBUGGING) { push_ext(VK_EXT_DEBUG_REPORT_EXTENSION_NAME); }
+
+    // Debug utils for Nsight profiling labels (vkCmdBeginDebugUtilsLabelEXT)
+    extStorage.insert(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+    // Check for extensions
+    uint32_t extensionCount = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
+
+    if (extensionCount == 0) {
+        instanceCerr() << "no extensions supported!" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, availableExtensions.data());
+
+    std::unordered_set<std::string> supportedExtensions;
+    supportedExtensions.reserve(availableExtensions.size());
+    for (const auto &extension : availableExtensions) {
+        supportedExtensions.insert(extension.extensionName);
+    }
+
+    std::unordered_set<std::string> requiredExtensions;
+    requiredExtensions.reserve(static_cast<size_t>(glfwExtensionCount) + 2);
+    for (int i = 0; i < glfwExtensionCount; i++) {
+        requiredExtensions.insert(glfwExtensions[i]);
+    }
+    requiredExtensions.insert(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+
+#ifdef DEBUG
+    instanceCout() << "supported extensions:" << std::endl;
+    for (const auto &extension : availableExtensions) {
+        instanceCout() << "\t" << extension.extensionName << std::endl;
+    }
+#endif
+
+    std::vector<const char *> extensions;
+    extensions.reserve(extStorage.size());
+    for (const auto &extension : extStorage) {
+        if (supportedExtensions.find(extension) == supportedExtensions.end()) {
+            if (requiredExtensions.find(extension) != requiredExtensions.end()) {
+                instanceCerr() << "required instance extension not supported: " << extension << std::endl;
+                exit(EXIT_FAILURE);
+            }
+            instanceCerr() << "optional instance extension not supported, skipping: " << extension << std::endl;
+            continue;
+        }
+        extensions.push_back(extension.c_str());
+    }
+
+#ifdef DEBUG
+    instanceCout() << "selected extensions:" << std::endl;
+    for (const auto &extension : extensions) { instanceCout() << "\t" << extension << std::endl; }
+#endif
+
+    // Note: instance creation fails if any enabled extension is unsupported.
+
+    VkInstanceCreateInfo createInfo = {};
+    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    createInfo.pApplicationInfo = &appInfo;
+    createInfo.enabledExtensionCount = (uint32_t)extensions.size();
+    createInfo.ppEnabledExtensionNames = extensions.data();
+
+    const bool useValidation = ENABLE_DEBUGGING || s_forceValidation;
+    if (useValidation) {
+        createInfo.enabledLayerCount = 1;
+        createInfo.ppEnabledLayerNames = &DEBUG_LAYER;
+    }
+
+    // Initialize Vulkan instance
+    if (vkCreateInstance(&createInfo, nullptr, &instance_) != VK_SUCCESS) {
+        instanceCerr() << "failed to create instance!" << std::endl;
+        exit(EXIT_FAILURE);
+    } else {
+#ifdef DEBUG
+        instanceCout() << "created vulkan instance" << std::endl;
+#endif
+    }
+
+    volkLoadInstance(instance_);
+
+    // if (ENABLE_DEBUGGING) {
+    //     VkDebugReportCallbackCreateInfoEXT createInfo = {};
+    //     createInfo.pfnCallback = debugCallback;
+
+    //     if (vkCreateDebugReportCallbackEXT(instance_, &createInfo, nullptr, &callback_) != VK_SUCCESS) {
+    //         instanceCerr() << "failed to create debug callback" << std::endl;
+    //         exit(EXIT_FAILURE);
+    //     } else {
+    //         instanceCout() << "created debug callback" << std::endl;
+    //     }
+    // } else {
+    //     instanceCout() << "skipped creating debug callback" << std::endl;
+    // }
+}
+
+vk::Instance::~Instance() {
+    vkDestroyInstance(instance_, nullptr);
+    // if (ENABLE_DEBUGGING) { vkDestroyDebugReportCallbackEXT(instance_, callback_, nullptr); }
+
+#ifdef DEBUG
+    instanceCout() << "instance deconstructed" << std::endl;
+#endif
+}
+
+VkInstance &vk::Instance::vkInstance() {
+    return instance_;
+}
