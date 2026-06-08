@@ -45,12 +45,45 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
         << "\"finalized\":" << (ts.isFinalized() ? "true" : "false") << ","
         << "\"spriteCount\":" << ts.spriteCount() << ","
         << "\"layerSize\":" << ts.layerSize() << ","
-        << "\"activeUploadMode\":\"fixed_albedo_arrays_sparse_aux_layer_updates\","
+        << "\"activeUploadMode\":\"fixed_albedo_arrays_batched_sparse_aux_pooled_material_pages\","
         << "\"nativeDefaultAuxTextures\":true,"
         << "\"sparseSpriteAuxUpload\":true,"
+        << "\"sparseAuxBatchUpload\":true,"
+        << "\"materialPagePools\":true,"
+        << "\"sparseMaterialTableUpdates\":true,"
         << "\"tieredArrays\":false,"
         << "\"asyncTransferQueueUpload\":false,"
+        << "\"pendingTextureUploads\":" << (ts.hasPendingTextureUploads() ? "true" : "false") << ","
         << "\"textureUploadCapabilities\":" << Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeTextureUploadCapabilities(nullptr, nullptr)
+        << "}";
+    return makeString(env, out.str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeTextureTierStatusJson(
+    JNIEnv *env, jclass) {
+    auto& ts = Renderer::textureSystem;
+    std::ostringstream out;
+    out << "{"
+        << "\"schema\":\"radser_native_texture_tier_status_v1\","
+        << "\"tieredArrays\":false,"
+        << "\"currentCompatibilityMode\":\"single_fixed_layer_array\","
+        << "\"layerSize\":" << ts.layerSize() << ","
+        << "\"spriteCount\":" << ts.spriteCount() << ","
+        << "\"plannedTiers\":\"pending_shader_material_abi_cutover\""
+        << "}";
+    return makeString(env, out.str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeGpuUploadQueueStatusJson(
+    JNIEnv *env, jclass) {
+    auto& ts = Renderer::textureSystem;
+    std::ostringstream out;
+    out << "{"
+        << "\"schema\":\"radser_native_gpu_upload_queue_status_v1\","
+        << "\"pendingTextureUploads\":" << (ts.hasPendingTextureUploads() ? "true" : "false") << ","
+        << "\"textureGeneration\":" << ts.generation() << ","
+        << "\"finalized\":" << (ts.isFinalized() ? "true" : "false") << ","
+        << "\"materialPageRevision\":" << ts.materialTexturePageRevision()
         << "}";
     return makeString(env, out.str());
 }
@@ -82,7 +115,9 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
         << "\"generation\":" << ts.generation() << ","
         << "\"finalized\":" << (ts.isFinalized() ? "true" : "false") << ","
         << "\"backend\":\"renderer_owned_material_pages\","
-        << "\"dirtyMaterialTableUpdates\":false,"
+        << "\"dirtyMaterialTableUpdates\":true,"
+        << "\"sparseMaterialTableUpdates\":true,"
+        << "\"persistentMaterialPagePools\":true,"
         << "\"materialPageRevision\":" << ts.materialTexturePageRevision()
         << "}";
     return makeString(env, out.str());

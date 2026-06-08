@@ -141,6 +141,7 @@ class TextureSystem {
     uint32_t layerSize() const { return layerSize_; }
     uint32_t atlasWidth() const { return atlasWidth_; }
     uint32_t atlasHeight() const { return atlasHeight_; }
+    bool hasPendingTextureUploads() const { return arrayManager_.hasPendingUploads(); }
 
     void setGeneration(uint64_t generation);
     uint64_t generation() const { return generation_.load(std::memory_order_acquire); }
