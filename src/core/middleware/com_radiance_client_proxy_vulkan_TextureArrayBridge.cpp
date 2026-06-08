@@ -124,6 +124,21 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
     return makeString(env, out.str());
 }
 
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeMaterialPagePoolStatusJson(
+    JNIEnv *env, jclass) {
+    return makeString(env, Renderer::textureSystem.materialPagePoolStatusJson());
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeMaterialTableStatusJson(
+    JNIEnv *env, jclass) {
+    return makeString(env, Renderer::textureSystem.materialTableStatusJson());
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeUploadSafetyStatusJson(
+    JNIEnv *env, jclass) {
+    return makeString(env, Renderer::textureSystem.nativeUploadSafetyStatusJson());
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeReceiveSpriteTable(
     JNIEnv *, jclass,
     jlong metaPtr, jint count, jint atlasWidth, jint atlasHeight) {

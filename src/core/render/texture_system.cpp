@@ -47,7 +47,15 @@ void TextureSystem::resetMaterialTexturePagesLocked() {
         materialFlagPageArrayIds_[page].store(UINT32_MAX, std::memory_order_release);
         materialPageReady_[page].store(false, std::memory_order_release);
         materialPageMipsDirty_[page] = false;
+        materialPageLayerCapacity_[page] = 0;
+        materialPageLayersUsed_[page] = 0;
     }
+    materialPageUpdates_ = 0;
+    materialPageImageAllocations_ = 0;
+    lastMaterialPage_ = 0;
+    lastMaterialPageStartLayer_ = 0;
+    lastMaterialPageLayerCount_ = 0;
+    lastMaterialPageLayerCapacity_ = 0;
 }
 
 bool TextureSystem::hasMaterialPageMipsDirtyLocked() const {
@@ -1129,6 +1137,16 @@ bool TextureSystem::uploadMaterialTextureLayers(uint32_t page, uint32_t spriteSi
     materialSpecularPageArrayIds_[page].store(specularArrayId, std::memory_order_release);
     materialNormalPageArrayIds_[page].store(normalArrayId, std::memory_order_release);
     materialFlagPageArrayIds_[page].store(flagArrayId, std::memory_order_release);
+    materialPageLayerCapacity_[page] = std::max(materialPageLayerCapacity_[page], layerCapacity);
+    materialPageLayersUsed_[page] = std::max(materialPageLayersUsed_[page], startLayer + layerCount);
+    materialPageUpdates_++;
+    if (createdPageArrays) {
+        materialPageImageAllocations_++;
+    }
+    lastMaterialPage_ = page;
+    lastMaterialPageStartLayer_ = startLayer;
+    lastMaterialPageLayerCount_ = layerCount;
+    lastMaterialPageLayerCapacity_ = layerCapacity;
     materialPageMipsDirty_[page] = true;
     materialTexturePageRevision_.fetch_add(1, std::memory_order_acq_rel);
 
@@ -1149,6 +1167,64 @@ bool TextureSystem::uploadMaterialTextureLayers(uint32_t page, uint32_t spriteSi
               << " capacity=" << layerCapacity
               << " size=" << spriteSize << "x" << spriteSize << std::endl;
     return true;
+}
+
+std::string TextureSystem::materialPagePoolStatusJson() const {
+    std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return "{\"schema\":\"radser_material_page_pool_status_v1\",\"busy\":true}";
+    }
+    uint32_t pagesAllocated = 0;
+    uint32_t layersUsed = 0;
+    uint32_t layersFree = 0;
+    uint32_t allocatedLayers = 0;
+    for (uint32_t page = 1; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+        uint32_t capacity = materialPageLayerCapacity_[page];
+        if (capacity == 0 && materialAlbedoPageArrayIds_[page].load(std::memory_order_acquire) != UINT32_MAX) {
+            capacity = materialPageLayersUsed_[page];
+        }
+        if (capacity == 0) continue;
+        pagesAllocated++;
+        allocatedLayers += capacity;
+        uint32_t used = std::min(materialPageLayersUsed_[page], capacity);
+        layersUsed += used;
+        layersFree += capacity - used;
+    }
+    std::ostringstream out;
+    out << "{"
+        << "\"schema\":\"radser_material_page_pool_status_v1\","
+        << "\"generation\":" << generation() << ","
+        << "\"materialPagePools\":true,"
+        << "\"pagesAllocated\":" << pagesAllocated << ","
+        << "\"layersUsed\":" << layersUsed << ","
+        << "\"layersFree\":" << layersFree << ","
+        << "\"allocatedLayers\":" << allocatedLayers << ","
+        << "\"updates\":" << materialPageUpdates_ << ","
+        << "\"newPageImageAllocations\":" << materialPageImageAllocations_ << ","
+        << "\"lastUpdatePage\":" << lastMaterialPage_ << ","
+        << "\"lastUpdateStartLayer\":" << lastMaterialPageStartLayer_ << ","
+        << "\"lastUpdateLayerCount\":" << lastMaterialPageLayerCount_ << ","
+        << "\"lastUpdateLayerCapacity\":" << lastMaterialPageLayerCapacity_ << ","
+        << "\"materialPageRevision\":" << materialTexturePageRevision()
+        << "}";
+    return out.str();
+}
+
+std::string TextureSystem::materialTableStatusJson() const {
+    return materials_.statusJson();
+}
+
+std::string TextureSystem::nativeUploadSafetyStatusJson() const {
+    std::ostringstream out;
+    out << "{"
+        << "\"schema\":\"radser_native_upload_safety_status_v1\","
+        << "\"materialLayerRangeValidation\":true,"
+        << "\"materialLayerPointerValidation\":true,"
+        << "\"materialLayerByteOverflowValidation\":true,"
+        << "\"invalidMaterialUploadsReturnFalse\":true,"
+        << "\"generation\":" << generation()
+        << "}";
+    return out.str();
 }
 
 std::string TextureSystem::statusString() const {

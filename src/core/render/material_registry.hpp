@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <vector>
 
 class GarbageCollector;
@@ -29,6 +30,7 @@ class MaterialRegistry {
         std::lock_guard<std::mutex> lock(mutex_);
         return materialCount_;
     }
+    std::string statusJson() const;
 
     void reset();
     void retire(GarbageCollector& gc);
@@ -36,6 +38,12 @@ class MaterialRegistry {
   private:
     std::vector<vk::Data::MaterialEntry> entries_;
     uint32_t materialCount_ = 0;
+    uint64_t fullUploads_ = 0;
+    uint64_t sparseUpdates_ = 0;
+    uint32_t lastSparseEntryCount_ = 0;
+    uint32_t lastSparseMinMaterialId_ = 0;
+    uint32_t lastSparseMaxMaterialId_ = 0;
+    uint64_t rejectedSparseEntries_ = 0;
     std::shared_ptr<vk::DeviceLocalBuffer> ssbo_;
     mutable std::mutex mutex_;
 };

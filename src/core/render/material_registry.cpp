@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <iostream>
+#include <limits>
+#include <sstream>
 #include <utility>
 
 bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, uint32_t count,
@@ -65,6 +67,7 @@ bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, u
     ssbo_ = std::move(nextSsbo);
     entries_.assign(entries, entries + copyCount);
     materialCount_ = static_cast<uint32_t>(copyCount);
+    fullUploads_++;
 
     std::cout << "[MaterialRegistry] Uploaded " << materialCount_
               << " materials (" << dataSize << " bytes padded) to GPU SSBO" << std::endl;
@@ -83,9 +86,12 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
     auto framework = renderer->framework();
 
     uint32_t updated = 0;
+    uint32_t minMaterialId = std::numeric_limits<uint32_t>::max();
+    uint32_t maxMaterialId = 0;
     for (uint32_t i = 0; i < count; i++) {
         const auto& entry = entries[i];
         if (entry.materialId >= vk::Data::MATERIAL_MAX_ENTRIES) {
+            rejectedSparseEntries_++;
             continue;
         }
         if (entries_.size() <= entry.materialId) {
@@ -98,6 +104,8 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
             sizeof(vk::Data::MaterialEntry),
             offset);
         updated++;
+        minMaterialId = std::min(minMaterialId, entry.materialId);
+        maxMaterialId = std::max(maxMaterialId, entry.materialId);
     }
     if (updated == 0) return true;
 
@@ -117,14 +125,42 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
     vkWaitForFences(device->vkDevice(), 1, &fence->vkFence(), VK_TRUE, UINT64_MAX);
 
     materialCount_ = std::max(materialCount_, static_cast<uint32_t>(entries_.size()));
-    std::cout << "[MaterialRegistry] sparse update: " << updated << " entries" << std::endl;
+    sparseUpdates_++;
+    lastSparseEntryCount_ = updated;
+    lastSparseMinMaterialId_ = minMaterialId == std::numeric_limits<uint32_t>::max() ? 0 : minMaterialId;
+    lastSparseMaxMaterialId_ = maxMaterialId;
+    std::cout << "[MaterialRegistry] Sparse updated " << updated
+              << " material entries minId=" << lastSparseMinMaterialId_
+              << " maxId=" << lastSparseMaxMaterialId_ << std::endl;
     return true;
+}
+
+std::string MaterialRegistry::statusJson() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::ostringstream out;
+    out << "{"
+        << "\"schema\":\"radser_material_table_status_v1\","
+        << "\"materialCount\":" << materialCount_ << ","
+        << "\"fullUploads\":" << fullUploads_ << ","
+        << "\"sparseUpdates\":" << sparseUpdates_ << ","
+        << "\"lastSparseEntryCount\":" << lastSparseEntryCount_ << ","
+        << "\"lastSparseMinMaterialId\":" << lastSparseMinMaterialId_ << ","
+        << "\"lastSparseMaxMaterialId\":" << lastSparseMaxMaterialId_ << ","
+        << "\"rejectedSparseEntries\":" << rejectedSparseEntries_
+        << "}";
+    return out.str();
 }
 
 void MaterialRegistry::reset() {
     std::lock_guard<std::mutex> lock(mutex_);
     entries_.clear();
     materialCount_ = 0;
+    fullUploads_ = 0;
+    sparseUpdates_ = 0;
+    lastSparseEntryCount_ = 0;
+    lastSparseMinMaterialId_ = 0;
+    lastSparseMaxMaterialId_ = 0;
+    rejectedSparseEntries_ = 0;
     ssbo_.reset();
 }
 
@@ -133,5 +169,11 @@ void MaterialRegistry::retire(GarbageCollector& gc) {
     gc.collect(ssbo_);
     entries_.clear();
     materialCount_ = 0;
+    fullUploads_ = 0;
+    sparseUpdates_ = 0;
+    lastSparseEntryCount_ = 0;
+    lastSparseMinMaterialId_ = 0;
+    lastSparseMaxMaterialId_ = 0;
+    rejectedSparseEntries_ = 0;
     ssbo_.reset();
 }

@@ -209,6 +209,9 @@ class TextureSystem {
     uint64_t materialTexturePageRevision() const {
         return materialTexturePageRevision_.load(std::memory_order_acquire);
     }
+    std::string materialPagePoolStatusJson() const;
+    std::string materialTableStatusJson() const;
+    std::string nativeUploadSafetyStatusJson() const;
     /// Reset on resource reload.
     void reset();
 
@@ -261,7 +264,15 @@ class TextureSystem {
     std::array<std::atomic<uint32_t>, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialFlagPageArrayIds_{};
     std::array<std::atomic<bool>, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialPageReady_{};
     std::array<bool, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialPageMipsDirty_{};
+    std::array<uint32_t, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialPageLayerCapacity_{};
+    std::array<uint32_t, vk::Data::MATERIAL_TEXTURE_PAGE_MAX> materialPageLayersUsed_{};
     std::atomic<uint64_t> materialTexturePageRevision_{1};
+    uint64_t materialPageUpdates_ = 0;
+    uint64_t materialPageImageAllocations_ = 0;
+    uint32_t lastMaterialPage_ = 0;
+    uint32_t lastMaterialPageStartLayer_ = 0;
+    uint32_t lastMaterialPageLayerCount_ = 0;
+    uint32_t lastMaterialPageLayerCapacity_ = 0;
     bool albedoMipsInitialized_ = false;
     bool specMipsInitialized_ = false;
     bool normMipsInitialized_ = false;
