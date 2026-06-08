@@ -1027,8 +1027,22 @@ bool TextureSystem::uploadMaterialTexturePage(uint32_t page, uint32_t spriteSize
                                               uint64_t generation,
                                               std::shared_ptr<vk::VMA> vma,
                                               std::shared_ptr<vk::Device> device) {
+    return uploadMaterialTextureLayers(page, spriteSize, 0, layerCount, layerCount,
+        albedoData, specularData, normalData, flagData, generation, std::move(vma), std::move(device));
+}
+
+bool TextureSystem::uploadMaterialTextureLayers(uint32_t page, uint32_t spriteSize, uint32_t startLayer,
+                                                uint32_t layerCount, uint32_t layerCapacity,
+                                                const uint8_t* albedoData,
+                                                const uint8_t* specularData,
+                                                const uint8_t* normalData,
+                                                const uint8_t* flagData,
+                                                uint64_t generation,
+                                                std::shared_ptr<vk::VMA> vma,
+                                                std::shared_ptr<vk::Device> device) {
     if (page == 0 || page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return false;
-    if (spriteSize == 0 || layerCount == 0) return false;
+    if (spriteSize == 0 || layerCount == 0 || layerCapacity == 0) return false;
+    if (startLayer >= layerCapacity || layerCount > layerCapacity - startLayer) return false;
     if (!albedoData || !specularData || !normalData || !flagData || !vma || !device) return false;
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1039,40 +1053,49 @@ bool TextureSystem::uploadMaterialTexturePage(uint32_t page, uint32_t spriteSize
     if (bytesPerLayer == 0) return false;
 
     std::vector<uint32_t> oldArrayIds;
-    appendArrayId(oldArrayIds, materialAlbedoPageArrayIds_[page].load(std::memory_order_acquire));
-    appendArrayId(oldArrayIds, materialSpecularPageArrayIds_[page].load(std::memory_order_acquire));
-    appendArrayId(oldArrayIds, materialNormalPageArrayIds_[page].load(std::memory_order_acquire));
-    appendArrayId(oldArrayIds, materialFlagPageArrayIds_[page].load(std::memory_order_acquire));
+    uint32_t albedoArrayId = materialAlbedoPageArrayIds_[page].load(std::memory_order_acquire);
+    uint32_t specularArrayId = materialSpecularPageArrayIds_[page].load(std::memory_order_acquire);
+    uint32_t normalArrayId = materialNormalPageArrayIds_[page].load(std::memory_order_acquire);
+    uint32_t flagArrayId = materialFlagPageArrayIds_[page].load(std::memory_order_acquire);
 
     std::vector<uint32_t> newArrayIds;
-    uint32_t newAlbedoArrayId = arrayManager_.createArray(
-        vma, device, spriteSize, layerCount, VK_FORMAT_R8G8B8A8_SRGB, true);
-    uint32_t newSpecularArrayId = arrayManager_.createArray(
-        vma, device, spriteSize, layerCount, VK_FORMAT_R8G8B8A8_UNORM, true);
-    uint32_t newNormalArrayId = arrayManager_.createArray(
-        vma, device, spriteSize, layerCount, VK_FORMAT_R8G8B8A8_UNORM, true);
-    uint32_t newFlagArrayId = arrayManager_.createArray(
-        vma, device, spriteSize, layerCount, VK_FORMAT_R8G8B8A8_UNORM, true);
-    appendArrayId(newArrayIds, newAlbedoArrayId);
-    appendArrayId(newArrayIds, newSpecularArrayId);
-    appendArrayId(newArrayIds, newNormalArrayId);
-    appendArrayId(newArrayIds, newFlagArrayId);
+    bool createdPageArrays = false;
+    if (albedoArrayId == UINT32_MAX || specularArrayId == UINT32_MAX
+        || normalArrayId == UINT32_MAX || flagArrayId == UINT32_MAX) {
+        appendArrayId(oldArrayIds, albedoArrayId);
+        appendArrayId(oldArrayIds, specularArrayId);
+        appendArrayId(oldArrayIds, normalArrayId);
+        appendArrayId(oldArrayIds, flagArrayId);
+        albedoArrayId = arrayManager_.createArray(
+            vma, device, spriteSize, layerCapacity, VK_FORMAT_R8G8B8A8_SRGB, true);
+        specularArrayId = arrayManager_.createArray(
+            vma, device, spriteSize, layerCapacity, VK_FORMAT_R8G8B8A8_UNORM, true);
+        normalArrayId = arrayManager_.createArray(
+            vma, device, spriteSize, layerCapacity, VK_FORMAT_R8G8B8A8_UNORM, true);
+        flagArrayId = arrayManager_.createArray(
+            vma, device, spriteSize, layerCapacity, VK_FORMAT_R8G8B8A8_UNORM, true);
+        appendArrayId(newArrayIds, albedoArrayId);
+        appendArrayId(newArrayIds, specularArrayId);
+        appendArrayId(newArrayIds, normalArrayId);
+        appendArrayId(newArrayIds, flagArrayId);
+        createdPageArrays = true;
+    }
 
     auto stageAllLayers = [&](uint32_t arrayId, const uint8_t* data) -> uint32_t {
         uint32_t staged = 0;
         for (uint32_t layer = 0; layer < layerCount; layer++) {
             const uint8_t* layerData = data + static_cast<size_t>(layer) * bytesPerLayer;
-            if (arrayManager_.stageLayerPixels(arrayId, layer, 0, layerData, bytesPerLayer)) {
+            if (arrayManager_.stageLayerPixels(arrayId, startLayer + layer, 0, layerData, bytesPerLayer)) {
                 staged++;
             }
         }
         return staged;
     };
 
-    const uint32_t stagedAlbedo = stageAllLayers(newAlbedoArrayId, albedoData);
-    const uint32_t stagedSpecular = stageAllLayers(newSpecularArrayId, specularData);
-    const uint32_t stagedNormal = stageAllLayers(newNormalArrayId, normalData);
-    const uint32_t stagedFlag = stageAllLayers(newFlagArrayId, flagData);
+    const uint32_t stagedAlbedo = stageAllLayers(albedoArrayId, albedoData);
+    const uint32_t stagedSpecular = stageAllLayers(specularArrayId, specularData);
+    const uint32_t stagedNormal = stageAllLayers(normalArrayId, normalData);
+    const uint32_t stagedFlag = stageAllLayers(flagArrayId, flagData);
     if (stagedAlbedo != layerCount || stagedSpecular != layerCount ||
         stagedNormal != layerCount || stagedFlag != layerCount) {
         auto* renderer = Renderer::try_instance();
@@ -1089,10 +1112,10 @@ bool TextureSystem::uploadMaterialTexturePage(uint32_t page, uint32_t spriteSize
     }
 
     materialPageReady_[page].store(false, std::memory_order_release);
-    materialAlbedoPageArrayIds_[page].store(newAlbedoArrayId, std::memory_order_release);
-    materialSpecularPageArrayIds_[page].store(newSpecularArrayId, std::memory_order_release);
-    materialNormalPageArrayIds_[page].store(newNormalArrayId, std::memory_order_release);
-    materialFlagPageArrayIds_[page].store(newFlagArrayId, std::memory_order_release);
+    materialAlbedoPageArrayIds_[page].store(albedoArrayId, std::memory_order_release);
+    materialSpecularPageArrayIds_[page].store(specularArrayId, std::memory_order_release);
+    materialNormalPageArrayIds_[page].store(normalArrayId, std::memory_order_release);
+    materialFlagPageArrayIds_[page].store(flagArrayId, std::memory_order_release);
     materialPageMipsDirty_[page] = true;
     materialTexturePageRevision_.fetch_add(1, std::memory_order_acq_rel);
 
@@ -1103,7 +1126,10 @@ bool TextureSystem::uploadMaterialTexturePage(uint32_t page, uint32_t spriteSize
     }
 
     std::cout << "[TextureSystem] Uploaded material texture page " << page
+              << " startLayer=" << startLayer
               << " layers=" << layerCount
+              << " capacity=" << layerCapacity
+              << " createdPageArrays=" << (createdPageArrays ? 1 : 0)
               << " size=" << spriteSize << "x" << spriteSize << std::endl;
     return true;
 }

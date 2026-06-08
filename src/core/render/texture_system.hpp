@@ -186,6 +186,15 @@ class TextureSystem {
                                    uint64_t generation,
                                    std::shared_ptr<vk::VMA> vma,
                                    std::shared_ptr<vk::Device> device);
+    bool uploadMaterialTextureLayers(uint32_t page, uint32_t spriteSize, uint32_t startLayer,
+                                     uint32_t layerCount, uint32_t layerCapacity,
+                                     const uint8_t* albedoData,
+                                     const uint8_t* specularData,
+                                     const uint8_t* normalData,
+                                     const uint8_t* flagData,
+                                     uint64_t generation,
+                                     std::shared_ptr<vk::VMA> vma,
+                                     std::shared_ptr<vk::Device> device);
 
     /// Get texture array IDs (for descriptor binding).
     uint32_t blockAlbedoArrayId() const { return blockAlbedoArrayId_.load(std::memory_order_acquire); }
