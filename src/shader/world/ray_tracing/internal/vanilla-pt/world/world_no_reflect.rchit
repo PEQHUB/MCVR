@@ -48,6 +48,53 @@ layout(set = 2, binding = 2) uniform SkyUniform {
     SkyUBO skyUBO;
 };
 
+layout(push_constant) uniform PushConstant {
+    int numRayBounces;
+    int flags;
+    int reservedLighting0;
+    float reservedLighting1;
+    int reservedLighting2;
+    int reservedLighting3;
+    int reservedLighting4;
+    float preExposure;
+    float displacementDepthScale;
+    int displacementPrimarySteps;
+    int displacementRefinementSteps;
+    float displacementFadeDistanceBlocks;
+    uint blueNoiseFrame;
+    uint rtDebugFlags;
+    uint handInstanceCount;
+    uint reservedPc0;
+    uint64_t sharcHashEntries;
+    uint64_t sharcAccumulation;
+    uint64_t sharcResolved;
+    float sharcCameraX;
+    float sharcCameraY;
+    float sharcCameraZ;
+    float sharcSceneScale;
+    uint sharcCapacity;
+    float sharcRadianceScale;
+    uint sharcFrameIndex;
+    float sharcRoughnessThreshold;
+    int sharcUpdateBlockSize;
+    int sharcUpdateBounces;
+    int sharcQueryMode;
+    int sharcQueryReserved;
+    int offlineFlags;
+    int accumFrameCount;
+    float aperture;
+    float focalDistance;
+    uint64_t reservedAddr;
+} pc;
+
+#define RT_DEBUG_MATERIAL_MODE_SHIFT 24u
+#define RT_DEBUG_MATERIAL_MODE_MASK  15u
+#define RT_DEBUG_MATERIAL_MODE       ((pc.rtDebugFlags >> RT_DEBUG_MATERIAL_MODE_SHIFT) & RT_DEBUG_MATERIAL_MODE_MASK)
+#define RT_DEBUG_MATERIAL_ID         1u
+#define RT_DEBUG_MATERIAL_PAGE_LAYER 2u
+#define RT_DEBUG_MATERIAL_DISPLACE_ELIGIBLE 3u
+#define RT_DEBUG_MATERIAL_DISPLACE_HEIGHT   4u
+
 layout(set = 3, binding = 1, rgba8) uniform image2D diffuseAlbedoImage;
 layout(set = 3, binding = 2, rgba8) uniform image2D specularAlbedoImage;
 layout(set = 3, binding = 3, rgba32f) uniform image2D normalRoughnessImage;
@@ -63,6 +110,50 @@ indexBuffer;
 
 layout(location = 0) rayPayloadInEXT MainRay mainRay;
 hitAttributeEXT vec2 attribs;
+
+vec3 materialDebugHashColor(uint materialId) {
+    uint h = materialId * 1664525u + 1013904223u;
+    h ^= h >> 16u;
+    return vec3(
+        float((h >> 0u) & 255u),
+        float((h >> 8u) & 255u),
+        float((h >> 16u) & 255u)) / 255.0;
+}
+
+vec3 materialDebugPageLayer(uint materialId) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    uint albedoPage = materialTexturePage(material.albedoPage);
+    uint normalPage = materialTexturePage(material.normalPage);
+    uint albedoLayer = uint(max(material.albedoLayer, 0));
+    return vec3(
+        float(albedoPage & 255u) / 255.0,
+        float(albedoLayer & 255u) / 255.0,
+        float(normalPage & 255u) / 255.0);
+}
+
+bool materialDebugHasAuthoredHeight(uint materialId) {
+    MaterialEntry material = safeMaterialEntry(materialId);
+    return (material.flags & MATERIAL_FLAG_DISPLACEMENT_ELIGIBLE) != 0u &&
+           material.displacementPolicy == MATERIAL_DISPLACEMENT_AUTHORED_HEIGHT;
+}
+
+vec3 materialDebugDisplacementEligible(uint materialId) {
+    return materialDebugHasAuthoredHeight(materialId) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+}
+
+vec3 materialDebugDisplacementHeight(uint materialId, vec4 normalValue) {
+    if (!materialDebugHasAuthoredHeight(materialId)) return vec3(0.0);
+    return vec3(clamp(normalValue.a, 0.0, 1.0));
+}
+
+vec3 materialDebugColor(uint materialId, vec4 normalValue) {
+    uint mode = RT_DEBUG_MATERIAL_MODE;
+    if (mode == RT_DEBUG_MATERIAL_ID) return materialDebugHashColor(materialId);
+    if (mode == RT_DEBUG_MATERIAL_PAGE_LAYER) return materialDebugPageLayer(materialId);
+    if (mode == RT_DEBUG_MATERIAL_DISPLACE_ELIGIBLE) return materialDebugDisplacementEligible(materialId);
+    if (mode == RT_DEBUG_MATERIAL_DISPLACE_HEIGHT) return materialDebugDisplacementHeight(materialId, normalValue);
+    return vec3(0.0);
+}
 
 void main() {
     vec3 viewDir = -mainRay.direction;
@@ -180,6 +271,10 @@ void main() {
     }
 
     albedoValue = vec4(tint, albedoValue.a);
+    if (isBlockGeometry && RT_DEBUG_MATERIAL_MODE != 0u) {
+        albedoValue = vec4(materialDebugColor(materialRuleTextureID, normalValue), 1.0);
+        tint = albedoValue.rgb;
+    }
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
     if (isBlockGeometry) { applyTextureRule(materialRuleTextureID, mat); }
 
