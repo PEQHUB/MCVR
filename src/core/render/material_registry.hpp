@@ -16,6 +16,9 @@ class MaterialRegistry {
     bool uploadMaterials(const vk::Data::MaterialEntry* entries, uint32_t count,
                          std::shared_ptr<vk::VMA> vma,
                          std::shared_ptr<vk::Device> device);
+    bool updateMaterialsSparse(const vk::Data::MaterialEntry* entries, uint32_t count,
+                               std::shared_ptr<vk::VMA> vma,
+                               std::shared_ptr<vk::Device> device);
 
     std::shared_ptr<vk::DeviceLocalBuffer> getBuffer() const {
         std::lock_guard<std::mutex> lock(mutex_);
