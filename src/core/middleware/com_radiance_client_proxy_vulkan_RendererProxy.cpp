@@ -19,6 +19,7 @@
 #include <map>
 #include <mutex>
 #include <sstream>
+#include <string>
 
 #if defined(_WIN32)
 #    include <windows.h>
@@ -62,6 +63,41 @@ namespace {
 std::recursive_mutex g_rendererJniMtx;
 std::atomic<bool> g_rendererShuttingDown{false};
 std::atomic<bool> g_rendererClosed{false};
+
+#ifndef MCVR_BUILD_GIT_SHA
+#define MCVR_BUILD_GIT_SHA "unknown"
+#endif
+#ifndef MCVR_BUILD_CONFIG
+#define MCVR_BUILD_CONFIG "unknown"
+#endif
+#ifndef MCVR_BUILD_COMPILER_ID
+#define MCVR_BUILD_COMPILER_ID "unknown"
+#endif
+#ifndef MCVR_BUILD_COMPILER_VERSION
+#define MCVR_BUILD_COMPILER_VERSION "unknown"
+#endif
+#ifndef MCVR_BUILD_VULKAN_SDK
+#define MCVR_BUILD_VULKAN_SDK "unknown"
+#endif
+#ifndef MCVR_BUILD_TIMESTAMP
+#define MCVR_BUILD_TIMESTAMP "unknown"
+#endif
+
+std::string json_escape(const char *text) {
+    std::string out;
+    if (text == nullptr) return out;
+    for (const char c : std::string(text)) {
+        switch (c) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out += c; break;
+        }
+    }
+    return out;
+}
 
 inline bool rendererUsable() {
     return !g_rendererShuttingDown.load(std::memory_order_acquire) &&
@@ -166,6 +202,42 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
     if (!rendererUsable()) return 0;
     auto maxImageSize = Renderer::instance().framework()->physicalDevice()->properties().limits.maxImageDimension2D;
     return maxImageSize;
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeBuildInfoJson(JNIEnv *env,
+                                                                                                            jclass) {
+    std::ostringstream json;
+    json << "{";
+    json << "\"repository\":\"radser-mcvr\",";
+    json << "\"commit\":\"" << json_escape(MCVR_BUILD_GIT_SHA) << "\",";
+    json << "\"buildType\":\"" << json_escape(MCVR_BUILD_CONFIG) << "\",";
+    json << "\"compiler\":\"" << json_escape(MCVR_BUILD_COMPILER_ID) << " "
+         << json_escape(MCVR_BUILD_COMPILER_VERSION) << "\",";
+    json << "\"vulkanSdk\":\"" << json_escape(MCVR_BUILD_VULKAN_SDK) << "\",";
+    json << "\"buildTimestamp\":\"" << json_escape(MCVR_BUILD_TIMESTAMP) << "\",";
+    json << "\"features\":{";
+#ifdef MCVR_ENABLE_NRD
+    json << "\"nrd\":true,";
+#else
+    json << "\"nrd\":false,";
+#endif
+#ifdef MCVR_ENABLE_FFX_UPSCALER
+    json << "\"ffxUpscaler\":true,";
+#else
+    json << "\"ffxUpscaler\":false,";
+#endif
+#ifdef MCVR_ENABLE_SHARC
+    json << "\"sharc\":true,";
+#else
+    json << "\"sharc\":false,";
+#endif
+#ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
+    json << "\"sharcMainTraceQuery\":true";
+#else
+    json << "\"sharcMainTraceQuery\":false";
+#endif
+    json << "}}";
+    return env->NewStringUTF(json.str().c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_acquireContext(JNIEnv *, jclass) {

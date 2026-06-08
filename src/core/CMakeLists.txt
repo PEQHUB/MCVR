@@ -10,11 +10,23 @@ add_library(core SHARED ${SOURCE_FILES})
 target_link_libraries(core PUBLIC ngx ${JNI_LIBRARIES} VulkanMemoryAllocator volk::volk glfw streamline minizip tinyexpr)
 target_include_directories(core PRIVATE ${PROJECT_SOURCE_DIR}/extern/json/include ${PROJECT_SOURCE_DIR}/extern/minizip-ng)
 
+execute_process(
+    COMMAND git -C "${CMAKE_SOURCE_DIR}" rev-parse --short=12 HEAD
+    OUTPUT_VARIABLE MCVR_GIT_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT MCVR_GIT_SHA)
+    set(MCVR_GIT_SHA "unknown")
+endif()
+string(TIMESTAMP MCVR_BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
+
 if(DEFINED ENV{VULKAN_SDK} AND NOT "$ENV{VULKAN_SDK}" STREQUAL "")
     set(MCVR_VULKAN_SDK "$ENV{VULKAN_SDK}")
 else()
     set(MCVR_VULKAN_SDK "C:/VulkanSDK/1.4.341.1")
 endif()
+file(TO_CMAKE_PATH "${MCVR_VULKAN_SDK}" MCVR_VULKAN_SDK_JSON)
 
 find_path(SHADERC_INCLUDE_DIR shaderc/shaderc.hpp
     HINTS
@@ -40,6 +52,14 @@ target_link_libraries(core PUBLIC ${SHADERC_LIBRARY})
 set(AFTERMATH_SDK_DIR "${CMAKE_SOURCE_DIR}/extern/aftermath")
 target_include_directories(core PUBLIC ${GENTOOL_OUTPUT_DIR} ${VOLK_INCLUDE_DIR} ${GLFW_INCLUDE_DIR} ${VMA_INCLUDE_DIR} ${STB_INCLUDE_DIR} ${JNI_INCLUDE_DIRS} ${GLM_INCLUDE_DIR} ${AFTERMATH_SDK_DIR}/include)
 target_compile_definitions(core PUBLIC VK_NO_PROTOTYPES CORE_LIB)
+target_compile_definitions(core PRIVATE
+    "MCVR_BUILD_GIT_SHA=\"${MCVR_GIT_SHA}\""
+    "MCVR_BUILD_CONFIG=\"$<CONFIG>\""
+    "MCVR_BUILD_COMPILER_ID=\"${CMAKE_CXX_COMPILER_ID}\""
+    "MCVR_BUILD_COMPILER_VERSION=\"${CMAKE_CXX_COMPILER_VERSION}\""
+    "MCVR_BUILD_VULKAN_SDK=\"${MCVR_VULKAN_SDK_JSON}\""
+    "MCVR_BUILD_TIMESTAMP=\"${MCVR_BUILD_TIMESTAMP}\""
+)
 if (USE_AMD)
     target_compile_definitions(core PUBLIC USE_AMD)
 endif ()
