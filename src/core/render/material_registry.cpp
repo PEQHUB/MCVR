@@ -96,6 +96,7 @@ bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, u
         .commandBuffer = cmd,
         .fence = fence,
         .deviceLocalStagingOwner = ssbo_,
+        .targetBuffer = ssbo_,
         .bytes = static_cast<uint64_t>(dataSize),
         .entries = static_cast<uint32_t>(copyCount),
         .sparse = false,
@@ -169,6 +170,7 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
         .device = device,
         .commandBuffer = cmd,
         .fence = fence,
+        .targetBuffer = ssbo_,
         .hostStaging = staging,
         .bytes = static_cast<uint64_t>(dataSize),
         .entries = updated,
@@ -187,6 +189,17 @@ std::string MaterialRegistry::statusJson() const {
     std::lock_guard<std::mutex> lock(mutex_);
     pollCompletedUploadsLocked();
     std::ostringstream out;
+    uint64_t pendingEntries = 0;
+    uint32_t pendingFullUploads = 0;
+    uint32_t pendingSparseUploads = 0;
+    for (const auto& upload : pendingUploads_) {
+        pendingEntries += upload.entries;
+        if (upload.sparse) {
+            pendingSparseUploads++;
+        } else {
+            pendingFullUploads++;
+        }
+    }
     out << "{"
         << "\"schema\":\"radser_material_table_status_v1\","
         << "\"materialCount\":" << materialCount_ << ","
@@ -197,7 +210,13 @@ std::string MaterialRegistry::statusJson() const {
         << "\"asyncSubmissions\":" << asyncSubmissions_ << ","
         << "\"asyncCompletions\":" << asyncCompletions_ << ","
         << "\"pendingAsyncUploads\":" << pendingUploads_.size() << ","
+        << "\"pendingAsyncFullUploads\":" << pendingFullUploads << ","
+        << "\"pendingAsyncSparseUploads\":" << pendingSparseUploads << ","
+        << "\"pendingAsyncMaterialEntries\":" << pendingEntries << ","
         << "\"pendingAsyncUploadBytes\":" << pendingUploadBytes_ << ","
+        << "\"asyncTransferQueueUpload\":false,"
+        << "\"fencePollingUploadCompletion\":true,"
+        << "\"retainsInFlightTargetsUntilFence\":true,"
         << "\"lastSparseEntryCount\":" << lastSparseEntryCount_ << ","
         << "\"lastSparseMinMaterialId\":" << lastSparseMinMaterialId_ << ","
         << "\"lastSparseMaxMaterialId\":" << lastSparseMaxMaterialId_ << ","
@@ -214,17 +233,17 @@ void MaterialRegistry::reset() {
     sparseUpdates_ = 0;
     asyncSubmissions_ = 0;
     asyncCompletions_ = 0;
-    pendingUploadBytes_ = 0;
     lastSparseEntryCount_ = 0;
     lastSparseMinMaterialId_ = 0;
     lastSparseMaxMaterialId_ = 0;
     rejectedSparseEntries_ = 0;
-    pendingUploads_.clear();
+    pollCompletedUploadsLocked();
     ssbo_.reset();
 }
 
 void MaterialRegistry::retire(GarbageCollector& gc) {
     std::lock_guard<std::mutex> lock(mutex_);
+    pollCompletedUploadsLocked();
     gc.collect(ssbo_);
     entries_.clear();
     materialCount_ = 0;
@@ -232,11 +251,9 @@ void MaterialRegistry::retire(GarbageCollector& gc) {
     sparseUpdates_ = 0;
     asyncSubmissions_ = 0;
     asyncCompletions_ = 0;
-    pendingUploadBytes_ = 0;
     lastSparseEntryCount_ = 0;
     lastSparseMinMaterialId_ = 0;
     lastSparseMaxMaterialId_ = 0;
     rejectedSparseEntries_ = 0;
-    pendingUploads_.clear();
     ssbo_.reset();
 }

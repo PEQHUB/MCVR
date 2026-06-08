@@ -42,6 +42,7 @@ class MaterialRegistry {
         std::shared_ptr<vk::CommandBuffer> commandBuffer;
         std::shared_ptr<vk::Fence> fence;
         std::shared_ptr<vk::DeviceLocalBuffer> deviceLocalStagingOwner;
+        std::shared_ptr<vk::DeviceLocalBuffer> targetBuffer;
         std::shared_ptr<vk::HostVisibleBuffer> hostStaging;
         uint64_t bytes = 0;
         uint32_t entries = 0;
