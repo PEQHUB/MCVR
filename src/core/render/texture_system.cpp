@@ -365,6 +365,7 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
             layerSize_ = inferredLayerSize;
         }
     }
+    const bool metadataOnlyFallbackArrays = spriteSize == 1 && !spritePixels_.empty();
     if (spriteSize == 0) {
         std::cerr << "[TextureSystem] Cannot finalize: no valid fixed sprite layer size" << std::endl;
         return;
@@ -386,6 +387,7 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
 
     std::cout << "[TextureSystem] Finalizing: " << count << " sprites, "
               << spriteSize << "x" << spriteSize
+              << (metadataOnlyFallbackArrays ? " fallback arrays" : "")
               << ", max layers=" << maxLayers << std::endl;
 
     uint32_t newAlbedoArrayId = UINT32_MAX;
@@ -404,6 +406,7 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
     // Pixels are concatenated in sorted order in spritePixels_.
     // Java uses FIXED offset: i * spriteSize * spriteSize * 4 (all sprites assumed same size).
     size_t bytesPerSprite = static_cast<size_t>(spriteSize) * spriteSize * 4;
+    std::vector<uint8_t> defaultAlbedo(bytesPerSprite, 255);
     const std::vector<uint8_t> defaultSpecular(bytesPerSprite, 0);
     std::vector<uint8_t> defaultNormal(bytesPerSprite, 0);
     std::vector<uint8_t> defaultFlag(bytesPerSprite, 0);
@@ -437,14 +440,12 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
             frameData = spritePixels_.data() + pixelOffset;
         }
 
-        if (frameData) {
-            if (arrayManager_.stageLayerPixels(newAlbedoArrayId, i, 0,
-                                               frameData, bytesPerSprite)) {
-                stagedAlbedoLayers++;
+        const uint8_t* layer = frameData ? frameData : defaultAlbedo.data();
+        if (arrayManager_.stageLayerPixels(newAlbedoArrayId, i, 0, layer, bytesPerSprite)) {
+            stagedAlbedoLayers++;
+            if (frameData) {
                 albedoChecksums_[i] = fnv1a64(frameData, bytesPerSprite);
             }
-        } else {
-            std::cerr << "[TextureSystem] Missing pixel data for sprite " << i << std::endl;
         }
     }
 
