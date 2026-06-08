@@ -59,6 +59,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
         << "\"vanillaMaterialPageTiers\":true,"
         << "\"asyncTransferQueueUpload\":false,"
         << "\"pendingTextureUploads\":" << (ts.hasPendingTextureUploads() ? "true" : "false") << ","
+        << "\"materialTable\":" << ts.materialTableStatusJson() << ","
         << "\"textureUploadCapabilities\":" << Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeTextureUploadCapabilities(nullptr, nullptr)
         << "}";
     return makeString(env, out.str());
@@ -95,6 +96,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
         << "\"finalized\":" << (ts.isFinalized() ? "true" : "false") << ","
         << "\"materialPageRevision\":" << ts.materialTexturePageRevision()
         << ",\"materialPagePool\":" << ts.materialPagePoolStatusJson()
+        << ",\"materialTable\":" << ts.materialTableStatusJson()
         << "}";
     return makeString(env, out.str());
 }
