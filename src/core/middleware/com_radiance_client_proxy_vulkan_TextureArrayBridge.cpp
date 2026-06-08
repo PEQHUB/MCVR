@@ -46,7 +46,8 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
         << "\"finalized\":" << (ts.isFinalized() ? "true" : "false") << ","
         << "\"spriteCount\":" << ts.spriteCount() << ","
         << "\"layerSize\":" << ts.layerSize() << ","
-        << "\"activeUploadMode\":\"fixed_bootstrap_arrays_plus_vanilla_material_page_tiers\","
+        << "\"activeUploadMode\":\"expanded_material_page_space_with_vanilla_material_page_tiers\","
+        << "\"materialTexturePageMax\":" << vk::Data::MATERIAL_TEXTURE_PAGE_MAX << ","
         << "\"nativeDefaultAuxTextures\":true,"
         << "\"sparseSpriteAuxUpload\":true,"
         << "\"sparseAuxBatchUpload\":true,"
@@ -71,6 +72,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
         << "\"currentCompatibilityMode\":\"material_page_size_tiers\","
         << "\"layerSize\":" << ts.layerSize() << ","
         << "\"spriteCount\":" << ts.spriteCount() << ","
+        << "\"materialTexturePageMax\":" << vk::Data::MATERIAL_TEXTURE_PAGE_MAX << ","
         << "\"reservedTierPages\":\"1-7\","
         << "\"tierSizes\":\"16,32,64,128,256,512,1024\","
         << "\"compatMaterialFirstPage\":8"
@@ -88,6 +90,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
         << "\"textureGeneration\":" << ts.generation() << ","
         << "\"finalized\":" << (ts.isFinalized() ? "true" : "false") << ","
         << "\"materialPageRevision\":" << ts.materialTexturePageRevision()
+        << ",\"materialPagePool\":" << ts.materialPagePoolStatusJson()
         << "}";
     return makeString(env, out.str());
 }
@@ -119,6 +122,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
         << "\"generation\":" << ts.generation() << ","
         << "\"finalized\":" << (ts.isFinalized() ? "true" : "false") << ","
         << "\"backend\":\"renderer_owned_material_pages\","
+        << "\"materialTexturePageMax\":" << vk::Data::MATERIAL_TEXTURE_PAGE_MAX << ","
         << "\"dirtyMaterialTableUpdates\":true,"
         << "\"sparseMaterialTableUpdates\":true,"
         << "\"persistentMaterialPagePools\":true,"

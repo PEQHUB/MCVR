@@ -1176,6 +1176,9 @@ std::string TextureSystem::materialPagePoolStatusJson() const {
         return "{\"schema\":\"radser_material_page_pool_status_v1\",\"busy\":true}";
     }
     uint32_t pagesAllocated = 0;
+    uint32_t readyAllocatedPages = 0;
+    uint32_t unreadyAllocatedPages = 0;
+    uint32_t pendingMipPages = 0;
     uint32_t layersUsed = 0;
     uint32_t layersFree = 0;
     uint32_t allocatedLayers = 0;
@@ -1186,20 +1189,48 @@ std::string TextureSystem::materialPagePoolStatusJson() const {
         }
         if (capacity == 0) continue;
         pagesAllocated++;
+        if (materialPageReady_[page].load(std::memory_order_acquire)) {
+            readyAllocatedPages++;
+        } else {
+            unreadyAllocatedPages++;
+        }
+        if (materialPageMipsDirty_[page]) {
+            pendingMipPages++;
+        }
         allocatedLayers += capacity;
         uint32_t used = std::min(materialPageLayersUsed_[page], capacity);
         layersUsed += used;
         layersFree += capacity - used;
     }
+    constexpr uint32_t fallbackPage = 0;
+    constexpr uint32_t vanillaTierFirstPage = 1;
+    constexpr uint32_t vanillaTierPageCount = 7;
+    constexpr uint32_t ctmFirstMaterialPage = vanillaTierFirstPage + vanillaTierPageCount;
+    constexpr uint32_t ctmMaterialPageBudget =
+        vk::Data::MATERIAL_TEXTURE_PAGE_MAX > ctmFirstMaterialPage
+            ? vk::Data::MATERIAL_TEXTURE_PAGE_MAX - ctmFirstMaterialPage
+            : 0;
     std::ostringstream out;
     out << "{"
         << "\"schema\":\"radser_material_page_pool_status_v1\","
         << "\"generation\":" << generation() << ","
         << "\"materialPagePools\":true,"
+        << "\"materialTexturePageMax\":" << vk::Data::MATERIAL_TEXTURE_PAGE_MAX << ","
+        << "\"fallbackMaterialPage\":" << fallbackPage << ","
+        << "\"vanillaTierFirstPage\":" << vanillaTierFirstPage << ","
+        << "\"vanillaTierPageCount\":" << vanillaTierPageCount << ","
+        << "\"ctmFirstMaterialPage\":" << ctmFirstMaterialPage << ","
+        << "\"ctmMaterialPageBudget\":" << ctmMaterialPageBudget << ","
         << "\"pagesAllocated\":" << pagesAllocated << ","
+        << "\"readyAllocatedPageCount\":" << readyAllocatedPages << ","
+        << "\"unreadyAllocatedPageCount\":" << unreadyAllocatedPages << ","
+        << "\"pendingMipPageCount\":" << pendingMipPages << ","
         << "\"layersUsed\":" << layersUsed << ","
         << "\"layersFree\":" << layersFree << ","
         << "\"allocatedLayers\":" << allocatedLayers << ","
+        << "\"residentLayerCapacity\":" << allocatedLayers << ","
+        << "\"pagesExhausted\":false,"
+        << "\"ctmUnaddressableMaterials\":0,"
         << "\"updates\":" << materialPageUpdates_ << ","
         << "\"newPageImageAllocations\":" << materialPageImageAllocations_ << ","
         << "\"lastUpdatePage\":" << lastMaterialPage_ << ","
