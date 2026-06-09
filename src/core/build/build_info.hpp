@@ -1,0 +1,24 @@
+#pragma once
+// Build identity for MCVR native core.
+//
+// Generated at build time by CMake custom command.
+// Every runtime log and DebugBridge buildInfo command must print these fields.
+
+#include <cstdint>
+#include <string>
+
+namespace build_info {
+
+inline constexpr int kTextureLoaderAbiVersion = 4;
+inline constexpr int kCacheSchemaVersion = 4;
+
+// Filled by CMake configure/generate step
+inline constexpr const char* kRepoCommit = "${MCVR_REPO_COMMIT}";
+inline constexpr const char* kBranch = "${MCVR_BRANCH}";
+inline constexpr bool kDirty = ${MCVR_DIRTY};
+inline constexpr const char* kBuildTimestamp = "${MCVR_BUILD_TIMESTAMP}";
+inline constexpr const char* kDllSha256 = "${MCVR_DLL_SHA256}";
+
+std::string summary();
+
+} // namespace build_info

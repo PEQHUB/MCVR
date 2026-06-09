@@ -31,6 +31,7 @@ std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::renderResHdrImages;
 GpuProfiler Renderer::gpuProfiler;
 ThreadPool Renderer::threadPool;
 TextureSystem Renderer::textureSystem;
+TextureLoaderV4 Renderer::textureLoaderV4_;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::frameGenDepthImages;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::frameGenMotionVectorImages;
 

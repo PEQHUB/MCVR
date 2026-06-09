@@ -31,4 +31,18 @@ bool materialUsesSpriteArray(MaterialEntry material) {
     return (material.flags & (MATERIAL_FLAG_VANILLA_SPRITE | MATERIAL_FLAG_FALLBACK)) != 0u;
 }
 
+// V4: Extract namespace from material entry
+uint materialAlbedoNamespace(MaterialEntry m) { return m.albedoNamespace; }
+uint materialAlbedoTier(MaterialEntry m) { return m.albedoTier; }
+uint materialSpecularNamespace(MaterialEntry m) { return m.specularNamespace; }
+uint materialSpecularTier(MaterialEntry m) { return m.specularTier; }
+uint materialNormalNamespace(MaterialEntry m) { return m.normalNamespace; }
+uint materialNormalTier(MaterialEntry m) { return m.normalTier; }
+uint materialFlagNamespace(MaterialEntry m) { return m.flagNamespace; }
+uint materialFlagTier(MaterialEntry m) { return m.flagTier; }
+
+// V4: Residency state
+bool materialIsGpuResident(MaterialEntry m) { return m.residencyState == 3u; }
+bool materialIsPending(MaterialEntry m) { return m.residencyState == 1u || m.residencyState == 2u; }
+
 #endif // MATERIAL_FETCH_GLSL

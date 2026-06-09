@@ -8,6 +8,7 @@
 
 #include "core/render/gpu_profiler.hpp"
 #include "core/render/texture_system.hpp"
+#include "core/render/texture_loader_v4.hpp"
 #include "core/render/thread_pool.hpp"
 
 #include <array>
@@ -211,6 +212,9 @@ class Renderer : public Singleton<Renderer> {
     static GpuProfiler gpuProfiler;
     static ThreadPool threadPool;
     static TextureSystem textureSystem;
+    static TextureLoaderV4 textureLoaderV4_;
+
+    TextureLoaderV4& textureLoaderV4() { return textureLoaderV4_; }
 
     // Frame Generation: images set by pipeline modules, read by render_framework for SL tagging
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> frameGenDepthImages;        // Linear depth (render res)

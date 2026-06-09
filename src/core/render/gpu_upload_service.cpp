@@ -1,0 +1,266 @@
+#include "core/render/gpu_upload_service.hpp"
+#include "core/render/renderer.hpp"
+#include "core/render/render_framework.hpp"
+#include <algorithm>
+#include <cstring>
+#include <iostream>
+#include <sstream>
+
+bool GpuUploadService::initialize(std::shared_ptr<vk::Device> device,
+                                   std::shared_ptr<vk::VMA> vma,
+                                   uint64_t stagingBytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (initialized_) return true;
+    if (!device || !vma) return false;
+
+    device_ = device;
+    vma_ = vma;
+
+    // Check for dedicated transfer queue
+    auto framework = Renderer::try_instance() ? Renderer::instance().framework() : nullptr;
+    if (framework && framework->physicalDevice()) {
+        auto& families = framework->queueFamilies();
+        // Look for a queue family with transfer but not graphics
+        for (const auto& family : families) {
+            if ((family.queueFlags & VK_QUEUE_TRANSFER_BIT) &&
+                !(family.queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+                hasDedicatedTransferQueue_ = true;
+                asyncTransferQueueUpload_ = true;
+                break;
+            }
+        }
+    }
+
+    if (!hasDedicatedTransferQueue_) {
+        asyncMainQueueUpload_ = true;
+        asyncTransferQueueUpload_ = false;
+    }
+
+    initialized_ = true;
+    std::cout << "[GpuUploadService] Initialized: transferQueue="
+              << (hasDedicatedTransferQueue_ ? "dedicated" : "main-queue-fallback")
+              << " stagingBytes=" << stagingBytes << std::endl;
+    return true;
+}
+
+void GpuUploadService::shutdown() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Wait for in-flight submissions
+    for (auto& flight : inFlight_) {
+        if (flight.timeline != VK_NULL_HANDLE && device_) {
+            vkWaitSemaphores(device_->vkDevice(),
+                &(VkSemaphoreWaitInfo){
+                    .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+                    .semaphoreCount = 1,
+                    .pSemaphores = &flight.timeline,
+                    .pValues = &flight.timelineValue,
+                }, UINT64_MAX);
+        }
+    }
+    inFlight_.clear();
+    for (int i = 0; i < static_cast<int>(Priority::Count); i++) {
+        queues_[i].clear();
+    }
+    initialized_ = false;
+}
+
+void GpuUploadService::cancelGeneration(uint64_t generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (int i = 0; i < static_cast<int>(Priority::Count); i++) {
+        auto& q = queues_[i];
+        q.erase(std::remove_if(q.begin(), q.end(),
+            [generation](const Pending& p) { return p.generation == generation; }),
+            q.end());
+    }
+    // Recalculate pending bytes
+    uint64_t totalBytes = 0, visibleBytes = 0;
+    for (int i = 0; i < static_cast<int>(Priority::Count); i++) {
+        for (const auto& p : queues_[i]) {
+            totalBytes += p.payload.size();
+            if (p.visible) visibleBytes += p.payload.size();
+        }
+    }
+    pendingUploadBytes_.store(totalBytes, std::memory_order_relaxed);
+    pendingVisibleUploadBytes_.store(visibleBytes, std::memory_order_relaxed);
+}
+
+bool GpuUploadService::enqueueTextureUpload(const TextureUpload& upload) {
+    if (!initialized_ || upload.data == nullptr || upload.bytes == 0) return false;
+    if (upload.generation == 0) return false;
+
+    Pending pending{};
+    pending.kind = Kind::TextureSubresource;
+    pending.priority = upload.priority;
+    pending.generation = upload.generation;
+    pending.visible = upload.visible;
+    pending.namespaceId = upload.namespaceId;
+    pending.tier = upload.tier;
+    pending.page = upload.page;
+    pending.layer = upload.layer;
+    pending.layerCount = upload.layerCount;
+    pending.width = upload.width;
+    pending.height = upload.height;
+    pending.bytesPerLayer = upload.bytesPerLayer;
+    pending.format = upload.format;
+    pending.payload.assign(upload.data, upload.data + upload.bytes);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    int idx = static_cast<int>(upload.priority);
+    if (idx < 0 || idx >= static_cast<int>(Priority::Count)) idx = static_cast<int>(Priority::BackgroundCtm);
+    queues_[idx].push_back(std::move(pending));
+
+    pendingUploadBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
+    if (upload.visible) {
+        pendingVisibleUploadBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
+    }
+    return true;
+}
+
+bool GpuUploadService::enqueueBufferUpload(const BufferUpload& upload) {
+    if (!initialized_ || upload.data == nullptr || upload.bytes == 0) return false;
+    if (upload.generation == 0) return false;
+
+    Pending pending{};
+    pending.kind = Kind::BufferRange;
+    pending.priority = upload.priority;
+    pending.generation = upload.generation;
+    pending.visible = upload.visible;
+    pending.dstBuffer = upload.dst;
+    pending.dstOffset = upload.dstOffset;
+    pending.payload.assign(upload.data, upload.data + upload.bytes);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    int idx = static_cast<int>(upload.priority);
+    if (idx < 0 || idx >= static_cast<int>(Priority::Count)) idx = static_cast<int>(Priority::BackgroundCtm);
+    queues_[idx].push_back(std::move(pending));
+
+    pendingUploadBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
+    if (upload.visible) {
+        pendingVisibleUploadBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
+    }
+    return true;
+}
+
+void GpuUploadService::pump(uint64_t frameBudgetBytes) {
+    if (!initialized_) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint64_t budgetUsed = 0;
+
+    // Process queues in priority order
+    for (int i = 0; i < static_cast<int>(Priority::Count); i++) {
+        auto& q = queues_[i];
+        while (!q.empty() && budgetUsed < frameBudgetBytes) {
+            auto& pending = q.front();
+            bool ok = false;
+            if (pending.kind == Kind::TextureSubresource) {
+                ok = submitTextureUploadLocked(pending);
+            } else if (pending.kind == Kind::BufferRange) {
+                ok = submitBufferUploadLocked(pending);
+            }
+            if (ok) {
+                budgetUsed += pending.payload.size();
+                uint64_t sz = pending.payload.size();
+                q.pop_front();
+                pendingUploadBytes_.fetch_sub(sz, std::memory_order_relaxed);
+                if (pending.visible) {
+                    pendingVisibleUploadBytes_.fetch_sub(sz, std::memory_order_relaxed);
+                }
+                submittedBytes_.fetch_add(sz, std::memory_order_relaxed);
+            } else {
+                break; // Can't submit more this frame
+            }
+        }
+    }
+}
+
+void GpuUploadService::pollCompletions() {
+    if (!initialized_) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    while (!inFlight_.empty()) {
+        auto& flight = inFlight_.front();
+        if (flight.timeline != VK_NULL_HANDLE && device_) {
+            VkSemaphoreWaitInfo waitInfo{
+                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+                .semaphoreCount = 1,
+                .pSemaphores = &flight.timeline,
+                .pValues = &flight.timelineValue,
+            };
+            VkResult result = vkWaitSemaphores(device_->vkDevice(), &waitInfo, 0);
+            if (result == VK_TIMEOUT) break; // Not done yet
+        }
+        completedBytes_.fetch_add(flight.bytes, std::memory_order_relaxed);
+        inFlight_.pop_front();
+    }
+}
+
+bool GpuUploadService::generationIdle(uint64_t generation, bool visibleOnly) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (int i = 0; i < static_cast<int>(Priority::Count); i++) {
+        for (const auto& p : queues_[i]) {
+            if (p.generation == generation && (!visibleOnly || p.visible)) {
+                return false;
+            }
+        }
+    }
+    for (const auto& flight : inFlight_) {
+        if (flight.generation == generation && (!visibleOnly || flight.visible)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+GpuUploadService::Status GpuUploadService::status() const {
+    Status s;
+    s.initialized = initialized_;
+    s.hasDedicatedTransferQueue = hasDedicatedTransferQueue_;
+    s.asyncTransferQueueUpload = asyncTransferQueueUpload_;
+    s.asyncMainQueueUpload = asyncMainQueueUpload_;
+    s.blockingFenceUploads = false; // Never in v4
+    s.pendingUploadBytes = pendingUploadBytes_.load(std::memory_order_relaxed);
+    s.pendingVisibleUploadBytes = pendingVisibleUploadBytes_.load(std::memory_order_relaxed);
+    s.submittedBytes = submittedBytes_.load(std::memory_order_relaxed);
+    s.completedBytes = completedBytes_.load(std::memory_order_relaxed);
+    s.timelineSubmissions = timelineSubmissions_.load(std::memory_order_relaxed);
+    s.vkDeviceWaitIdleDuringLoad = vkDeviceWaitIdleDuringLoad_.load(std::memory_order_relaxed);
+    return s;
+}
+
+std::string GpuUploadService::statusJson() const {
+    auto s = status();
+    std::ostringstream out;
+    out << "{"
+        << "\"schema\":\"radser_gpu_upload_service_status_v4\","
+        << "\"initialized\":" << (s.initialized ? "true" : "false") << ","
+        << "\"hasDedicatedTransferQueue\":" << (s.hasDedicatedTransferQueue ? "true" : "false") << ","
+        << "\"asyncTransferQueueUpload\":" << (s.asyncTransferQueueUpload ? "true" : "false") << ","
+        << "\"asyncMainQueueUpload\":" << (s.asyncMainQueueUpload ? "true" : "false") << ","
+        << "\"blockingFenceUploads\":" << (s.blockingFenceUploads ? "true" : "false") << ","
+        << "\"pendingUploadBytes\":" << s.pendingUploadBytes << ","
+        << "\"pendingVisibleUploadBytes\":" << s.pendingVisibleUploadBytes << ","
+        << "\"submittedBytes\":" << s.submittedBytes << ","
+        << "\"completedBytes\":" << s.completedBytes << ","
+        << "\"timelineSubmissions\":" << s.timelineSubmissions << ","
+        << "\"vkDeviceWaitIdleDuringLoad\":" << s.vkDeviceWaitIdleDuringLoad
+        << "}";
+    return out.str();
+}
+
+bool GpuUploadService::submitTextureUploadLocked(const Pending& pending) {
+    // In the full implementation, this records a vkCmdCopyBufferToImage
+    // into a command buffer and submits it with a timeline semaphore.
+    // For the initial scaffold, we mark it as submitted.
+    timelineSubmissions_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+bool GpuUploadService::submitBufferUploadLocked(const Pending& pending) {
+    timelineSubmissions_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+bool GpuUploadService::ensureStagingCapacityLocked(uint64_t bytes) {
+    // In the full implementation, this manages the persistent mapped ring buffer.
+    return true;
+}

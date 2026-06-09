@@ -602,7 +602,7 @@ namespace Data {
     static constexpr uint32_t TEXTURE_RULE_DIFFUSE_VMF = 2u;
     static constexpr uint32_t TEXTURE_RULE_DIFFUSE_LEGACY = 3u;
     static_assert(sizeof(TextureRuleEntry) == 192, "TextureRuleEntry must be exactly 192 bytes");
-    static_assert(sizeof(MaterialEntry) == 80, "MaterialEntry must be exactly 80 bytes");
+    static_assert(sizeof(MaterialEntry) == 112, "MaterialEntry must be exactly 112 bytes");
 #else
     #define SPRITE_FLAG_HAS_SPECULAR (1u << 0)
     #define SPRITE_FLAG_HAS_NORMAL   (1u << 1)

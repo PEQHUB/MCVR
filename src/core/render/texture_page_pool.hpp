@@ -1,0 +1,104 @@
+#pragma once
+
+#include "core/render/gpu_upload_service.hpp"
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <vector>
+
+/// Tiered texture page pool for texture_loader_v4.
+///
+/// Manages texture array pages organized by namespace and tier.
+/// Pages are allocated once and updated via subrange uploads.
+/// No new page image set per small CTM batch.
+///
+/// Namespaces: Fallback, Vanilla, CTM, Dynamic
+/// Tiers: 16, 32, 64, 128, 256, 512, 1024
+class TexturePagePool {
+public:
+    static constexpr uint32_t kMaxTiers = 7;
+    static constexpr uint32_t kMaxPagesPerNamespace = 64;
+
+    enum Namespace : uint32_t {
+        Fallback = 0,
+        Vanilla  = 1,
+        Ctm      = 2,
+        Dynamic  = 3
+    };
+
+    struct PageHandle {
+        uint32_t namespaceId = 0;
+        uint32_t tier = 0;
+        uint32_t page = 0;
+        uint32_t layer = 0;
+        uint32_t mipCount = 1;
+    };
+
+    struct Allocation {
+        PageHandle first;
+        uint32_t layerCount = 0;
+        bool valid = false;
+    };
+
+    bool initialize(std::shared_ptr<vk::Device> device, std::shared_ptr<vk::VMA> vma, GpuUploadService* uploads);
+    void resetGeneration(uint64_t generation);
+    void cancelGeneration(uint64_t generation);
+
+    /// Allocate layers in a namespace/tier. Returns an allocation handle.
+    Allocation allocate(uint64_t generation, Namespace ns, uint32_t tier, uint32_t layerCount, bool visible);
+
+    /// Upload pixel data to an allocated range.
+    bool upload(uint64_t generation, const Allocation& allocation,
+                const uint8_t* rgba, uint64_t bytes, VkFormat format,
+                bool visible, GpuUploadService::Priority priority);
+
+    /// Check if a specific page/layer is ready (uploaded + mips generated).
+    bool isReady(uint64_t generation, Namespace ns, uint32_t tier, uint32_t page, uint32_t layer) const;
+
+    /// Mark an allocation as ready after upload + mipgen complete.
+    void markReady(uint64_t generation, const Allocation& allocation);
+
+    /// Status JSON for DebugBridge.
+    std::string statusJson() const;
+
+    /// CTM capacity metrics.
+    uint32_t ctmResidentCapacity() const;
+    uint32_t ctmPresentMaterials() const;
+    bool ctmPagesExhausted() const;
+    uint32_t ctmUnaddressableMaterials() const;
+
+private:
+    struct Page {
+        uint64_t generation = 0;
+        uint32_t namespaceId = 0;
+        uint32_t tier = 0;
+        uint32_t page = 0;
+        uint32_t layerCapacity = 0;
+        uint32_t layersUsed = 0;
+        uint32_t readyLayers = 0;
+        bool allocated = false;
+        bool mipsReady = false;
+        uint32_t albedoArrayId = UINT32_MAX;
+        uint32_t specularArrayId = UINT32_MAX;
+        uint32_t normalArrayId = UINT32_MAX;
+        uint32_t flagArrayId = UINT32_MAX;
+    };
+
+    Page& pageForAllocationLocked(uint64_t generation, Namespace ns, uint32_t tier, uint32_t neededLayers);
+    uint32_t tierSize(uint32_t tier) const;
+    uint32_t pageLayerCapacity(uint32_t tier) const;
+
+    std::shared_ptr<vk::Device> device_;
+    std::shared_ptr<vk::VMA> vma_;
+    GpuUploadService* uploads_ = nullptr;
+
+    std::vector<Page> pages_;
+    mutable std::mutex mutex_;
+
+    uint64_t activeGeneration_ = 0;
+    uint64_t pageImageAllocations_ = 0;
+    uint64_t pageSubrangeUploads_ = 0;
+};

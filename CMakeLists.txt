@@ -222,4 +222,39 @@ add_custom_target(generate_config DEPENDS
 # --- V2 engine (behind build flag, default OFF) ---
 option(MCVR_ENABLE_ENGINE_V2 "Enable v2 engine subsystems" OFF)
 
+# --- Build info generation (Phase 0: Texture Loader v4) ---
+execute_process(
+    COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE MCVR_REPO_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+execute_process(
+    COMMAND git rev-parse --abbrev-ref HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE MCVR_BRANCH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+execute_process(
+    COMMAND git diff --quiet
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    RESULT_VARIABLE MCVR_DIRTY_RESULT
+    ERROR_QUIET
+)
+if(MCVR_DIRTY_RESULT EQUAL 0)
+    set(MCVR_DIRTY 0)
+else()
+    set(MCVR_DIRTY 1)
+endif()
+string(TIMESTAMP MCVR_BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
+set(MCVR_DLL_SHA256 "unknown")
+
+configure_file(
+    ${CMAKE_SOURCE_DIR}/src/core/build/build_info.hpp.in
+    ${CMAKE_SOURCE_DIR}/src/core/build/build_info.hpp
+    @ONLY
+)
+
 add_subdirectory(src)
