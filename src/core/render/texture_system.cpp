@@ -1001,7 +1001,6 @@ bool TextureSystem::uploadTextureRules(const vk::Data::TextureRuleEntry* entries
 
     std::lock_guard<std::mutex> lock(mutex_);
     if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
-    if (!finalized_) return false;
     return textureRules_.uploadRules(entries, count, std::move(vma), std::move(device));
 }
 

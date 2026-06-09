@@ -113,7 +113,36 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
     req.channelMask = static_cast<uint32_t>(channelMask);
     req.visible = visible == JNI_TRUE;
 
-    return renderer->textureLoaderV4().enqueueUpload(req) ? JNI_TRUE : JNI_FALSE;
+    bool queued = renderer->textureLoaderV4().enqueueUpload(req);
+    if (!queued) {
+        return JNI_FALSE;
+    }
+
+    auto framework = renderer->framework();
+    if (page > 0
+        && ((static_cast<uint32_t>(channelMask)
+            & (CHANNEL_ALBEDO | CHANNEL_SPECULAR | CHANNEL_NORMAL | CHANNEL_FLAG))
+            == (CHANNEL_ALBEDO | CHANNEL_SPECULAR | CHANNEL_NORMAL | CHANNEL_FLAG))) {
+        bool shaderVisible = Renderer::textureSystem.uploadMaterialTextureLayers(
+            static_cast<uint32_t>(page),
+            static_cast<uint32_t>(width),
+            static_cast<uint32_t>(std::max(0, startLayer)),
+            static_cast<uint32_t>(layerCount),
+            static_cast<uint32_t>(layerCapacity),
+            reinterpret_cast<const uint8_t*>(albedoPtr),
+            reinterpret_cast<const uint8_t*>(specularPtr),
+            reinterpret_cast<const uint8_t*>(normalPtr),
+            reinterpret_cast<const uint8_t*>(flagPtr),
+            static_cast<uint64_t>(generation),
+            framework->vma(),
+            framework->device());
+        if (!shaderVisible) {
+            renderer->textureLoaderV4().cancelGeneration(static_cast<uint64_t>(generation), 4);
+            return JNI_FALSE;
+        }
+    }
+
+    return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

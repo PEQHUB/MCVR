@@ -46,7 +46,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
         << "\"finalized\":" << (ts.isFinalized() ? "true" : "false") << ","
         << "\"spriteCount\":" << ts.spriteCount() << ","
         << "\"layerSize\":" << ts.layerSize() << ","
-        << "\"activeUploadMode\":\"tagged_vanilla_tier_namespace_plus_ctm_material_pages\","
+        << "\"activeUploadMode\":\"texture_loader_v4\","
         << "\"materialTexturePageMax\":" << vk::Data::MATERIAL_TEXTURE_PAGE_MAX << ","
         << "\"nativeDefaultAuxTextures\":true,"
         << "\"sparseSpriteAuxUpload\":true,"
@@ -57,7 +57,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
         << "\"asyncMaterialTableMainQueueUpload\":true,"
         << "\"tieredArrays\":true,"
         << "\"vanillaMaterialPageTiers\":true,"
-        << "\"asyncTransferQueueUpload\":false,"
+        << "\"asyncTransferQueueUpload\":true,"
         << "\"pendingTextureUploads\":" << (ts.hasPendingTextureUploads() ? "true" : "false") << ","
         << "\"materialTable\":" << ts.materialTableStatusJson() << ","
         << "\"textureUploadCapabilities\":" << Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeTextureUploadCapabilities(nullptr, nullptr)
@@ -72,7 +72,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
     out << "{"
         << "\"schema\":\"radser_native_texture_tier_status_v1\","
         << "\"tieredArrays\":true,"
-        << "\"currentCompatibilityMode\":\"tagged_vanilla_tier_page_namespace\","
+        << "\"currentCompatibilityMode\":\"texture_loader_v4_namespace_tier_page_layer\","
         << "\"layerSize\":" << ts.layerSize() << ","
         << "\"spriteCount\":" << ts.spriteCount() << ","
         << "\"materialTexturePageMax\":" << vk::Data::MATERIAL_TEXTURE_PAGE_MAX << ","
@@ -112,7 +112,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Textu
         << "\"spriteCount\":" << ts.spriteCount() << ","
         << "\"layerSize\":" << ts.layerSize() << ","
         << "\"bytesPerLayer\":" << bytesPerLayer << ","
-        << "\"fixedAlbedoBytes\":" << (bytesPerLayer * ts.spriteCount()) << ","
+        << "\"fixedAlbedoBytes\":0,"
         << "\"javaFullAuxArraysRequired\":false,"
         << "\"nativeDefaultAuxTextures\":true"
         << "}";
@@ -298,35 +298,15 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_Text
 extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeReceiveMaterialTable(
     JNIEnv *, jclass, jlong dataPtr, jint count, jlong generation) {
 
-    auto& ts = Renderer::textureSystem;
-    if (dataPtr == 0 || count <= 0) return JNI_FALSE;
-
-    auto renderer = Renderer::try_instance();
-    if (!renderer || !renderer->framework()) return JNI_FALSE;
-    auto framework = renderer->framework();
-    return ts.uploadMaterialTable(
-        reinterpret_cast<const vk::Data::MaterialEntry*>(dataPtr),
-        static_cast<uint32_t>(count),
-        static_cast<uint64_t>(generation),
-        framework->vma(),
-        framework->device()) ? JNI_TRUE : JNI_FALSE;
+    std::cerr << "[TextureLoaderV4] Rejected retired legacy material table upload" << std::endl;
+    return JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeUpdateMaterialTableSparse(
     JNIEnv *, jclass, jlong dataPtr, jint count, jlong generation) {
 
-    auto& ts = Renderer::textureSystem;
-    if (dataPtr == 0 || count <= 0) return JNI_FALSE;
-
-    auto renderer = Renderer::try_instance();
-    if (!renderer || !renderer->framework()) return JNI_FALSE;
-    auto framework = renderer->framework();
-    return ts.updateMaterialTableSparse(
-        reinterpret_cast<const vk::Data::MaterialEntry*>(dataPtr),
-        static_cast<uint32_t>(count),
-        static_cast<uint64_t>(generation),
-        framework->vma(),
-        framework->device()) ? JNI_TRUE : JNI_FALSE;
+    std::cerr << "[TextureLoaderV4] Rejected retired legacy sparse material table upload" << std::endl;
+    return JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeReceiveMaterialTexturePage(
@@ -334,24 +314,8 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_Text
     jlong albedoPtr, jlong specularPtr, jlong normalPtr, jlong flagPtr,
     jlong generation) {
 
-    auto& ts = Renderer::textureSystem;
-    if (page <= 0 || layerSize <= 0 || layerCount <= 0) return JNI_FALSE;
-    if (albedoPtr == 0 || specularPtr == 0 || normalPtr == 0 || flagPtr == 0) return JNI_FALSE;
-
-    auto renderer = Renderer::try_instance();
-    if (!renderer || !renderer->framework()) return JNI_FALSE;
-    auto framework = renderer->framework();
-    return ts.uploadMaterialTexturePage(
-        static_cast<uint32_t>(page),
-        static_cast<uint32_t>(layerSize),
-        static_cast<uint32_t>(layerCount),
-        reinterpret_cast<const uint8_t*>(albedoPtr),
-        reinterpret_cast<const uint8_t*>(specularPtr),
-        reinterpret_cast<const uint8_t*>(normalPtr),
-        reinterpret_cast<const uint8_t*>(flagPtr),
-        static_cast<uint64_t>(generation),
-        framework->vma(),
-        framework->device()) ? JNI_TRUE : JNI_FALSE;
+    std::cerr << "[TextureLoaderV4] Rejected retired legacy material texture page upload" << std::endl;
+    return JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeReceiveMaterialTextureLayers(
@@ -359,51 +323,8 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_radiance_client_proxy_vulkan_Text
     jlong albedoPtr, jlong specularPtr, jlong normalPtr, jlong flagPtr,
     jlong generation) {
 
-    auto& ts = Renderer::textureSystem;
-    if (page <= 0 || layerSize <= 0 || startLayer < 0 || layerCount <= 0 || layerCapacity <= 0) {
-        std::cerr << "[TextureSystem] Rejected material layer upload: invalid args page=" << page
-                  << " layerSize=" << layerSize
-                  << " startLayer=" << startLayer
-                  << " layerCount=" << layerCount
-                  << " layerCapacity=" << layerCapacity << std::endl;
-        return JNI_FALSE;
-    }
-    if (page >= static_cast<jint>(vk::Data::MATERIAL_TEXTURE_PAGE_MAX)
-        || startLayer > layerCapacity
-        || layerCount > layerCapacity - startLayer) {
-        std::cerr << "[TextureSystem] Rejected material layer upload: out-of-range page=" << page
-                  << " startLayer=" << startLayer
-                  << " layerCount=" << layerCount
-                  << " layerCapacity=" << layerCapacity
-                  << " maxPages=" << vk::Data::MATERIAL_TEXTURE_PAGE_MAX << std::endl;
-        return JNI_FALSE;
-    }
-    if (layerSize > 4096) {
-        std::cerr << "[TextureSystem] Rejected material layer upload: unsupported layerSize="
-                  << layerSize << std::endl;
-        return JNI_FALSE;
-    }
-    if (albedoPtr == 0 || specularPtr == 0 || normalPtr == 0 || flagPtr == 0) {
-        std::cerr << "[TextureSystem] Rejected material layer upload: null pixel pointer" << std::endl;
-        return JNI_FALSE;
-    }
-
-    auto renderer = Renderer::try_instance();
-    if (!renderer || !renderer->framework()) return JNI_FALSE;
-    auto framework = renderer->framework();
-    return ts.uploadMaterialTextureLayers(
-        static_cast<uint32_t>(page),
-        static_cast<uint32_t>(layerSize),
-        static_cast<uint32_t>(startLayer),
-        static_cast<uint32_t>(layerCount),
-        static_cast<uint32_t>(layerCapacity),
-        reinterpret_cast<const uint8_t*>(albedoPtr),
-        reinterpret_cast<const uint8_t*>(specularPtr),
-        reinterpret_cast<const uint8_t*>(normalPtr),
-        reinterpret_cast<const uint8_t*>(flagPtr),
-        static_cast<uint64_t>(generation),
-        framework->vma(),
-        framework->device()) ? JNI_TRUE : JNI_FALSE;
+    std::cerr << "[TextureLoaderV4] Rejected retired legacy material texture layer upload" << std::endl;
+    return JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_TextureArrayBridge_nativeTextureFinalize(
