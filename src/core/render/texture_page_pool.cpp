@@ -106,9 +106,12 @@ bool TexturePagePool::isReady(uint64_t generation, Namespace ns, uint32_t tier,
         if (p.generation == generation
             && p.namespaceId == static_cast<uint32_t>(ns)
             && p.tier == tier
-            && p.page == page
-            && layer < p.readyLayers) {
-            return true;
+            && p.page == page) {
+            if (layer >= p.layerCapacity) return false;
+            if (layer < p.layerUploaded.size() && layer < p.layerMipsReady.size()) {
+                return p.layerUploaded[layer] && p.layerMipsReady[layer];
+            }
+            return false;
         }
     }
     return false;
@@ -121,8 +124,22 @@ void TexturePagePool::markReady(uint64_t generation, const Allocation& allocatio
             && p.namespaceId == allocation.first.namespaceId
             && p.tier == allocation.first.tier
             && p.page == allocation.first.page) {
-            p.readyLayers = std::max(p.readyLayers,
-                allocation.first.layer + allocation.layerCount);
+            // Mark individual layers as uploaded and mip-ready
+            for (uint32_t l = allocation.first.layer;
+                 l < allocation.first.layer + allocation.layerCount && l < p.layerCapacity; l++) {
+                if (l < p.layerUploaded.size()) p.layerUploaded[l] = true;
+                if (l < p.layerMipsReady.size()) p.layerMipsReady[l] = true;
+            }
+            // Update readyLayers to the highest contiguous ready layer
+            uint32_t maxReady = 0;
+            for (uint32_t l = 0; l < p.layerCapacity && l < p.layerUploaded.size(); l++) {
+                if (p.layerUploaded[l] && p.layerMipsReady[l]) {
+                    maxReady = l + 1;
+                } else {
+                    break;
+                }
+            }
+            p.readyLayers = std::max(p.readyLayers, maxReady);
             if (p.readyLayers >= p.layersUsed) {
                 p.mipsReady = true;
             }
@@ -244,6 +261,8 @@ TexturePagePool::Page& TexturePagePool::pageForAllocationLocked(
     newPage.readyLayers = 0;
     newPage.allocated = true;
     newPage.mipsReady = false;
+    newPage.layerUploaded.resize(newPage.layerCapacity, false);
+    newPage.layerMipsReady.resize(newPage.layerCapacity, false);
 
     pages_.push_back(newPage);
     pageImageAllocations_++;

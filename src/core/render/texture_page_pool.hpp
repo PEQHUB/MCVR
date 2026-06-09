@@ -85,6 +85,9 @@ private:
         uint32_t specularArrayId = UINT32_MAX;
         uint32_t normalArrayId = UINT32_MAX;
         uint32_t flagArrayId = UINT32_MAX;
+        // Per-layer upload tracking
+        std::vector<bool> layerUploaded;   // [layerCount] true after GPU copy complete
+        std::vector<bool> layerMipsReady;  // [layerCount] true after mipgen complete
     };
 
     Page& pageForAllocationLocked(uint64_t generation, Namespace ns, uint32_t tier, uint32_t neededLayers);
