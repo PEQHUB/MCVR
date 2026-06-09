@@ -303,7 +303,7 @@ void ChunkBuildData::prepareCPU(bool allowMicromapBake, bool skipOMM, glm::vec3 
         auto buffers = Renderer::instance().buffers();
         auto texMappingBuf = buffers ? buffers->textureMappingBuffer() : nullptr;
         texMappingPtr = texMappingBuf ? static_cast<vk::Data::TextureMapping *>(texMappingBuf->mappedPtr()) : nullptr;
-        auto matClassBuf = buffers ? buffers->materialClassMappingBuffer() : nullptr;
+        auto matClassBuf = std::shared_ptr<vk::HostVisibleBuffer>(); // materialClassMappingBuffer removed
         matClassPtr = matClassBuf ? static_cast<vk::Data::MaterialClassMapping *>(matClassBuf->mappedPtr()) : nullptr;
     }
 
@@ -979,6 +979,7 @@ void ChunkBuildData::uploadGPU() {
                 vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque);
         }
     };
+#ifdef MCVR_ENABLE_OMM
     auto defineGeomOMM = [&](int i, bool isOpaque, uint32_t numVerts, uint32_t numIndices,
                              VkDeviceAddress ommAddr, uint32_t numTris) {
         if (vertexFormat == 1) {
@@ -992,6 +993,7 @@ void ChunkBuildData::uploadGPU() {
                 vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris);
         }
     };
+#ifdef MCVR_ENABLE_OMM
     auto defineGeomMicromap = [&](int i, bool isOpaque, uint32_t numVerts, uint32_t numIndices,
                                   VkDeviceAddress ommAddr, uint32_t numTris,
                                   VkMicromapEXT mm, const VkMicromapUsageEXT *uc, uint32_t ucc) {
@@ -1006,6 +1008,8 @@ void ChunkBuildData::uploadGPU() {
                 vertexBuffers[i], numVerts, indexBuffers[i], numIndices, isOpaque, ommAddr, numTris, mm, uc, ucc);
         }
     };
+#endif
+#endif
 
     for (int i = 0; i < geometryCount; i++) {
         bool isOpaque = geometryTypes[i] == World::WORLD_SOLID;
@@ -1019,6 +1023,7 @@ void ChunkBuildData::uploadGPU() {
 
         if (ommIndexBuffers[i] != nullptr) {
             uint32_t numTriangles = indexCount / 3;
+#ifdef MCVR_ENABLE_OMM
             if (ommGeometryData[i].hasMicromap) {
                 defineGeomMicromap(i, isOpaque, vertCount, indexCount,
                     ommIndexBuffers[i]->bufferAddress(), numTriangles,
@@ -1029,6 +1034,9 @@ void ChunkBuildData::uploadGPU() {
                 defineGeomOMM(i, isOpaque, vertCount, indexCount,
                     ommIndexBuffers[i]->bufferAddress(), numTriangles);
             }
+#else
+            defineGeom(i, isOpaque, vertCount, indexCount);
+#endif
         } else {
             defineGeom(i, isOpaque, vertCount, indexCount);
         }
@@ -1629,12 +1637,17 @@ uint32_t ChunkBuildScheduler::chunkBuildingBatchSize() {
     return chunkBuildingBatchSize_;
 }
 
-void ChunkBuildScheduler::pause() {
+bool ChunkBuildScheduler::pause(std::chrono::milliseconds timeout) {
     paused_.store(true, std::memory_order_release);
-    // Spin until BLAS thread acknowledges — guarantees no submit is in progress
+    auto deadline = std::chrono::steady_clock::now() + timeout;
     while (!pausedAck_.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            paused_.store(false, std::memory_order_release);
+            return false;
+        }
         std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
+    return true;
 }
 
 void ChunkBuildScheduler::resume() {

@@ -21,10 +21,9 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
     if (!Renderer::is_initialized()) return;
     Renderer::instance().world()->chunks()->reset(chunkNum);
 
-    // Compute Java's render distance from chunk count:
-    // numChunks = (2*RD+1)^2 * 24 → RD = (sqrt(numChunks/24) - 1) / 2
-    uint32_t javaRD = static_cast<uint32_t>((std::sqrt(chunkNum / 24.0) - 1) / 2);
-    Renderer::instance().world()->startExtendedChunkLoading(javaRD, chunkNum);
+    // Extended chunk loading (baseline removed)
+    // uint32_t javaRD = static_cast<uint32_t>((std::sqrt(chunkNum / 24.0) - 1) / 2);
+    // Renderer::instance().world()->startExtendedChunkLoading(javaRD, chunkNum);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_nativeSetWorldRegionPath(
@@ -33,8 +32,8 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
     if (!jpath) return;
     const char* utf = env->GetStringUTFChars(jpath, nullptr);
     if (utf) {
-        Renderer::worldRegionPath = utf;
-        engine::log::info("ExtendedRD", "World region path: " + Renderer::worldRegionPath);
+        // Renderer::worldRegionPath = utf;
+        // engine::log::info("ExtendedRD", "World region path: " + Renderer::worldRegionPath);
         env->ReleaseStringUTFChars(jpath, utf);
     }
 }
@@ -162,7 +161,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
             "#" + std::to_string(rn) +
             " origin=(" + std::to_string(originX) + "," + std::to_string(originY) + "," + std::to_string(originZ) + ")" +
             " rendererInit=" + (Renderer::is_initialized() ? "Y" : "N") +
-            " mtl=" + (Renderer::blockModelTable.isLoaded() ? "Y" : "N") +
+            " mtl=N" +
             " v2App=" + (v2Init ? "Y" : "N"));
     }
 

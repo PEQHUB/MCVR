@@ -140,6 +140,8 @@ namespace VertexFormat {
     static constexpr uint32_t PBR_FLAG_TEXT_MODE_SHIFT = 18u;
     static constexpr uint32_t PBR_FLAG_TEXT_MODE_MASK  = 0xFu << 18u; // vanilla text modes 1..8
     static constexpr uint32_t PBR_FLAG_WATER_GEOMETRY  = 1u << 22; // water fluid surface, distinct from lava/other fluids
+    static constexpr uint32_t PBR_FLAG_GREEDY_MERGED = 1u << 23; // greedy-meshed quad (skip per-face AO)
+    static constexpr uint32_t PBR_FLAG_COMPACT_VIVID    = 1u << 11;
     static constexpr uint32_t PBR_TEXT_MODE_BACKGROUND = 1u;
     static constexpr uint32_t PBR_TEXT_MODE_INTENSITY = 2u;
     static constexpr uint32_t PBR_TEXT_MODE_RGBA = 3u;
@@ -174,6 +176,8 @@ namespace VertexFormat {
     #define PBR_FLAG_TEXT_MODE_SHIFT 18u
     #define PBR_FLAG_TEXT_MODE_MASK  (0xFu << 18u)
     #define PBR_FLAG_WATER_GEOMETRY  (1u << 22)
+    #define PBR_FLAG_GREEDY_MERGED (1u << 23)
+    #define PBR_FLAG_COMPACT_VIVID   (1u << 11)
     #define PBR_TEXT_MODE_BACKGROUND 1u
     #define PBR_TEXT_MODE_INTENSITY 2u
     #define PBR_TEXT_MODE_RGBA 3u
@@ -227,6 +231,48 @@ namespace VertexFormat {
     static_assert(PBR_PACKED_EMISSIVE_TYPE_MASK == 0xFFu, "emissive block type mask mismatch");
     static_assert(PBR_PACKED_SHADER_BLOCK_ID_SHIFT == 17u, "shader block id shift mismatch");
     static_assert(PBR_PACKED_SHADER_BLOCK_ID_MASK == (0x3FFFu << 17u), "shader block id mask mismatch");
+#endif
+
+    // 32 bytes per vertex, compact far-field format.
+    struct PBRTriangleCompact {
+        T_VEC3 pos;            // 0..11
+        T_UINT packed0;        // 12..15  flags:12 | pad:4 | textureID:16
+        T_VEC2 textureUV;      // 16..23
+        T_UINT colorPacked;    // 24..27  R:8 | G:8 | B:8 | A:8
+        T_UINT packed1;        // 28..31  albedoEmission_half:16 | emissiveBlockType:16
+    };
+#ifdef __cplusplus
+    static_assert(sizeof(PBRTriangleCompact) == 32, "PBRTriangleCompact must be exactly 32 bytes");
+    static_assert(offsetof(PBRTriangleCompact, pos) == 0, "compact pos offset mismatch");
+    static_assert(offsetof(PBRTriangleCompact, packed0) == 12, "compact packed0 offset mismatch");
+    static_assert(offsetof(PBRTriangleCompact, textureUV) == 16, "compact textureUV offset mismatch");
+    static_assert(offsetof(PBRTriangleCompact, colorPacked) == 24, "compact colorPacked offset mismatch");
+    static_assert(offsetof(PBRTriangleCompact, packed1) == 28, "compact packed1 offset mismatch");
+#endif
+
+    // 64 bytes per vertex, lossless near-field format.
+    struct PBRTriangleLossless {
+        T_VEC3 pos;                // 0..11
+        T_UINT flags;              // 12..15
+        T_VEC4 colorLayer;         // 16..31
+        T_VEC2 textureUV;          // 32..39
+        T_VEC2 glintUV;            // 40..47
+        T_FLOAT albedoEmission;    // 48..51
+        T_UINT emissiveBlockType;  // 52..55
+        T_UINT textureID_glint;    // 56..59
+        T_UINT overlayPacked;      // 60..63
+    };
+#ifdef __cplusplus
+    static_assert(sizeof(PBRTriangleLossless) == 64, "PBRTriangleLossless must be exactly 64 bytes");
+    static_assert(offsetof(PBRTriangleLossless, pos) == 0, "lossless pos offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, flags) == 12, "lossless flags offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, colorLayer) == 16, "lossless colorLayer offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, textureUV) == 32, "lossless textureUV offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, glintUV) == 40, "lossless glintUV offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, albedoEmission) == 48, "lossless albedoEmission offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, emissiveBlockType) == 52, "lossless emissiveBlockType offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, textureID_glint) == 56, "lossless textureID_glint offset mismatch");
+    static_assert(offsetof(PBRTriangleLossless, overlayPacked) == 60, "lossless overlayPacked offset mismatch");
 #endif
 
 #ifdef __cplusplus
@@ -602,7 +648,17 @@ namespace Data {
     static constexpr uint32_t TEXTURE_RULE_DIFFUSE_VMF = 2u;
     static constexpr uint32_t TEXTURE_RULE_DIFFUSE_LEGACY = 3u;
     static_assert(sizeof(TextureRuleEntry) == 192, "TextureRuleEntry must be exactly 192 bytes");
-    static_assert(sizeof(MaterialEntry) == 112, "MaterialEntry must be exactly 112 bytes");
+    static_assert(sizeof(MaterialEntry) == 80, "MaterialEntry must be exactly 80 bytes");
+    static_assert(offsetof(MaterialEntry, materialId) == 0);
+    static_assert(offsetof(MaterialEntry, albedoPage) == 16);
+    static_assert(offsetof(MaterialEntry, albedoLayer) == 20);
+    static_assert(offsetof(MaterialEntry, specularPage) == 24);
+    static_assert(offsetof(MaterialEntry, specularLayer) == 28);
+    static_assert(offsetof(MaterialEntry, normalPage) == 32);
+    static_assert(offsetof(MaterialEntry, normalLayer) == 36);
+    static_assert(offsetof(MaterialEntry, flagPage) == 40);
+    static_assert(offsetof(MaterialEntry, flagLayer) == 44);
+    static_assert(offsetof(MaterialEntry, uvOffsetV) == 76);
 #else
     #define SPRITE_FLAG_HAS_SPECULAR (1u << 0)
     #define SPRITE_FLAG_HAS_NORMAL   (1u << 1)
@@ -680,6 +736,77 @@ namespace Data {
 
     struct MaterialRegistry {
         MaterialEntry entries[MATERIAL_MAX_ENTRIES];
+    };
+
+#ifdef __cplusplus
+    static constexpr int MAX_MATERIAL_CLASSES = 512;
+#else
+    #define MAX_MATERIAL_CLASSES 512
+#endif
+
+    struct MaterialClassEntry {
+        T_VEC3 f0;
+        T_FLOAT roughness;
+        T_FLOAT metallic;
+        T_FLOAT transmission;
+        T_FLOAT ior;
+        T_FLOAT subsurface;
+        T_FLOAT anisotropic;
+        T_FLOAT sheenWeight;
+        T_FLOAT sheenTint;
+        T_FLOAT coatWeight;
+        T_FLOAT coatRoughness;
+        T_FLOAT noiseScale;
+        T_FLOAT noiseStrength;
+        T_UINT noisePacked;
+        T_UINT pomPacked0;
+        T_UINT pomPacked1;
+        T_UINT pomPacked2;
+        T_FLOAT pomDepth;
+        T_FLOAT gamutBoost;
+        T_FLOAT noiseMaskThreshold;
+        T_UINT noiseMaskPacked;
+        T_FLOAT normalStrength;
+        T_FLOAT noiseRotation;
+        T_FLOAT noiseAspect;
+        T_FLOAT noiseLacunarity;
+        T_FLOAT noiseContrast;
+        T_FLOAT emissionNits;
+        T_UINT emissionType;
+        T_UINT classId;
+        T_UINT flags;
+        T_FLOAT lumMin;
+        T_FLOAT lumMax;
+        T_UINT autoPBRPacked0;
+        T_UINT autoPBRPacked1;
+    };
+
+    struct MaterialClassMapping {
+        MaterialClassEntry entries[MAX_MATERIAL_CLASSES];
+    };
+
+    struct DisplacedFaceData {
+        T_VEC3 corner;
+        T_UINT faceAxis;
+        T_VEC3 edgeU;
+        T_FLOAT heightScale;
+        T_VEC3 edgeV;
+        T_UINT textureID;
+        T_INT normalTexID;
+        T_INT specularTexID;
+        T_VEC2 uvMin;
+        T_VEC2 uvMax;
+        T_UINT pomPacked0;
+        T_UINT materialClassIdx;
+        T_UINT emissiveBlockType;
+        T_UINT properties;
+        T_FLOAT lumMin;
+        T_FLOAT lumMax;
+        T_VEC4 colorLayer;
+        T_UINT pomPacked1;
+        T_UINT pomPacked2;
+        T_UINT flags;
+        T_UINT fadeEdgeMask;
     };
 
     struct ExposureData {

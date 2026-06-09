@@ -45,10 +45,16 @@ class Textures : public SharedObject<Textures> {
         uint32_t height = 0;
         std::vector<uint8_t> alpha;
     };
+    struct TextureRGBAData {
+        std::vector<uint8_t> rgba;
+        uint32_t width = 0;
+        uint32_t height = 0;
+    };
     void setTextureAlphaClass(uint32_t id, AlphaClass alphaClass);
     AlphaClass getTextureAlphaClass(uint32_t id) const;
     const TextureAlphaData *getTextureAlphaData(uint32_t id) const;
     bool getTextureAlphaDataSnapshot(uint32_t id, TextureAlphaData &out) const;
+    const TextureRGBAData *getTextureRGBAData(uint32_t id);
     // Per-frame upload diagnostics (reset each frame by resetFrame)
     size_t uploadBytes_ = 0;
     uint32_t uploadRegions_ = 0;
@@ -66,6 +72,8 @@ class Textures : public SharedObject<Textures> {
     mutable std::recursive_mutex mutex_;
     std::map<uint32_t, AlphaClass> textureAlphaClass_;
     std::map<uint32_t, TextureAlphaData> textureAlphaData_;
+    std::map<uint32_t, TextureRGBAData> textureRGBAData_;
+    size_t totalRGBADataBytes_ = 0;
 
     std::map<uint32_t, std::shared_ptr<ImageBufferCache>> caches_;
     std::shared_ptr<std::map<uint32_t, std::vector<VkBufferImageCopy>>> uploadQueue_;

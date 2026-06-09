@@ -36,6 +36,7 @@ class Device : public SharedObject<Device> {
     bool hasShaderClock() const { return shaderClockSupported_; }
     bool hasCheckpoints() const { return checkpointsSupported_; }
     bool hasDeviceFault() const { return deviceFaultSupported_; }
+    bool hasOMM() const { return false; }
 
   private:
     std::shared_ptr<Instance> instance_;

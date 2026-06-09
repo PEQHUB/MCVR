@@ -122,7 +122,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferPr
     auto buffers = Renderer::instance().buffers();
     if (buffers == nullptr) return;
     vk::Data::MaterialClassMapping *mapping = reinterpret_cast<vk::Data::MaterialClassMapping *>(ptr);
-    buffers->setAndUploadMaterialClassMappingBuffer(*mapping);
+    // buffers->setAndUploadMaterialClassMappingBuffer(*mapping);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_BufferProxy_updateLightMapUniform(JNIEnv *,

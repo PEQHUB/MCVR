@@ -9,6 +9,7 @@
 #include "core/render/gpu_profiler.hpp"
 #include "core/render/texture_system.hpp"
 #include "core/render/texture_loader_v4.hpp"
+#include "core/render/block_model_table.hpp"
 #include "core/render/thread_pool.hpp"
 
 #include <array>
@@ -28,6 +29,9 @@ struct Options {
     uint32_t upscalerQuality = 0;
     uint32_t denoiserMode = 1;
     uint32_t rayBounces = 16;
+    bool ommEnabled = false;          // Opacity Micro Maps (disabled by default until Phase 1 validated)
+    uint32_t ommBakerLevel = 4;       // OMM baker max subdivision level (1-8)
+    bool greedyMeshingEnabled = false; // Disabled: unsafe across native block and Java atlas geometry
     bool simplifiedIndirect = false; // Skip detail textures on indirect bounces + simplify shadow AHS
     bool outputScale2x = false;     // Render world at 2x display resolution, FSR1 EASU downscale
     bool reflexEnabled = false;     // NVIDIA Reflex low-latency mode (VK_NV_low_latency2)
@@ -40,6 +44,7 @@ struct Options {
     uint32_t chunkBuildingBatchSize = 6;
     uint32_t chunkBuildingTotalBatches = 6;
     float chunkCullDistance = 384.0f;  // Max chunk distance in blocks (64-1024), chunks beyond are excluded from TLAS
+    float chunkLodDistance = 160.0f;   // LOD boundary in blocks (0 or 64-8192): 0 = all full quality, ≤ = lossless 64B vertex, > = compact 32B
     float megaMergeDistance = 0.0f;  // Beyond this distance (blocks), chunks are merged into mega-BLASes (0=disabled)
     uint32_t tonemappingMode = 1; // 0 = PBR Neutral, 1 = Reinhard Extended
     float minExposure = 1e-7f;         // Minimum exposure clamp (lowered for physical sun ~100k lux)
@@ -58,6 +63,7 @@ struct Options {
     float highlightWeight = 0.5f;      // Highlight-weighted metering (0.0-1.0, 0=uniform, 1=full highlight bias)
     float saturation = 1.3f;           // Saturation/Vibrance boost (0.0 to 2.0)
     bool saturationAdaptive = false;   // Adaptive saturation: brightness+chroma-dependent (Special K style)
+    bool noiseLOD = true;             // Noise quality LOD: reduce octaves with distance, skip gradient far away
     bool multiScatterGGX = true;       // Kulla-Conty multi-scatter GGX energy compensation (flag bit 7)
     bool eonDiffuse = true;            // EON energy-preserving diffuse BRDF, replaces Disney diffuse (flag bit 8)
     uint32_t diffuseModel = 0;          // 0=EON, 1=VMF experimental, 2=legacy compatibility
@@ -99,6 +105,59 @@ struct Options {
     bool serHintsEnabled = true;  // explicit geometry-based coherence hints (on top of driver reorder)
     uint32_t rtDebugFlags = 0;    // transient DebugBridge RT.MainTrace floor sweep flags
 
+    // Area lights
+    bool areaLightsEnabled = true;
+    bool restirEnabled = true;               // ReSTIR DI temporal reuse for area lights
+    float perBlockTemperatureK[50] = {};     // Per-type temperature override in Kelvin. 0 = use LIGHT_DEFS default.
+    float areaLightIntensity = 1.0f;         // Global multiplier [0.0 - 5.0]
+    float areaLightRange = 128.0f;           // Max cull distance [8 - 512]
+    float shadowSoftness = 1.0f;             // Shadow softness multiplier [0.0 - 2.0]
+    float colorExpansion = 1.0f;             // Per-block vivid color chroma boost [0.0 - 2.0] (1.0 = neutral)
+
+    // ReSTIR DI tuning
+    int restirCandidates = 32;               // Total RIS candidates per pixel [8 - 64]
+    int restirTemporalMClamp = 20;           // Temporal reservoir M clamp [5 - 50]
+    int restirWClamp = 30;                   // Importance weight W clamp [10 - 200]
+    int restirSpatialTaps = 5;               // Spatial neighbor taps [1 - 10]
+    int restirSpatialRadius = 30;            // Spatial search radius in pixels [5 - 60]
+
+    // ReSTIR DI performance
+    bool restirSimplifiedBRDF = false;       // Lambertian instead of Disney for area lights
+    bool restirSpatialEnabled = false;       // Enable spatial reuse compute pass
+    bool restirBounceEnabled = false;        // Enable ReSTIR on indirect bounces (1-3)
+
+    float perBlockIntensity[50] = {          // Per-block intensity multiplier, indexed by LightTypeId
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+    };
+    float perBlockScale[50] = {             // Per-block halfExtent scale multiplier (1.0 = 100%)
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+    };
+    float perBlockYOffset[50] = {};         // Per-block additive Y offset in blocks (all baked into LIGHT_DEFS)
+    float perBlockColorR[50] = {            // Per-block color R (0-1), sentinel -1 = use LIGHT_DEFS
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    };
+    float perBlockColorG[50] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    };
+    float perBlockColorB[50] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    };
+    int blockLightMode[50] = {};            // Per-block light mode: 0=Auto, 1=ForceAreaLight, 2=ForceEmissive
+
     // SHARC radiance cache
     bool sharcEnabled = true;
     float sharcSceneScale = 4.0f;           // Grid voxel size (1.0-20.0)
@@ -119,6 +178,19 @@ struct Options {
     float displacementFadeDistanceBlocks = 64.0f;  // Distance in blocks to fade displacement out (8-256)
 
     uint32_t displacementQuality = 2;  // UI preset: 1=Low,2=Balanced,3=High,4=Ultra
+
+    // Parallax Occlusion Mapping
+    bool pomEnabled = false;            // POM toggle (off when tessellation is active)
+    float pomHeightScale = 0.1f;        // Height scale for parallax mapping (0.01-1.0)
+    uint32_t pomSteps = 32;             // Max ray march steps for POM (8-128)
+    bool pomRefinement = true;          // Binary refinement refinement pass
+    float pomFadeDistance = 128.0f;     // Distance in blocks to fade POM out
+
+    // CPU tessellation (geometric displacement, replaces POM/DDA at range)
+    uint32_t tessMaxLevel = 16;         // Max tessellation grid resolution (2-32)
+    float tessNearDist = 32.0f;         // Full tessellation distance (blocks)
+    float tessMidDist = 96.0f;          // Half tessellation distance
+    float tessFarDist = 192.0f;         // Quarter tessellation distance
 
     // Offline accumulation mode
     uint32_t offlineState = 0;       // 0=NORMAL, 1=FREE, 2=ACCUMULATING
@@ -183,6 +255,7 @@ class Renderer : public Singleton<Renderer> {
   public:
     static std::filesystem::path folderPath;
     static Options options;
+    static BlockModelTable blockModelTable;
     static float preExposure;  // Constant per-frame pre-exposure (0.1 for DLSS-RR, 1.0 otherwise)
     static bool resetExposureAdaptation;  // Set by JNI on world load, consumed by tone mapping
     static uint32_t accumFrameCount;

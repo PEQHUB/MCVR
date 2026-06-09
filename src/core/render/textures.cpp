@@ -24,6 +24,8 @@ void Textures::reset() {
     samplers.clear();
     textureAlphaClass_.clear();
     textureAlphaData_.clear();
+    textureRGBAData_.clear();
+    totalRGBADataBytes_ = 0;
     caches_.clear();
     uploadQueue_ = std::make_shared<std::map<uint32_t, std::vector<VkBufferImageCopy>>>();
     freeList_.clear();
@@ -337,6 +339,15 @@ bool Textures::getTextureAlphaDataSnapshot(uint32_t id, TextureAlphaData &out) c
     }
     out = it->second;
     return true;
+}
+
+const Textures::TextureRGBAData *Textures::getTextureRGBAData(uint32_t id) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    auto it = textureRGBAData_.find(id);
+    if (it != textureRGBAData_.end()) {
+        return &it->second;
+    }
+    return nullptr;
 }
 
 void Textures::bindAllTextures() {

@@ -7,6 +7,7 @@
 
 std::filesystem::path Renderer::folderPath{};
 Options Renderer::options{};
+BlockModelTable Renderer::blockModelTable{};
 float Renderer::preExposure = 0.1f;  // Constant pre-exposure for DLSS-RR (never varies per-frame)
 bool Renderer::resetExposureAdaptation = false;
 uint32_t Renderer::accumFrameCount = 0;
