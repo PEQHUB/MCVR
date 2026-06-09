@@ -89,6 +89,7 @@ TexturePagePool::Allocation TexturePagePool::allocate(
 bool TexturePagePool::upload(uint64_t generation, const Allocation& allocation,
                               const uint8_t* rgba, uint64_t bytes, VkFormat format,
                               bool visible, GpuUploadService::Priority priority) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!allocation.valid || !rgba || bytes == 0) return false;
     if (generation != activeGeneration_) return false;
 
@@ -130,8 +131,7 @@ void TexturePagePool::markReady(uint64_t generation, const Allocation& allocatio
     }
 }
 
-uint32_t TexturePagePool::ctmResidentCapacity() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+uint32_t TexturePagePool::ctmResidentCapacityLocked() const {
     uint32_t capacity = 0;
     for (const auto& p : pages_) {
         if (p.namespaceId == Ctm && p.allocated) {
@@ -141,8 +141,7 @@ uint32_t TexturePagePool::ctmResidentCapacity() const {
     return capacity;
 }
 
-uint32_t TexturePagePool::ctmPresentMaterials() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+uint32_t TexturePagePool::ctmPresentMaterialsLocked() const {
     uint32_t count = 0;
     for (const auto& p : pages_) {
         if (p.namespaceId == Ctm && p.allocated) {
@@ -150,6 +149,16 @@ uint32_t TexturePagePool::ctmPresentMaterials() const {
         }
     }
     return count;
+}
+
+uint32_t TexturePagePool::ctmResidentCapacity() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ctmResidentCapacityLocked();
+}
+
+uint32_t TexturePagePool::ctmPresentMaterials() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ctmPresentMaterialsLocked();
 }
 
 bool TexturePagePool::ctmPagesExhausted() const {
@@ -171,8 +180,8 @@ std::string TexturePagePool::statusJson() const {
         << "\"totalPages\":" << pages_.size() << ","
         << "\"pageImageAllocations\":" << pageImageAllocations_ << ","
         << "\"pageSubrangeUploads\":" << pageSubrangeUploads_ << ","
-        << "\"ctmResidentCapacity\":" << ctmResidentCapacity() << ","
-        << "\"ctmPresentMaterials\":" << ctmPresentMaterials() << ","
+        << "\"ctmResidentCapacity\":" << ctmResidentCapacityLocked() << ","
+        << "\"ctmPresentMaterials\":" << ctmPresentMaterialsLocked() << ","
         << "\"ctmPagesExhausted\":" << (ctmPagesExhausted() ? "true" : "false") << ","
         << "\"ctmUnaddressableMaterials\":" << ctmUnaddressableMaterials() << ",";
 

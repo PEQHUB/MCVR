@@ -88,6 +88,8 @@ private:
     };
 
     Page& pageForAllocationLocked(uint64_t generation, Namespace ns, uint32_t tier, uint32_t neededLayers);
+    uint32_t ctmResidentCapacityLocked() const;
+    uint32_t ctmPresentMaterialsLocked() const;
     uint32_t tierSize(uint32_t tier) const;
     uint32_t pageLayerCapacity(uint32_t tier) const;
 
