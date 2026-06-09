@@ -116,7 +116,9 @@ private:
     struct InFlight {
         uint64_t generation;
         VkCommandBuffer cmd;
-        VkSemaphore timeline;
+        VkCommandPool cmdPool;
+        std::shared_ptr<vk::HostVisibleBuffer> stagingBuffer;
+        std::shared_ptr<vk::TimelineSemaphore> timeline;
         uint64_t timelineValue;
         uint64_t bytes;
         bool visible;
@@ -128,6 +130,16 @@ private:
 
     std::shared_ptr<vk::Device> device_;
     std::shared_ptr<vk::VMA> vma_;
+
+    // Transfer infrastructure
+    std::shared_ptr<vk::CommandPool> transferCmdPool_;
+    std::shared_ptr<vk::TimelineSemaphore> uploadTimeline_;
+    uint64_t nextTimelineValue_ = 1;
+
+    // Staging ring buffer
+    std::shared_ptr<vk::HostVisibleBuffer> stagingRing_;
+    uint64_t stagingRingSize_ = 0;
+    uint64_t stagingRingOffset_ = 0;
 
     std::deque<Pending> queues_[static_cast<int>(Priority::Count)];
     std::deque<InFlight> inFlight_;
