@@ -1,6 +1,7 @@
 #include "com_radiance_client_proxy_vulkan_RendererProxy.h"
 
 #include "core/all_extern.hpp"
+#include "core/build/build_info.hpp"
 #include "core/render/buffers.hpp"
 #include "core/render/chunks.hpp"
 #include "core/render/entities.hpp"
@@ -63,25 +64,6 @@ namespace {
 std::recursive_mutex g_rendererJniMtx;
 std::atomic<bool> g_rendererShuttingDown{false};
 std::atomic<bool> g_rendererClosed{false};
-
-#ifndef MCVR_BUILD_GIT_SHA
-#define MCVR_BUILD_GIT_SHA "unknown"
-#endif
-#ifndef MCVR_BUILD_CONFIG
-#define MCVR_BUILD_CONFIG "unknown"
-#endif
-#ifndef MCVR_BUILD_COMPILER_ID
-#define MCVR_BUILD_COMPILER_ID "unknown"
-#endif
-#ifndef MCVR_BUILD_COMPILER_VERSION
-#define MCVR_BUILD_COMPILER_VERSION "unknown"
-#endif
-#ifndef MCVR_BUILD_VULKAN_SDK
-#define MCVR_BUILD_VULKAN_SDK "unknown"
-#endif
-#ifndef MCVR_BUILD_TIMESTAMP
-#define MCVR_BUILD_TIMESTAMP "unknown"
-#endif
 
 std::string json_escape(const char *text) {
     std::string out;
@@ -206,16 +188,17 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
 }
 
 extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeBuildInfoJson(JNIEnv *env,
-                                                                                                            jclass) {
+                                                                                                             jclass) {
     std::ostringstream json;
     json << "{";
     json << "\"repository\":\"radser-mcvr\",";
-    json << "\"commit\":\"" << json_escape(MCVR_BUILD_GIT_SHA) << "\",";
-    json << "\"buildType\":\"" << json_escape(MCVR_BUILD_CONFIG) << "\",";
-    json << "\"compiler\":\"" << json_escape(MCVR_BUILD_COMPILER_ID) << " "
-         << json_escape(MCVR_BUILD_COMPILER_VERSION) << "\",";
-    json << "\"vulkanSdk\":\"" << json_escape(MCVR_BUILD_VULKAN_SDK) << "\",";
-    json << "\"buildTimestamp\":\"" << json_escape(MCVR_BUILD_TIMESTAMP) << "\",";
+    json << "\"commit\":\"" << json_escape(build_info::kRepoCommit) << "\",";
+    json << "\"branch\":\"" << json_escape(build_info::kBranch) << "\",";
+    json << "\"dirty\":" << (build_info::kDirty ? "true" : "false") << ",";
+    json << "\"buildTimestamp\":\"" << json_escape(build_info::kBuildTimestamp) << "\",";
+    json << "\"dllSha256\":\"" << json_escape(build_info::kDllSha256) << "\",";
+    json << "\"textureLoaderAbiVersion\":" << build_info::kTextureLoaderAbiVersion << ",";
+    json << "\"cacheSchemaVersion\":" << build_info::kCacheSchemaVersion << ",";
     json << "\"features\":{";
 #ifdef MCVR_ENABLE_NRD
     json << "\"nrd\":true,";
