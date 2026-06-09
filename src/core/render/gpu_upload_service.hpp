@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -47,10 +48,13 @@ public:
         uint32_t height       = 0;
         uint32_t bytesPerLayer = 0;
         VkFormat format       = VK_FORMAT_R8G8B8A8_UNORM;
+        VkImage dstImage      = VK_NULL_HANDLE;
+        uint32_t mipLevels    = 1;
         const uint8_t* data   = nullptr;
         uint64_t bytes        = 0;
         bool visible          = false;
         Priority priority     = Priority::BackgroundCtm;
+        std::function<void(uint64_t)> onComplete;
     };
 
     struct BufferUpload {
@@ -71,9 +75,17 @@ public:
         bool blockingFenceUploads     = false;
         uint64_t pendingUploadBytes   = 0;
         uint64_t pendingVisibleUploadBytes = 0;
+        uint64_t queuedBytes          = 0;
+        uint64_t queuedVisibleBytes   = 0;
+        uint64_t inFlightBytes        = 0;
+        uint64_t inFlightVisibleBytes = 0;
         uint64_t submittedBytes       = 0;
         uint64_t completedBytes       = 0;
+        uint64_t completedVisibleBytes = 0;
+        uint64_t failedBytes          = 0;
         uint64_t timelineSubmissions  = 0;
+        uint64_t actualVkCopyCommands = 0;
+        uint64_t actualVkBufferCopyCommands = 0;
         uint64_t vkDeviceWaitIdleDuringLoad = 0;
     };
 
@@ -106,11 +118,14 @@ private:
         uint32_t namespaceId, tier, page, layer, layerCount;
         uint32_t width, height, bytesPerLayer;
         VkFormat format;
+        VkImage dstImage;
+        uint32_t mipLevels;
         // Buffer fields
         VkBuffer dstBuffer;
         VkDeviceSize dstOffset;
         // Data
         std::vector<uint8_t> payload;
+        std::function<void(uint64_t)> onComplete;
     };
 
     struct InFlight {
@@ -122,6 +137,7 @@ private:
         uint64_t timelineValue;
         uint64_t bytes;
         bool visible;
+        std::function<void(uint64_t)> onComplete;
     };
 
     bool submitTextureUploadLocked(const Pending& pending);
@@ -148,9 +164,17 @@ private:
 
     std::atomic<uint64_t> pendingUploadBytes_{0};
     std::atomic<uint64_t> pendingVisibleUploadBytes_{0};
+    std::atomic<uint64_t> queuedBytes_{0};
+    std::atomic<uint64_t> queuedVisibleBytes_{0};
+    std::atomic<uint64_t> inFlightBytes_{0};
+    std::atomic<uint64_t> inFlightVisibleBytes_{0};
     std::atomic<uint64_t> submittedBytes_{0};
     std::atomic<uint64_t> completedBytes_{0};
+    std::atomic<uint64_t> completedVisibleBytes_{0};
+    std::atomic<uint64_t> failedBytes_{0};
     std::atomic<uint64_t> timelineSubmissions_{0};
+    std::atomic<uint64_t> actualVkCopyCommands_{0};
+    std::atomic<uint64_t> actualVkBufferCopyCommands_{0};
     std::atomic<uint64_t> vkDeviceWaitIdleDuringLoad_{0};
 
     bool initialized_ = false;

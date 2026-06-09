@@ -45,6 +45,8 @@ void TexturePagePool::resetGeneration(uint64_t generation) {
         page.layersUsed = 0;
         page.readyLayers = 0;
         page.mipsReady = false;
+        std::fill(page.layerUploaded.begin(), page.layerUploaded.end(), false);
+        std::fill(page.layerMipsReady.begin(), page.layerMipsReady.end(), false);
     }
 }
 
@@ -92,9 +94,57 @@ bool TexturePagePool::upload(uint64_t generation, const Allocation& allocation,
     std::lock_guard<std::mutex> lock(mutex_);
     if (!allocation.valid || !rgba || bytes == 0) return false;
     if (generation != activeGeneration_) return false;
+    if (!uploads_) return false;
 
-    // In the full implementation, this enqueues a texture upload through GpuUploadService
-    // targeting the specific page/layer range in the texture array.
+    Page* page = findPageLocked(generation, allocation.first.namespaceId,
+        allocation.first.tier, allocation.first.page);
+    if (!page || !page->allocated || !page->albedoImage) return false;
+    if (allocation.first.layer >= page->layerCapacity
+        || allocation.layerCount == 0
+        || allocation.first.layer + allocation.layerCount > page->layerCapacity) {
+        return false;
+    }
+
+    const uint32_t size = tierSize(allocation.first.tier);
+    const uint64_t bytesPerLayer = static_cast<uint64_t>(size) * size * 4;
+    const uint64_t requiredBytes = bytesPerLayer * allocation.layerCount;
+    if (size == 0 || bytes < requiredBytes) return false;
+
+    for (uint32_t l = allocation.first.layer;
+         l < allocation.first.layer + allocation.layerCount; ++l) {
+        if (l < page->layerUploaded.size()) page->layerUploaded[l] = false;
+        if (l < page->layerMipsReady.size()) page->layerMipsReady[l] = false;
+    }
+
+    GpuUploadService::TextureUpload upload{};
+    upload.generation = generation;
+    upload.namespaceId = allocation.first.namespaceId;
+    upload.tier = allocation.first.tier;
+    upload.page = allocation.first.page;
+    upload.layer = allocation.first.layer;
+    upload.layerCount = allocation.layerCount;
+    upload.width = size;
+    upload.height = size;
+    upload.bytesPerLayer = static_cast<uint32_t>(bytesPerLayer);
+    upload.format = format;
+    upload.dstImage = page->albedoImage->vkImage();
+    upload.mipLevels = page->mipCount;
+    upload.data = rgba;
+    upload.bytes = requiredBytes;
+    upload.visible = visible;
+    upload.priority = priority;
+    upload.onComplete = [this, generation,
+                         namespaceId = allocation.first.namespaceId,
+                         tier = allocation.first.tier,
+                         pageId = allocation.first.page,
+                         startLayer = allocation.first.layer,
+                         layerCount = allocation.layerCount](uint64_t) {
+        markCopyComplete(generation, namespaceId, tier, pageId, startLayer, layerCount);
+    };
+
+    if (!uploads_->enqueueTextureUpload(upload)) {
+        return false;
+    }
     pageSubrangeUploads_++;
     return true;
 }
@@ -168,6 +218,38 @@ uint32_t TexturePagePool::ctmPresentMaterialsLocked() const {
     return count;
 }
 
+bool TexturePagePool::ctmPagesExhaustedLocked() const {
+    uint32_t ctmPages = 0;
+    for (const auto& p : pages_) {
+        if (p.namespaceId == Ctm && p.allocated) {
+            ctmPages++;
+            if (p.layersUsed < p.layerCapacity) return false;
+        }
+    }
+    return ctmPages >= kMaxPagesPerNamespace;
+}
+
+uint32_t TexturePagePool::ctmUnaddressableMaterialsLocked() const {
+    return ctmPagesExhaustedLocked() ? 1u : 0u;
+}
+
+uint32_t TexturePagePool::unreadyAllocatedPageCountLocked(uint64_t generation) const {
+    uint32_t count = 0;
+    for (const auto& p : pages_) {
+        if (!p.allocated || p.generation != generation || p.layersUsed == 0) {
+            continue;
+        }
+        for (uint32_t l = 0; l < p.layersUsed && l < p.layerUploaded.size()
+             && l < p.layerMipsReady.size(); ++l) {
+            if (!p.layerUploaded[l] || !p.layerMipsReady[l]) {
+                count++;
+                break;
+            }
+        }
+    }
+    return count;
+}
+
 uint32_t TexturePagePool::ctmResidentCapacity() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return ctmResidentCapacityLocked();
@@ -179,13 +261,18 @@ uint32_t TexturePagePool::ctmPresentMaterials() const {
 }
 
 bool TexturePagePool::ctmPagesExhausted() const {
-    // Not exhausted if we can still allocate more pages
-    return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ctmPagesExhaustedLocked();
 }
 
 uint32_t TexturePagePool::ctmUnaddressableMaterials() const {
-    // In v4, all materials should be addressable
-    return 0;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ctmUnaddressableMaterialsLocked();
+}
+
+uint32_t TexturePagePool::unreadyAllocatedPageCount(uint64_t generation) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return unreadyAllocatedPageCountLocked(generation);
 }
 
 std::string TexturePagePool::statusJson() const {
@@ -199,8 +286,9 @@ std::string TexturePagePool::statusJson() const {
         << "\"pageSubrangeUploads\":" << pageSubrangeUploads_ << ","
         << "\"ctmResidentCapacity\":" << ctmResidentCapacityLocked() << ","
         << "\"ctmPresentMaterials\":" << ctmPresentMaterialsLocked() << ","
-        << "\"ctmPagesExhausted\":" << (ctmPagesExhausted() ? "true" : "false") << ","
-        << "\"ctmUnaddressableMaterials\":" << ctmUnaddressableMaterials() << ",";
+        << "\"ctmPagesExhausted\":" << (ctmPagesExhaustedLocked() ? "true" : "false") << ","
+        << "\"ctmUnaddressableMaterials\":" << ctmUnaddressableMaterialsLocked() << ","
+        << "\"nativeUnreadyAllocatedPageCount\":" << unreadyAllocatedPageCountLocked(activeGeneration_) << ",";
 
     // Per-namespace summary
     out << "\"namespaces\":{";
@@ -259,13 +347,62 @@ TexturePagePool::Page& TexturePagePool::pageForAllocationLocked(
     newPage.layerCapacity = pageLayerCapacity(tier);
     newPage.layersUsed = 0;
     newPage.readyLayers = 0;
+    newPage.mipCount = 1;
     newPage.allocated = true;
     newPage.mipsReady = false;
+    newPage.format = VK_FORMAT_R8G8B8A8_UNORM;
     newPage.layerUploaded.resize(newPage.layerCapacity, false);
     newPage.layerMipsReady.resize(newPage.layerCapacity, false);
+
+    uint32_t size = tierSize(tier);
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    newPage.albedoImage = vk::DeviceLocalImage::create(
+        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
+        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    newPage.sampler = vk::Sampler::create(
+        device_, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
 
     pages_.push_back(newPage);
     pageImageAllocations_++;
 
     return pages_.back();
+}
+
+TexturePagePool::Page* TexturePagePool::findPageLocked(uint64_t generation,
+                                                       uint32_t namespaceId,
+                                                       uint32_t tier,
+                                                       uint32_t page) {
+    for (auto& p : pages_) {
+        if (p.generation == generation
+            && p.namespaceId == namespaceId
+            && p.tier == tier
+            && p.page == page) {
+            return &p;
+        }
+    }
+    return nullptr;
+}
+
+void TexturePagePool::markCopyComplete(uint64_t generation, uint32_t namespaceId,
+                                       uint32_t tier, uint32_t page,
+                                       uint32_t startLayer, uint32_t layerCount) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Page* p = findPageLocked(generation, namespaceId, tier, page);
+    if (!p || startLayer >= p->layerCapacity) return;
+    uint32_t endLayer = std::min(p->layerCapacity, startLayer + layerCount);
+    for (uint32_t l = startLayer; l < endLayer; ++l) {
+        if (l < p->layerUploaded.size()) p->layerUploaded[l] = true;
+        // Mip generation is not yet split out; v4 currently clamps to mip 0 for uploaded pages.
+        if (l < p->layerMipsReady.size()) p->layerMipsReady[l] = true;
+    }
+    uint32_t ready = 0;
+    for (uint32_t l = 0; l < p->layersUsed && l < p->layerUploaded.size()
+         && l < p->layerMipsReady.size(); ++l) {
+        if (p->layerUploaded[l] && p->layerMipsReady[l]) {
+            ready++;
+        }
+    }
+    p->readyLayers = ready;
+    p->mipsReady = p->readyLayers >= p->layersUsed;
 }

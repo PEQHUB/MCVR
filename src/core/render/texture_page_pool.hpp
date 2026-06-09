@@ -69,6 +69,7 @@ public:
     uint32_t ctmPresentMaterials() const;
     bool ctmPagesExhausted() const;
     uint32_t ctmUnaddressableMaterials() const;
+    uint32_t unreadyAllocatedPageCount(uint64_t generation) const;
 
 private:
     struct Page {
@@ -79,8 +80,12 @@ private:
         uint32_t layerCapacity = 0;
         uint32_t layersUsed = 0;
         uint32_t readyLayers = 0;
+        uint32_t mipCount = 1;
         bool allocated = false;
         bool mipsReady = false;
+        VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+        std::shared_ptr<vk::DeviceLocalImage> albedoImage;
+        std::shared_ptr<vk::Sampler> sampler;
         uint32_t albedoArrayId = UINT32_MAX;
         uint32_t specularArrayId = UINT32_MAX;
         uint32_t normalArrayId = UINT32_MAX;
@@ -91,8 +96,14 @@ private:
     };
 
     Page& pageForAllocationLocked(uint64_t generation, Namespace ns, uint32_t tier, uint32_t neededLayers);
+    Page* findPageLocked(uint64_t generation, uint32_t namespaceId, uint32_t tier, uint32_t page);
+    void markCopyComplete(uint64_t generation, uint32_t namespaceId, uint32_t tier,
+                          uint32_t page, uint32_t startLayer, uint32_t layerCount);
     uint32_t ctmResidentCapacityLocked() const;
     uint32_t ctmPresentMaterialsLocked() const;
+    bool ctmPagesExhaustedLocked() const;
+    uint32_t ctmUnaddressableMaterialsLocked() const;
+    uint32_t unreadyAllocatedPageCountLocked(uint64_t generation) const;
     uint32_t tierSize(uint32_t tier) const;
     uint32_t pageLayerCapacity(uint32_t tier) const;
 

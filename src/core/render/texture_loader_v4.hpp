@@ -29,6 +29,7 @@ public:
         const uint8_t* normalData = nullptr;
         const uint8_t* flagData = nullptr;
         uint64_t bytesPerLayer = 0;
+        uint32_t channelMask = 0;
         bool visible = false;
     };
 

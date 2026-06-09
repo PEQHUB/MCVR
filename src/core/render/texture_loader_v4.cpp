@@ -52,32 +52,30 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
     if (request.tier >= TexturePagePool::kMaxTiers) return false;
     if (request.layerCount == 0) return false;
 
-    // Allocate page pool layers
+    const uint32_t expectedSize = request.tier < TexturePagePool::kMaxTiers
+        ? (16u << request.tier)
+        : 0u;
+    if (expectedSize == 0 || request.width != expectedSize || request.height != expectedSize) {
+        return false;
+    }
+    const uint64_t expectedBytesPerLayer = static_cast<uint64_t>(expectedSize) * expectedSize * 4u;
+    if (request.bytesPerLayer < expectedBytesPerLayer) return false;
+
+    // Allocate page pool layers. Native chooses page/layer placement; Java hints are accepted
+    // only as diagnostics until sparse registry publication consumes the returned handles.
     auto ns = static_cast<TexturePagePool::Namespace>(request.namespaceId);
     auto alloc = pagePool_.allocate(request.generation, ns, request.tier,
                                      request.layerCount, request.visible);
     if (!alloc.valid) return false;
 
-    // Enqueue upload through GPU upload service
-    GpuUploadService::TextureUpload upload;
-    upload.generation = request.generation;
-    upload.namespaceId = request.namespaceId;
-    upload.tier = request.tier;
-    upload.page = alloc.first.page;
-    upload.layer = alloc.first.layer;
-    upload.layerCount = request.layerCount;
-    upload.width = request.width;
-    upload.height = request.height;
-    upload.bytesPerLayer = static_cast<uint32_t>(request.bytesPerLayer);
-    upload.format = request.format;
-    upload.data = request.albedoData;
-    upload.bytes = request.bytesPerLayer * request.layerCount;
-    upload.visible = request.visible;
-    upload.priority = request.visible
+    return pagePool_.upload(request.generation, alloc,
+        request.albedoData,
+        request.bytesPerLayer * request.layerCount,
+        request.format,
+        request.visible,
+        request.visible
         ? GpuUploadService::Priority::FirstFrameAlbedo
-        : GpuUploadService::Priority::BackgroundCtm;
-
-    return uploadService_.enqueueTextureUpload(upload);
+        : GpuUploadService::Priority::BackgroundCtm);
 }
 
 bool TextureLoaderV4::commitGeneration(uint64_t generation) {
@@ -129,6 +127,8 @@ std::string TextureLoaderV4::statusJson() const {
         << "\"committed\":" << (generationCommitted_.load(std::memory_order_acquire) ? "true" : "false") << ","
         << "\"vanillaBlockAtlasBypass\":true,"
         << "\"fixedCompatibilityUploadBytes\":0,"
+        << "\"legacyFixedBlockUploadCalls\":0,"
+        << "\"v4ActualVkCopyCommands\":" << uploadService_.status().actualVkCopyCommands << ","
         << "\"tieredArrays\":true,"
         << "\"ctmTieredPages\":true,"
         << "\"diskCacheEnabled\":true,"
@@ -155,12 +155,13 @@ std::string TextureLoaderV4::firstFrameReadinessJson(uint64_t generation) const 
     std::ostringstream out;
     bool idle = generationIdle(generation, true);
     auto uploadStatus = uploadService_.status();
+    auto unreadyPages = pagePool_.unreadyAllocatedPageCount(generation);
     out << "{"
         << "\"schema\":\"radser_first_frame_native_readiness_v4\","
         << "\"generation\":" << generation << ","
         << "\"pendingVisibleUploadBytes\":" << uploadStatus.pendingVisibleUploadBytes << ","
         << "\"nativePendingMipPageCount\":0,"
-        << "\"nativeUnreadyAllocatedPageCount\":0,"
+        << "\"nativeUnreadyAllocatedPageCount\":" << unreadyPages << ","
         << "\"pendingVisibleMaterialTableUpdates\":0,"
         << "\"generationIdle\":" << (idle ? "true" : "false")
         << "}";

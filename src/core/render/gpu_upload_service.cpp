@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <functional>
 #include <vector>
 
 bool GpuUploadService::initialize(std::shared_ptr<vk::Device> device, std::shared_ptr<vk::VMA> vma, uint64_t stagingBytes) {
@@ -94,21 +95,35 @@ void GpuUploadService::cancelGeneration(uint64_t generation) {
             q.end());
     }
 
-    // Recalculate pending bytes
-    uint64_t totalBytes = 0, visibleBytes = 0;
+    // Recalculate queued and total pending bytes. In-flight uploads cannot be
+    // unsignaled safely here, so keep them counted until timeline completion.
+    uint64_t queuedBytes = 0, queuedVisibleBytes = 0;
     for (int i = 0; i < static_cast<int>(Priority::Count); i++) {
         for (const auto& p : queues_[i]) {
-            totalBytes += p.payload.size();
-            if (p.visible) visibleBytes += p.payload.size();
+            queuedBytes += p.payload.size();
+            if (p.visible) queuedVisibleBytes += p.payload.size();
         }
     }
-    pendingUploadBytes_.store(totalBytes, std::memory_order_relaxed);
-    pendingVisibleUploadBytes_.store(visibleBytes, std::memory_order_relaxed);
+    uint64_t flightBytes = 0, flightVisibleBytes = 0;
+    for (const auto& flight : inFlight_) {
+        flightBytes += flight.bytes;
+        if (flight.visible) flightVisibleBytes += flight.bytes;
+    }
+    pendingUploadBytes_.store(queuedBytes + flightBytes, std::memory_order_relaxed);
+    pendingVisibleUploadBytes_.store(queuedVisibleBytes + flightVisibleBytes, std::memory_order_relaxed);
+    queuedBytes_.store(queuedBytes, std::memory_order_relaxed);
+    queuedVisibleBytes_.store(queuedVisibleBytes, std::memory_order_relaxed);
+    inFlightBytes_.store(flightBytes, std::memory_order_relaxed);
+    inFlightVisibleBytes_.store(flightVisibleBytes, std::memory_order_relaxed);
 }
 
 bool GpuUploadService::enqueueTextureUpload(const TextureUpload& upload) {
     if (!initialized_ || upload.data == nullptr || upload.bytes == 0) return false;
     if (upload.generation == 0) return false;
+    if (upload.dstImage == VK_NULL_HANDLE) return false;
+    if (upload.layerCount == 0 || upload.width == 0 || upload.height == 0) return false;
+    const uint64_t expectedBytes = static_cast<uint64_t>(upload.bytesPerLayer) * upload.layerCount;
+    if (upload.bytesPerLayer == 0 || expectedBytes == 0 || upload.bytes < expectedBytes) return false;
 
     Pending pending{};
     pending.kind = Kind::TextureSubresource;
@@ -124,7 +139,10 @@ bool GpuUploadService::enqueueTextureUpload(const TextureUpload& upload) {
     pending.height = upload.height;
     pending.bytesPerLayer = upload.bytesPerLayer;
     pending.format = upload.format;
+    pending.dstImage = upload.dstImage;
+    pending.mipLevels = std::max(1u, upload.mipLevels);
     pending.payload.assign(upload.data, upload.data + upload.bytes);
+    pending.onComplete = upload.onComplete;
 
     std::lock_guard<std::mutex> lock(mutex_);
     int idx = static_cast<int>(upload.priority);
@@ -133,8 +151,10 @@ bool GpuUploadService::enqueueTextureUpload(const TextureUpload& upload) {
     queues_[idx].push_back(std::move(pending));
 
     pendingUploadBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
+    queuedBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
     if (upload.visible) {
         pendingVisibleUploadBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
+        queuedVisibleBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
     }
     return true;
 }
@@ -159,8 +179,10 @@ bool GpuUploadService::enqueueBufferUpload(const BufferUpload& upload) {
     queues_[idx].push_back(std::move(pending));
 
     pendingUploadBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
+    queuedBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
     if (upload.visible) {
         pendingVisibleUploadBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
+        queuedVisibleBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
     }
     return true;
 }
@@ -184,10 +206,13 @@ void GpuUploadService::pump(uint64_t frameBudgetBytes) {
             if (ok) {
                 budgetUsed += pending.payload.size();
                 uint64_t sz = pending.payload.size();
+                bool visible = pending.visible;
                 q.pop_front();
-                pendingUploadBytes_.fetch_sub(sz, std::memory_order_relaxed);
-                if (pending.visible) {
-                    pendingVisibleUploadBytes_.fetch_sub(sz, std::memory_order_relaxed);
+                queuedBytes_.fetch_sub(sz, std::memory_order_relaxed);
+                inFlightBytes_.fetch_add(sz, std::memory_order_relaxed);
+                if (visible) {
+                    queuedVisibleBytes_.fetch_sub(sz, std::memory_order_relaxed);
+                    inFlightVisibleBytes_.fetch_add(sz, std::memory_order_relaxed);
                 }
                 submittedBytes_.fetch_add(sz, std::memory_order_relaxed);
             } else {
@@ -199,6 +224,8 @@ void GpuUploadService::pump(uint64_t frameBudgetBytes) {
 
 void GpuUploadService::pollCompletions() {
     if (!initialized_) return;
+    std::vector<std::function<void(uint64_t)>> completions;
+    {
     std::lock_guard<std::mutex> lock(mutex_);
 
     while (!inFlight_.empty()) {
@@ -208,6 +235,16 @@ void GpuUploadService::pollCompletions() {
             if (result == VK_TIMEOUT) break; // Not done yet
         }
         completedBytes_.fetch_add(flight.bytes, std::memory_order_relaxed);
+        pendingUploadBytes_.fetch_sub(flight.bytes, std::memory_order_relaxed);
+        inFlightBytes_.fetch_sub(flight.bytes, std::memory_order_relaxed);
+        if (flight.visible) {
+            completedVisibleBytes_.fetch_add(flight.bytes, std::memory_order_relaxed);
+            pendingVisibleUploadBytes_.fetch_sub(flight.bytes, std::memory_order_relaxed);
+            inFlightVisibleBytes_.fetch_sub(flight.bytes, std::memory_order_relaxed);
+        }
+        if (flight.onComplete) {
+            completions.push_back(std::move(flight.onComplete));
+        }
         // Release command buffer
         if (flight.cmd != VK_NULL_HANDLE && flight.cmdPool != VK_NULL_HANDLE && device_) {
             vkFreeCommandBuffers(device_->vkDevice(), flight.cmdPool, 1, &flight.cmd);
@@ -218,6 +255,11 @@ void GpuUploadService::pollCompletions() {
     // Reset staging ring offset when all in-flight are done
     if (inFlight_.empty()) {
         stagingRingOffset_ = 0;
+    }
+    }
+
+    for (auto& completion : completions) {
+        if (completion) completion(0);
     }
 }
 
@@ -247,9 +289,17 @@ GpuUploadService::Status GpuUploadService::status() const {
     s.blockingFenceUploads = false; // Never in v4
     s.pendingUploadBytes = pendingUploadBytes_.load(std::memory_order_relaxed);
     s.pendingVisibleUploadBytes = pendingVisibleUploadBytes_.load(std::memory_order_relaxed);
+    s.queuedBytes = queuedBytes_.load(std::memory_order_relaxed);
+    s.queuedVisibleBytes = queuedVisibleBytes_.load(std::memory_order_relaxed);
+    s.inFlightBytes = inFlightBytes_.load(std::memory_order_relaxed);
+    s.inFlightVisibleBytes = inFlightVisibleBytes_.load(std::memory_order_relaxed);
     s.submittedBytes = submittedBytes_.load(std::memory_order_relaxed);
     s.completedBytes = completedBytes_.load(std::memory_order_relaxed);
+    s.completedVisibleBytes = completedVisibleBytes_.load(std::memory_order_relaxed);
+    s.failedBytes = failedBytes_.load(std::memory_order_relaxed);
     s.timelineSubmissions = timelineSubmissions_.load(std::memory_order_relaxed);
+    s.actualVkCopyCommands = actualVkCopyCommands_.load(std::memory_order_relaxed);
+    s.actualVkBufferCopyCommands = actualVkBufferCopyCommands_.load(std::memory_order_relaxed);
     s.vkDeviceWaitIdleDuringLoad = vkDeviceWaitIdleDuringLoad_.load(std::memory_order_relaxed);
     return s;
 }
@@ -266,9 +316,18 @@ std::string GpuUploadService::statusJson() const {
         << "\"blockingFenceUploads\":" << (s.blockingFenceUploads ? "true" : "false") << ","
         << "\"pendingUploadBytes\":" << s.pendingUploadBytes << ","
         << "\"pendingVisibleUploadBytes\":" << s.pendingVisibleUploadBytes << ","
+        << "\"queuedBytes\":" << s.queuedBytes << ","
+        << "\"queuedVisibleBytes\":" << s.queuedVisibleBytes << ","
+        << "\"inFlightBytes\":" << s.inFlightBytes << ","
+        << "\"inFlightVisibleBytes\":" << s.inFlightVisibleBytes << ","
         << "\"submittedBytes\":" << s.submittedBytes << ","
         << "\"completedBytes\":" << s.completedBytes << ","
+        << "\"completedVisibleBytes\":" << s.completedVisibleBytes << ","
+        << "\"failedBytes\":" << s.failedBytes << ","
         << "\"timelineSubmissions\":" << s.timelineSubmissions << ","
+        << "\"actualVkCopyCommands\":" << s.actualVkCopyCommands << ","
+        << "\"v4ActualVkCopyCommands\":" << s.actualVkCopyCommands << ","
+        << "\"actualVkBufferCopyCommands\":" << s.actualVkBufferCopyCommands << ","
         << "\"vkDeviceWaitIdleDuringLoad\":" << s.vkDeviceWaitIdleDuringLoad
         << "}";
     return out.str();
@@ -279,6 +338,11 @@ bool GpuUploadService::submitTextureUploadLocked(const Pending& pending) {
 
     uint64_t payloadSize = pending.payload.size();
     if (payloadSize == 0) return false;
+    if (pending.dstImage == VK_NULL_HANDLE || pending.layerCount == 0 || pending.width == 0 || pending.height == 0) {
+        return false;
+    }
+    const uint64_t requiredBytes = static_cast<uint64_t>(pending.bytesPerLayer) * pending.layerCount;
+    if (pending.bytesPerLayer == 0 || payloadSize < requiredBytes) return false;
 
     // Allocate staging space (simple bump allocator, wraps around)
     uint64_t alignedOffset = (stagingRingOffset_ + 255) & ~255ULL;
@@ -292,7 +356,7 @@ bool GpuUploadService::submitTextureUploadLocked(const Pending& pending) {
     // Copy payload into staging buffer
     void* mappedPtr = stagingRing_->mappedPtr();
     if (!mappedPtr) return false;
-    memcpy(static_cast<uint8_t*>(mappedPtr) + stagingOffset, pending.payload.data(), payloadSize);
+    stagingRing_->uploadToBuffer(const_cast<uint8_t*>(pending.payload.data()), payloadSize, stagingOffset);
 
     // Allocate and begin command buffer
     VkCommandBufferAllocateInfo allocInfo{};
@@ -314,13 +378,69 @@ bool GpuUploadService::submitTextureUploadLocked(const Pending& pending) {
         return false;
     }
 
-    // Record buffer copy (staging -> destination)
-    // For texture uploads, this copies to a staging destination buffer.
-    // The actual vkCmdCopyBufferToImage is done by the caller after this returns.
-    // Here we just record the staging buffer submission for completion tracking.
+    VkImageSubresourceRange range{};
+    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.baseMipLevel = 0;
+    range.levelCount = std::max(1u, pending.mipLevels);
+    range.baseArrayLayer = pending.layer;
+    range.layerCount = pending.layerCount;
+
+    VkImageMemoryBarrier toTransfer{};
+    toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toTransfer.srcAccessMask = 0;
+    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransfer.image = pending.dstImage;
+    toTransfer.subresourceRange = range;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &toTransfer);
+
+    std::vector<VkBufferImageCopy> copies;
+    copies.reserve(pending.layerCount);
+    for (uint32_t i = 0; i < pending.layerCount; ++i) {
+        VkBufferImageCopy region{};
+        region.bufferOffset = stagingOffset + static_cast<uint64_t>(pending.bytesPerLayer) * i;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = pending.layer + i;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {0, 0, 0};
+        region.imageExtent = {pending.width, pending.height, 1};
+        copies.push_back(region);
+    }
+
+    vkCmdCopyBufferToImage(cmd,
+        stagingRing_->vkBuffer(),
+        pending.dstImage,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        static_cast<uint32_t>(copies.size()),
+        copies.data());
+
+    VkImageMemoryBarrier toShader{};
+    toShader.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toShader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    toShader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toShader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toShader.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toShader.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toShader.image = pending.dstImage;
+    toShader.subresourceRange = range;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        0, 0, nullptr, 0, nullptr, 1, &toShader);
 
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
         vkFreeCommandBuffers(device_->vkDevice(), transferCmdPool_->vkCommandPool(), 1, &cmd);
+        failedBytes_.fetch_add(payloadSize, std::memory_order_relaxed);
         return false;
     }
 
@@ -357,9 +477,11 @@ bool GpuUploadService::submitTextureUploadLocked(const Pending& pending) {
     flight.timelineValue = timelineValue;
     flight.bytes = payloadSize;
     flight.visible = pending.visible;
+    flight.onComplete = pending.onComplete;
     inFlight_.push_back(std::move(flight));
 
     timelineSubmissions_.fetch_add(1, std::memory_order_relaxed);
+    actualVkCopyCommands_.fetch_add(copies.size(), std::memory_order_relaxed);
     return true;
 }
 
@@ -380,7 +502,7 @@ bool GpuUploadService::submitBufferUploadLocked(const Pending& pending) {
     // Copy payload into staging buffer
     void* mappedPtr = stagingRing_->mappedPtr();
     if (!mappedPtr) return false;
-    memcpy(static_cast<uint8_t*>(mappedPtr) + stagingOffset, pending.payload.data(), payloadSize);
+    stagingRing_->uploadToBuffer(const_cast<uint8_t*>(pending.payload.data()), payloadSize, stagingOffset);
 
     // Allocate and begin command buffer
     VkCommandBufferAllocateInfo allocInfo{};
@@ -399,6 +521,7 @@ bool GpuUploadService::submitBufferUploadLocked(const Pending& pending) {
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
         vkFreeCommandBuffers(device_->vkDevice(), transferCmdPool_->vkCommandPool(), 1, &cmd);
+        failedBytes_.fetch_add(payloadSize, std::memory_order_relaxed);
         return false;
     }
 
@@ -452,6 +575,7 @@ bool GpuUploadService::submitBufferUploadLocked(const Pending& pending) {
     inFlight_.push_back(std::move(flight));
 
     timelineSubmissions_.fetch_add(1, std::memory_order_relaxed);
+    actualVkBufferCopyCommands_.fetch_add(pending.dstBuffer != VK_NULL_HANDLE ? 1 : 0, std::memory_order_relaxed);
     return true;
 }
 
