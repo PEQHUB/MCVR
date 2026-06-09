@@ -13,32 +13,32 @@ jstring makeString(JNIEnv* env, const std::string& value) {
     return env->NewStringUTF(value.c_str());
 }
 
-bool validateUploadStruct(const void* ptr, uint32_t bytes) {
-    if (!ptr || bytes == 0) return false;
-    if (bytes < sizeof(TextureLoaderV4::UploadRequest)) return false;
-    return true;
-}
+static constexpr uint32_t CHANNEL_ALBEDO   = 1u << 0;
+static constexpr uint32_t CHANNEL_SPECULAR = 1u << 1;
+static constexpr uint32_t CHANNEL_NORMAL   = 1u << 2;
+static constexpr uint32_t CHANNEL_FLAG     = 1u << 3;
 
-uint32_t tierSizeBytes(uint32_t tier) {
+uint32_t tierSizePixels(uint32_t tier) {
     static const uint32_t SIZES[] = {16, 32, 64, 128, 256, 512, 1024};
     if (tier >= 7) return 0;
-    uint32_t s = SIZES[tier];
-    return s * s * 4;
+    return SIZES[tier];
 }
 
-bool validLayerUpload(uint64_t generation, uint32_t page, uint32_t tier,
-                      uint32_t startLayer, uint32_t layerCount,
-                      uint32_t layerCapacity, const uint8_t* data, uint64_t bytes) {
+bool validateLayerUpload(uint64_t generation, uint32_t tier, uint32_t layerCount,
+                         uint32_t channelMask, jlong albedoPtr, jlong specularPtr,
+                         jlong normalPtr, jlong flagPtr, jlong bytesPerLayer) {
     if (generation == 0) return false;
-    if (!data || bytes == 0) return false;
     if (tier >= 7) return false;
-    if (layerCount == 0 || layerCapacity == 0) return false;
-    if (startLayer > layerCapacity) return false;
-    if (layerCount > layerCapacity - startLayer) return false;
-    const uint64_t size = tierSizeBytes(tier);
-    if (size == 0) return false;
-    if (layerCount > UINT64_MAX / size) return false;
-    if (bytes < layerCount * size) return false;
+    if (layerCount == 0) return false;
+    uint32_t pixelSize = tierSizePixels(tier);
+    if (pixelSize == 0) return false;
+    jlong expectedBytes = static_cast<jlong>(pixelSize) * pixelSize * 4;
+    if (bytesPerLayer < expectedBytes) return false;
+    if (layerCount > UINT64_MAX / static_cast<uint64_t>(bytesPerLayer)) return false;
+    if ((channelMask & CHANNEL_ALBEDO) && albedoPtr == 0) return false;
+    if ((channelMask & CHANNEL_SPECULAR) && specularPtr == 0) return false;
+    if ((channelMask & CHANNEL_NORMAL) && normalPtr == 0) return false;
+    if ((channelMask & CHANNEL_FLAG) && flagPtr == 0) return false;
     return true;
 }
 
@@ -65,13 +65,36 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeBeginTextureLoa
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePageV4(
-    JNIEnv*, jclass, jlong generation, jlong uploadPtr, jint uploadBytes) {
-    if (generation <= 0 || uploadPtr == 0 || uploadBytes <= 0) return JNI_FALSE;
-    auto* upload = reinterpret_cast<const TextureLoaderV4::UploadRequest*>(uploadPtr);
-    if (!validateUploadStruct(upload, static_cast<uint32_t>(uploadBytes))) return JNI_FALSE;
+    JNIEnv*, jclass, jlong generation, jint namespaceId, jint tier, jint page,
+    jint startLayer, jint layerCount, jint width, jint height, jint channelMask,
+    jlong albedoPtr, jlong specularPtr, jlong normalPtr, jlong flagPtr,
+    jlong bytesPerLayer, jboolean visible) {
+    if (!validateLayerUpload(static_cast<uint64_t>(generation), static_cast<uint32_t>(tier),
+            static_cast<uint32_t>(layerCount), static_cast<uint32_t>(channelMask),
+            albedoPtr, specularPtr, normalPtr, flagPtr, bytesPerLayer)) {
+        return JNI_FALSE;
+    }
     auto* renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return JNI_FALSE;
-    return renderer->textureLoaderV4().enqueueUpload(*upload) ? JNI_TRUE : JNI_FALSE;
+
+    TextureLoaderV4::UploadRequest req{};
+    req.generation = static_cast<uint64_t>(generation);
+    req.namespaceId = static_cast<uint32_t>(namespaceId);
+    req.tier = static_cast<uint32_t>(tier);
+    req.page = static_cast<uint32_t>(page);
+    req.startLayer = static_cast<uint32_t>(startLayer);
+    req.layerCount = static_cast<uint32_t>(layerCount);
+    req.width = static_cast<uint32_t>(width);
+    req.height = static_cast<uint32_t>(height);
+    req.format = VK_FORMAT_R8G8B8A8_UNORM;
+    req.albedoData = albedoPtr ? reinterpret_cast<const uint8_t*>(albedoPtr) : nullptr;
+    req.specularData = specularPtr ? reinterpret_cast<const uint8_t*>(specularPtr) : nullptr;
+    req.normalData = normalPtr ? reinterpret_cast<const uint8_t*>(normalPtr) : nullptr;
+    req.flagData = flagPtr ? reinterpret_cast<const uint8_t*>(flagPtr) : nullptr;
+    req.bytesPerLayer = static_cast<uint64_t>(bytesPerLayer);
+    req.visible = visible == JNI_TRUE;
+
+    return renderer->textureLoaderV4().enqueueUpload(req) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
