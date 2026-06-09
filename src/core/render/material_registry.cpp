@@ -56,18 +56,26 @@ bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, u
     defaultEntry.flags = vk::Data::MATERIAL_FLAG_VALID |
                          vk::Data::MATERIAL_FLAG_VANILLA_SPRITE |
                          vk::Data::MATERIAL_FLAG_GPU_RESIDENT;
+    defaultEntry.albedoNamespace = 0;
+    defaultEntry.albedoTier = 0;
     defaultEntry.albedoPage = 0;
     defaultEntry.albedoLayer = 0;
+    defaultEntry.specularNamespace = 0;
+    defaultEntry.specularTier = 0;
     defaultEntry.specularPage = 0;
     defaultEntry.specularLayer = -1;
+    defaultEntry.normalNamespace = 0;
+    defaultEntry.normalTier = 0;
     defaultEntry.normalPage = 0;
     defaultEntry.normalLayer = -1;
+    defaultEntry.flagNamespace = 0;
+    defaultEntry.flagTier = 0;
     defaultEntry.flagPage = 0;
     defaultEntry.flagLayer = 0;
     defaultEntry.overlayMaterialId = -1;
-    defaultEntry.displacementPolicy = vk::Data::MATERIAL_DISPLACEMENT_DISABLED;
-    defaultEntry.displacementScale = 0.0f;
-    defaultEntry.heightRangePacked = -1;
+    defaultEntry.residencyState = 0;
+    defaultEntry.generationLo = 0;
+    defaultEntry.generationHi = 0;
     defaultEntry.uvScaleU = 1.0f;
     defaultEntry.uvScaleV = 1.0f;
     defaultEntry.uvOffsetU = 0.0f;

@@ -635,26 +635,30 @@ void TextureSystem::finalize(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::D
         if (se && (se->flags & vk::Data::SPRITE_FLAG_HAS_HEIGHT) != 0u) {
             material.flags |= vk::Data::MATERIAL_FLAG_DISPLACEMENT_ELIGIBLE;
         }
-        material.albedoPage = 0;
-        material.albedoLayer = static_cast<int32_t>(i);
-        material.specularPage = 0;
-        material.specularLayer = se ? se->specularLayer : -1;
-        material.normalPage = 0;
-        material.normalLayer = se ? se->normalLayer : -1;
-        material.flagPage = 0;
-        material.flagLayer = static_cast<int32_t>(i);
-        material.overlayMaterialId = se ? se->overlaySprite : -1;
-        material.displacementPolicy =
-            (material.flags & vk::Data::MATERIAL_FLAG_DISPLACEMENT_ELIGIBLE) != 0u
-                ? vk::Data::MATERIAL_DISPLACEMENT_AUTHORED_HEIGHT
-                : vk::Data::MATERIAL_DISPLACEMENT_DISABLED;
-        material.displacementScale =
-            material.displacementPolicy == vk::Data::MATERIAL_DISPLACEMENT_AUTHORED_HEIGHT ? 1.0f : 0.0f;
-        material.heightRangePacked = se ? se->maskLayer : -1;
-        material.uvScaleU = 1.0f;
-        material.uvScaleV = 1.0f;
-        material.uvOffsetU = 0.0f;
-        material.uvOffsetV = 0.0f;
+        material.albedoNamespace = 0;
+            material.albedoTier = 0;
+            material.albedoPage = 0;
+            material.albedoLayer = static_cast<int32_t>(i);
+            material.specularNamespace = 0;
+            material.specularTier = 0;
+            material.specularPage = 0;
+            material.specularLayer = se ? se->specularLayer : -1;
+            material.normalNamespace = 0;
+            material.normalTier = 0;
+            material.normalPage = 0;
+            material.normalLayer = se ? se->normalLayer : -1;
+            material.flagNamespace = 0;
+            material.flagTier = 0;
+            material.flagPage = 0;
+            material.flagLayer = static_cast<int32_t>(i);
+            material.overlayMaterialId = se ? se->overlaySprite : -1;
+            material.residencyState = 0;
+            material.generationLo = 0;
+            material.generationHi = 0;
+            material.uvScaleU = 1.0f;
+            material.uvScaleV = 1.0f;
+            material.uvOffsetU = 0.0f;
+            material.uvOffsetV = 0.0f;
     }
     if (!materials_.uploadMaterials(wrappedMaterials.data(), static_cast<uint32_t>(wrappedMaterials.size()),
                                     vma, device)) {

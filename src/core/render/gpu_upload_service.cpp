@@ -5,10 +5,9 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <vector>
 
-bool GpuUploadService::initialize(std::shared_ptr<vk::Device> device,
-                                   std::shared_ptr<vk::VMA> vma,
-                                   uint64_t stagingBytes) {
+bool GpuUploadService::initialize(std::shared_ptr<vk::Device> device, std::shared_ptr<vk::VMA> vma, uint64_t stagingBytes) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (initialized_) return true;
     if (!device || !vma) return false;
@@ -19,7 +18,11 @@ bool GpuUploadService::initialize(std::shared_ptr<vk::Device> device,
     // Check for dedicated transfer queue
     auto framework = Renderer::try_instance() ? Renderer::instance().framework() : nullptr;
     if (framework && framework->physicalDevice()) {
-        auto& families = framework->queueFamilies();
+        VkPhysicalDevice physDev = framework->physicalDevice()->vkPhysicalDevice();
+        uint32_t familyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physDev, &familyCount, nullptr);
+        std::vector<VkQueueFamilyProperties> families(familyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(physDev, &familyCount, families.data());
         // Look for a queue family with transfer but not graphics
         for (const auto& family : families) {
             if ((family.queueFlags & VK_QUEUE_TRANSFER_BIT) &&
@@ -45,19 +48,20 @@ bool GpuUploadService::initialize(std::shared_ptr<vk::Device> device,
 
 void GpuUploadService::shutdown() {
     std::lock_guard<std::mutex> lock(mutex_);
+
     // Wait for in-flight submissions
     for (auto& flight : inFlight_) {
         if (flight.timeline != VK_NULL_HANDLE && device_) {
-            vkWaitSemaphores(device_->vkDevice(),
-                &(VkSemaphoreWaitInfo){
-                    .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-                    .semaphoreCount = 1,
-                    .pSemaphores = &flight.timeline,
-                    .pValues = &flight.timelineValue,
-                }, UINT64_MAX);
+            VkSemaphoreWaitInfo waitInfo{};
+            waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+            waitInfo.semaphoreCount = 1;
+            waitInfo.pSemaphores = &flight.timeline;
+            waitInfo.pValues = &flight.timelineValue;
+            vkWaitSemaphores(device_->vkDevice(), &waitInfo, UINT64_MAX);
         }
     }
     inFlight_.clear();
+
     for (int i = 0; i < static_cast<int>(Priority::Count); i++) {
         queues_[i].clear();
     }
@@ -72,6 +76,7 @@ void GpuUploadService::cancelGeneration(uint64_t generation) {
             [generation](const Pending& p) { return p.generation == generation; }),
             q.end());
     }
+
     // Recalculate pending bytes
     uint64_t totalBytes = 0, visibleBytes = 0;
     for (int i = 0; i < static_cast<int>(Priority::Count); i++) {
@@ -106,7 +111,8 @@ bool GpuUploadService::enqueueTextureUpload(const TextureUpload& upload) {
 
     std::lock_guard<std::mutex> lock(mutex_);
     int idx = static_cast<int>(upload.priority);
-    if (idx < 0 || idx >= static_cast<int>(Priority::Count)) idx = static_cast<int>(Priority::BackgroundCtm);
+    if (idx < 0 || idx >= static_cast<int>(Priority::Count))
+        idx = static_cast<int>(Priority::BackgroundCtm);
     queues_[idx].push_back(std::move(pending));
 
     pendingUploadBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
@@ -131,7 +137,8 @@ bool GpuUploadService::enqueueBufferUpload(const BufferUpload& upload) {
 
     std::lock_guard<std::mutex> lock(mutex_);
     int idx = static_cast<int>(upload.priority);
-    if (idx < 0 || idx >= static_cast<int>(Priority::Count)) idx = static_cast<int>(Priority::BackgroundCtm);
+    if (idx < 0 || idx >= static_cast<int>(Priority::Count))
+        idx = static_cast<int>(Priority::BackgroundCtm);
     queues_[idx].push_back(std::move(pending));
 
     pendingUploadBytes_.fetch_add(upload.bytes, std::memory_order_relaxed);
@@ -144,8 +151,8 @@ bool GpuUploadService::enqueueBufferUpload(const BufferUpload& upload) {
 void GpuUploadService::pump(uint64_t frameBudgetBytes) {
     if (!initialized_) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    uint64_t budgetUsed = 0;
 
+    uint64_t budgetUsed = 0;
     // Process queues in priority order
     for (int i = 0; i < static_cast<int>(Priority::Count); i++) {
         auto& q = queues_[i];
@@ -180,12 +187,11 @@ void GpuUploadService::pollCompletions() {
     while (!inFlight_.empty()) {
         auto& flight = inFlight_.front();
         if (flight.timeline != VK_NULL_HANDLE && device_) {
-            VkSemaphoreWaitInfo waitInfo{
-                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-                .semaphoreCount = 1,
-                .pSemaphores = &flight.timeline,
-                .pValues = &flight.timelineValue,
-            };
+            VkSemaphoreWaitInfo waitInfo{};
+            waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+            waitInfo.semaphoreCount = 1;
+            waitInfo.pSemaphores = &flight.timeline;
+            waitInfo.pValues = &flight.timelineValue;
             VkResult result = vkWaitSemaphores(device_->vkDevice(), &waitInfo, 0);
             if (result == VK_TIMEOUT) break; // Not done yet
         }
