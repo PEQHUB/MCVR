@@ -7,6 +7,10 @@
 
 static const uint32_t TIER_SIZES[] = {16, 32, 64, 128, 256, 512, 1024};
 static const uint32_t DEFAULT_LAYERS_PER_PAGE = 256;
+static constexpr uint32_t CHANNEL_ALBEDO   = 1u << 0;
+static constexpr uint32_t CHANNEL_SPECULAR = 1u << 1;
+static constexpr uint32_t CHANNEL_NORMAL   = 1u << 2;
+static constexpr uint32_t CHANNEL_FLAG     = 1u << 3;
 
 uint32_t TexturePagePool::tierSize(uint32_t tier) const {
     return tier < kMaxTiers ? TIER_SIZES[tier] : 0;
@@ -149,6 +153,100 @@ bool TexturePagePool::upload(uint64_t generation, const Allocation& allocation,
     return true;
 }
 
+bool TexturePagePool::upload(uint64_t generation, const Allocation& allocation,
+                              const uint8_t* albedo, const uint8_t* specular,
+                              const uint8_t* normal, const uint8_t* flag,
+                              uint64_t bytesPerLayer, uint32_t channelMask,
+                              VkFormat format, bool visible) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!allocation.valid || !albedo || bytesPerLayer == 0) return false;
+    if (generation != activeGeneration_) return false;
+    if (!uploads_) return false;
+
+    Page* page = findPageLocked(generation, allocation.first.namespaceId,
+        allocation.first.tier, allocation.first.page);
+    if (!page || !page->allocated || !page->albedoImage) return false;
+    if (allocation.first.layer >= page->layerCapacity
+        || allocation.layerCount == 0
+        || allocation.first.layer + allocation.layerCount > page->layerCapacity) {
+        return false;
+    }
+
+    const uint32_t size = tierSize(allocation.first.tier);
+    const uint64_t requiredBytesPerLayer = static_cast<uint64_t>(size) * size * 4;
+    if (size == 0 || bytesPerLayer < requiredBytesPerLayer) return false;
+    const uint64_t requiredBytes = requiredBytesPerLayer * allocation.layerCount;
+
+    for (uint32_t l = allocation.first.layer;
+         l < allocation.first.layer + allocation.layerCount; ++l) {
+        if (l < page->layerUploaded.size()) page->layerUploaded[l] = false;
+        if (l < page->layerMipsReady.size()) page->layerMipsReady[l] = false;
+    }
+
+    struct Plane {
+        const uint8_t* data;
+        std::shared_ptr<vk::DeviceLocalImage> image;
+        GpuUploadService::Priority priority;
+    };
+    std::vector<Plane> planes;
+    planes.push_back({albedo, page->albedoImage, visible
+        ? GpuUploadService::Priority::FirstFrameAlbedo
+        : GpuUploadService::Priority::BackgroundCtm});
+    if ((channelMask & CHANNEL_SPECULAR) && specular && page->specularImage) {
+        planes.push_back({specular, page->specularImage, visible
+            ? GpuUploadService::Priority::FirstFrameAux
+            : GpuUploadService::Priority::BackgroundCtm});
+    }
+    if ((channelMask & CHANNEL_NORMAL) && normal && page->normalImage) {
+        planes.push_back({normal, page->normalImage, visible
+            ? GpuUploadService::Priority::FirstFrameAux
+            : GpuUploadService::Priority::BackgroundCtm});
+    }
+    if ((channelMask & CHANNEL_FLAG) && flag && page->flagImage) {
+        planes.push_back({flag, page->flagImage, visible
+            ? GpuUploadService::Priority::FirstFrameAux
+            : GpuUploadService::Priority::BackgroundCtm});
+    }
+
+    auto remaining = std::make_shared<std::atomic<uint32_t>>(static_cast<uint32_t>(planes.size()));
+    for (const auto& plane : planes) {
+        if (!plane.data || !plane.image) return false;
+        GpuUploadService::TextureUpload upload{};
+        upload.generation = generation;
+        upload.namespaceId = allocation.first.namespaceId;
+        upload.tier = allocation.first.tier;
+        upload.page = allocation.first.page;
+        upload.layer = allocation.first.layer;
+        upload.layerCount = allocation.layerCount;
+        upload.width = size;
+        upload.height = size;
+        upload.bytesPerLayer = static_cast<uint32_t>(requiredBytesPerLayer);
+        upload.format = format;
+        upload.dstImage = plane.image->vkImage();
+        upload.mipLevels = page->mipCount;
+        upload.data = plane.data;
+        upload.bytes = requiredBytes;
+        upload.visible = visible;
+        upload.priority = plane.priority;
+        upload.onComplete = [this, generation,
+                             namespaceId = allocation.first.namespaceId,
+                             tier = allocation.first.tier,
+                             pageId = allocation.first.page,
+                             startLayer = allocation.first.layer,
+                             layerCount = allocation.layerCount,
+                             remaining](uint64_t) {
+            if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                markCopyComplete(generation, namespaceId, tier, pageId, startLayer, layerCount);
+            }
+        };
+        if (!uploads_->enqueueTextureUpload(upload)) {
+            return false;
+        }
+        pageSubrangeUploads_++;
+    }
+    return true;
+}
+
 bool TexturePagePool::isReady(uint64_t generation, Namespace ns, uint32_t tier,
                                uint32_t page, uint32_t layer) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -282,6 +380,8 @@ std::string TexturePagePool::statusJson() const {
         << "\"schema\":\"radser_texture_page_pool_status_v4\","
         << "\"generation\":" << activeGeneration_ << ","
         << "\"totalPages\":" << pages_.size() << ","
+        << "\"planesPerPage\":4,"
+        << "\"pageUploadMode\":\"async_four_plane_texture_subresource\","
         << "\"pageImageAllocations\":" << pageImageAllocations_ << ","
         << "\"pageSubrangeUploads\":" << pageSubrangeUploads_ << ","
         << "\"ctmResidentCapacity\":" << ctmResidentCapacityLocked() << ","
@@ -359,6 +459,19 @@ TexturePagePool::Page& TexturePagePool::pageForAllocationLocked(
     newPage.albedoImage = vk::DeviceLocalImage::create(
         device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
         newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    newPage.specularImage = vk::DeviceLocalImage::create(
+        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
+        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    newPage.normalImage = vk::DeviceLocalImage::create(
+        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
+        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    newPage.flagImage = vk::DeviceLocalImage::create(
+        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
+        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    if (!newPage.albedoImage || !newPage.specularImage || !newPage.normalImage || !newPage.flagImage) {
+        static Page invalid;
+        return invalid;
+    }
     newPage.sampler = vk::Sampler::create(
         device_, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST,
         VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);

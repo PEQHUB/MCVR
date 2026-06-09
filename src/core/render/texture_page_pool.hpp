@@ -55,6 +55,12 @@ public:
                 const uint8_t* rgba, uint64_t bytes, VkFormat format,
                 bool visible, GpuUploadService::Priority priority);
 
+    /// Upload one or more material planes to an allocated range.
+    bool upload(uint64_t generation, const Allocation& allocation,
+                const uint8_t* albedo, const uint8_t* specular, const uint8_t* normal,
+                const uint8_t* flag, uint64_t bytesPerLayer, uint32_t channelMask,
+                VkFormat format, bool visible);
+
     /// Check if a specific page/layer is ready (uploaded + mips generated).
     bool isReady(uint64_t generation, Namespace ns, uint32_t tier, uint32_t page, uint32_t layer) const;
 
@@ -85,6 +91,9 @@ private:
         bool mipsReady = false;
         VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
         std::shared_ptr<vk::DeviceLocalImage> albedoImage;
+        std::shared_ptr<vk::DeviceLocalImage> specularImage;
+        std::shared_ptr<vk::DeviceLocalImage> normalImage;
+        std::shared_ptr<vk::DeviceLocalImage> flagImage;
         std::shared_ptr<vk::Sampler> sampler;
         uint32_t albedoArrayId = UINT32_MAX;
         uint32_t specularArrayId = UINT32_MAX;

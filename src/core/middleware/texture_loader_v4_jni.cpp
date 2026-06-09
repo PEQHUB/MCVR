@@ -27,14 +27,16 @@ uint32_t tierSizePixels(uint32_t tier) {
 
 bool validateLayerUpload(uint64_t generation, uint32_t namespaceId, uint32_t tier,
                          uint32_t startLayer, uint32_t layerCount,
-                         uint32_t width, uint32_t height, uint32_t vkFormat,
+                         uint32_t layerCapacity, uint32_t width, uint32_t height, uint32_t vkFormat,
                          uint32_t channelMask, jlong albedoPtr, jlong specularPtr,
                          jlong normalPtr, jlong flagPtr, jlong bytesPerLayer) {
     if (generation == 0) return false;
     if (namespaceId > 3) return false;
     if (tier >= 7) return false;
     if (layerCount == 0) return false;
+    if (layerCapacity == 0) return false;
     if (startLayer > UINT32_MAX - layerCount) return false;
+    if (startLayer >= layerCapacity || layerCount > layerCapacity - startLayer) return false;
     uint32_t pixelSize = tierSizePixels(tier);
     if (pixelSize == 0) return false;
     if (width != pixelSize || height != pixelSize) return false;
@@ -73,16 +75,17 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeBeginTextureLoa
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePageV4(
     JNIEnv*, jclass, jlong generation, jint namespaceId, jint tier, jint page,
-    jint startLayer, jint layerCount, jint width, jint height, jint vkFormat,
+    jint startLayer, jint layerCount, jint layerCapacity, jint width, jint height, jint vkFormat,
     jlong albedoPtr, jlong specularPtr, jlong normalPtr, jlong flagPtr,
     jlong bytesPerLayer, jint channelMask, jboolean visible) {
     if (namespaceId < 0 || tier < 0 || page < -1 || startLayer < -1 || layerCount <= 0
-        || width <= 0 || height <= 0 || bytesPerLayer <= 0) {
+        || layerCapacity <= 0 || width <= 0 || height <= 0 || bytesPerLayer <= 0) {
         return JNI_FALSE;
     }
     if (!validateLayerUpload(static_cast<uint64_t>(generation), static_cast<uint32_t>(namespaceId),
             static_cast<uint32_t>(tier), static_cast<uint32_t>(std::max(0, startLayer)),
-            static_cast<uint32_t>(layerCount), static_cast<uint32_t>(width),
+            static_cast<uint32_t>(layerCount), static_cast<uint32_t>(layerCapacity),
+            static_cast<uint32_t>(width),
             static_cast<uint32_t>(height), static_cast<uint32_t>(vkFormat),
             static_cast<uint32_t>(channelMask),
             albedoPtr, specularPtr, normalPtr, flagPtr, bytesPerLayer)) {
@@ -98,6 +101,7 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
     req.page = static_cast<uint32_t>(std::max(0, page));
     req.startLayer = static_cast<uint32_t>(std::max(0, startLayer));
     req.layerCount = static_cast<uint32_t>(layerCount);
+    req.layerCapacity = static_cast<uint32_t>(layerCapacity);
     req.width = static_cast<uint32_t>(width);
     req.height = static_cast<uint32_t>(height);
     req.format = static_cast<VkFormat>(vkFormat);

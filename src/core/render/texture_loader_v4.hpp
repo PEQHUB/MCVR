@@ -21,6 +21,7 @@ public:
         uint32_t page = 0;
         uint32_t startLayer = 0;
         uint32_t layerCount = 0;
+        uint32_t layerCapacity = 0;
         uint32_t width = 0;
         uint32_t height = 0;
         VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;

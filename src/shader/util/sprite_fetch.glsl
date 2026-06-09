@@ -65,7 +65,7 @@ bool spriteLayerInRange(int layer, ivec3 textureDims) {
 }
 
 uint materialTexturePage(uint page) {
-    return min(page, MATERIAL_TEXTURE_PAGE_MAX - 1u);
+    return min(materialPackedPageIndex(page), MATERIAL_TEXTURE_PAGE_MAX - 1u);
 }
 
 // V4: Compute texture descriptor index from namespace, tier, page
@@ -84,7 +84,9 @@ ivec3 materialAlbedoTextureSize(MaterialEntry material) {
 }
 
 ivec3 materialAlbedoTextureSizeV4(MaterialEntry material) {
-    return textureSize(blockAlbedo[nonuniformEXT(textureDescriptorIndexV4(material.albedoNamespace, material.albedoTier, material.albedoPage))], 0);
+    return textureSize(blockAlbedo[nonuniformEXT(textureDescriptorIndexV4(
+        materialAlbedoNamespace(material), materialAlbedoTier(material),
+        materialPackedPageIndex(material.albedoPage)))], 0);
 }
 
 ivec3 materialSpecularTextureSize(MaterialEntry material) {

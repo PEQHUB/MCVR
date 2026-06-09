@@ -51,6 +51,11 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
     if (request.albedoData == nullptr || request.bytesPerLayer == 0) return false;
     if (request.tier >= TexturePagePool::kMaxTiers) return false;
     if (request.layerCount == 0) return false;
+    if (request.layerCapacity == 0) return false;
+    if (request.startLayer >= request.layerCapacity
+        || request.layerCount > request.layerCapacity - request.startLayer) {
+        return false;
+    }
 
     const uint32_t expectedSize = request.tier < TexturePagePool::kMaxTiers
         ? (16u << request.tier)
@@ -70,12 +75,13 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
 
     return pagePool_.upload(request.generation, alloc,
         request.albedoData,
-        request.bytesPerLayer * request.layerCount,
+        request.specularData,
+        request.normalData,
+        request.flagData,
+        request.bytesPerLayer,
+        request.channelMask,
         request.format,
-        request.visible,
-        request.visible
-        ? GpuUploadService::Priority::FirstFrameAlbedo
-        : GpuUploadService::Priority::BackgroundCtm);
+        request.visible);
 }
 
 bool TextureLoaderV4::commitGeneration(uint64_t generation) {
@@ -130,6 +136,8 @@ std::string TextureLoaderV4::statusJson() const {
         << "\"legacyFixedBlockUploadCalls\":0,"
         << "\"v4ActualVkCopyCommands\":" << uploadService_.status().actualVkCopyCommands << ","
         << "\"tieredArrays\":true,"
+        << "\"fourPlanePageUploads\":true,"
+        << "\"shaderVisibleMaterialTableUpload\":true,"
         << "\"ctmTieredPages\":true,"
         << "\"diskCacheEnabled\":true,"
         << "\"timeoutReadinessAllowed\":false,"

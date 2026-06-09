@@ -31,18 +31,39 @@ bool materialUsesSpriteArray(MaterialEntry material) {
     return (material.flags & (MATERIAL_FLAG_VANILLA_SPRITE | MATERIAL_FLAG_FALLBACK)) != 0u;
 }
 
-// V4: Extract namespace from material entry
-uint materialAlbedoNamespace(MaterialEntry m) { return m.albedoNamespace; }
-uint materialAlbedoTier(MaterialEntry m) { return m.albedoTier; }
-uint materialSpecularNamespace(MaterialEntry m) { return m.specularNamespace; }
-uint materialSpecularTier(MaterialEntry m) { return m.specularTier; }
-uint materialNormalNamespace(MaterialEntry m) { return m.normalNamespace; }
-uint materialNormalTier(MaterialEntry m) { return m.normalTier; }
-uint materialFlagNamespace(MaterialEntry m) { return m.flagNamespace; }
-uint materialFlagTier(MaterialEntry m) { return m.flagTier; }
+uint materialPackedPageNamespace(uint packedPage) {
+    uint ns = packedPage & MATERIAL_PAGE_NAMESPACE_MASK;
+    if (ns == MATERIAL_PAGE_NAMESPACE_VANILLA_TIER) return 1u;
+    if (ns == MATERIAL_PAGE_NAMESPACE_MATERIAL) return 2u;
+    return 0u;
+}
+
+uint materialPackedPageIndex(uint packedPage) {
+    return packedPage & MATERIAL_PAGE_INDEX_MASK;
+}
+
+uint materialPackedPageTier(uint packedPage) {
+    uint ns = packedPage & MATERIAL_PAGE_NAMESPACE_MASK;
+    uint page = materialPackedPageIndex(packedPage);
+    if (ns == MATERIAL_PAGE_NAMESPACE_VANILLA_TIER) {
+        return clamp(page - 1u, 0u, 6u);
+    }
+    return 3u;
+}
+
+// V4 semantics over the preserved 80-byte ABI: namespace and tier are encoded
+// into each packed page handle rather than separate struct fields.
+uint materialAlbedoNamespace(MaterialEntry m) { return materialPackedPageNamespace(m.albedoPage); }
+uint materialAlbedoTier(MaterialEntry m) { return materialPackedPageTier(m.albedoPage); }
+uint materialSpecularNamespace(MaterialEntry m) { return materialPackedPageNamespace(m.specularPage); }
+uint materialSpecularTier(MaterialEntry m) { return materialPackedPageTier(m.specularPage); }
+uint materialNormalNamespace(MaterialEntry m) { return materialPackedPageNamespace(m.normalPage); }
+uint materialNormalTier(MaterialEntry m) { return materialPackedPageTier(m.normalPage); }
+uint materialFlagNamespace(MaterialEntry m) { return materialPackedPageNamespace(m.flagPage); }
+uint materialFlagTier(MaterialEntry m) { return materialPackedPageTier(m.flagPage); }
 
 // V4: Residency state
-bool materialIsGpuResident(MaterialEntry m) { return m.residencyState == 3u; }
-bool materialIsPending(MaterialEntry m) { return m.residencyState == 1u || m.residencyState == 2u; }
+bool materialIsGpuResident(MaterialEntry m) { return (m.flags & MATERIAL_FLAG_GPU_RESIDENT) != 0u; }
+bool materialIsPending(MaterialEntry m) { return (m.flags & MATERIAL_FLAG_PENDING_RESIDENCY) != 0u; }
 
 #endif // MATERIAL_FETCH_GLSL
