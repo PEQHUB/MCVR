@@ -85,6 +85,7 @@ public:
         uint64_t failedBytes          = 0;
         uint64_t timelineSubmissions  = 0;
         uint64_t actualVkCopyCommands = 0;
+        uint64_t actualVkCopyBufferToImageCommands = 0;
         uint64_t actualVkBufferCopyCommands = 0;
         uint64_t vkDeviceWaitIdleDuringLoad = 0;
     };
@@ -174,6 +175,7 @@ private:
     std::atomic<uint64_t> failedBytes_{0};
     std::atomic<uint64_t> timelineSubmissions_{0};
     std::atomic<uint64_t> actualVkCopyCommands_{0};
+    std::atomic<uint64_t> actualVkCopyBufferToImageCommands_{0};
     std::atomic<uint64_t> actualVkBufferCopyCommands_{0};
     std::atomic<uint64_t> vkDeviceWaitIdleDuringLoad_{0};
 

@@ -299,6 +299,7 @@ GpuUploadService::Status GpuUploadService::status() const {
     s.failedBytes = failedBytes_.load(std::memory_order_relaxed);
     s.timelineSubmissions = timelineSubmissions_.load(std::memory_order_relaxed);
     s.actualVkCopyCommands = actualVkCopyCommands_.load(std::memory_order_relaxed);
+    s.actualVkCopyBufferToImageCommands = actualVkCopyBufferToImageCommands_.load(std::memory_order_relaxed);
     s.actualVkBufferCopyCommands = actualVkBufferCopyCommands_.load(std::memory_order_relaxed);
     s.vkDeviceWaitIdleDuringLoad = vkDeviceWaitIdleDuringLoad_.load(std::memory_order_relaxed);
     return s;
@@ -482,6 +483,7 @@ bool GpuUploadService::submitTextureUploadLocked(const Pending& pending) {
 
     timelineSubmissions_.fetch_add(1, std::memory_order_relaxed);
     actualVkCopyCommands_.fetch_add(copies.size(), std::memory_order_relaxed);
+    actualVkCopyBufferToImageCommands_.fetch_add(copies.size(), std::memory_order_relaxed);
     return true;
 }
 
