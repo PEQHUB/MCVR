@@ -45,8 +45,14 @@ bool TextureLoaderV4::beginGeneration(uint64_t generation) {
 }
 
 bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
-    if (!initialized_.load(std::memory_order_acquire)) return false;
-    if (request.generation != activeGeneration_.load(std::memory_order_acquire)) return false;
+    if (!initialized_.load(std::memory_order_acquire)) {
+        std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: not initialized" << std::endl;
+        return false;
+    }
+    if (request.generation != activeGeneration_.load(std::memory_order_acquire)) {
+        std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: gen mismatch gen=" << request.generation << " active=" << activeGeneration_.load() << std::endl;
+        return false;
+    }
     if (request.generation == 0) return false;
     if (request.albedoData == nullptr || request.bytesPerLayer == 0) return false;
     if (request.tier >= TexturePagePool::kMaxTiers) return false;
@@ -61,6 +67,7 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
         ? (16u << request.tier)
         : 0u;
     if (expectedSize == 0 || request.width != expectedSize || request.height != expectedSize) {
+        std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: size mismatch tier=" << request.tier << " expected=" << expectedSize << " w=" << request.width << " h=" << request.height << std::endl;
         return false;
     }
     const uint64_t expectedBytesPerLayer = static_cast<uint64_t>(expectedSize) * expectedSize * 4u;
@@ -68,10 +75,14 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
 
     // Allocate page pool layers. Native chooses page/layer placement; Java hints are accepted
     // only as diagnostics until sparse registry publication consumes the returned handles.
+    std::cout << "[TextureLoaderV4] enqueueUpload gen=" << request.generation << " ns=" << request.namespaceId << " tier=" << request.tier << " layers=" << request.layerCount << " channelMask=0x" << std::hex << request.channelMask << std::dec << std::endl;
     auto ns = static_cast<TexturePagePool::Namespace>(request.namespaceId);
     auto alloc = pagePool_.allocate(request.generation, ns, request.tier,
                                      request.layerCount, request.visible);
-    if (!alloc.valid) return false;
+    if (!alloc.valid) {
+        std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: pagePool_.allocate() returned invalid" << std::endl;
+        return false;
+    }
 
     return pagePool_.upload(request.generation, alloc,
         request.albedoData,
