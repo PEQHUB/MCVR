@@ -1178,3 +1178,64 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     (void)write;
 }
 
+
+// --- Geometry Displacement ---
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGeometryDisplacementEnabled(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    if (!Renderer::is_initialized()) return;
+    Renderer::options.displacementEnabled = (enabled == JNI_TRUE);
+    if (write) Renderer::options.needRecreate = true;
+    (void)write;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGeometryDisplacementDepthScale(
+    JNIEnv *, jclass, jfloat scale, jboolean write) {
+    if (!Renderer::is_initialized()) return;
+    Renderer::options.displacementDepthScale = std::clamp(scale, 0.01f, 0.50f);
+    (void)write;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGeometryDisplacementPrimarySteps(
+    JNIEnv *, jclass, jint steps, jboolean write) {
+    if (!Renderer::is_initialized()) return;
+    Renderer::options.displacementPrimarySteps = std::clamp(steps, 8, 512);
+    (void)write;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGeometryDisplacementRefinementSteps(
+    JNIEnv *, jclass, jint steps, jboolean write) {
+    if (!Renderer::is_initialized()) return;
+    Renderer::options.displacementRefinementSteps = std::clamp(steps, 0, 8);
+    (void)write;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGeometryDisplacementFadeDistance(
+    JNIEnv *, jclass, jfloat dist, jboolean write) {
+    if (!Renderer::is_initialized()) return;
+    Renderer::options.displacementFadeDistanceBlocks = std::clamp(dist, 8.0f, 256.0f);
+    (void)write;
+}
+
+// --- Diffuse Model ---
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDiffuseModel(
+    JNIEnv *, jclass, jint model, jboolean write) {
+    if (!Renderer::is_initialized()) return;
+    Renderer::options.diffuseModel = static_cast<uint32_t>(std::clamp(model, 0, 2));
+    (void)write;
+}
+
+// --- SHARC Query Mode ---
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetSharcQueryMode(
+    JNIEnv *, jclass, jint mode, jboolean write) {
+    if (!Renderer::is_initialized()) return;
+    Renderer::options.sharcQueryMode = std::clamp(mode, 0, 2);
+    (void)write;
+}
+
+// --- DLSS-G Queue Parallelism ---
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetDlssgQueueParallelism(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    if (!Renderer::is_initialized()) return;
+    Renderer::options.dlssgQueueParallelism = (enabled == JNI_TRUE);
+    (void)write;
+}
