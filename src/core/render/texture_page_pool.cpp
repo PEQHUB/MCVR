@@ -624,22 +624,13 @@ TexturePagePool::Page& TexturePagePool::pageForAllocationLocked(
     newPage.albedoImage = vk::DeviceLocalImage::create(
         device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
         newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-    newPage.specularImage = vk::DeviceLocalImage::create(
-        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
-        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-    newPage.normalImage = vk::DeviceLocalImage::create(
-        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
-        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-    newPage.flagImage = vk::DeviceLocalImage::create(
-        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
-        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    // Albedo-only bring-up: aux images not allocated until aux planes are wired end-to-end
+    newPage.specularImage = nullptr;
+    newPage.normalImage = nullptr;
+    newPage.flagImage = nullptr;
 
     // Increment pageImageAllocations_ only after the image exists and vkImage() != VK_NULL_HANDLE
     if (!newPage.albedoImage || newPage.albedoImage->vkImage() == VK_NULL_HANDLE) {
-        static Page invalid;
-        return invalid;
-    }
-    if (!newPage.specularImage || !newPage.normalImage || !newPage.flagImage) {
         static Page invalid;
         return invalid;
     }
