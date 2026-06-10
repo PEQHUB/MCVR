@@ -73,15 +73,29 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
     const uint64_t expectedBytesPerLayer = static_cast<uint64_t>(expectedSize) * expectedSize * 4u;
     if (request.bytesPerLayer != expectedBytesPerLayer) return false;
 
-    // Allocate page pool layers. Native chooses page/layer placement; Java hints are accepted
-    // only as diagnostics until sparse registry publication consumes the returned handles.
+    // Allocate page pool layers. If Java provides exact page/layer hints, use them.
+    // Otherwise fall back to dynamic allocation.
     std::cout << "[TextureLoaderV4] enqueueUpload gen=" << request.generation << " ns=" << request.namespaceId << " tier=" << request.tier << " layers=" << request.layerCount << " channelMask=0x" << std::hex << request.channelMask << std::dec << std::endl;
     auto ns = static_cast<TexturePagePool::Namespace>(request.namespaceId);
-    auto alloc = pagePool_.allocate(request.generation, ns, request.tier,
-                                     request.layerCount, request.visible);
-    if (!alloc.valid) {
-        std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: pagePool_.allocate() returned invalid" << std::endl;
-        return false;
+    TexturePagePool::Allocation alloc;
+    if (request.page != UINT32_MAX && request.startLayer != UINT32_MAX) {
+        // Java provided exact placement — use it
+        alloc = pagePool_.allocateExact(request.generation, ns, request.tier,
+                                         request.page, request.startLayer,
+                                         request.layerCount, request.layerCapacity,
+                                         request.visible);
+        if (!alloc.valid) {
+            std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: pagePool_.allocateExact() returned invalid" << std::endl;
+            return false;
+        }
+    } else {
+        // Dynamic allocation — native chooses placement
+        alloc = pagePool_.allocate(request.generation, ns, request.tier,
+                                    request.layerCount, request.visible);
+        if (!alloc.valid) {
+            std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: pagePool_.allocate() returned invalid" << std::endl;
+            return false;
+        }
     }
 
     return pagePool_.upload(request.generation, alloc,
@@ -147,8 +161,8 @@ std::string TextureLoaderV4::statusJson() const {
         << "\"legacyFixedBlockUploadCalls\":0,"
         << "\"v4ActualVkCopyCommands\":" << uploadService_.status().actualVkCopyCommands << ","
         << "\"tieredArrays\":true,"
-        << "\"auxPlaneUploadsAccepted\":false,"
-        << "\"fourPlanePageUploads\":false,"
+        << "\"auxPlaneUploadsAccepted\":true,"
+        << "\"fourPlanePageUploads\":true,"
         << "\"shaderVisibleMaterialTableUpload\":false,"
         << "\"spriteRegistrySparseUpdates\":false,"
         << "\"ctmLoadGraphWorkItems\":false,"

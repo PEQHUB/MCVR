@@ -97,6 +97,48 @@ TexturePagePool::Allocation TexturePagePool::allocate(
     return {handle, layerCount, true};
 }
 
+TexturePagePool::Allocation TexturePagePool::allocateExact(
+    uint64_t generation, Namespace ns, uint32_t tier,
+    uint32_t page, uint32_t startLayer, uint32_t layerCount,
+    uint32_t layerCapacity, bool visible) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation == 0) return {PageHandle{}, 0, false};
+    if (generation != activeGeneration_) return {PageHandle{}, 0, false};
+    if (static_cast<uint32_t>(ns) > 3) return {PageHandle{}, 0, false};
+    if (tier >= kMaxTiers) return {PageHandle{}, 0, false};
+    if (layerCount == 0) return {PageHandle{}, 0, false};
+    if (layerCapacity == 0) return {PageHandle{}, 0, false};
+    if (startLayer + layerCount > layerCapacity) return {PageHandle{}, 0, false};
+    if (!device_ || !vma_ || !uploads_) return {PageHandle{}, 0, false};
+
+    Page& p = pageForExactAllocationLocked(generation, ns, tier, page, layerCapacity);
+    if (!p.allocated) {
+        return {PageHandle{}, 0, false};
+    }
+    if (!p.albedoImage || p.albedoImage->vkImage() == VK_NULL_HANDLE) {
+        return {PageHandle{}, 0, false};
+    }
+    if (startLayer + layerCount > p.layerCapacity) {
+        return {PageHandle{}, 0, false};
+    }
+
+    // Mark per-layer state
+    for (uint32_t l = startLayer; l < startLayer + layerCount; ++l) {
+        if (l < p.layerAllocated.size()) p.layerAllocated[l] = true;
+        if (l < p.layerVisible.size()) p.layerVisible[l] = visible;
+        if (l < p.layerUploaded.size()) p.layerUploaded[l] = false;
+        if (l < p.layerMipsReady.size()) p.layerMipsReady[l] = false;
+    }
+    p.layersUsed = std::max(p.layersUsed, startLayer + layerCount);
+    PageHandle handle;
+    handle.namespaceId = static_cast<uint32_t>(ns);
+    handle.tier = tier;
+    handle.page = p.page;
+    handle.layer = startLayer;
+    handle.mipCount = 1;
+    return {handle, layerCount, true};
+}
+
 bool TexturePagePool::upload(uint64_t generation, const Allocation& allocation,
     const uint8_t* rgba, uint64_t bytes, VkFormat format,
     bool visible, GpuUploadService::Priority priority) {
@@ -624,12 +666,107 @@ TexturePagePool::Page& TexturePagePool::pageForAllocationLocked(
     newPage.albedoImage = vk::DeviceLocalImage::create(
         device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
         newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
-    // Albedo-only bring-up: aux images not allocated until aux planes are wired end-to-end
-    newPage.specularImage = nullptr;
-    newPage.normalImage = nullptr;
-    newPage.flagImage = nullptr;
+    // Allocate all four plane images for v4 four-plane uploads
+    newPage.specularImage = vk::DeviceLocalImage::create(
+        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
+        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    newPage.normalImage = vk::DeviceLocalImage::create(
+        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
+        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    newPage.flagImage = vk::DeviceLocalImage::create(
+        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
+        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
 
     // Increment pageImageAllocations_ only after the image exists and vkImage() != VK_NULL_HANDLE
+    if (!newPage.albedoImage || newPage.albedoImage->vkImage() == VK_NULL_HANDLE) {
+        static Page invalid;
+        return invalid;
+    }
+
+    newPage.sampler = vk::Sampler::create(
+        device_, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+
+    pages_.push_back(newPage);
+    pageImageAllocations_++;
+    return pages_.back();
+}
+
+TexturePagePool::Page& TexturePagePool::pageForExactAllocationLocked(
+    uint64_t generation, Namespace ns, uint32_t tier,
+    uint32_t page, uint32_t layerCapacity) {
+    // Validate dependencies
+    if (!device_ || !vma_ || !uploads_) {
+        static Page invalid;
+        return invalid;
+    }
+    if (tier >= kMaxTiers) {
+        static Page invalid;
+        return invalid;
+    }
+    const uint32_t size = tierSize(tier);
+    if (size == 0) {
+        static Page invalid;
+        return invalid;
+    }
+    if (layerCapacity == 0) {
+        static Page invalid;
+        return invalid;
+    }
+
+    // Find existing page with exact match
+    for (auto& p : pages_) {
+        if (p.generation == generation &&
+            p.namespaceId == static_cast<uint32_t>(ns) &&
+            p.tier == tier &&
+            p.page == page) {
+            if (p.allocated && p.albedoImage && p.albedoImage->vkImage() != VK_NULL_HANDLE) {
+                return p;
+            }
+            static Page invalid;
+            return invalid;
+        }
+    }
+
+    // Page does not exist — allocate it at the exact page index
+    if (page >= kMaxPagesPerNamespace) {
+        static Page invalid;
+        return invalid;
+    }
+
+    Page newPage;
+    newPage.generation = generation;
+    newPage.namespaceId = static_cast<uint32_t>(ns);
+    newPage.tier = tier;
+    newPage.page = page;
+    newPage.layerCapacity = layerCapacity;
+    newPage.layersUsed = 0;
+    newPage.readyLayers = 0;
+    newPage.mipCount = 1;
+    newPage.allocated = true;
+    newPage.mipsReady = false;
+    newPage.format = VK_FORMAT_R8G8B8A8_UNORM;
+
+    // Initialize per-layer state arrays
+    newPage.layerAllocated.assign(layerCapacity, false);
+    newPage.layerVisible.assign(layerCapacity, false);
+    newPage.layerUploaded.assign(layerCapacity, false);
+    newPage.layerMipsReady.assign(layerCapacity, false);
+
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    newPage.albedoImage = vk::DeviceLocalImage::create(
+        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
+        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    // Allocate all four plane images for v4 four-plane uploads
+    newPage.specularImage = vk::DeviceLocalImage::create(
+        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
+        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    newPage.normalImage = vk::DeviceLocalImage::create(
+        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
+        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+    newPage.flagImage = vk::DeviceLocalImage::create(
+        device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
+        newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
+
     if (!newPage.albedoImage || newPage.albedoImage->vkImage() == VK_NULL_HANDLE) {
         static Page invalid;
         return invalid;

@@ -50,6 +50,12 @@ public:
     /// Allocate layers in a namespace/tier. Returns an allocation handle.
     Allocation allocate(uint64_t generation, Namespace ns, uint32_t tier, uint32_t layerCount, bool visible);
 
+    /// Allocate an exact page/layer range in a namespace/tier.
+    /// Java provides exact placement; native must allocate that exact range or reject.
+    Allocation allocateExact(uint64_t generation, Namespace ns, uint32_t tier,
+                            uint32_t page, uint32_t startLayer, uint32_t layerCount,
+                            uint32_t layerCapacity, bool visible);
+
     /// Upload pixel data to an allocated range.
     bool upload(uint64_t generation, const Allocation& allocation,
                 const uint8_t* rgba, uint64_t bytes, VkFormat format,
@@ -115,6 +121,8 @@ private:
     };
 
     Page& pageForAllocationLocked(uint64_t generation, Namespace ns, uint32_t tier, uint32_t neededLayers);
+    Page& pageForExactAllocationLocked(uint64_t generation, Namespace ns, uint32_t tier,
+                                        uint32_t page, uint32_t layerCapacity);
     Page* findPageLocked(uint64_t generation, uint32_t namespaceId, uint32_t tier, uint32_t page);
     void markCopyComplete(uint64_t generation, uint32_t namespaceId, uint32_t tier,
                           uint32_t page, uint32_t startLayer, uint32_t layerCount);

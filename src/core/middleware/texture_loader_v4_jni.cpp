@@ -27,8 +27,7 @@ uint32_t tierSizePixels(uint32_t tier) {
 }
 
 /// Validate signed JNI inputs before any unsigned cast.
-/// This pass only wires albedo; reject non-albedo channel masks until
-/// auxiliary image uploads are implemented in TexturePagePool.
+/// Accepts four-plane channel masks; requires a non-null pointer for every set bit.
 bool validateLayerUploadSigned(jlong generation, jint namespaceId, jint tier,
     jint page, jint startLayer, jint layerCount, jint layerCapacity,
     jint width, jint height, jint vkFormat, jint channelMask,
@@ -50,15 +49,20 @@ bool validateLayerUploadSigned(jlong generation, jint namespaceId, jint tier,
     if (expectedBytes == 0 || expectedBytes > static_cast<uint64_t>(INT64_MAX)) return false;
     if (bytesPerLayer <= 0) return false;
     if (static_cast<uint64_t>(bytesPerLayer) != expectedBytes) return false;
-    // Only albedo is supported in this pass; reject specular/normal/flag until implemented
-    static constexpr uint32_t SUPPORTED_CHANNELS = CHANNEL_ALBEDO;
+    // Four-plane validation: require a non-null pointer for every set bit
     const uint32_t mask = static_cast<uint32_t>(channelMask);
     if ((mask & CHANNEL_ALBEDO) == 0) return false;
-    if ((mask & ~SUPPORTED_CHANNELS) != 0) return false;
     if (albedoPtr == 0) return false;
-    (void)specularPtr;
-    (void)normalPtr;
-    (void)flagPtr;
+    if ((mask & CHANNEL_SPECULAR) && specularPtr == 0) return false;
+    if ((mask & CHANNEL_NORMAL) && normalPtr == 0) return false;
+    if ((mask & CHANNEL_FLAG) && flagPtr == 0) return false;
+    // Reject unknown bits
+    static constexpr uint32_t ALL_CHANNELS = CHANNEL_ALBEDO | CHANNEL_SPECULAR | CHANNEL_NORMAL | CHANNEL_FLAG;
+    if ((mask & ~ALL_CHANNELS) != 0) return false;
+    // Reject nonzero aux pointers when their bit is not set
+    if ((mask & CHANNEL_SPECULAR) == 0 && specularPtr != 0) return false;
+    if ((mask & CHANNEL_NORMAL) == 0 && normalPtr != 0) return false;
+    if ((mask & CHANNEL_FLAG) == 0 && flagPtr != 0) return false;
     return true;
 }
 
@@ -113,10 +117,9 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
     req.height = static_cast<uint32_t>(height);
     req.format = static_cast<VkFormat>(vkFormat);
     req.albedoData = reinterpret_cast<const uint8_t*>(albedoPtr);
-    // Auxiliary data pointers set to nullptr until auxiliary planes are implemented
-    req.specularData = nullptr;
-    req.normalData = nullptr;
-    req.flagData = nullptr;
+    req.specularData = (channelMask & CHANNEL_SPECULAR) ? reinterpret_cast<const uint8_t*>(specularPtr) : nullptr;
+    req.normalData   = (channelMask & CHANNEL_NORMAL)   ? reinterpret_cast<const uint8_t*>(normalPtr)   : nullptr;
+    req.flagData     = (channelMask & CHANNEL_FLAG)     ? reinterpret_cast<const uint8_t*>(flagPtr)     : nullptr;
     req.bytesPerLayer = static_cast<uint64_t>(bytesPerLayer);
     req.channelMask = static_cast<uint32_t>(channelMask);
     req.visible = visible == JNI_TRUE;
