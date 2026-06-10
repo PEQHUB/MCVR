@@ -216,3 +216,13 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeFirstFrameNativ
     return makeString(env, renderer->textureLoaderV4().firstFrameReadinessJson(
         static_cast<uint64_t>(generation)));
 }
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativePageLayerCapacityForTier(
+    JNIEnv*, jclass, jint tier) {
+    if (tier < 0 || tier >= static_cast<jint>(TexturePagePool::kMaxTiers)) return 0;
+    // Mirrors TexturePagePool::pageLayerCapacity() — kept as a JNI query so
+    // Java can chunk uploads to stay within per-page layer limits.
+    static constexpr uint32_t CAPACITIES[] = {2048, 1024, 512, 256, 128, 64, 32};
+    return static_cast<jint>(CAPACITIES[static_cast<uint32_t>(tier)]);
+}
