@@ -71,7 +71,7 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
         return false;
     }
     const uint64_t expectedBytesPerLayer = static_cast<uint64_t>(expectedSize) * expectedSize * 4u;
-    if (request.bytesPerLayer < expectedBytesPerLayer) return false;
+    if (request.bytesPerLayer != expectedBytesPerLayer) return false;
 
     // Allocate page pool layers. Native chooses page/layer placement; Java hints are accepted
     // only as diagnostics until sparse registry publication consumes the returned handles.

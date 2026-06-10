@@ -50,9 +50,8 @@ bool validateLayerUploadSigned(jlong generation, jint namespaceId, jint tier,
     if (expectedBytes == 0 || expectedBytes > static_cast<uint64_t>(INT64_MAX)) return false;
     if (bytesPerLayer <= 0) return false;
     if (static_cast<uint64_t>(bytesPerLayer) != expectedBytes) return false;
-    // Only albedo is supported in this pass
-    static constexpr uint32_t SUPPORTED_CHANNELS =
-    CHANNEL_ALBEDO | CHANNEL_SPECULAR | CHANNEL_NORMAL | CHANNEL_FLAG;
+    // Only albedo is supported in this pass; reject specular/normal/flag until implemented
+    static constexpr uint32_t SUPPORTED_CHANNELS = CHANNEL_ALBEDO;
     const uint32_t mask = static_cast<uint32_t>(channelMask);
     if ((mask & CHANNEL_ALBEDO) == 0) return false;
     if ((mask & ~SUPPORTED_CHANNELS) != 0) return false;
