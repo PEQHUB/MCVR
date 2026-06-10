@@ -1171,3 +1171,10 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_native
     Renderer::options.wetSurfaceStrength = std::clamp(strength, 0.0f, 2.0f);
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_option_Options_nativeSetGpuDebugLabels(
+    JNIEnv *, jclass, jboolean enabled, jboolean write) {
+    if (!Renderer::is_initialized()) return;
+    Renderer::options.gpuDebugLabels = (enabled == JNI_TRUE);
+    (void)write;
+}
+
