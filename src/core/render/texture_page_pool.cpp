@@ -43,15 +43,9 @@ bool TexturePagePool::initialize(std::shared_ptr<vk::Device> device,
 void TexturePagePool::resetGeneration(uint64_t generation) {
     std::lock_guard<std::mutex> lock(mutex_);
     activeGeneration_ = generation;
-    // Mark all pages as belonging to the new generation
-    for (auto& page : pages_) {
-        page.generation = generation;
-        page.layersUsed = 0;
-        page.readyLayers = 0;
-        page.mipsReady = false;
-        std::fill(page.layerUploaded.begin(), page.layerUploaded.end(), false);
-        std::fill(page.layerMipsReady.begin(), page.layerMipsReady.end(), false);
-    }
+    // Clear all pages so every newly allocated image can use VK_IMAGE_LAYOUT_UNDEFINED.
+    // Do not reuse page images across generations unless layout tracking is implemented.
+    pages_.clear();
 }
 
 void TexturePagePool::cancelGeneration(uint64_t generation) {
@@ -371,6 +365,50 @@ uint32_t TexturePagePool::ctmUnaddressableMaterials() const {
 uint32_t TexturePagePool::unreadyAllocatedPageCount(uint64_t generation) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return unreadyAllocatedPageCountLocked(generation);
+}
+
+uint32_t TexturePagePool::unreadyAllocatedLayerCount(uint64_t generation, bool visibleOnly) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return unreadyAllocatedLayerCountLocked(generation, visibleOnly);
+}
+
+uint32_t TexturePagePool::pendingMipPageCount(uint64_t generation, bool visibleOnly) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pendingMipPageCountLocked(generation, visibleOnly);
+}
+
+uint32_t TexturePagePool::unreadyAllocatedLayerCountLocked(uint64_t generation, bool visibleOnly) const {
+    uint32_t count = 0;
+    for (const auto& p : pages_) {
+        if (p.generation != generation || !p.allocated) continue;
+        for (uint32_t l = 0; l < p.layersUsed; ++l) {
+            if (l >= p.layerAllocated.size() || !p.layerAllocated[l]) continue;
+            if (visibleOnly && (l >= p.layerVisible.size() || !p.layerVisible[l])) continue;
+            if (l >= p.layerUploaded.size() || !p.layerUploaded[l] ||
+                l >= p.layerMipsReady.size() || !p.layerMipsReady[l]) {
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
+uint32_t TexturePagePool::pendingMipPageCountLocked(uint64_t generation, bool visibleOnly) const {
+    uint32_t count = 0;
+    for (const auto& p : pages_) {
+        if (p.generation != generation || !p.allocated) continue;
+        bool hasPendingMip = false;
+        for (uint32_t l = 0; l < p.layersUsed; ++l) {
+            if (l >= p.layerAllocated.size() || !p.layerAllocated[l]) continue;
+            if (visibleOnly && (l >= p.layerVisible.size() || !p.layerVisible[l])) continue;
+            if (l >= p.layerMipsReady.size() || !p.layerMipsReady[l]) {
+                hasPendingMip = true;
+                break;
+            }
+        }
+        if (hasPendingMip) ++count;
+    }
+    return count;
 }
 
 std::string TexturePagePool::statusJson() const {

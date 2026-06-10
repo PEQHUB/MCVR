@@ -77,6 +77,14 @@ public:
     uint32_t ctmUnaddressableMaterials() const;
     uint32_t unreadyAllocatedPageCount(uint64_t generation) const;
 
+    /// Count allocated layers that are not both uploaded and mip-ready.
+    /// If visibleOnly, count only layers where layerVisible is true.
+    uint32_t unreadyAllocatedLayerCount(uint64_t generation, bool visibleOnly) const;
+
+    /// Count pages that have at least one allocated layer with layerMipsReady == false.
+    /// If visibleOnly, restrict the check to visible layers.
+    uint32_t pendingMipPageCount(uint64_t generation, bool visibleOnly) const;
+
 private:
     struct Page {
         uint64_t generation = 0;
@@ -99,9 +107,11 @@ private:
         uint32_t specularArrayId = UINT32_MAX;
         uint32_t normalArrayId = UINT32_MAX;
         uint32_t flagArrayId = UINT32_MAX;
-        // Per-layer upload tracking
-        std::vector<bool> layerUploaded;   // [layerCount] true after GPU copy complete
-        std::vector<bool> layerMipsReady;  // [layerCount] true after mipgen complete
+        // Per-layer tracking
+        std::vector<bool> layerAllocated;  // [layerCapacity] true after allocate()
+        std::vector<bool> layerVisible;    // [layerCapacity] true if visible at allocate time
+        std::vector<bool> layerUploaded;   // [layerCapacity] true after GPU copy complete
+        std::vector<bool> layerMipsReady;  // [layerCapacity] true after mipgen complete
     };
 
     Page& pageForAllocationLocked(uint64_t generation, Namespace ns, uint32_t tier, uint32_t neededLayers);
@@ -113,6 +123,8 @@ private:
     bool ctmPagesExhaustedLocked() const;
     uint32_t ctmUnaddressableMaterialsLocked() const;
     uint32_t unreadyAllocatedPageCountLocked(uint64_t generation) const;
+    uint32_t unreadyAllocatedLayerCountLocked(uint64_t generation, bool visibleOnly) const;
+    uint32_t pendingMipPageCountLocked(uint64_t generation, bool visibleOnly) const;
     uint32_t tierSize(uint32_t tier) const;
     uint32_t pageLayerCapacity(uint32_t tier) const;
 
