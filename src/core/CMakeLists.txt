@@ -1,7 +1,8 @@
 file(GLOB_RECURSE SOURCE_FILES CONFIGURE_DEPENDS "*.cpp")
 
 add_library(core SHARED ${SOURCE_FILES})
-target_link_libraries(core PUBLIC ngx ${JNI_LIBRARIES} VulkanMemoryAllocator volk::volk glfw streamline)
+target_link_libraries(core PUBLIC ngx ${JNI_LIBRARIES} VulkanMemoryAllocator volk::volk glfw streamline minizip tinyexpr ${SHADERC_LIBRARY})
+target_include_directories(core PUBLIC ${SHADERC_INCLUDE_DIR})
 if (MCVR_ENABLE_OMM)
     target_link_libraries(core PUBLIC omm-lib)
     target_compile_definitions(core PUBLIC MCVR_ENABLE_OMM)

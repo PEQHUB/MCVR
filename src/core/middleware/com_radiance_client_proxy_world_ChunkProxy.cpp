@@ -157,12 +157,14 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
 #else
         const bool v2Init = false;
 #endif
+#ifdef MCVR_ENABLE_ENGINE_V2
         engine::log::info("rebuildSingleBlockStates",
             "#" + std::to_string(rn) +
             " origin=(" + std::to_string(originX) + "," + std::to_string(originY) + "," + std::to_string(originZ) + ")" +
             " rendererInit=" + (Renderer::is_initialized() ? "Y" : "N") +
             " mtl=N" +
             " v2App=" + (v2Init ? "Y" : "N"));
+#endif
     }
 
     // Decode palette-indexed block states to global state IDs (needed by both V1 and V2 paths)
@@ -270,12 +272,14 @@ extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProx
         static std::atomic<uint32_t> v2SubmitCount{0};
         uint32_t sn = v2SubmitCount.fetch_add(1) + 1;
         if (sn <= 5 || sn % 200 == 0) {
-            engine::log::info("V2 submit",
+            #ifdef MCVR_ENABLE_ENGINE_V2
+engine::log::info("V2 submit",
                 "#" + std::to_string(sn) +
                 " chunk=(" + std::to_string(cmd.chunkX) + "," + std::to_string(cmd.sectionY) + "," + std::to_string(cmd.chunkZ) + ")" +
                 " origin=(" + std::to_string(originX) + "," + std::to_string(originY) + "," + std::to_string(originZ) + ")" +
                 " tris=" + std::to_string(totalTris) + " verts=" + std::to_string(totalV) +
                 " (sV=" + std::to_string(solidV) + " cV=" + std::to_string(cutoutV) + " tV=" + std::to_string(transV) + ")");
+#endif
         }
         return;
     }
