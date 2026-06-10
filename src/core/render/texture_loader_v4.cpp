@@ -168,8 +168,9 @@ std::string TextureLoaderV4::firstFrameReadinessJson(uint64_t generation) const 
         << "\"schema\":\"radser_first_frame_native_readiness_v4\","
         << "\"generation\":" << generation << ","
         << "\"pendingVisibleUploadBytes\":" << uploadStatus.pendingVisibleUploadBytes << ","
-        << "\"nativePendingMipPageCount\":0,"
+        << "\"nativePendingMipPageCount\":" << pagePool_.pendingMipPageCount(generation, true) << ","
         << "\"nativeUnreadyAllocatedPageCount\":" << unreadyPages << ","
+        << "\"nativeUnreadyAllocatedLayerCount\":" << pagePool_.unreadyAllocatedLayerCount(generation, true) << ","
         << "\"pendingVisibleMaterialTableUpdates\":0,"
         << "\"generationIdle\":" << (idle ? "true" : "false")
         << "}";
