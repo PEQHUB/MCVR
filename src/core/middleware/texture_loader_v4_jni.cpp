@@ -7,6 +7,7 @@
 #include <iostream>
 #include <sstream>
 #include <cstring>
+#include <climits>
 
 namespace {
 
@@ -25,29 +26,39 @@ uint32_t tierSizePixels(uint32_t tier) {
     return SIZES[tier];
 }
 
-bool validateLayerUpload(uint64_t generation, uint32_t namespaceId, uint32_t tier,
-                         uint32_t startLayer, uint32_t layerCount,
-                         uint32_t layerCapacity, uint32_t width, uint32_t height, uint32_t vkFormat,
-                         uint32_t channelMask, jlong albedoPtr, jlong specularPtr,
-                         jlong normalPtr, jlong flagPtr, jlong bytesPerLayer) {
-    if (generation == 0) return false;
-    if (namespaceId > 3) return false;
-    if (tier >= 7) return false;
-    if (layerCount == 0) return false;
-    if (layerCapacity == 0) return false;
-    if (startLayer > UINT32_MAX - layerCount) return false;
-    if (startLayer >= layerCapacity || layerCount > layerCapacity - startLayer) return false;
-    uint32_t pixelSize = tierSizePixels(tier);
-    if (pixelSize == 0) return false;
-    if (width != pixelSize || height != pixelSize) return false;
-    if (vkFormat != VK_FORMAT_R8G8B8A8_UNORM) return false;
-    jlong expectedBytes = static_cast<jlong>(pixelSize) * pixelSize * 4;
-    if (bytesPerLayer < expectedBytes) return false;
-    if (layerCount > UINT64_MAX / static_cast<uint64_t>(bytesPerLayer)) return false;
-    if ((channelMask & CHANNEL_ALBEDO) && albedoPtr == 0) return false;
-    if ((channelMask & CHANNEL_SPECULAR) && specularPtr == 0) return false;
-    if ((channelMask & CHANNEL_NORMAL) && normalPtr == 0) return false;
-    if ((channelMask & CHANNEL_FLAG) && flagPtr == 0) return false;
+/// Validate signed JNI inputs before any unsigned cast.
+/// This pass only wires albedo; reject non-albedo channel masks until
+/// auxiliary image uploads are implemented in TexturePagePool.
+bool validateLayerUploadSigned(jlong generation, jint namespaceId, jint tier,
+    jint page, jint startLayer, jint layerCount, jint layerCapacity,
+    jint width, jint height, jint vkFormat, jint channelMask,
+    jlong albedoPtr, jlong specularPtr, jlong normalPtr, jlong flagPtr,
+    jlong bytesPerLayer) {
+    if (generation <= 0) return false;
+    if (namespaceId < 0 || namespaceId > 3) return false;
+    if (tier < 0 || tier >= 7) return false;
+    if (page < -1) return false;
+    if (startLayer < -1) return false;
+    if (layerCount <= 0) return false;
+    if (layerCapacity <= 0) return false;
+    if (width <= 0 || height <= 0) return false;
+    const uint32_t tierSize = tierSizePixels(static_cast<uint32_t>(tier));
+    if (tierSize == 0) return false;
+    if (width != static_cast<jint>(tierSize) || height != static_cast<jint>(tierSize)) return false;
+    if (vkFormat != static_cast<jint>(VK_FORMAT_R8G8B8A8_UNORM)) return false;
+    const uint64_t expectedBytes = uint64_t(static_cast<uint32_t>(width)) * uint64_t(static_cast<uint32_t>(height)) * 4ull;
+    if (expectedBytes == 0 || expectedBytes > static_cast<uint64_t>(INT64_MAX)) return false;
+    if (bytesPerLayer <= 0) return false;
+    if (static_cast<uint64_t>(bytesPerLayer) != expectedBytes) return false;
+    // Only albedo is supported in this pass
+    static constexpr uint32_t SUPPORTED_CHANNELS = CHANNEL_ALBEDO;
+    const uint32_t mask = static_cast<uint32_t>(channelMask);
+    if ((mask & CHANNEL_ALBEDO) == 0) return false;
+    if ((mask & ~SUPPORTED_CHANNELS) != 0) return false;
+    if (albedoPtr == 0) return false;
+    (void)specularPtr;
+    (void)normalPtr;
+    (void)flagPtr;
     return true;
 }
 
@@ -78,37 +89,34 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
     jint startLayer, jint layerCount, jint layerCapacity, jint width, jint height, jint vkFormat,
     jlong albedoPtr, jlong specularPtr, jlong normalPtr, jlong flagPtr,
     jlong bytesPerLayer, jint channelMask, jboolean visible) {
-    if (namespaceId < 0 || tier < 0 || page < -1 || startLayer < -1 || layerCount <= 0
-        || layerCapacity <= 0 || width <= 0 || height <= 0 || bytesPerLayer <= 0) {
+    // Validate all signed JNI inputs before any unsigned cast.
+    // Negative values would become huge native values if cast without validation.
+    if (!validateLayerUploadSigned(generation, namespaceId, tier, page, startLayer,
+        layerCount, layerCapacity, width, height, vkFormat, channelMask,
+        albedoPtr, specularPtr, normalPtr, flagPtr, bytesPerLayer)) {
         return JNI_FALSE;
     }
-    if (!validateLayerUpload(static_cast<uint64_t>(generation), static_cast<uint32_t>(namespaceId),
-            static_cast<uint32_t>(tier), static_cast<uint32_t>(std::max(0, startLayer)),
-            static_cast<uint32_t>(layerCount), static_cast<uint32_t>(layerCapacity),
-            static_cast<uint32_t>(width),
-            static_cast<uint32_t>(height), static_cast<uint32_t>(vkFormat),
-            static_cast<uint32_t>(channelMask),
-            albedoPtr, specularPtr, normalPtr, flagPtr, bytesPerLayer)) {
-        return JNI_FALSE;
-    }
+
     auto* renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return JNI_FALSE;
 
+    // Build request only after validation — safe to cast now
     TextureLoaderV4::UploadRequest req{};
     req.generation = static_cast<uint64_t>(generation);
     req.namespaceId = static_cast<uint32_t>(namespaceId);
     req.tier = static_cast<uint32_t>(tier);
-    req.page = static_cast<uint32_t>(std::max(0, page));
-    req.startLayer = static_cast<uint32_t>(std::max(0, startLayer));
+    req.page = page >= 0 ? static_cast<uint32_t>(page) : UINT32_MAX;
+    req.startLayer = startLayer >= 0 ? static_cast<uint32_t>(startLayer) : UINT32_MAX;
     req.layerCount = static_cast<uint32_t>(layerCount);
     req.layerCapacity = static_cast<uint32_t>(layerCapacity);
     req.width = static_cast<uint32_t>(width);
     req.height = static_cast<uint32_t>(height);
     req.format = static_cast<VkFormat>(vkFormat);
-    req.albedoData = albedoPtr ? reinterpret_cast<const uint8_t*>(albedoPtr) : nullptr;
-    req.specularData = specularPtr ? reinterpret_cast<const uint8_t*>(specularPtr) : nullptr;
-    req.normalData = normalPtr ? reinterpret_cast<const uint8_t*>(normalPtr) : nullptr;
-    req.flagData = flagPtr ? reinterpret_cast<const uint8_t*>(flagPtr) : nullptr;
+    req.albedoData = reinterpret_cast<const uint8_t*>(albedoPtr);
+    // Auxiliary data pointers set to nullptr until auxiliary planes are implemented
+    req.specularData = nullptr;
+    req.normalData = nullptr;
+    req.flagData = nullptr;
     req.bytesPerLayer = static_cast<uint64_t>(bytesPerLayer);
     req.channelMask = static_cast<uint32_t>(channelMask);
     req.visible = visible == JNI_TRUE;
@@ -116,30 +124,6 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
     bool queued = renderer->textureLoaderV4().enqueueUpload(req);
     if (!queued) {
         return JNI_FALSE;
-    }
-
-    auto framework = renderer->framework();
-    if (page > 0
-        && ((static_cast<uint32_t>(channelMask)
-            & (CHANNEL_ALBEDO | CHANNEL_SPECULAR | CHANNEL_NORMAL | CHANNEL_FLAG))
-            == (CHANNEL_ALBEDO | CHANNEL_SPECULAR | CHANNEL_NORMAL | CHANNEL_FLAG))) {
-        bool shaderVisible = Renderer::textureSystem.uploadMaterialTextureLayers(
-            static_cast<uint32_t>(page),
-            static_cast<uint32_t>(width),
-            static_cast<uint32_t>(std::max(0, startLayer)),
-            static_cast<uint32_t>(layerCount),
-            static_cast<uint32_t>(layerCapacity),
-            reinterpret_cast<const uint8_t*>(albedoPtr),
-            reinterpret_cast<const uint8_t*>(specularPtr),
-            reinterpret_cast<const uint8_t*>(normalPtr),
-            reinterpret_cast<const uint8_t*>(flagPtr),
-            static_cast<uint64_t>(generation),
-            framework->vma(),
-            framework->device());
-        if (!shaderVisible) {
-            renderer->textureLoaderV4().cancelGeneration(static_cast<uint64_t>(generation), 4);
-            return JNI_FALSE;
-        }
     }
 
     return JNI_TRUE;
