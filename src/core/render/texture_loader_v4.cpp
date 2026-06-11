@@ -62,6 +62,13 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
         || request.layerCount > request.layerCapacity - request.startLayer) {
         return false;
     }
+    // Reject chunks that exceed native page capacity — Java should have chunked them
+    if (request.layerCount > TexturePagePool::pageLayerCapacityStatic(request.tier)) {
+        std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: layerCount=" << request.layerCount
+                  << " exceeds native page capacity=" << TexturePagePool::pageLayerCapacityStatic(request.tier)
+                  << " for tier=" << request.tier << std::endl;
+        return false;
+    }
 
     const uint32_t expectedSize = request.tier < TexturePagePool::kMaxTiers
         ? (16u << request.tier)
@@ -73,19 +80,53 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
     const uint64_t expectedBytesPerLayer = static_cast<uint64_t>(expectedSize) * expectedSize * 4u;
     if (request.bytesPerLayer != expectedBytesPerLayer) return false;
 
-    // Allocate page pool layers. If Java provides exact page/layer hints, use them.
-    // Otherwise fall back to dynamic allocation.
-    std::cout << "[TextureLoaderV4] enqueueUpload gen=" << request.generation << " ns=" << request.namespaceId << " tier=" << request.tier << " layers=" << request.layerCount << " channelMask=0x" << std::hex << request.channelMask << std::dec << std::endl;
+    // Allocate page pool layers. Java provides absolute page and startLayer values
+    // relative to a full tier page. Normalize these to tier-local native page indices
+    // and cap layerCapacity to the per-native-page limit.
+    //
+    // Java sends: page = VANILLA_TIER_FIRST_PAGE + sequential index
+    //            startLayer = offset within the full Java tier page
+    //            layerCapacity = full Java tier page layer count
+    //
+    // Native needs: page = tier-local native page index (0, 1, 2, ...)
+    //               startLayer = offset within the native page (always 0 for chunk uploads)
+    //               layerCapacity = per-native-page capacity (e.g., 256 for T128)
+    const uint32_t nativeCapacity = TexturePagePool::pageLayerCapacityStatic(request.tier);
+    if (nativeCapacity == 0) {
+        std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: zero native capacity for tier=" << request.tier << std::endl;
+        return false;
+    }
+
+    uint32_t normalizedPage = request.page;
+    uint32_t normalizedStartLayer = request.startLayer;
+    uint32_t normalizedCapacity = request.layerCapacity;
+
+    if (request.page != UINT32_MAX && request.startLayer != UINT32_MAX) {
+        // Compute tier-local native page index from Java's absolute startLayer
+        normalizedPage = request.startLayer / nativeCapacity;
+        normalizedStartLayer = request.startLayer % nativeCapacity;
+        normalizedCapacity = nativeCapacity;
+    }
+
+    std::cout << "[TextureLoaderV4] enqueueUpload gen=" << request.generation << " ns=" << request.namespaceId
+              << " tier=" << request.tier
+              << " javaPage=" << request.page << " javaStartLayer=" << request.startLayer << " javaCapacity=" << request.layerCapacity
+              << " -> nativePage=" << normalizedPage << " nativeStartLayer=" << normalizedStartLayer << " nativeCapacity=" << normalizedCapacity
+              << " layers=" << request.layerCount
+              << " channelMask=0x" << std::hex << request.channelMask << std::dec << std::endl;
+
     auto ns = static_cast<TexturePagePool::Namespace>(request.namespaceId);
     TexturePagePool::Allocation alloc;
     if (request.page != UINT32_MAX && request.startLayer != UINT32_MAX) {
-        // Java provided exact placement — use it
+        // Java provided exact placement — use normalized tier-local values
         alloc = pagePool_.allocateExact(request.generation, ns, request.tier,
-                                         request.page, request.startLayer,
-                                         request.layerCount, request.layerCapacity,
+                                         normalizedPage, normalizedStartLayer,
+                                         request.layerCount, normalizedCapacity,
                                          request.visible);
         if (!alloc.valid) {
-            std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: pagePool_.allocateExact() returned invalid" << std::endl;
+            std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: pagePool_.allocateExact() returned invalid"
+                      << " page=" << normalizedPage << " startLayer=" << normalizedStartLayer
+                      << " layerCount=" << request.layerCount << " capacity=" << normalizedCapacity << std::endl;
             return false;
         }
     } else {

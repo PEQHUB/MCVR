@@ -136,6 +136,9 @@ private:
     uint32_t tierSize(uint32_t tier) const;
     uint32_t pageLayerCapacity(uint32_t tier) const;
 
+    /// Static version of pageLayerCapacity for use outside an instance (e.g. JNI queries).
+    static uint32_t pageLayerCapacityStatic(uint32_t tier);
+
     std::shared_ptr<vk::Device> device_;
     std::shared_ptr<vk::VMA> vma_;
     GpuUploadService* uploads_ = nullptr;

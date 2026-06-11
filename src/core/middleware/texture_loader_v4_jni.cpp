@@ -28,6 +28,7 @@ uint32_t tierSizePixels(uint32_t tier) {
 
 /// Validate signed JNI inputs before any unsigned cast.
 /// Accepts four-plane channel masks; requires a non-null pointer for every set bit.
+/// page and startLayer must be non-negative (no -1 sentinel; Java provides explicit values).
 bool validateLayerUploadSigned(jlong generation, jint namespaceId, jint tier,
     jint page, jint startLayer, jint layerCount, jint layerCapacity,
     jint width, jint height, jint vkFormat, jint channelMask,
@@ -36,8 +37,8 @@ bool validateLayerUploadSigned(jlong generation, jint namespaceId, jint tier,
     if (generation <= 0) return false;
     if (namespaceId < 0 || namespaceId > 3) return false;
     if (tier < 0 || tier >= 7) return false;
-    if (page < -1) return false;
-    if (startLayer < -1) return false;
+    if (page < 0) return false;
+    if (startLayer < 0) return false;
     if (layerCount <= 0) return false;
     if (layerCapacity <= 0) return false;
     if (width <= 0 || height <= 0) return false;
@@ -109,8 +110,8 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
     req.generation = static_cast<uint64_t>(generation);
     req.namespaceId = static_cast<uint32_t>(namespaceId);
     req.tier = static_cast<uint32_t>(tier);
-    req.page = page >= 0 ? static_cast<uint32_t>(page) : UINT32_MAX;
-    req.startLayer = startLayer >= 0 ? static_cast<uint32_t>(startLayer) : UINT32_MAX;
+    req.page = static_cast<uint32_t>(page);
+    req.startLayer = static_cast<uint32_t>(startLayer);
     req.layerCount = static_cast<uint32_t>(layerCount);
     req.layerCapacity = static_cast<uint32_t>(layerCapacity);
     req.width = static_cast<uint32_t>(width);
@@ -224,8 +225,5 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativePageLayerCapacityForTier(
     JNIEnv*, jclass, jint tier) {
     if (tier < 0 || tier >= static_cast<jint>(TexturePagePool::kMaxTiers)) return 0;
-    // Mirrors TexturePagePool::pageLayerCapacity() — kept as a JNI query so
-    // Java can chunk uploads to stay within per-page layer limits.
-    static constexpr uint32_t CAPACITIES[] = {2048, 1024, 512, 256, 128, 64, 32};
-    return static_cast<jint>(CAPACITIES[static_cast<uint32_t>(tier)]);
+    return static_cast<jint>(TexturePagePool::pageLayerCapacityStatic(static_cast<uint32_t>(tier)));
 }

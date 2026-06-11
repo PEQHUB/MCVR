@@ -153,11 +153,106 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
     if (!entries || count == 0 || !vma || !device) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     pollCompletedUploadsLocked();
-    if (!ssbo_ || !ssbo_->isValid() || entries_.empty()) return false;
 
     auto renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return false;
     auto framework = renderer->framework();
+
+    // Lazy SSBO creation for V4 path: if the legacy uploadMaterials() was never called,
+    // create a default-initialized SSBO so sparse updates can proceed.
+    if (!ssbo_ || !ssbo_->isValid()) {
+        std::cout << "[MaterialRegistry] Lazy SSBO creation for sparse V4 path" << std::endl;
+        vk::Data::MaterialEntry defaultEntry{};
+        defaultEntry.materialId = 0;
+        defaultEntry.baseSpriteId = 0;
+        defaultEntry.fallbackMaterialId = 0;
+        defaultEntry.flags = vk::Data::MATERIAL_FLAG_VALID |
+                             vk::Data::MATERIAL_FLAG_VANILLA_SPRITE |
+                             vk::Data::MATERIAL_FLAG_GPU_RESIDENT;
+        defaultEntry.albedoPage = 0;
+        defaultEntry.albedoLayer = 0;
+        defaultEntry.specularPage = 0;
+        defaultEntry.specularLayer = -1;
+        defaultEntry.normalPage = 0;
+        defaultEntry.normalLayer = -1;
+        defaultEntry.flagPage = 0;
+        defaultEntry.flagLayer = 0;
+        defaultEntry.overlayMaterialId = -1;
+        defaultEntry.displacementPolicy = 0;
+        defaultEntry.displacementScale = 0.0f;
+        defaultEntry.heightRangePacked = -1;
+        defaultEntry.uvScaleU = 1.0f;
+        defaultEntry.uvScaleV = 1.0f;
+        defaultEntry.uvOffsetU = 0.0f;
+        defaultEntry.uvOffsetV = 0.0f;
+
+        std::vector<vk::Data::MaterialEntry> defaultEntries(vk::Data::MATERIAL_MAX_ENTRIES, defaultEntry);
+        VkDeviceSize dataSize = defaultEntries.size() * sizeof(vk::Data::MaterialEntry);
+        auto lazySsbo = vk::DeviceLocalBuffer::create(
+            vma, device, true, dataSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        if (!lazySsbo || !lazySsbo->isValid()) {
+            std::cerr << "[MaterialRegistry] Lazy SSBO creation failed" << std::endl;
+            return false;
+        }
+        lazySsbo->uploadToStagingBuffer(defaultEntries.data(), static_cast<size_t>(dataSize), 0);
+
+        auto fence = vk::Fence::create(device);
+        auto cmd = vk::CommandBuffer::create(device, framework->mainCommandPool());
+        cmd->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+        lazySsbo->uploadToBuffer(cmd);
+        cmd->end();
+        auto timeline = device->materialUploadSemaphore();
+        uint64_t timelineValue = 0;
+        if (timeline) {
+            timelineValue = ++materialUploadTimelineValue_;
+            VkTimelineSemaphoreSubmitInfo timelineInfo{};
+            timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            timelineInfo.signalSemaphoreValueCount = 1;
+            timelineInfo.pSignalSemaphoreValues = &timelineValue;
+
+            VkSemaphore signalSemaphore = timeline->vkSemaphore();
+            VkCommandBuffer commandBuffer = cmd->vkCommandBuffer();
+            VkSubmitInfo submitInfo{};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submitInfo.pNext = &timelineInfo;
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &commandBuffer;
+            submitInfo.signalSemaphoreCount = 1;
+            submitInfo.pSignalSemaphores = &signalSemaphore;
+
+            std::lock_guard<std::mutex> qLock(device->queueMutex());
+            VkResult submitResult = vkQueueSubmit(device->mainVkQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+            if (submitResult != VK_SUCCESS) {
+                --materialUploadTimelineValue_;
+                return false;
+            }
+            timelineSubmissions_++;
+        } else {
+            cmd->submitMainQueueIndividual(device, fence);
+            fenceSubmissions_++;
+        }
+
+        ssbo_ = std::move(lazySsbo);
+        entries_.assign(defaultEntries.begin(), defaultEntries.end());
+        materialCount_ = static_cast<uint32_t>(defaultEntries.size());
+        asyncSubmissions_++;
+        pendingUploadBytes_ += static_cast<uint64_t>(dataSize);
+        pendingUploads_.push_back(PendingUpload{
+            .device = device,
+            .commandBuffer = cmd,
+            .fence = timeline ? nullptr : fence,
+            .timeline = timeline,
+            .deviceLocalStagingOwner = ssbo_,
+            .targetBuffer = ssbo_,
+            .bytes = static_cast<uint64_t>(dataSize),
+            .entries = static_cast<uint32_t>(defaultEntries.size()),
+            .timelineValue = timelineValue,
+            .sparse = false,
+        });
+    }
+
+    // renderer and framework were captured above for lazy SSBO creation
 
     std::vector<vk::Data::MaterialEntry> sparseEntries;
     sparseEntries.reserve(count);

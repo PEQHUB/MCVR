@@ -17,6 +17,10 @@ uint32_t TexturePagePool::tierSize(uint32_t tier) const {
 }
 
 uint32_t TexturePagePool::pageLayerCapacity(uint32_t tier) const {
+    return pageLayerCapacityStatic(tier);
+}
+
+uint32_t TexturePagePool::pageLayerCapacityStatic(uint32_t tier) {
     // Larger tiers get fewer layers per page to stay within memory budgets
     if (tier >= kMaxTiers) return 0;
     uint32_t size = TIER_SIZES[tier];
@@ -286,6 +290,17 @@ bool TexturePagePool::upload(uint64_t generation, const Allocation& allocation,
         if (requiredBytesPerLayer == 0 || requiredBytesPerLayer > UINT32_MAX) return false;
         if (bytesPerLayer != requiredBytesPerLayer) return false;
         if (allocation.layerCount > UINT64_MAX / bytesPerLayer) return false;
+
+        // Prevalidate channelMask: every set bit must have a non-null image
+        if ((channelMask & CHANNEL_SPECULAR) && (!page->specularImage || page->specularImage->vkImage() == VK_NULL_HANDLE)) {
+            return false;
+        }
+        if ((channelMask & CHANNEL_NORMAL) && (!page->normalImage || page->normalImage->vkImage() == VK_NULL_HANDLE)) {
+            return false;
+        }
+        if ((channelMask & CHANNEL_FLAG) && (!page->flagImage || page->flagImage->vkImage() == VK_NULL_HANDLE)) {
+            return false;
+        }
 
         // Mark layers as not-yet-uploaded
         for (uint32_t l = allocation.first.layer; l < allocation.first.layer + allocation.layerCount; ++l) {
@@ -804,7 +819,8 @@ void TexturePagePool::markCopyComplete(uint64_t generation, uint32_t namespaceId
     for (uint32_t l = startLayer; l < endLayer; ++l) {
         if (l < p->layerUploaded.size()) p->layerUploaded[l] = true;
         // Mip generation is not yet split out; v4 currently clamps to mip 0 for uploaded pages.
-        // True mip generation is not implemented yet.
+        // True mip generation is not implemented yet. Under mip0Clamp mode, mark mips ready
+        // immediately since there is only one mip level. When real mipgen lands, remove this.
         if (l < p->layerMipsReady.size()) p->layerMipsReady[l] = true;
     }
     // Recompute readyLayers from allocated layers only
