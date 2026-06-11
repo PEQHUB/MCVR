@@ -207,6 +207,7 @@ class TextureSystem {
                                        const uint8_t* specularData,
                                        const uint8_t* normalData,
                                        const uint8_t* flagData,
+                                       uint32_t channelMask,
                                        uint64_t generation,
                                        std::shared_ptr<vk::VMA> vma,
                                        std::shared_ptr<vk::Device> device);
@@ -227,6 +228,7 @@ class TextureSystem {
     bool hasAllocatedMaterialTexturePages() const;
     bool hasReadyMaterialTexturePages() const;
     uint32_t readyMaterialTexturePageCount() const;
+    uint32_t unreadyMaterialTexturePageCount() const;
     uint32_t pendingMaterialMipPageCount() const;
     bool ensureDescriptorFallbackArrays(std::shared_ptr<vk::VMA> vma,
                                         std::shared_ptr<vk::Device> device);

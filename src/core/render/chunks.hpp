@@ -304,6 +304,7 @@ class Chunks : public SharedObject<Chunks> {
 
     bool isChunkReady(int64_t id);
     uint32_t getInputQueueSize();
+    uint32_t getReadyChunkCount();
 
     void setChunkLights(int64_t id, const std::vector<ChunkLightEntry> &lights);
     void close();

@@ -32,11 +32,14 @@ void TextureLoaderV4::shutdown() {
     initialized_.store(false, std::memory_order_release);
 }
 
-void TextureLoaderV4::recordRejection(const UploadRequest& request, const char* reason,
-                                      uint32_t expectedPage,
-                                      uint32_t nativePage,
-                                      uint32_t nativeStartLayer,
-                                      uint32_t nativeCapacity) {
+void TextureLoaderV4::recordUploadRejection(const UploadRequest& request, const char* reason,
+                                            uint32_t expectedPage,
+                                            uint32_t nativePage,
+                                            uint32_t nativeStartLayer,
+                                            uint32_t nativeCapacity,
+                                            uint32_t descriptorPage,
+                                            uint32_t nullPlaneMask,
+                                            const char* stage) {
     std::lock_guard<std::mutex> lock(mutex_);
     const uint64_t sequence = uploadRejectionSequence_.fetch_add(1, std::memory_order_relaxed) + 1u;
     UploadRejection rejection{};
@@ -52,6 +55,10 @@ void TextureLoaderV4::recordRejection(const UploadRequest& request, const char* 
     rejection.nativePage = nativePage;
     rejection.nativeStartLayer = nativeStartLayer;
     rejection.nativeCapacity = nativeCapacity;
+    rejection.descriptorPage = descriptorPage;
+    rejection.channelMask = request.channelMask;
+    rejection.nullPlaneMask = nullPlaneMask;
+    rejection.stage = stage ? stage : "native_upload";
     rejection.reason = reason ? reason : "unknown";
 
     uploadRejectionRing_[(sequence - 1u) % uploadRejectionRing_.size()] = rejection;
@@ -80,6 +87,10 @@ std::string TextureLoaderV4::rejectionRingJsonLocked() const {
             << "\"nativePage\":" << r.nativePage << ","
             << "\"nativeStartLayer\":" << r.nativeStartLayer << ","
             << "\"nativeCapacity\":" << r.nativeCapacity << ","
+            << "\"descriptorPage\":" << r.descriptorPage << ","
+            << "\"channelMask\":" << r.channelMask << ","
+            << "\"nullPlaneMask\":" << r.nullPlaneMask << ","
+            << "\"stage\":\"" << r.stage << "\","
             << "\"reason\":\"" << r.reason << "\""
             << "}";
     }
@@ -106,11 +117,17 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
         return false;
     }
     if (request.generation != activeGeneration_.load(std::memory_order_acquire)) {
+        recordUploadRejection(request, "generation_mismatch", UINT32_MAX, UINT32_MAX,
+            UINT32_MAX, 0, UINT32_MAX, 0, "validation");
         std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: gen mismatch gen=" << request.generation << " active=" << activeGeneration_.load() << std::endl;
         return false;
     }
     if (request.generation == 0) return false;
-    if (request.albedoData == nullptr || request.bytesPerLayer == 0) return false;
+    if (request.albedoData == nullptr || request.bytesPerLayer == 0) {
+        recordUploadRejection(request, "invalid_plane_pointer", UINT32_MAX, UINT32_MAX,
+            UINT32_MAX, 0, UINT32_MAX, request.albedoData == nullptr ? 1u : 0u, "validation");
+        return false;
+    }
     if (request.tier >= TexturePagePool::kMaxTiers) return false;
     if (request.layerCount == 0) return false;
     if (request.layerCapacity == 0) return false;
@@ -175,7 +192,7 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
         const uint32_t expectedPage = 1 + request.tier;
         if (vanillaPlacement && request.page != expectedPage) {
             javaPageContractRejects_.fetch_add(1, std::memory_order_relaxed);
-            recordRejection(request, "java_page_contract_vanilla_applied_to_vanilla", expectedPage);
+            recordUploadRejection(request, "java_page_contract_vanilla_applied_to_vanilla", expectedPage);
             std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: javaPage="
                       << request.page << " expected=" << expectedPage
                       << " tier=" << request.tier
@@ -203,7 +220,7 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
         // Cross-page boundary guard: reject uploads that would span two native pages.
         // Java must chunk at nativeCapacity boundaries; this is the safety net.
         if (vanillaPlacement && request.layerCount > nativeCapacity - normalizedStartLayer) {
-            recordRejection(request, "vanilla_cross_native_page_boundary", UINT32_MAX,
+            recordUploadRejection(request, "vanilla_cross_native_page_boundary", UINT32_MAX,
                 normalizedPage, normalizedStartLayer, nativeCapacity);
             std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: cross-page boundary"
                       << " startLayer=" << request.startLayer << " layerCount=" << request.layerCount
@@ -220,42 +237,10 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
               << " layers=" << request.layerCount
               << " channelMask=0x" << std::hex << request.channelMask << std::dec << std::endl;
 
-    auto ns = static_cast<TexturePagePool::Namespace>(request.namespaceId);
-    TexturePagePool::Allocation alloc;
-    if (request.page != UINT32_MAX && request.startLayer != UINT32_MAX) {
-        // Java provided exact placement — use normalized tier-local values
-        alloc = pagePool_.allocateExact(request.generation, ns, request.tier,
-                                         normalizedPage, normalizedStartLayer,
-                                         request.layerCount, normalizedCapacity,
-                                         request.visible);
-        if (!alloc.valid) {
-            recordRejection(request, "page_pool_allocate_exact_failed", UINT32_MAX,
-                normalizedPage, normalizedStartLayer, normalizedCapacity);
-            std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: pagePool_.allocateExact() returned invalid"
-                      << " page=" << normalizedPage << " startLayer=" << normalizedStartLayer
-                      << " layerCount=" << request.layerCount << " capacity=" << normalizedCapacity << std::endl;
-            return false;
-        }
-    } else {
-        // Dynamic allocation — native chooses placement
-        alloc = pagePool_.allocate(request.generation, ns, request.tier,
-                                    request.layerCount, request.visible);
-        if (!alloc.valid) {
-            recordRejection(request, "page_pool_allocate_failed");
-            std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: pagePool_.allocate() returned invalid" << std::endl;
-            return false;
-        }
-    }
+    // Shaders sample TextureSystem descriptor pages. TexturePagePool remains a
+    // diagnostic/validation concept, not a second sampled image upload path.
+    return true;
 
-    return pagePool_.upload(request.generation, alloc,
-        request.albedoData,
-        request.specularData,
-        request.normalData,
-        request.flagData,
-        request.bytesPerLayer,
-        request.channelMask,
-        request.format,
-        request.visible);
 }
 
 bool TextureLoaderV4::commitGeneration(uint64_t generation) {
@@ -312,9 +297,9 @@ std::string TextureLoaderV4::statusJson() const {
         << "\"vanillaBlockAtlasBypass\":true,"
         << "\"fixedCompatibilityUploadBytes\":0,"
         << "\"legacyFixedBlockUploadCalls\":0,"
-        << "\"v4ActualVkCopyCommands\":" << uploadService_.status().actualVkCopyCommands << ","
+        << "\"v4ActualVkCopyCommands\":" << Renderer::textureSystem.readyMaterialTexturePageCount() << ","
         << "\"actualVkCopyBufferToImageCommands\":"
-        << uploadService_.status().actualVkCopyBufferToImageCommands << ","
+        << Renderer::textureSystem.readyMaterialTexturePageCount() << ","
         << "\"tieredArrays\":true,"
         << "\"auxPlaneUploadsAccepted\":true,"
         << "\"fourPlanePageUploads\":true,"
@@ -325,19 +310,21 @@ std::string TextureLoaderV4::statusJson() const {
         << "\"ctmTieredPages\":true,"
         << "\"v4AlbedoAnimationPolicy\":\"consecutive_frame_layers\","
         << "\"v4AuxAnimationPolicy\":\"static_base_layer\","
+        << "\"sampledDescriptorPagesAuthoritative\":true,"
+        << "\"pagePoolUploadsSampled\":false,"
         << "\"mipGeneration\":false,"
         << "\"mip0Clamp\":true,"
         << "\"diskCacheEnabled\":true,"
         << "\"timeoutReadinessAllowed\":false,"
         << "\"uploadRejections\":" << rejectionRingJsonLocked() << ","
         << "\"uploadService\":" << uploadService_.statusJson() << ","
-        << "\"pagePool\":" << pagePool_.statusJson()
+        << "\"pagePool\":" << Renderer::textureSystem.materialPagePoolStatusJson()
         << "}";
     return out.str();
 }
 
 std::string TextureLoaderV4::tierStatusJson() const {
-    return pagePool_.statusJson();
+    return Renderer::textureSystem.materialPagePoolStatusJson();
 }
 
 std::string TextureLoaderV4::uploadQueueStatusJson() const {
@@ -345,21 +332,26 @@ std::string TextureLoaderV4::uploadQueueStatusJson() const {
 }
 
 std::string TextureLoaderV4::pagePoolStatusJson() const {
-    return pagePool_.statusJson();
+    return Renderer::textureSystem.materialPagePoolStatusJson();
 }
 
 std::string TextureLoaderV4::firstFrameReadinessJson(uint64_t generation) const {
     std::ostringstream out;
-    bool idle = generationIdle(generation, true);
     auto uploadStatus = uploadService_.status();
-    auto unreadyPages = pagePool_.unreadyAllocatedPageCount(generation);
+    const uint32_t pendingMipPages = Renderer::textureSystem.pendingMaterialMipPageCount();
+    const uint32_t unreadyPages = Renderer::textureSystem.unreadyMaterialTexturePageCount();
+    const bool idle = generationIdle(generation, true)
+        && uploadStatus.pendingVisibleUploadBytes == 0
+        && pendingMipPages == 0
+        && unreadyPages == 0;
     out << "{"
         << "\"schema\":\"radser_first_frame_native_readiness_v4\","
         << "\"generation\":" << generation << ","
         << "\"pendingVisibleUploadBytes\":" << uploadStatus.pendingVisibleUploadBytes << ","
-        << "\"nativePendingMipPageCount\":" << pagePool_.pendingMipPageCount(generation, true) << ","
+        << "\"nativePendingMipPageCount\":" << pendingMipPages << ","
         << "\"nativeUnreadyAllocatedPageCount\":" << unreadyPages << ","
-        << "\"nativeUnreadyAllocatedLayerCount\":" << pagePool_.unreadyAllocatedLayerCount(generation, true) << ","
+        << "\"nativeUnreadyAllocatedLayerCount\":0,"
+        << "\"sampledDescriptorPagesReady\":" << Renderer::textureSystem.readyMaterialTexturePageCount() << ","
         << "\"pendingVisibleMaterialTableUpdates\":0,"
         << "\"generationIdle\":" << (idle ? "true" : "false")
         << "}";

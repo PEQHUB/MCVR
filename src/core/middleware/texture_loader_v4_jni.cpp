@@ -49,6 +49,45 @@ uint32_t descriptorPageForV4(uint32_t namespaceId, uint32_t tier,
     return page;
 }
 
+uint32_t nullPlaneMask(jlong albedoPtr, jlong specularPtr, jlong normalPtr, jlong flagPtr) {
+    uint32_t mask = 0;
+    if (albedoPtr == 0) mask |= CHANNEL_ALBEDO;
+    if (specularPtr == 0) mask |= CHANNEL_SPECULAR;
+    if (normalPtr == 0) mask |= CHANNEL_NORMAL;
+    if (flagPtr == 0) mask |= CHANNEL_FLAG;
+    return mask;
+}
+
+uint32_t clampJintToU32(jint value) {
+    return value < 0 ? 0u : static_cast<uint32_t>(value);
+}
+
+TextureLoaderV4::UploadRequest requestForRejection(
+    jlong generation, jint namespaceId, jint tier, jint page,
+    jint startLayer, jint layerCount, jint layerCapacity, jint width, jint height,
+    jint vkFormat, jlong albedoPtr, jlong specularPtr, jlong normalPtr, jlong flagPtr,
+    jlong bytesPerLayer, jint channelMask, jboolean visible) {
+    TextureLoaderV4::UploadRequest req{};
+    req.generation = generation <= 0 ? 0u : static_cast<uint64_t>(generation);
+    req.namespaceId = clampJintToU32(namespaceId);
+    req.tier = clampJintToU32(tier);
+    req.page = clampJintToU32(page);
+    req.startLayer = clampJintToU32(startLayer);
+    req.layerCount = clampJintToU32(layerCount);
+    req.layerCapacity = clampJintToU32(layerCapacity);
+    req.width = clampJintToU32(width);
+    req.height = clampJintToU32(height);
+    req.format = static_cast<VkFormat>(vkFormat);
+    req.albedoData = reinterpret_cast<const uint8_t*>(albedoPtr);
+    req.specularData = reinterpret_cast<const uint8_t*>(specularPtr);
+    req.normalData = reinterpret_cast<const uint8_t*>(normalPtr);
+    req.flagData = reinterpret_cast<const uint8_t*>(flagPtr);
+    req.bytesPerLayer = bytesPerLayer <= 0 ? 0u : static_cast<uint64_t>(bytesPerLayer);
+    req.channelMask = clampJintToU32(channelMask);
+    req.visible = visible == JNI_TRUE;
+    return req;
+}
+
 /// Validate signed JNI inputs before any unsigned cast.
 /// Accepts four-plane channel masks; requires a non-null pointer for every set bit.
 /// page and startLayer must be non-negative (no -1 sentinel; Java provides explicit values).
@@ -83,10 +122,6 @@ bool validateLayerUploadSigned(jlong generation, jint namespaceId, jint tier,
     // Reject unknown bits
     static constexpr uint32_t ALL_CHANNELS = CHANNEL_ALBEDO | CHANNEL_SPECULAR | CHANNEL_NORMAL | CHANNEL_FLAG;
     if ((mask & ~ALL_CHANNELS) != 0) return false;
-    // Reject nonzero aux pointers when their bit is not set
-    if ((mask & CHANNEL_SPECULAR) == 0 && specularPtr != 0) return false;
-    if ((mask & CHANNEL_NORMAL) == 0 && normalPtr != 0) return false;
-    if ((mask & CHANNEL_FLAG) == 0 && flagPtr != 0) return false;
     return true;
 }
 
@@ -147,6 +182,15 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
     if (!validateLayerUploadSigned(generation, namespaceId, tier, page, startLayer,
         layerCount, layerCapacity, width, height, vkFormat, channelMask,
         albedoPtr, specularPtr, normalPtr, flagPtr, bytesPerLayer)) {
+        if (auto* renderer = Renderer::try_instance()) {
+            auto rejected = requestForRejection(generation, namespaceId, tier, page, startLayer,
+                layerCount, layerCapacity, width, height, vkFormat,
+                albedoPtr, specularPtr, normalPtr, flagPtr, bytesPerLayer, channelMask, visible);
+            const uint32_t planeMask = nullPlaneMask(albedoPtr, specularPtr, normalPtr, flagPtr);
+            renderer->textureLoaderV4().recordUploadRejection(rejected,
+                planeMask != 0 ? "invalid_plane_pointer" : "invalid_arguments",
+                UINT32_MAX, UINT32_MAX, UINT32_MAX, 0, UINT32_MAX, planeMask, "validation");
+        }
         std::cerr << "[TextureLoaderV4JNI] nativeUploadTexturePageV4 rejected invalid arguments"
                   << " generation=" << generation
                   << " namespace=" << namespaceId
@@ -216,6 +260,11 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
         &nativeStartLayer,
         &nativeCapacity);
     if (descriptorPage >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX || nativeCapacity == 0) {
+        renderer->textureLoaderV4().recordUploadRejection(req,
+            "invalid_descriptor_page", UINT32_MAX,
+            UINT32_MAX, nativeStartLayer, nativeCapacity,
+            descriptorPage, nullPlaneMask(albedoPtr, specularPtr, normalPtr, flagPtr),
+            "descriptor_map");
         std::cerr << "[TextureLoaderV4JNI] nativeUploadTexturePageV4 rejected invalid descriptor page"
                   << " generation=" << generation
                   << " namespace=" << namespaceId
@@ -241,10 +290,16 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
         reinterpret_cast<const uint8_t*>(specularPtr),
         reinterpret_cast<const uint8_t*>(normalPtr),
         reinterpret_cast<const uint8_t*>(flagPtr),
+        static_cast<uint32_t>(channelMask),
         static_cast<uint64_t>(generation),
         framework->vma(),
         framework->device());
     if (!published) {
+        renderer->textureLoaderV4().recordUploadRejection(req,
+            "descriptor_publish_failed", UINT32_MAX,
+            descriptorPage, nativeStartLayer, nativeCapacity,
+            descriptorPage, nullPlaneMask(albedoPtr, specularPtr, normalPtr, flagPtr),
+            "descriptor_publish");
         std::cerr << "[TextureLoaderV4JNI] nativeUploadTexturePageV4 rejected: descriptor/material page publication failed"
                   << " generation=" << generation
                   << " namespace=" << namespaceId

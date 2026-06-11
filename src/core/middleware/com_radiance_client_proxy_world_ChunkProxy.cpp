@@ -345,6 +345,13 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_world_ChunkProx
     return static_cast<jint>(world->chunks()->getInputQueueSize());
 }
 
+extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_nativeGetReadyChunkCount(JNIEnv *, jclass) {
+    if (!Renderer::is_initialized()) return 0;
+    auto world = Renderer::instance().world();
+    if (!world) return 0;
+    return static_cast<jint>(world->chunks()->getReadyChunkCount());
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_world_ChunkProxy_setChunkLights(JNIEnv *, jclass, jlong chunkIndex, jint lightCount, jlong lightDataPtr) {
     if (!Renderer::is_initialized()) return;
     auto world = Renderer::instance().world();

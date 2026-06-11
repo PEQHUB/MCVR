@@ -5,6 +5,7 @@
 #include "core/render/world.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -18,6 +19,11 @@
 const TextureSystem::SpriteBounds TextureSystem::DEFAULT_BOUNDS = {0.0f, 1.0f, 0.0f, 1.0f};
 
 namespace {
+static constexpr uint32_t CHANNEL_ALBEDO   = 1u << 0;
+static constexpr uint32_t CHANNEL_SPECULAR = 1u << 1;
+static constexpr uint32_t CHANNEL_NORMAL   = 1u << 2;
+static constexpr uint32_t CHANNEL_FLAG     = 1u << 3;
+
 uint64_t fnv1a64(const uint8_t* data, size_t size) {
     uint64_t hash = 1469598103934665603ull;
     for (size_t i = 0; i < size; i++) {
@@ -31,6 +37,16 @@ void appendArrayId(std::vector<uint32_t>& ids, uint32_t id) {
     if (id == UINT32_MAX) return;
     if (std::find(ids.begin(), ids.end(), id) != ids.end()) return;
     ids.push_back(id);
+}
+
+void fillPlaneDefault(std::vector<uint8_t>& dst, size_t bytes, std::array<uint8_t, 4> pixel) {
+    dst.resize(bytes);
+    for (size_t offset = 0; offset + 3u < dst.size(); offset += 4u) {
+        dst[offset + 0u] = pixel[0];
+        dst[offset + 1u] = pixel[1];
+        dst[offset + 2u] = pixel[2];
+        dst[offset + 3u] = pixel[3];
+    }
 }
 
 }
@@ -89,6 +105,19 @@ uint32_t TextureSystem::readyMaterialTexturePageCount() const {
             materialSpecularPageArrayIds_[page].load(std::memory_order_acquire) != UINT32_MAX &&
             materialNormalPageArrayIds_[page].load(std::memory_order_acquire) != UINT32_MAX &&
             materialFlagPageArrayIds_[page].load(std::memory_order_acquire) != UINT32_MAX) {
+            count++;
+        }
+    }
+    return count;
+}
+
+uint32_t TextureSystem::unreadyMaterialTexturePageCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint32_t count = 0;
+    for (uint32_t page = 1; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+        const bool allocated = materialPageLayerCapacity_[page] > 0 ||
+            materialAlbedoPageArrayIds_[page].load(std::memory_order_acquire) != UINT32_MAX;
+        if (allocated && !materialPageReady_[page].load(std::memory_order_acquire)) {
             count++;
         }
     }
@@ -1229,11 +1258,43 @@ bool TextureSystem::uploadMaterialTextureLayersV4(uint32_t page, uint32_t sprite
                                                   const uint8_t* specularData,
                                                   const uint8_t* normalData,
                                                   const uint8_t* flagData,
+                                                  uint32_t channelMask,
                                                   uint64_t generation,
                                                   std::shared_ptr<vk::VMA> vma,
                                                   std::shared_ptr<vk::Device> device) {
+    if (!albedoData || spriteSize == 0 || layerCount == 0) return false;
+    const size_t spriteSizeBytes = static_cast<size_t>(spriteSize);
+    if (spriteSizeBytes > std::numeric_limits<size_t>::max() / spriteSizeBytes
+        || spriteSizeBytes * spriteSizeBytes > std::numeric_limits<size_t>::max() / 4u) {
+        return false;
+    }
+    const size_t bytesPerLayer = spriteSizeBytes * spriteSizeBytes * 4u;
+    if (bytesPerLayer == 0 || layerCount > std::numeric_limits<size_t>::max() / bytesPerLayer) {
+        return false;
+    }
+    const size_t totalBytes = bytesPerLayer * layerCount;
+    std::vector<uint8_t> defaultSpecular;
+    std::vector<uint8_t> defaultNormal;
+    std::vector<uint8_t> defaultFlag;
+
+    const uint8_t* specularPlane = specularData;
+    const uint8_t* normalPlane = normalData;
+    const uint8_t* flagPlane = flagData;
+    if ((channelMask & CHANNEL_SPECULAR) == 0 || specularPlane == nullptr) {
+        fillPlaneDefault(defaultSpecular, totalBytes, {0, 0, 0, 255});
+        specularPlane = defaultSpecular.data();
+    }
+    if ((channelMask & CHANNEL_NORMAL) == 0 || normalPlane == nullptr) {
+        fillPlaneDefault(defaultNormal, totalBytes, {128, 128, 255, 255});
+        normalPlane = defaultNormal.data();
+    }
+    if ((channelMask & CHANNEL_FLAG) == 0 || flagPlane == nullptr) {
+        fillPlaneDefault(defaultFlag, totalBytes, {0, 0, 0, 255});
+        flagPlane = defaultFlag.data();
+    }
+
     return uploadMaterialTextureLayersLocked(page, spriteSize, startLayer, layerCount, layerCapacity,
-        albedoData, specularData, normalData, flagData, generation, std::move(vma), std::move(device), true);
+        albedoData, specularPlane, normalPlane, flagPlane, generation, std::move(vma), std::move(device), true);
 }
 
 bool TextureSystem::uploadMaterialTextureLayersLocked(uint32_t page, uint32_t spriteSize, uint32_t startLayer,
@@ -1429,8 +1490,8 @@ std::string TextureSystem::materialPagePoolStatusJson() const {
     }
     constexpr uint32_t fallbackPage = 0;
     constexpr uint32_t vanillaTierFirstPage = 1;
-    constexpr uint32_t vanillaTierPageCount = 7;
-    constexpr uint32_t ctmFirstMaterialPage = vanillaTierFirstPage + vanillaTierPageCount;
+    constexpr uint32_t vanillaTierPageCount = 8;
+    constexpr uint32_t ctmFirstMaterialPage = 64;
     constexpr uint32_t ctmMaterialPageBudget =
         vk::Data::MATERIAL_TEXTURE_PAGE_MAX > ctmFirstMaterialPage
             ? vk::Data::MATERIAL_TEXTURE_PAGE_MAX - ctmFirstMaterialPage
@@ -1440,6 +1501,8 @@ std::string TextureSystem::materialPagePoolStatusJson() const {
         << "\"schema\":\"radser_material_page_pool_status_v1\","
         << "\"generation\":" << generation() << ","
         << "\"materialPagePools\":true,"
+        << "\"sampledDescriptorPages\":true,"
+        << "\"unsampledTexturePagePool\":false,"
         << "\"materialTexturePageMax\":" << vk::Data::MATERIAL_TEXTURE_PAGE_MAX << ","
         << "\"fallbackMaterialPage\":" << fallbackPage << ","
         << "\"vanillaTierFirstPage\":" << vanillaTierFirstPage << ","
@@ -1458,6 +1521,10 @@ std::string TextureSystem::materialPagePoolStatusJson() const {
         << "\"ctmUnaddressableMaterials\":0,"
         << "\"updates\":" << materialPageUpdates_ << ","
         << "\"newPageImageAllocations\":" << materialPageImageAllocations_ << ","
+        << "\"pageImageAllocations\":" << materialPageImageAllocations_ << ","
+        << "\"pageSubrangeUploads\":" << materialPageUpdates_ << ","
+        << "\"readySampledDescriptorPages\":" << readyAllocatedPages << ","
+        << "\"unreadySampledDescriptorPages\":" << unreadyAllocatedPages << ","
         << "\"lastUpdatePage\":" << lastMaterialPage_ << ","
         << "\"lastUpdateStartLayer\":" << lastMaterialPageStartLayer_ << ","
         << "\"lastUpdateLayerCount\":" << lastMaterialPageLayerCount_ << ","

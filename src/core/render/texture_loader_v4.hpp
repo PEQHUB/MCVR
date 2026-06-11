@@ -71,6 +71,15 @@ public:
 
     bool isInitialized() const { return initialized_.load(std::memory_order_acquire); }
 
+    void recordUploadRejection(const UploadRequest& request, const char* reason,
+                               uint32_t expectedPage = UINT32_MAX,
+                               uint32_t nativePage = UINT32_MAX,
+                               uint32_t nativeStartLayer = UINT32_MAX,
+                               uint32_t nativeCapacity = 0,
+                               uint32_t descriptorPage = UINT32_MAX,
+                               uint32_t nullPlaneMask = 0,
+                               const char* stage = "native_upload");
+
 private:
     struct UploadRejection {
         uint64_t sequence = 0;
@@ -85,14 +94,13 @@ private:
         uint32_t nativePage = UINT32_MAX;
         uint32_t nativeStartLayer = UINT32_MAX;
         uint32_t nativeCapacity = 0;
+        uint32_t descriptorPage = UINT32_MAX;
+        uint32_t channelMask = 0;
+        uint32_t nullPlaneMask = 0;
+        const char* stage = "native_upload";
         const char* reason = "unknown";
     };
 
-    void recordRejection(const UploadRequest& request, const char* reason,
-                         uint32_t expectedPage = UINT32_MAX,
-                         uint32_t nativePage = UINT32_MAX,
-                         uint32_t nativeStartLayer = UINT32_MAX,
-                         uint32_t nativeCapacity = 0);
     std::string rejectionRingJsonLocked() const;
 
     GpuUploadService uploadService_;

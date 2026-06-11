@@ -2071,6 +2071,17 @@ uint32_t Chunks::getInputQueueSize() {
     return chunkBuildScheduler_->getInputQueueSize();
 }
 
+uint32_t Chunks::getReadyChunkCount() {
+    std::unique_lock<std::recursive_mutex> lock(mutex_);
+    uint32_t count = 0;
+    for (const auto &chunk : chunks_) {
+        if (chunk && chunk->blas != nullptr) {
+            count++;
+        }
+    }
+    return count;
+}
+
 bool Chunks::isChunkReady(int64_t id) {
     std::unique_lock<std::recursive_mutex> lock(mutex_);
     if (id < 0 || id >= static_cast<int64_t>(chunks_.size())) return false;
