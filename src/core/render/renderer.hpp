@@ -284,8 +284,14 @@ class Renderer : public Singleton<Renderer> {
     static std::vector<std::shared_ptr<vk::DeviceLocalImage>> renderResHdrImages;  // DLSS input (render-res HDR), read by tone mapping histogram
     static GpuProfiler gpuProfiler;
     static ThreadPool threadPool;
-    static TextureSystem textureSystem;
-    static TextureLoaderV4 textureLoaderV4_;
+    // References to intentionally leaked heap instances. As plain static
+    // members their destructors ran at DLL_PROCESS_DETACH over state already
+    // torn down by the explicit shutdown path and crashed the process on
+    // every exit (EXCEPTION_ACCESS_VIOLATION in ~TextureSystem, core.dll
+    // static destructor chain). Explicit shutdown still releases the Vulkan
+    // resources; the OS reclaims the heap blocks at process exit.
+    static TextureSystem& textureSystem;
+    static TextureLoaderV4& textureLoaderV4_;
 
     TextureLoaderV4& textureLoaderV4() { return textureLoaderV4_; }
 

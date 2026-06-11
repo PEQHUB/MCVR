@@ -31,8 +31,8 @@ std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::emissionImages;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::renderResHdrImages;
 GpuProfiler Renderer::gpuProfiler;
 ThreadPool Renderer::threadPool;
-TextureSystem Renderer::textureSystem;
-TextureLoaderV4 Renderer::textureLoaderV4_;
+TextureSystem& Renderer::textureSystem = *new TextureSystem();
+TextureLoaderV4& Renderer::textureLoaderV4_ = *new TextureLoaderV4();
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::frameGenDepthImages;
 std::vector<std::shared_ptr<vk::DeviceLocalImage>> Renderer::frameGenMotionVectorImages;
 
