@@ -111,8 +111,29 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeBeginTextureLoa
     if (!loader.beginGeneration(static_cast<uint64_t>(generation))) {
         return JNI_FALSE;
     }
-    Renderer::textureSystem.beginV4MaterialPages(static_cast<uint64_t>(generation));
+    const uint64_t nativeGeneration = static_cast<uint64_t>(generation);
+    Renderer::textureSystem.beginV4MaterialPages(nativeGeneration);
+    auto framework = renderer->framework();
+    if (!Renderer::textureSystem.ensureV4ShaderFallbackResources(
+            nativeGeneration, framework->vma(), framework->device())) {
+        std::cerr << "[TextureLoaderV4JNI] nativeBeginTextureLoaderV4 rejected: V4 fallback resources unavailable"
+                  << " generation=" << generation << std::endl;
+        loader.cancelGeneration(nativeGeneration, -2);
+        return JNI_FALSE;
+    }
     return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeEnsureV4ShaderFallbackResources(
+    JNIEnv*, jclass, jlong generation) {
+    if (generation <= 0) return JNI_FALSE;
+    auto* renderer = Renderer::try_instance();
+    if (!renderer || !renderer->framework()) return JNI_FALSE;
+    auto framework = renderer->framework();
+    return Renderer::textureSystem.ensureV4ShaderFallbackResources(
+        static_cast<uint64_t>(generation), framework->vma(), framework->device())
+        ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -247,6 +268,13 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeCommitTextureLo
     if (generation <= 0) return JNI_FALSE;
     auto* renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return JNI_FALSE;
+    auto framework = renderer->framework();
+    if (!Renderer::textureSystem.ensureV4ShaderFallbackResources(
+            static_cast<uint64_t>(generation), framework->vma(), framework->device())) {
+        std::cerr << "[TextureLoaderV4JNI] nativeCommitTextureLoaderV4 rejected: V4 fallback contract unavailable"
+                  << " generation=" << generation << std::endl;
+        return JNI_FALSE;
+    }
     return renderer->textureLoaderV4().commitGeneration(static_cast<uint64_t>(generation))
         ? JNI_TRUE : JNI_FALSE;
 }
@@ -292,6 +320,24 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUpdateSpriteReg
         framework->vma(), framework->device()) ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUpdateTextureRulesV4(
+    JNIEnv*, jclass, jlong generation, jlong entriesPtr, jint entryCount) {
+    if (generation <= 0 || entryCount < 0) return JNI_FALSE;
+    auto* renderer = Renderer::try_instance();
+    if (!renderer || !renderer->framework()) return JNI_FALSE;
+    auto framework = renderer->framework();
+    const auto* entries = entriesPtr == 0
+        ? nullptr
+        : reinterpret_cast<const vk::Data::TextureRuleEntry*>(entriesPtr);
+    const uint32_t count = entryCount <= 0 ? 0u : static_cast<uint32_t>(entryCount);
+    return Renderer::textureSystem.uploadTextureRules(
+        entries,
+        count,
+        static_cast<uint64_t>(generation),
+        framework->vma(), framework->device()) ? JNI_TRUE : JNI_FALSE;
+}
+
 // ---- Status JSON ----
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -324,6 +370,14 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeMaterialPagePoo
     auto* renderer = Renderer::try_instance();
     if (!renderer) return makeString(env, "{\"error\":\"no_renderer\"}");
     return makeString(env, renderer->textureLoaderV4().pagePoolStatusJson());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeV4FrameResourceStatusJson(
+    JNIEnv* env, jclass) {
+    auto* renderer = Renderer::try_instance();
+    if (!renderer) return makeString(env, "{\"error\":\"no_renderer\"}");
+    return makeString(env, Renderer::textureSystem.v4FrameResourceStatusJson());
 }
 
 extern "C" JNIEXPORT jstring JNICALL

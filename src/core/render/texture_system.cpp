@@ -116,7 +116,10 @@ bool TextureSystem::ensureDescriptorFallbackArrays(std::shared_ptr<vk::VMA> vma,
         return true;
     }
     if (descriptorFallbackArraysDirty_) {
-        return false;
+        return fallbackAlbedoArrayId_.load(std::memory_order_acquire) != UINT32_MAX &&
+            fallbackSpecularArrayId_.load(std::memory_order_acquire) != UINT32_MAX &&
+            fallbackNormalArrayId_.load(std::memory_order_acquire) != UINT32_MAX &&
+            fallbackFlagArrayId_.load(std::memory_order_acquire) != UINT32_MAX;
     }
 
     const uint32_t albedoId = arrayManager_.createArray(
@@ -149,7 +152,7 @@ bool TextureSystem::ensureDescriptorFallbackArrays(std::shared_ptr<vk::VMA> vma,
     descriptorFallbackArraysReady_.store(false, std::memory_order_release);
     descriptorFallbackArraysDirty_ = true;
     materialTexturePageRevision_.fetch_add(1, std::memory_order_acq_rel);
-    return false;
+    return true;
 }
 
 bool TextureSystem::descriptorFallbackArraysReady() const {
@@ -1142,10 +1145,13 @@ bool TextureSystem::uploadTextureRules(const vk::Data::TextureRuleEntry* entries
                                        uint64_t generation,
                                        std::shared_ptr<vk::VMA> vma,
                                        std::shared_ptr<vk::Device> device) {
-    if (!entries || count == 0 || !vma || !device) return false;
+    if (!vma || !device) return false;
 
     std::lock_guard<std::mutex> lock(mutex_);
     if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
+    if (!entries || count == 0) {
+        return textureRules_.ensureDefaultRules(std::move(vma), std::move(device));
+    }
     return textureRules_.uploadRules(entries, count, std::move(vma), std::move(device));
 }
 
@@ -1484,8 +1490,24 @@ std::string TextureSystem::v4FrameResourceStatusJson() const {
     return out.str();
 }
 
+std::shared_ptr<vk::DeviceLocalBuffer> TextureSystem::spriteRegistryBufferOrFallback() const {
+    return registry_.getBuffer();
+}
+
+std::shared_ptr<vk::DeviceLocalBuffer> TextureSystem::materialRegistryBufferOrFallback() const {
+    return materials_.getBuffer();
+}
+
 std::shared_ptr<vk::DeviceLocalBuffer> TextureSystem::textureRuleBufferOrFallback() const {
     return textureRules_.getBuffer();
+}
+
+bool TextureSystem::spriteRegistryUsingFallback() const {
+    return registry_.usingFallback();
+}
+
+bool TextureSystem::materialRegistryUsingFallback() const {
+    return materials_.usingFallback();
 }
 
 bool TextureSystem::textureRulesReady() const {
@@ -1494,6 +1516,14 @@ bool TextureSystem::textureRulesReady() const {
 
 bool TextureSystem::textureRulesUsingFallback() const {
     return textureRules_.usingDefaultRules();
+}
+
+uint64_t TextureSystem::spriteRegistryRevision() const {
+    return registry_.revision();
+}
+
+uint64_t TextureSystem::materialRegistryRevision() const {
+    return materials_.revision();
 }
 
 uint64_t TextureSystem::textureRulesRevision() const {

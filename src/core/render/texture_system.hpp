@@ -243,9 +243,15 @@ class TextureSystem {
     std::string materialPagePoolStatusJson() const;
     std::string materialTableStatusJson() const;
     std::string v4FrameResourceStatusJson() const;
+    std::shared_ptr<vk::DeviceLocalBuffer> spriteRegistryBufferOrFallback() const;
+    std::shared_ptr<vk::DeviceLocalBuffer> materialRegistryBufferOrFallback() const;
     std::shared_ptr<vk::DeviceLocalBuffer> textureRuleBufferOrFallback() const;
+    bool spriteRegistryUsingFallback() const;
+    bool materialRegistryUsingFallback() const;
     bool textureRulesReady() const;
     bool textureRulesUsingFallback() const;
+    uint64_t spriteRegistryRevision() const;
+    uint64_t materialRegistryRevision() const;
     uint64_t textureRulesRevision() const;
     std::string nativeUploadSafetyStatusJson() const;
     /// Reset on resource reload.

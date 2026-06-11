@@ -9,7 +9,7 @@
 
 namespace build_info {
 
-inline constexpr int kTextureLoaderAbiVersion = 5;
+inline constexpr int kTextureLoaderAbiVersion = 6;
 inline constexpr int kCacheSchemaVersion = 5;
 
 // Filled by CMake configure step

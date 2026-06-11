@@ -98,6 +98,48 @@ struct FileIdentity {
     std::string error;
 };
 
+std::string buildInfoJson(const FileIdentity& dllIdentity, bool buildInfoSafe, const std::string& reason) {
+    std::ostringstream json;
+    json << "{";
+    json << "\"repository\":\"radser-mcvr\",";
+    json << "\"commit\":\"" << json_escape(build_info::kRepoCommit) << "\",";
+    json << "\"branch\":\"" << json_escape(build_info::kBranch) << "\",";
+    json << "\"dirty\":" << (build_info::kDirty ? "true" : "false") << ",";
+    json << "\"buildTimestamp\":\"" << json_escape(build_info::kBuildTimestamp) << "\",";
+    json << "\"buildInfoSafe\":" << (buildInfoSafe ? "true" : "false") << ",";
+    json << "\"buildInfoReason\":\"" << json_escape(reason) << "\",";
+    json << "\"dllSha256\":\"" << json_escape(dllIdentity.sha256) << "\",";
+    json << "\"dllPath\":\"" << json_escape(dllIdentity.path) << "\",";
+    json << "\"dllSizeBytes\":" << dllIdentity.sizeBytes << ",";
+    json << "\"dllHashError\":\"" << json_escape(dllIdentity.error) << "\",";
+    json << "\"compileTimeDllSha256\":\"" << json_escape(build_info::kDllSha256) << "\",";
+    json << "\"textureLoaderAbiVersion\":" << build_info::kTextureLoaderAbiVersion << ",";
+    json << "\"cacheSchemaVersion\":" << build_info::kCacheSchemaVersion << ",";
+    json << "\"features\":{";
+#ifdef MCVR_ENABLE_NRD
+    json << "\"nrd\":true,";
+#else
+    json << "\"nrd\":false,";
+#endif
+#ifdef MCVR_ENABLE_FFX_UPSCALER
+    json << "\"ffxUpscaler\":true,";
+#else
+    json << "\"ffxUpscaler\":false,";
+#endif
+#ifdef MCVR_ENABLE_SHARC
+    json << "\"sharc\":true,";
+#else
+    json << "\"sharc\":false,";
+#endif
+#ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
+    json << "\"sharcMainTraceQuery\":true";
+#else
+    json << "\"sharcMainTraceQuery\":false";
+#endif
+    json << "}}";
+    return json.str();
+}
+
 #if defined(_WIN32)
 std::string utf8FromWide(const std::wstring& text) {
     if (text.empty()) return {};
@@ -347,44 +389,49 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
 
 extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeBuildInfoJson(JNIEnv *env,
                                                                                                              jclass) {
-    const FileIdentity dllIdentity = currentDllIdentity();
-    std::ostringstream json;
-    json << "{";
-    json << "\"repository\":\"radser-mcvr\",";
-    json << "\"commit\":\"" << json_escape(build_info::kRepoCommit) << "\",";
-    json << "\"branch\":\"" << json_escape(build_info::kBranch) << "\",";
-    json << "\"dirty\":" << (build_info::kDirty ? "true" : "false") << ",";
-    json << "\"buildTimestamp\":\"" << json_escape(build_info::kBuildTimestamp) << "\",";
-    json << "\"dllSha256\":\"" << json_escape(dllIdentity.sha256) << "\",";
-    json << "\"dllPath\":\"" << json_escape(dllIdentity.path) << "\",";
-    json << "\"dllSizeBytes\":" << dllIdentity.sizeBytes << ",";
-    json << "\"dllHashError\":\"" << json_escape(dllIdentity.error) << "\",";
-    json << "\"compileTimeDllSha256\":\"" << json_escape(build_info::kDllSha256) << "\",";
-    json << "\"textureLoaderAbiVersion\":" << build_info::kTextureLoaderAbiVersion << ",";
-    json << "\"cacheSchemaVersion\":" << build_info::kCacheSchemaVersion << ",";
-    json << "\"features\":{";
-#ifdef MCVR_ENABLE_NRD
-    json << "\"nrd\":true,";
-#else
-    json << "\"nrd\":false,";
-#endif
-#ifdef MCVR_ENABLE_FFX_UPSCALER
-    json << "\"ffxUpscaler\":true,";
-#else
-    json << "\"ffxUpscaler\":false,";
-#endif
-#ifdef MCVR_ENABLE_SHARC
-    json << "\"sharc\":true,";
-#else
-    json << "\"sharc\":false,";
-#endif
-#ifdef MCVR_ENABLE_SHARC_MAIN_TRACE_QUERY
-    json << "\"sharcMainTraceQuery\":true";
-#else
-    json << "\"sharcMainTraceQuery\":false";
-#endif
-    json << "}}";
-    return env->NewStringUTF(json.str().c_str());
+    static std::mutex cacheMutex;
+    static std::string cachedJson;
+    static std::atomic<bool> computing{false};
+
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        if (!cachedJson.empty()) {
+            return env->NewStringUTF(cachedJson.c_str());
+        }
+    }
+
+    bool expected = false;
+    if (!computing.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        FileIdentity unavailable;
+        unavailable.error = "build-info request reentered while first result was still computing";
+        const std::string fallback = buildInfoJson(unavailable, false, "reentrant");
+        return env->NewStringUTF(fallback.c_str());
+    }
+
+    struct ComputingGuard {
+        std::atomic<bool>& flag;
+        ~ComputingGuard() {
+            flag.store(false, std::memory_order_release);
+        }
+    } guard{computing};
+
+    std::string result;
+    try {
+        const FileIdentity dllIdentity = currentDllIdentity();
+        result = buildInfoJson(dllIdentity, true, "");
+    } catch (...) {
+        FileIdentity unavailable;
+        unavailable.error = "native build-info collection threw";
+        result = buildInfoJson(unavailable, false, "exception");
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        if (cachedJson.empty()) {
+            cachedJson = result;
+        }
+        return env->NewStringUTF(cachedJson.c_str());
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_acquireContext(JNIEnv *, jclass) {
