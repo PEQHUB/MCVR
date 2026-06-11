@@ -91,6 +91,9 @@ public:
     /// If visibleOnly, restrict the check to visible layers.
     uint32_t pendingMipPageCount(uint64_t generation, bool visibleOnly) const;
 
+    /// Static page capacity query for use outside an instance (JNI, validation).
+    static uint32_t pageLayerCapacityStatic(uint32_t tier);
+
 private:
     struct Page {
         uint64_t generation = 0;
@@ -135,9 +138,6 @@ private:
     uint32_t pendingMipPageCountLocked(uint64_t generation, bool visibleOnly) const;
     uint32_t tierSize(uint32_t tier) const;
     uint32_t pageLayerCapacity(uint32_t tier) const;
-
-    /// Static version of pageLayerCapacity for use outside an instance (e.g. JNI queries).
-    static uint32_t pageLayerCapacityStatic(uint32_t tier);
 
     std::shared_ptr<vk::Device> device_;
     std::shared_ptr<vk::VMA> vma_;

@@ -77,7 +77,10 @@ TexturePagePool::Allocation TexturePagePool::allocate(
     if (!page.allocated) {
         return {PageHandle{}, 0, false};
     }
-    if (!page.albedoImage || page.albedoImage->vkImage() == VK_NULL_HANDLE) {
+    if (!page.albedoImage || page.albedoImage->vkImage() == VK_NULL_HANDLE
+        || !page.specularImage || page.specularImage->vkImage() == VK_NULL_HANDLE
+        || !page.normalImage || page.normalImage->vkImage() == VK_NULL_HANDLE
+        || !page.flagImage || page.flagImage->vkImage() == VK_NULL_HANDLE) {
         return {PageHandle{}, 0, false};
     }
     uint32_t startLayer = page.layersUsed;
@@ -119,7 +122,10 @@ TexturePagePool::Allocation TexturePagePool::allocateExact(
     if (!p.allocated) {
         return {PageHandle{}, 0, false};
     }
-    if (!p.albedoImage || p.albedoImage->vkImage() == VK_NULL_HANDLE) {
+    if (!p.albedoImage || p.albedoImage->vkImage() == VK_NULL_HANDLE
+        || !p.specularImage || p.specularImage->vkImage() == VK_NULL_HANDLE
+        || !p.normalImage || p.normalImage->vkImage() == VK_NULL_HANDLE
+        || !p.flagImage || p.flagImage->vkImage() == VK_NULL_HANDLE) {
         return {PageHandle{}, 0, false};
     }
     if (startLayer + layerCount > p.layerCapacity) {
@@ -692,8 +698,11 @@ TexturePagePool::Page& TexturePagePool::pageForAllocationLocked(
         device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
         newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
 
-    // Increment pageImageAllocations_ only after the image exists and vkImage() != VK_NULL_HANDLE
-    if (!newPage.albedoImage || newPage.albedoImage->vkImage() == VK_NULL_HANDLE) {
+    // Increment pageImageAllocations_ only after ALL plane images exist with valid VkImage handles
+    if (!newPage.albedoImage || newPage.albedoImage->vkImage() == VK_NULL_HANDLE
+        || !newPage.specularImage || newPage.specularImage->vkImage() == VK_NULL_HANDLE
+        || !newPage.normalImage || newPage.normalImage->vkImage() == VK_NULL_HANDLE
+        || !newPage.flagImage || newPage.flagImage->vkImage() == VK_NULL_HANDLE) {
         static Page invalid;
         return invalid;
     }
@@ -782,7 +791,10 @@ TexturePagePool::Page& TexturePagePool::pageForExactAllocationLocked(
         device_, vma_, false, newPage.mipCount, size, size, newPage.layerCapacity,
         newPage.format, usage, 0, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
 
-    if (!newPage.albedoImage || newPage.albedoImage->vkImage() == VK_NULL_HANDLE) {
+    if (!newPage.albedoImage || newPage.albedoImage->vkImage() == VK_NULL_HANDLE
+        || !newPage.specularImage || newPage.specularImage->vkImage() == VK_NULL_HANDLE
+        || !newPage.normalImage || newPage.normalImage->vkImage() == VK_NULL_HANDLE
+        || !newPage.flagImage || newPage.flagImage->vkImage() == VK_NULL_HANDLE) {
         static Page invalid;
         return invalid;
     }

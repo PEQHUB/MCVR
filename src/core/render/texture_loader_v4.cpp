@@ -80,17 +80,22 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
     const uint64_t expectedBytesPerLayer = static_cast<uint64_t>(expectedSize) * expectedSize * 4u;
     if (request.bytesPerLayer != expectedBytesPerLayer) return false;
 
-    // Allocate page pool layers. Java provides absolute page and startLayer values
-    // relative to a full tier page. Normalize these to tier-local native page indices
-    // and cap layerCapacity to the per-native-page limit.
+    // Allocate page pool layers. Java provides absolute page and startLayer values.
     //
-    // Java sends: page = VANILLA_TIER_FIRST_PAGE + sequential index
-    //            startLayer = offset within the full Java tier page
-    //            layerCapacity = full Java tier page layer count
+    // CONTRACT: Java's mixin loop sends exactly ONE page per tier. Within that page,
+    // startLayer is the absolute tier-local layer index (0..totalTierSprites-1).
+    // The tier-local index is split across native pages by dividing by nativeCapacity.
     //
-    // Native needs: page = tier-local native page index (0, 1, 2, ...)
-    //               startLayer = offset within the native page (always 0 for chunk uploads)
-    //               layerCapacity = per-native-page capacity (e.g., 256 for T128)
+    // Java sends: page = VANILLA_TIER_FIRST_PAGE + tierIndex (1 per tier)
+    //            startLayer = absolute tier-local layer index
+    //            layerCapacity = total sprites in this tier
+    //
+    // Native computes: nativePage = startLayer / nativeCapacity
+    //                  nativeStartLayer = startLayer % nativeCapacity
+    //                  nativeCapacity = per-native-page limit (e.g., 256 for T128)
+    //
+    // IMPORTANT: If Java ever sends multiple pages per tier, this normalization
+    // must incorporate the Java page index: absoluteLayer = javaPageIndex * javaPageCapacity + startLayer.
     const uint32_t nativeCapacity = TexturePagePool::pageLayerCapacityStatic(request.tier);
     if (nativeCapacity == 0) {
         std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: zero native capacity for tier=" << request.tier << std::endl;
@@ -102,6 +107,17 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
     uint32_t normalizedCapacity = request.layerCapacity;
 
     if (request.page != UINT32_MAX && request.startLayer != UINT32_MAX) {
+        // CONTRACT ASSERTION: request.page should equal VANILLA_TIER_FIRST_PAGE + tier,
+        // confirming one-page-per-tier. Currently VANILLA_TIER_FIRST_PAGE = 1, so
+        // for tier 0 the page should be 1, tier 1 → page 2, etc.
+        // This is a diagnostic — do not reject yet until Java contract is fully enforced.
+        const uint32_t expectedPage = 1 + request.tier;
+        if (request.page != expectedPage) {
+            std::cout << "[TextureLoaderV4] WARNING: javaPage=" << request.page
+                      << " != expected " << expectedPage << " (1+tier) for tier=" << request.tier
+                      << " — contract assumes one page per tier" << std::endl;
+        }
+
         // Compute tier-local native page index from Java's absolute startLayer
         normalizedPage = request.startLayer / nativeCapacity;
         normalizedStartLayer = request.startLayer % nativeCapacity;
