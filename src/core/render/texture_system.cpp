@@ -65,6 +65,101 @@ bool TextureSystem::hasMaterialPageMipsDirtyLocked() const {
     return false;
 }
 
+bool TextureSystem::hasAllocatedMaterialTexturePages() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (uint32_t page = 1; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+        if (materialPageLayerCapacity_[page] > 0 ||
+            materialAlbedoPageArrayIds_[page].load(std::memory_order_acquire) != UINT32_MAX) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TextureSystem::hasReadyMaterialTexturePages() const {
+    return readyMaterialTexturePageCount() > 0;
+}
+
+uint32_t TextureSystem::readyMaterialTexturePageCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint32_t count = 0;
+    for (uint32_t page = 1; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+        if (materialPageReady_[page].load(std::memory_order_acquire) &&
+            materialAlbedoPageArrayIds_[page].load(std::memory_order_acquire) != UINT32_MAX &&
+            materialSpecularPageArrayIds_[page].load(std::memory_order_acquire) != UINT32_MAX &&
+            materialNormalPageArrayIds_[page].load(std::memory_order_acquire) != UINT32_MAX &&
+            materialFlagPageArrayIds_[page].load(std::memory_order_acquire) != UINT32_MAX) {
+            count++;
+        }
+    }
+    return count;
+}
+
+uint32_t TextureSystem::pendingMaterialMipPageCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint32_t count = 0;
+    for (uint32_t page = 1; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+        if (materialPageMipsDirty_[page]) count++;
+    }
+    return count;
+}
+
+bool TextureSystem::ensureDescriptorFallbackArrays(std::shared_ptr<vk::VMA> vma,
+                                                   std::shared_ptr<vk::Device> device) {
+    if (!vma || !device) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (descriptorFallbackArraysReady_.load(std::memory_order_acquire) &&
+        fallbackAlbedoArrayId_.load(std::memory_order_acquire) != UINT32_MAX &&
+        fallbackSpecularArrayId_.load(std::memory_order_acquire) != UINT32_MAX &&
+        fallbackNormalArrayId_.load(std::memory_order_acquire) != UINT32_MAX &&
+        fallbackFlagArrayId_.load(std::memory_order_acquire) != UINT32_MAX) {
+        return true;
+    }
+    if (descriptorFallbackArraysDirty_) {
+        return false;
+    }
+
+    const uint32_t albedoId = arrayManager_.createArray(
+        vma, device, 1, 1, VK_FORMAT_R8G8B8A8_SRGB, true);
+    const uint32_t specularId = arrayManager_.createArray(
+        vma, device, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, true);
+    const uint32_t normalId = arrayManager_.createArray(
+        vma, device, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, true);
+    const uint32_t flagId = arrayManager_.createArray(
+        vma, device, 1, 1, VK_FORMAT_R8G8B8A8_UNORM, true);
+
+    constexpr std::array<uint8_t, 4> albedoPixel{255, 255, 255, 255};
+    constexpr std::array<uint8_t, 4> specularPixel{0, 0, 0, 255};
+    constexpr std::array<uint8_t, 4> normalPixel{128, 128, 255, 255};
+    constexpr std::array<uint8_t, 4> flagPixel{0, 0, 0, 0};
+    const bool staged =
+        arrayManager_.stageLayerPixels(albedoId, 0, 0, albedoPixel.data(), albedoPixel.size()) &&
+        arrayManager_.stageLayerPixels(specularId, 0, 0, specularPixel.data(), specularPixel.size()) &&
+        arrayManager_.stageLayerPixels(normalId, 0, 0, normalPixel.data(), normalPixel.size()) &&
+        arrayManager_.stageLayerPixels(flagId, 0, 0, flagPixel.data(), flagPixel.size());
+    if (!staged) {
+        std::cerr << "[TextureSystem] Descriptor fallback array staging failed" << std::endl;
+        return false;
+    }
+
+    fallbackAlbedoArrayId_.store(albedoId, std::memory_order_release);
+    fallbackSpecularArrayId_.store(specularId, std::memory_order_release);
+    fallbackNormalArrayId_.store(normalId, std::memory_order_release);
+    fallbackFlagArrayId_.store(flagId, std::memory_order_release);
+    descriptorFallbackArraysReady_.store(false, std::memory_order_release);
+    descriptorFallbackArraysDirty_ = true;
+    materialTexturePageRevision_.fetch_add(1, std::memory_order_acq_rel);
+    return false;
+}
+
+bool TextureSystem::descriptorFallbackArraysReady() const {
+    return descriptorFallbackArraysReady_.load(std::memory_order_acquire) &&
+        fallbackAlbedoArrayId_.load(std::memory_order_acquire) != UINT32_MAX &&
+        fallbackSpecularArrayId_.load(std::memory_order_acquire) != UINT32_MAX &&
+        fallbackNormalArrayId_.load(std::memory_order_acquire) != UINT32_MAX &&
+        fallbackFlagArrayId_.load(std::memory_order_acquire) != UINT32_MAX;
+}
+
 uint32_t TextureSystem::materialAlbedoPageArrayId(uint32_t page) const {
     if (page == 0) return blockAlbedoArrayId();
     if (page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return UINT32_MAX;
@@ -148,6 +243,12 @@ void TextureSystem::retireGpuResourcesLocked(std::shared_ptr<vk::Device> device,
     blockNormalArrayId_ = UINT32_MAX;
     blockFlagArrayId_ = UINT32_MAX;
     resetMaterialTexturePagesLocked();
+    fallbackAlbedoArrayId_.store(UINT32_MAX, std::memory_order_release);
+    fallbackSpecularArrayId_.store(UINT32_MAX, std::memory_order_release);
+    fallbackNormalArrayId_.store(UINT32_MAX, std::memory_order_release);
+    fallbackFlagArrayId_.store(UINT32_MAX, std::memory_order_release);
+    descriptorFallbackArraysReady_.store(false, std::memory_order_release);
+    descriptorFallbackArraysDirty_ = false;
     materialTexturePageRevision_.fetch_add(1, std::memory_order_acq_rel);
     albedoMipsInitialized_ = false;
     specMipsInitialized_ = false;
@@ -811,6 +912,11 @@ void TextureSystem::flushPendingUploads(std::shared_ptr<vk::VMA> vma,
         dirty = arrayManager_.flushUploads(
             vma, device, cmdBuffer,
             blockAlbedoArrayId_, blockSpecularArrayId_, blockNormalArrayId_, blockFlagArrayId_);
+        if (descriptorFallbackArraysDirty_) {
+            descriptorFallbackArraysDirty_ = false;
+            descriptorFallbackArraysReady_.store(true, std::memory_order_release);
+            materialTexturePageRevision_.fetch_add(1, std::memory_order_acq_rel);
+        }
     }
     // Route staging buffers through GarbageCollector for proper lifetime management.
     // GC keeps resources alive for imageCount*3 frames (matching all other GPU resources).
@@ -1327,6 +1433,11 @@ std::string TextureSystem::materialPagePoolStatusJson() const {
         << "\"lastUpdateStartLayer\":" << lastMaterialPageStartLayer_ << ","
         << "\"lastUpdateLayerCount\":" << lastMaterialPageLayerCount_ << ","
         << "\"lastUpdateLayerCapacity\":" << lastMaterialPageLayerCapacity_ << ","
+        << "\"descriptorFallbackArraysReady\":" << (descriptorFallbackArraysReady() ? "true" : "false") << ","
+        << "\"fallbackAlbedoArrayId\":" << fallbackAlbedoArrayId_.load(std::memory_order_acquire) << ","
+        << "\"fallbackSpecularArrayId\":" << fallbackSpecularArrayId_.load(std::memory_order_acquire) << ","
+        << "\"fallbackNormalArrayId\":" << fallbackNormalArrayId_.load(std::memory_order_acquire) << ","
+        << "\"fallbackFlagArrayId\":" << fallbackFlagArrayId_.load(std::memory_order_acquire) << ","
         << "\"materialPageRevision\":" << materialTexturePageRevision()
         << "}";
     return out.str();
@@ -1370,6 +1481,8 @@ std::string TextureSystem::statusString() const {
         << ",materials:" << materials_.count()
         << ",materialPages:" << materialPages
         << ",materialPageRevision:" << materialTexturePageRevision()
+        << ",v4MaterialPagesActive:" << (v4MaterialPagesActive_.load(std::memory_order_acquire) ? 1 : 0)
+        << ",descriptorFallbackArraysReady:" << (descriptorFallbackArraysReady() ? 1 : 0)
         << ",albedoArray:" << blockAlbedoArrayId_
         << ",specularArray:" << blockSpecularArrayId_
         << ",normalArray:" << blockNormalArrayId_

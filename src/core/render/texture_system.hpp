@@ -223,6 +223,18 @@ class TextureSystem {
     uint64_t materialTexturePageRevision() const {
         return materialTexturePageRevision_.load(std::memory_order_acquire);
     }
+    bool hasV4MaterialPagesActive() const { return v4MaterialPagesActive_.load(std::memory_order_acquire); }
+    bool hasAllocatedMaterialTexturePages() const;
+    bool hasReadyMaterialTexturePages() const;
+    uint32_t readyMaterialTexturePageCount() const;
+    uint32_t pendingMaterialMipPageCount() const;
+    bool ensureDescriptorFallbackArrays(std::shared_ptr<vk::VMA> vma,
+                                        std::shared_ptr<vk::Device> device);
+    bool descriptorFallbackArraysReady() const;
+    uint32_t fallbackAlbedoArrayId() const { return fallbackAlbedoArrayId_.load(std::memory_order_acquire); }
+    uint32_t fallbackSpecularArrayId() const { return fallbackSpecularArrayId_.load(std::memory_order_acquire); }
+    uint32_t fallbackNormalArrayId() const { return fallbackNormalArrayId_.load(std::memory_order_acquire); }
+    uint32_t fallbackFlagArrayId() const { return fallbackFlagArrayId_.load(std::memory_order_acquire); }
     std::string materialPagePoolStatusJson() const;
     std::string materialTableStatusJson() const;
     std::string nativeUploadSafetyStatusJson() const;
@@ -297,6 +309,12 @@ class TextureSystem {
     uint32_t lastMaterialPageStartLayer_ = 0;
     uint32_t lastMaterialPageLayerCount_ = 0;
     uint32_t lastMaterialPageLayerCapacity_ = 0;
+    std::atomic<uint32_t> fallbackAlbedoArrayId_{UINT32_MAX};
+    std::atomic<uint32_t> fallbackSpecularArrayId_{UINT32_MAX};
+    std::atomic<uint32_t> fallbackNormalArrayId_{UINT32_MAX};
+    std::atomic<uint32_t> fallbackFlagArrayId_{UINT32_MAX};
+    std::atomic<bool> descriptorFallbackArraysReady_{false};
+    bool descriptorFallbackArraysDirty_ = false;
     bool albedoMipsInitialized_ = false;
     bool specMipsInitialized_ = false;
     bool normMipsInitialized_ = false;

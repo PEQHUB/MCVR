@@ -3846,16 +3846,27 @@ void RayTracingModuleContext::render() {
     // Bind block sprite texture arrays (set 0, bindings 3-5)
     auto& texSystem = Renderer::textureSystem;
     const uint64_t textureGeneration = texSystem.generation();
-    const uint64_t materialTexturePageRevision = texSystem.materialTexturePageRevision();
+    uint64_t materialTexturePageRevision = texSystem.materialTexturePageRevision();
     std::string textureDescriptorLabel = "RT:TexturePublishAndDescriptors gen=" +
         std::to_string(textureGeneration) + " frame=" + std::to_string(context->frameIndex);
     worldCommandBuffer->beginLabel(textureDescriptorLabel.c_str(), 0.95f, 0.35f, 0.1f);
     ScopedGpuProfile textureProfile(profileCmd, "RT.TexturePublish");
+    auto vma = framework->vma();
+    auto device = framework->device();
+    const bool v4MaterialPagesActiveBeforeFlush = texSystem.hasV4MaterialPagesActive();
+    const bool materialPagesAllocatedBeforeFlush = texSystem.hasAllocatedMaterialTexturePages();
+    if (v4MaterialPagesActiveBeforeFlush || materialPagesAllocatedBeforeFlush) {
+        texSystem.ensureDescriptorFallbackArrays(vma, device);
+    }
     // Flush any pending texture array uploads (staged by animation tick, executed here on render thread)
-    if (texSystem.isFinalized()) {
-        renderDiag("RT textureFlush begin");
-        auto vma = framework->vma();
-        auto device = framework->device();
+    const bool texturePublicationPossible =
+        texSystem.isFinalized() || v4MaterialPagesActiveBeforeFlush || materialPagesAllocatedBeforeFlush;
+    if (texturePublicationPossible) {
+        renderDiag("RT textureFlush begin finalized=%d v4Active=%d allocatedMaterialPages=%d pendingMipPages=%u",
+                   texSystem.isFinalized() ? 1 : 0,
+                   v4MaterialPagesActiveBeforeFlush ? 1 : 0,
+                   materialPagesAllocatedBeforeFlush ? 1 : 0,
+                   texSystem.pendingMaterialMipPageCount());
         {
             auto _ft0 = std::chrono::steady_clock::now();
             texSystem.flushPendingUploads(vma, device, worldCommandBuffer, framework->gc());
@@ -3863,12 +3874,17 @@ void RayTracingModuleContext::render() {
         }
         renderDiag("RT textureFlush end");
     }
+    materialTexturePageRevision = texSystem.materialTexturePageRevision();
     // Block albedo array
     auto& texArrayMgr = texSystem.arrayManager();
     TextureArrayManager::ArrayInfo albedoInfo{};
     TextureArrayManager::ArrayInfo specInfo{};
     TextureArrayManager::ArrayInfo normInfo{};
     TextureArrayManager::ArrayInfo flagInfo{};
+    TextureArrayManager::ArrayInfo fallbackAlbedoInfo{};
+    TextureArrayManager::ArrayInfo fallbackSpecInfo{};
+    TextureArrayManager::ArrayInfo fallbackNormInfo{};
+    TextureArrayManager::ArrayInfo fallbackFlagInfo{};
     const bool hasAlbedo = texArrayMgr.getArraySnapshot(texSystem.blockAlbedoArrayId(), albedoInfo) &&
                            albedoInfo.image && albedoInfo.sampler;
     const bool hasSpec = texArrayMgr.getArraySnapshot(texSystem.blockSpecularArrayId(), specInfo) &&
@@ -3877,17 +3893,48 @@ void RayTracingModuleContext::render() {
                          normInfo.image && normInfo.sampler;
     const bool hasFlag = texArrayMgr.getArraySnapshot(texSystem.blockFlagArrayId(), flagInfo) &&
                          flagInfo.image && flagInfo.sampler;
+    const bool hasFallbackAlbedo = texArrayMgr.getArraySnapshot(texSystem.fallbackAlbedoArrayId(), fallbackAlbedoInfo) &&
+                                   fallbackAlbedoInfo.image && fallbackAlbedoInfo.sampler;
+    const bool hasFallbackSpec = texArrayMgr.getArraySnapshot(texSystem.fallbackSpecularArrayId(), fallbackSpecInfo) &&
+                                 fallbackSpecInfo.image && fallbackSpecInfo.sampler;
+    const bool hasFallbackNorm = texArrayMgr.getArraySnapshot(texSystem.fallbackNormalArrayId(), fallbackNormInfo) &&
+                                 fallbackNormInfo.image && fallbackNormInfo.sampler;
+    const bool hasFallbackFlag = texArrayMgr.getArraySnapshot(texSystem.fallbackFlagArrayId(), fallbackFlagInfo) &&
+                                 fallbackFlagInfo.image && fallbackFlagInfo.sampler;
+    const bool legacyArraysReady = texSystem.isFinalized() && hasAlbedo && hasSpec && hasNorm && hasFlag;
+    const bool fallbackArraysReady =
+        texSystem.descriptorFallbackArraysReady() &&
+        hasFallbackAlbedo && hasFallbackSpec && hasFallbackNorm && hasFallbackFlag;
+    const uint32_t readyMaterialPages = texSystem.readyMaterialTexturePageCount();
+    const uint32_t pendingMaterialMipPages = texSystem.pendingMaterialMipPageCount();
+    const bool v4ArraysReady = readyMaterialPages > 0 && fallbackArraysReady;
 
-    const VkImageView albedoView = hasAlbedo ? albedoInfo.image->vkImageView() : VK_NULL_HANDLE;
-    const VkImageView specView = hasSpec ? specInfo.image->vkImageView() : VK_NULL_HANDLE;
-    const VkImageView normView = hasNorm ? normInfo.image->vkImageView() : VK_NULL_HANDLE;
-    const VkImageView flagView = hasFlag ? flagInfo.image->vkImageView() : VK_NULL_HANDLE;
+    const TextureArrayManager::ArrayInfo& baseAlbedoInfo = hasAlbedo ? albedoInfo : fallbackAlbedoInfo;
+    const TextureArrayManager::ArrayInfo& baseSpecInfo = hasSpec ? specInfo : fallbackSpecInfo;
+    const TextureArrayManager::ArrayInfo& baseNormInfo = hasNorm ? normInfo : fallbackNormInfo;
+    const TextureArrayManager::ArrayInfo& baseFlagInfo = hasFlag ? flagInfo : fallbackFlagInfo;
+    const bool hasBaseAlbedo = hasAlbedo || hasFallbackAlbedo;
+    const bool hasBaseSpec = hasSpec || hasFallbackSpec;
+    const bool hasBaseNorm = hasNorm || hasFallbackNorm;
+    const bool hasBaseFlag = hasFlag || hasFallbackFlag;
 
-    if (!texSystem.isFinalized() || !hasAlbedo || !hasSpec || !hasNorm || !hasFlag ||
+    const VkImageView albedoView = hasBaseAlbedo ? baseAlbedoInfo.image->vkImageView() : VK_NULL_HANDLE;
+    const VkImageView specView = hasBaseSpec ? baseSpecInfo.image->vkImageView() : VK_NULL_HANDLE;
+    const VkImageView normView = hasBaseNorm ? baseNormInfo.image->vkImageView() : VK_NULL_HANDLE;
+    const VkImageView flagView = hasBaseFlag ? baseFlagInfo.image->vkImageView() : VK_NULL_HANDLE;
+
+    if ((!legacyArraysReady && !v4ArraysReady) ||
         !spriteRegBuffer || !materialRegBuffer || !textureRuleBuffer) {
-        renderDiag("RT descriptors missing texture resources finalized=%d albedo=%d spec=%d norm=%d flag=%d spriteReg=%d materialReg=%d rules=%d; skipping RT",
-                   texSystem.isFinalized() ? 1 : 0, hasAlbedo ? 1 : 0, hasSpec ? 1 : 0,
-                   hasNorm ? 1 : 0, hasFlag ? 1 : 0, spriteRegBuffer ? 1 : 0,
+        renderDiag("RT descriptors missing texture resources finalized=%d legacyReady=%d v4Ready=%d albedo=%d spec=%d norm=%d flag=%d fallbackReady=%d readyMaterialPages=%u pendingMaterialMipPages=%u spriteReg=%d materialReg=%d rules=%d; skipping RT",
+                   texSystem.isFinalized() ? 1 : 0,
+                   legacyArraysReady ? 1 : 0,
+                   v4ArraysReady ? 1 : 0,
+                   hasAlbedo ? 1 : 0, hasSpec ? 1 : 0,
+                   hasNorm ? 1 : 0, hasFlag ? 1 : 0,
+                   fallbackArraysReady ? 1 : 0,
+                   readyMaterialPages,
+                   pendingMaterialMipPages,
+                   spriteRegBuffer ? 1 : 0,
                    materialRegBuffer ? 1 : 0,
                    textureRuleBuffer ? 1 : 0);
         g_crashRing.record("RT:descriptors_missing_textures");
@@ -3911,10 +3958,10 @@ void RayTracingModuleContext::render() {
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, binding, page);
         };
         for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
-            bindPage(3, page, texSystem.materialAlbedoPageArrayId(page), albedoInfo);
-            bindPage(4, page, texSystem.materialSpecularPageArrayId(page), specInfo);
-            bindPage(5, page, texSystem.materialNormalPageArrayId(page), normInfo);
-            bindPage(6, page, texSystem.materialFlagPageArrayId(page), flagInfo);
+            bindPage(3, page, texSystem.materialAlbedoPageArrayId(page), baseAlbedoInfo);
+            bindPage(4, page, texSystem.materialSpecularPageArrayId(page), baseSpecInfo);
+            bindPage(5, page, texSystem.materialNormalPageArrayId(page), baseNormInfo);
+            bindPage(6, page, texSystem.materialFlagPageArrayId(page), baseFlagInfo);
         }
     };
     auto bindSpriteRegistry = [&](const std::shared_ptr<vk::DescriptorTable>& table) {
@@ -3951,30 +3998,64 @@ void RayTracingModuleContext::render() {
         bindSpriteRegistry(rayTracingDescriptorTable);
         bindMaterialRegistry(rayTracingDescriptorTable);
         bindTextureRules(rayTracingDescriptorTable);
+        uint32_t boundV4AlbedoPages = 0;
+        uint32_t boundFallbackPages = 0;
+        uint32_t firstReadyPage = UINT32_MAX;
+        uint32_t firstReadyAlbedoArrayId = UINT32_MAX;
+        for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+            const uint32_t pageAlbedoArrayId = texSystem.materialAlbedoPageArrayId(page);
+            if (pageAlbedoArrayId != UINT32_MAX) {
+                if (page > 0) {
+                    boundV4AlbedoPages++;
+                }
+                if (firstReadyPage == UINT32_MAX && page > 0) {
+                    firstReadyPage = page;
+                    firstReadyAlbedoArrayId = pageAlbedoArrayId;
+                }
+            } else {
+                boundFallbackPages++;
+            }
+        }
         RadianceLogger::log(
             "TextureDescriptors", "INFO",
             "refresh-slot gen=%llu frame=%u albedoId=%u image=0x%llx view=0x%llx sampler=0x%llx "
             "specId=%u image=0x%llx view=0x%llx sampler=0x%llx normId=%u image=0x%llx view=0x%llx sampler=0x%llx "
             "flagId=%u image=0x%llx view=0x%llx sampler=0x%llx "
+            "legacyReady=%d v4Ready=%d fallbackReady=%d readyMaterialPages=%u pendingMaterialMipPages=%u "
+            "boundV4AlbedoPages=%u boundFallbackPages=%u firstReadyPage=%u firstReadyAlbedoArrayId=%u "
+            "fallbackAlbedoId=%u fallbackSpecId=%u fallbackNormId=%u fallbackFlagId=%u "
             "spriteRegistry=0x%llx materialRegistry=0x%llx materialPageRevision=%llu",
             static_cast<unsigned long long>(textureGeneration),
             context->frameIndex,
             texSystem.blockAlbedoArrayId(),
-            hasAlbedo ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(albedoInfo.image->vkImage())) : 0ull,
+            hasBaseAlbedo ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(baseAlbedoInfo.image->vkImage())) : 0ull,
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(albedoView)),
-            hasAlbedo ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(albedoInfo.sampler->vkSamper())) : 0ull,
+            hasBaseAlbedo ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(baseAlbedoInfo.sampler->vkSamper())) : 0ull,
             texSystem.blockSpecularArrayId(),
-            hasSpec ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(specInfo.image->vkImage())) : 0ull,
+            hasBaseSpec ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(baseSpecInfo.image->vkImage())) : 0ull,
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(specView)),
-            hasSpec ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(specInfo.sampler->vkSamper())) : 0ull,
+            hasBaseSpec ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(baseSpecInfo.sampler->vkSamper())) : 0ull,
             texSystem.blockNormalArrayId(),
-            hasNorm ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(normInfo.image->vkImage())) : 0ull,
+            hasBaseNorm ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(baseNormInfo.image->vkImage())) : 0ull,
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(normView)),
-            hasNorm ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(normInfo.sampler->vkSamper())) : 0ull,
+            hasBaseNorm ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(baseNormInfo.sampler->vkSamper())) : 0ull,
             texSystem.blockFlagArrayId(),
-            hasFlag ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(flagInfo.image->vkImage())) : 0ull,
+            hasBaseFlag ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(baseFlagInfo.image->vkImage())) : 0ull,
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(flagView)),
-            hasFlag ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(flagInfo.sampler->vkSamper())) : 0ull,
+            hasBaseFlag ? static_cast<unsigned long long>(vk::DebugUtils::objectHandle(baseFlagInfo.sampler->vkSamper())) : 0ull,
+            legacyArraysReady ? 1 : 0,
+            v4ArraysReady ? 1 : 0,
+            fallbackArraysReady ? 1 : 0,
+            readyMaterialPages,
+            pendingMaterialMipPages,
+            boundV4AlbedoPages,
+            boundFallbackPages,
+            firstReadyPage,
+            firstReadyAlbedoArrayId,
+            texSystem.fallbackAlbedoArrayId(),
+            texSystem.fallbackSpecularArrayId(),
+            texSystem.fallbackNormalArrayId(),
+            texSystem.fallbackFlagArrayId(),
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(spriteRegistryBuffer)),
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(materialRegistryBuffer)),
             static_cast<unsigned long long>(materialTexturePageRevision));
