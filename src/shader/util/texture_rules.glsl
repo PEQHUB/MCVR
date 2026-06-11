@@ -12,7 +12,7 @@ layout(std430, set = 1, binding = 11) readonly buffer TextureRuleRegistryBuffer 
 };
 
 TextureRuleEntry safeTextureRuleEntry(uint materialId) {
-    uint spriteId = materialRuleSpriteId(materialId);
+    uint spriteId = materialRuleSpriteId(materialEffectiveId(materialId));
     return textureRuleEntries[min(spriteId, SPRITE_MAX_ENTRIES - 1u)];
 }
 

@@ -9,8 +9,29 @@ MaterialEntry safeMaterialEntry(uint materialId) {
     return materialEntries[min(materialId, MATERIAL_MAX_ENTRIES - 1u)];
 }
 
-uint materialBaseSpriteId(uint materialId) {
+bool materialCanSample(MaterialEntry material) {
+    return (material.flags & MATERIAL_FLAG_VALID) != 0u &&
+           (material.flags & MATERIAL_FLAG_GPU_RESIDENT) != 0u &&
+           (material.flags & MATERIAL_FLAG_PENDING_RESIDENCY) == 0u;
+}
+
+uint materialEffectiveId(uint materialId) {
     MaterialEntry material = safeMaterialEntry(materialId);
+    if (materialCanSample(material)) return materialId;
+
+    uint fallbackId = uint(max(material.fallbackMaterialId, 0));
+    if (fallbackId != materialId && materialCanSample(safeMaterialEntry(fallbackId))) {
+        return fallbackId;
+    }
+    return 0u;
+}
+
+MaterialEntry materialSamplingEntry(uint materialId) {
+    return safeMaterialEntry(materialEffectiveId(materialId));
+}
+
+uint materialBaseSpriteId(uint materialId) {
+    MaterialEntry material = materialSamplingEntry(materialId);
     if ((material.flags & MATERIAL_FLAG_VALID) == 0u) return 0u;
     return uint(max(material.baseSpriteId, 0));
 }
@@ -21,7 +42,7 @@ uint materialFallbackId(uint materialId) {
 }
 
 uint materialRuleSpriteId(uint materialId) {
-    MaterialEntry material = safeMaterialEntry(materialId);
+    MaterialEntry material = materialSamplingEntry(materialId);
     if ((material.flags & MATERIAL_FLAG_VALID) == 0u) return 0u;
     if (material.baseSpriteId >= 0) return uint(material.baseSpriteId);
     return materialBaseSpriteId(materialFallbackId(materialId));
