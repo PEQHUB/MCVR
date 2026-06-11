@@ -161,28 +161,28 @@ bool TextureSystem::descriptorFallbackArraysReady() const {
 }
 
 uint32_t TextureSystem::materialAlbedoPageArrayId(uint32_t page) const {
-    if (page == 0) return blockAlbedoArrayId();
+    if (page == 0) return fallbackAlbedoArrayId();
     if (page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return UINT32_MAX;
     if (!materialPageReady_[page].load(std::memory_order_acquire)) return UINT32_MAX;
     return materialAlbedoPageArrayIds_[page].load(std::memory_order_acquire);
 }
 
 uint32_t TextureSystem::materialSpecularPageArrayId(uint32_t page) const {
-    if (page == 0) return blockSpecularArrayId();
+    if (page == 0) return fallbackSpecularArrayId();
     if (page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return UINT32_MAX;
     if (!materialPageReady_[page].load(std::memory_order_acquire)) return UINT32_MAX;
     return materialSpecularPageArrayIds_[page].load(std::memory_order_acquire);
 }
 
 uint32_t TextureSystem::materialNormalPageArrayId(uint32_t page) const {
-    if (page == 0) return blockNormalArrayId();
+    if (page == 0) return fallbackNormalArrayId();
     if (page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return UINT32_MAX;
     if (!materialPageReady_[page].load(std::memory_order_acquire)) return UINT32_MAX;
     return materialNormalPageArrayIds_[page].load(std::memory_order_acquire);
 }
 
 uint32_t TextureSystem::materialFlagPageArrayId(uint32_t page) const {
-    if (page == 0) return blockFlagArrayId();
+    if (page == 0) return fallbackFlagArrayId();
     if (page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return UINT32_MAX;
     if (!materialPageReady_[page].load(std::memory_order_acquire)) return UINT32_MAX;
     return materialFlagPageArrayIds_[page].load(std::memory_order_acquire);

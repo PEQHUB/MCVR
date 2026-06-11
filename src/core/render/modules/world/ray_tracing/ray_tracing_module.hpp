@@ -173,7 +173,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
                                             uint32_t frameIndex,
                                             uint32_t width,
                                             uint32_t height);
-    void bindLegacyTexturesForSlot(const std::shared_ptr<vk::DescriptorTable>& descriptorTable, uint32_t frameIndex);
 
   private:
     // input
@@ -235,14 +234,6 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
         VkBuffer textureRuleBuffer = VK_NULL_HANDLE;
     };
     std::vector<TextureDescriptorSlotState> textureDescriptorSlotStates_;
-    struct LegacyTextureBinding {
-        std::shared_ptr<vk::Sampler> sampler;
-        std::shared_ptr<vk::DeviceLocalImage> image;
-    };
-    std::mutex legacyTextureBindingsMutex_;
-    std::unordered_map<int, LegacyTextureBinding> legacyTextureBindings_;
-    std::vector<uint64_t> legacyTextureBindingRevisions_;
-    std::atomic<uint64_t> legacyTextureBindingRevision_{1};
 
     uint32_t numRayBounces_ = 2;
     bool useJitter_ = true;
