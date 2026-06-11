@@ -67,8 +67,13 @@ VkSemaphore &vk::TimelineSemaphore::vkSemaphore() {
 
 uint64_t vk::TimelineSemaphore::getValue() const {
     uint64_t value = 0;
-    vkGetSemaphoreCounterValue(device_->vkDevice(), semaphore_, &value);
+    if (getValue(value) != VK_SUCCESS) return 0;
     return value;
+}
+
+VkResult vk::TimelineSemaphore::getValue(uint64_t& value) const {
+    value = 0;
+    return vkGetSemaphoreCounterValue(device_->vkDevice(), semaphore_, &value);
 }
 
 VkResult vk::TimelineSemaphore::waitValue(uint64_t value, uint64_t timeout) const {

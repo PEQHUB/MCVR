@@ -41,6 +41,7 @@ class TimelineSemaphore : public SharedObject<TimelineSemaphore> {
 
     /// Query current counter value (may lag behind GPU — use waitValue for guaranteed sync)
     uint64_t getValue() const;
+    VkResult getValue(uint64_t& value) const;
 
     /// CPU-side blocking wait until counter >= value. Returns VK_SUCCESS or VK_ERROR_DEVICE_LOST.
     VkResult waitValue(uint64_t value, uint64_t timeout = UINT64_MAX) const;

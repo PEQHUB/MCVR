@@ -1247,7 +1247,16 @@ void ChunkBuildScheduler::blasThreadLoop() {
     auto blasSem = device->blasSemaphore();
     // Initialize counter from current semaphore value — handles scheduler restart
     // (render distance change recreates scheduler but Device-level semaphore persists).
-    blasTimelineCounter_ = blasSem->getValue();
+    uint64_t initialBlasTimeline = 0;
+    VkResult initialTimelineResult = blasSem->getValue(initialBlasTimeline);
+    if (initialTimelineResult != VK_SUCCESS) {
+        g_crashRing.record("blasTimelineInitFail", initialTimelineResult);
+        if (initialTimelineResult == VK_ERROR_DEVICE_LOST) {
+            crashExitWithQueue(initialTimelineResult, "BLAS timeline init DEVICE_LOST", device->secondaryQueue());
+        }
+        initialBlasTimeline = 0;
+    }
+    blasTimelineCounter_ = initialBlasTimeline;
 
     static uint64_t totalOrig = 0, totalComp = 0;
     static uint32_t totalN = 0;
@@ -1289,7 +1298,22 @@ void ChunkBuildScheduler::blasThreadLoop() {
         diagIter++;
         ensureDiagOpen();
         // ---- POLL: check completed batches via timeline counter (non-blocking) ----
-        uint64_t currentTimelineVal = blasSem->getValue();
+        uint64_t currentTimelineVal = 0;
+        VkResult timelineResult = blasSem->getValue(currentTimelineVal);
+        if (timelineResult != VK_SUCCESS) {
+            if (diagLog.is_open()) {
+                diagLog << diagTs() << " TIMELINE_QUERY_FAIL iter=" << diagIter
+                        << " vk=" << timelineResult
+                        << " inFlight=" << inFlight_.size() << std::endl;
+                diagLog.flush();
+            }
+            g_crashRing.record("blasTimelineQueryFail", timelineResult);
+            if (timelineResult == VK_ERROR_DEVICE_LOST) {
+                crashExitWithQueue(timelineResult, "BLAS timeline query DEVICE_LOST", device->secondaryQueue());
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
         while (!inFlight_.empty()) {
             auto &front = inFlight_.front();
             if (currentTimelineVal < front.timelineValue) break;  // oldest not done yet
