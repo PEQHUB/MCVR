@@ -5,7 +5,23 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <utility>
+
+namespace {
+vk::Data::SpriteEntry makeDefaultSpriteEntry() {
+    vk::Data::SpriteEntry defaultEntry{};
+    defaultEntry.baseLayer = 0;
+    defaultEntry.frameCount = 1;
+    defaultEntry.tickRate = 1;
+    defaultEntry.flags = 0;
+    defaultEntry.specularLayer = -1;
+    defaultEntry.normalLayer = -1;
+    defaultEntry.overlaySprite = -1;
+    defaultEntry.maskLayer = -1;
+    return defaultEntry;
+}
+}
 
 void SpriteRegistry::registerSprite(uint16_t spriteId,
                                      uint32_t baseLayer,
@@ -25,15 +41,7 @@ void SpriteRegistry::registerSprite(uint16_t spriteId,
     }
 
     if (entries_.size() <= spriteId) {
-        vk::Data::SpriteEntry defaultEntry{};
-        defaultEntry.baseLayer = 0;
-        defaultEntry.frameCount = 1;
-        defaultEntry.tickRate = 1;
-        defaultEntry.flags = 0;
-        defaultEntry.specularLayer = -1;
-        defaultEntry.normalLayer = -1;
-        defaultEntry.overlaySprite = -1;
-        defaultEntry.maskLayer = -1;
+        vk::Data::SpriteEntry defaultEntry = makeDefaultSpriteEntry();
         entries_.resize(spriteId + 1, defaultEntry);
     }
 
@@ -57,6 +65,8 @@ void SpriteRegistry::registerSprite(uint16_t spriteId,
     e.maskLayer = effectiveMaskLayer;
 
     spriteCount_ = std::max(spriteCount_, static_cast<uint32_t>(spriteId + 1));
+    usingFallback_ = false;
+    revision_++;
 }
 
 const vk::Data::SpriteEntry* SpriteRegistry::getEntry(uint16_t spriteId) const {
@@ -88,19 +98,13 @@ bool SpriteRegistry::replacePrefix(const vk::Data::SpriteEntry* entries, uint32_
     if (!entries || count == 0 || count > vk::Data::SPRITE_MAX_ENTRIES) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     if (entries_.size() < count) {
-        vk::Data::SpriteEntry defaultEntry{};
-        defaultEntry.baseLayer = 0;
-        defaultEntry.frameCount = 1;
-        defaultEntry.tickRate = 1;
-        defaultEntry.flags = 0;
-        defaultEntry.specularLayer = -1;
-        defaultEntry.normalLayer = -1;
-        defaultEntry.overlaySprite = -1;
-        defaultEntry.maskLayer = -1;
+        vk::Data::SpriteEntry defaultEntry = makeDefaultSpriteEntry();
         entries_.resize(count, defaultEntry);
     }
     std::copy(entries, entries + count, entries_.begin());
     spriteCount_ = std::max(spriteCount_, count);
+    usingFallback_ = false;
+    revision_++;
     return true;
 }
 
@@ -116,15 +120,7 @@ bool SpriteRegistry::uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk
         return false;
     }
 
-    vk::Data::SpriteEntry defaultEntry{};
-    defaultEntry.baseLayer = 0;
-    defaultEntry.frameCount = 1;
-    defaultEntry.tickRate = 1;
-    defaultEntry.flags = 0;
-    defaultEntry.specularLayer = -1;
-    defaultEntry.normalLayer = -1;
-    defaultEntry.overlaySprite = -1;
-    defaultEntry.maskLayer = -1;
+    vk::Data::SpriteEntry defaultEntry = makeDefaultSpriteEntry();
 
     std::vector<vk::Data::SpriteEntry> uploadEntries(vk::Data::SPRITE_MAX_ENTRIES, defaultEntry);
     const size_t copyCount = std::min(entries_.size(), uploadEntries.size());
@@ -151,10 +147,86 @@ bool SpriteRegistry::uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk
         framework->gc().collect(ssbo_);
     }
     ssbo_ = std::move(nextSsbo);
+    usingFallback_ = false;
+    revision_++;
 
     std::cout << "[SpriteRegistry] Uploaded " << spriteCount_ << " sprites ("
               << dataSize << " bytes padded) to GPU SSBO" << std::endl;
     return true;
+}
+
+bool SpriteRegistry::ensureFallbackSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device) {
+    if (!vma || !device) return false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (ssbo_ && ssbo_->isValid()) return true;
+    }
+
+    auto renderer = Renderer::try_instance();
+    auto framework = renderer ? renderer->framework() : nullptr;
+    if (!framework) {
+        std::cerr << "[SpriteRegistry] Cannot upload fallback SSBO without renderer framework" << std::endl;
+        return false;
+    }
+
+    std::vector<vk::Data::SpriteEntry> uploadEntries(vk::Data::SPRITE_MAX_ENTRIES, makeDefaultSpriteEntry());
+    VkDeviceSize dataSize = uploadEntries.size() * sizeof(vk::Data::SpriteEntry);
+    auto nextSsbo = vk::DeviceLocalBuffer::create(
+        vma, device, true, dataSize,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    if (!nextSsbo || !nextSsbo->isValid()) return false;
+
+    nextSsbo->uploadToStagingBuffer(uploadEntries.data(), static_cast<size_t>(dataSize), 0);
+
+    auto fence = vk::Fence::create(device);
+    auto cmd = vk::CommandBuffer::create(device, framework->mainCommandPool());
+    cmd->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+    nextSsbo->uploadToBuffer(cmd);
+    cmd->end();
+    cmd->submitMainQueueIndividual(device, fence);
+    vkWaitForFences(device->vkDevice(), 1, &fence->vkFence(), VK_TRUE, UINT64_MAX);
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (ssbo_) {
+        framework->gc().collect(ssbo_);
+    }
+    ssbo_ = std::move(nextSsbo);
+    entries_.clear();
+    spriteCount_ = 0;
+    usingFallback_ = true;
+    revision_++;
+    std::cout << "[SpriteRegistry] Uploaded V4 fallback sprite SSBO ("
+              << dataSize << " bytes padded)" << std::endl;
+    return true;
+}
+
+bool SpriteRegistry::hasBuffer() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ssbo_ && ssbo_->isValid();
+}
+
+bool SpriteRegistry::usingFallback() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return usingFallback_;
+}
+
+uint64_t SpriteRegistry::revision() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return revision_;
+}
+
+std::string SpriteRegistry::statusJson() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::ostringstream out;
+    out << "{"
+        << "\"schema\":\"radser_sprite_registry_status_v1\","
+        << "\"hasBuffer\":" << ((ssbo_ && ssbo_->isValid()) ? "true" : "false") << ","
+        << "\"usingFallback\":" << (usingFallback_ ? "true" : "false") << ","
+        << "\"spriteCount\":" << spriteCount_ << ","
+        << "\"paddedSpriteCapacity\":" << vk::Data::SPRITE_MAX_ENTRIES << ","
+        << "\"revision\":" << revision_
+        << "}";
+    return out.str();
 }
 
 void SpriteRegistry::reset() {
@@ -162,12 +234,16 @@ void SpriteRegistry::reset() {
     entries_.clear();
     spriteCount_ = 0;
     ssbo_.reset();
+    usingFallback_ = false;
+    revision_++;
 }
 
 void SpriteRegistry::clearEntries() {
     std::lock_guard<std::mutex> lock(mutex_);
     entries_.clear();
     spriteCount_ = 0;
+    usingFallback_ = false;
+    revision_++;
 }
 
 void SpriteRegistry::retire(GarbageCollector& gc) {
@@ -176,4 +252,6 @@ void SpriteRegistry::retire(GarbageCollector& gc) {
     entries_.clear();
     spriteCount_ = 0;
     ssbo_.reset();
+    usingFallback_ = false;
+    revision_++;
 }

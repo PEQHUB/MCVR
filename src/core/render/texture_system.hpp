@@ -230,6 +230,11 @@ class TextureSystem {
     uint32_t pendingMaterialMipPageCount() const;
     bool ensureDescriptorFallbackArrays(std::shared_ptr<vk::VMA> vma,
                                         std::shared_ptr<vk::Device> device);
+    bool ensureV4ShaderFallbackResources(uint64_t generation,
+                                         std::shared_ptr<vk::VMA> vma,
+                                         std::shared_ptr<vk::Device> device);
+    bool ensureV4ShaderFallbackResources(std::shared_ptr<vk::VMA> vma,
+                                         std::shared_ptr<vk::Device> device);
     bool descriptorFallbackArraysReady() const;
     uint32_t fallbackAlbedoArrayId() const { return fallbackAlbedoArrayId_.load(std::memory_order_acquire); }
     uint32_t fallbackSpecularArrayId() const { return fallbackSpecularArrayId_.load(std::memory_order_acquire); }
@@ -237,6 +242,11 @@ class TextureSystem {
     uint32_t fallbackFlagArrayId() const { return fallbackFlagArrayId_.load(std::memory_order_acquire); }
     std::string materialPagePoolStatusJson() const;
     std::string materialTableStatusJson() const;
+    std::string v4FrameResourceStatusJson() const;
+    std::shared_ptr<vk::DeviceLocalBuffer> textureRuleBufferOrFallback() const;
+    bool textureRulesReady() const;
+    bool textureRulesUsingFallback() const;
+    uint64_t textureRulesRevision() const;
     std::string nativeUploadSafetyStatusJson() const;
     /// Reset on resource reload.
     void reset();

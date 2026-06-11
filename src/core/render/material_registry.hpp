@@ -18,9 +18,14 @@ class MaterialRegistry {
     bool uploadMaterials(const vk::Data::MaterialEntry* entries, uint32_t count,
                          std::shared_ptr<vk::VMA> vma,
                          std::shared_ptr<vk::Device> device);
+    bool ensureFallbackMaterials(std::shared_ptr<vk::VMA> vma,
+                                 std::shared_ptr<vk::Device> device);
     bool updateMaterialsSparse(const vk::Data::MaterialEntry* entries, uint32_t count,
                                std::shared_ptr<vk::VMA> vma,
                                std::shared_ptr<vk::Device> device);
+    bool hasBuffer() const;
+    bool usingFallback() const;
+    uint64_t revision() const;
 
     std::shared_ptr<vk::DeviceLocalBuffer> getBuffer() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -57,6 +62,9 @@ class MaterialRegistry {
     uint32_t materialCount_ = 0;
     uint64_t fullUploads_ = 0;
     uint64_t sparseUpdates_ = 0;
+    uint64_t fallbackUploads_ = 0;
+    uint64_t revision_ = 0;
+    bool usingFallback_ = false;
     uint64_t asyncSubmissions_ = 0;
     mutable uint64_t asyncCompletions_ = 0;
     uint64_t timelineSubmissions_ = 0;

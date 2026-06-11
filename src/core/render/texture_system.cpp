@@ -160,6 +160,29 @@ bool TextureSystem::descriptorFallbackArraysReady() const {
         fallbackFlagArrayId_.load(std::memory_order_acquire) != UINT32_MAX;
 }
 
+bool TextureSystem::ensureV4ShaderFallbackResources(uint64_t generation,
+                                                    std::shared_ptr<vk::VMA> vma,
+                                                    std::shared_ptr<vk::Device> device) {
+    if (!vma || !device) return false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) {
+            return false;
+        }
+    }
+
+    if (!ensureDescriptorFallbackArrays(vma, device)) return false;
+    if (!registry_.ensureFallbackSSBO(vma, device)) return false;
+    if (!materials_.ensureFallbackMaterials(vma, device)) return false;
+    if (!textureRules_.ensureDefaultRules(vma, device)) return false;
+    return true;
+}
+
+bool TextureSystem::ensureV4ShaderFallbackResources(std::shared_ptr<vk::VMA> vma,
+                                                    std::shared_ptr<vk::Device> device) {
+    return ensureV4ShaderFallbackResources(generation(), std::move(vma), std::move(device));
+}
+
 uint32_t TextureSystem::materialAlbedoPageArrayId(uint32_t page) const {
     if (page == 0) return fallbackAlbedoArrayId();
     if (page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return UINT32_MAX;
@@ -1445,6 +1468,36 @@ std::string TextureSystem::materialPagePoolStatusJson() const {
 
 std::string TextureSystem::materialTableStatusJson() const {
     return materials_.statusJson();
+}
+
+std::string TextureSystem::v4FrameResourceStatusJson() const {
+    std::ostringstream out;
+    out << "{"
+        << "\"schema\":\"radser_v4_frame_resource_status_v1\","
+        << "\"generation\":" << generation() << ","
+        << "\"finalized\":" << (isFinalized() ? "true" : "false") << ","
+        << "\"descriptorFallbackArraysReady\":" << (descriptorFallbackArraysReady() ? "true" : "false") << ","
+        << "\"spriteRegistry\":" << registry_.statusJson() << ","
+        << "\"materialRegistry\":" << materials_.statusJson() << ","
+        << "\"textureRules\":" << textureRules_.statusJson()
+        << "}";
+    return out.str();
+}
+
+std::shared_ptr<vk::DeviceLocalBuffer> TextureSystem::textureRuleBufferOrFallback() const {
+    return textureRules_.getBuffer();
+}
+
+bool TextureSystem::textureRulesReady() const {
+    return textureRules_.hasBuffer();
+}
+
+bool TextureSystem::textureRulesUsingFallback() const {
+    return textureRules_.usingDefaultRules();
+}
+
+uint64_t TextureSystem::textureRulesRevision() const {
+    return textureRules_.revision();
 }
 
 std::string TextureSystem::nativeUploadSafetyStatusJson() const {

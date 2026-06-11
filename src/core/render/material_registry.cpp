@@ -8,6 +8,38 @@
 #include <sstream>
 #include <utility>
 
+namespace {
+vk::Data::MaterialEntry makeDefaultMaterialEntry(bool fallback) {
+    vk::Data::MaterialEntry defaultEntry{};
+    defaultEntry.materialId = 0;
+    defaultEntry.baseSpriteId = 0;
+    defaultEntry.fallbackMaterialId = 0;
+    defaultEntry.flags = vk::Data::MATERIAL_FLAG_VALID |
+                         vk::Data::MATERIAL_FLAG_VANILLA_SPRITE |
+                         vk::Data::MATERIAL_FLAG_GPU_RESIDENT;
+    if (fallback) {
+        defaultEntry.flags |= vk::Data::MATERIAL_FLAG_FALLBACK;
+    }
+    defaultEntry.albedoPage = 0;
+    defaultEntry.albedoLayer = 0;
+    defaultEntry.specularPage = 0;
+    defaultEntry.specularLayer = -1;
+    defaultEntry.normalPage = 0;
+    defaultEntry.normalLayer = -1;
+    defaultEntry.flagPage = 0;
+    defaultEntry.flagLayer = 0;
+    defaultEntry.overlayMaterialId = -1;
+    defaultEntry.displacementPolicy = 0;
+    defaultEntry.displacementScale = 0.0f;
+    defaultEntry.heightRangePacked = -1;
+    defaultEntry.uvScaleU = 1.0f;
+    defaultEntry.uvScaleV = 1.0f;
+    defaultEntry.uvOffsetU = 0.0f;
+    defaultEntry.uvOffsetV = 0.0f;
+    return defaultEntry;
+}
+}
+
 void MaterialRegistry::pollCompletedUploadsLocked() const {
     for (auto it = pendingUploads_.begin(); it != pendingUploads_.end();) {
         if (!it->device || (!it->fence && !it->timeline)) {
@@ -48,29 +80,7 @@ bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, u
     if (!renderer || !renderer->framework()) return false;
     auto framework = renderer->framework();
 
-    vk::Data::MaterialEntry defaultEntry{};
-    defaultEntry.materialId = 0;
-    defaultEntry.baseSpriteId = 0;
-    defaultEntry.fallbackMaterialId = 0;
-    defaultEntry.flags = vk::Data::MATERIAL_FLAG_VALID |
-                         vk::Data::MATERIAL_FLAG_VANILLA_SPRITE |
-                         vk::Data::MATERIAL_FLAG_GPU_RESIDENT;
-    defaultEntry.albedoPage = 0;
-    defaultEntry.albedoLayer = 0;
-    defaultEntry.specularPage = 0;
-    defaultEntry.specularLayer = -1;
-    defaultEntry.normalPage = 0;
-    defaultEntry.normalLayer = -1;
-    defaultEntry.flagPage = 0;
-    defaultEntry.flagLayer = 0;
-    defaultEntry.overlayMaterialId = -1;
-    defaultEntry.displacementPolicy = 0;
-    defaultEntry.displacementScale = 0.0f;
-    defaultEntry.heightRangePacked = -1;
-    defaultEntry.uvScaleU = 1.0f;
-    defaultEntry.uvScaleV = 1.0f;
-    defaultEntry.uvOffsetU = 0.0f;
-    defaultEntry.uvOffsetV = 0.0f;
+    vk::Data::MaterialEntry defaultEntry = makeDefaultMaterialEntry(false);
 
     std::vector<vk::Data::MaterialEntry> uploadEntries(vk::Data::MATERIAL_MAX_ENTRIES, defaultEntry);
     const size_t copyCount = std::min<size_t>(count, uploadEntries.size());
@@ -137,6 +147,8 @@ bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, u
         entries_.assign(entries, entries + copyCount);
         materialCount_ = static_cast<uint32_t>(copyCount);
         fullUploads_++;
+        usingFallback_ = false;
+        revision_++;
         asyncSubmissions_++;
         if (timeline) {
             timelineSubmissions_++;
@@ -160,6 +172,113 @@ bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, u
 
     std::cout << "[MaterialRegistry] Queued async full upload for " << copyCount
               << " materials (" << dataSize << " bytes padded) to GPU SSBO" << std::endl;
+    return true;
+}
+
+bool MaterialRegistry::ensureFallbackMaterials(std::shared_ptr<vk::VMA> vma,
+                                               std::shared_ptr<vk::Device> device) {
+    if (!vma || !device) return false;
+    std::lock_guard<std::mutex> operationLock(operationMutex_);
+
+    auto renderer = Renderer::try_instance();
+    if (!renderer || !renderer->framework()) return false;
+    auto framework = renderer->framework();
+
+    std::vector<vk::Data::MaterialEntry> uploadEntries;
+    std::shared_ptr<vk::DeviceLocalBuffer> nextSsbo;
+    std::shared_ptr<vk::CommandBuffer> cmd;
+    std::shared_ptr<vk::Fence> fence;
+    std::shared_ptr<vk::TimelineSemaphore> timeline;
+    VkTimelineSemaphoreSubmitInfo timelineInfo{};
+    VkSubmitInfo submitInfo{};
+    VkSemaphore signalSemaphore = VK_NULL_HANDLE;
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    uint64_t timelineValue = 0;
+    const VkDeviceSize dataSize = static_cast<VkDeviceSize>(vk::Data::MATERIAL_MAX_ENTRIES)
+        * sizeof(vk::Data::MaterialEntry);
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pollCompletedUploadsLocked();
+        if (ssbo_ && ssbo_->isValid()) return true;
+
+        uploadEntries.assign(vk::Data::MATERIAL_MAX_ENTRIES, makeDefaultMaterialEntry(true));
+        nextSsbo = vk::DeviceLocalBuffer::create(
+            vma, device, true, dataSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        if (!nextSsbo || !nextSsbo->isValid()) return false;
+        nextSsbo->uploadToStagingBuffer(uploadEntries.data(), static_cast<size_t>(dataSize), 0);
+
+        fence = vk::Fence::create(device);
+        cmd = vk::CommandBuffer::create(device, framework->mainCommandPool());
+        cmd->begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+        nextSsbo->uploadToBuffer(cmd);
+        cmd->end();
+
+        timeline = device->materialUploadSemaphore();
+        if (timeline) {
+            timelineValue = ++materialUploadTimelineValue_;
+            timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+            timelineInfo.signalSemaphoreValueCount = 1;
+            timelineInfo.pSignalSemaphoreValues = &timelineValue;
+
+            signalSemaphore = timeline->vkSemaphore();
+            commandBuffer = cmd->vkCommandBuffer();
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submitInfo.pNext = &timelineInfo;
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &commandBuffer;
+            submitInfo.signalSemaphoreCount = 1;
+            submitInfo.pSignalSemaphores = &signalSemaphore;
+        }
+    }
+
+    if (timeline) {
+        std::lock_guard<std::mutex> qLock(device->queueMutex());
+        VkResult submitResult = vkQueueSubmit(device->mainVkQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+        if (submitResult != VK_SUCCESS) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            --materialUploadTimelineValue_;
+            return false;
+        }
+    } else {
+        cmd->submitMainQueueIndividual(device, fence);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (ssbo_) {
+            framework->gc().collect(ssbo_);
+        }
+        ssbo_ = std::move(nextSsbo);
+        entries_.clear();
+        materialCount_ = 0;
+        fallbackUploads_++;
+        usingFallback_ = true;
+        revision_++;
+        asyncSubmissions_++;
+        if (timeline) {
+            timelineSubmissions_++;
+        } else {
+            fenceSubmissions_++;
+        }
+        pendingUploadBytes_ += static_cast<uint64_t>(dataSize);
+        pendingUploads_.push_back(PendingUpload{
+            .device = device,
+            .commandBuffer = cmd,
+            .fence = timeline ? nullptr : fence,
+            .timeline = timeline,
+            .deviceLocalStagingOwner = ssbo_,
+            .targetBuffer = ssbo_,
+            .bytes = static_cast<uint64_t>(dataSize),
+            .entries = vk::Data::MATERIAL_MAX_ENTRIES,
+            .timelineValue = timelineValue,
+            .sparse = false,
+        });
+    }
+
+    std::cout << "[MaterialRegistry] Queued V4 fallback material table upload ("
+              << dataSize << " bytes padded)" << std::endl;
     return true;
 }
 
@@ -199,29 +318,7 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
         nextEntries = entries_;
         if (!ssbo_ || !ssbo_->isValid()) {
             std::cout << "[MaterialRegistry] Lazy SSBO creation for sparse V4 path" << std::endl;
-            vk::Data::MaterialEntry defaultEntry{};
-            defaultEntry.materialId = 0;
-            defaultEntry.baseSpriteId = 0;
-            defaultEntry.fallbackMaterialId = 0;
-            defaultEntry.flags = vk::Data::MATERIAL_FLAG_VALID |
-                                 vk::Data::MATERIAL_FLAG_VANILLA_SPRITE |
-                                 vk::Data::MATERIAL_FLAG_GPU_RESIDENT;
-            defaultEntry.albedoPage = 0;
-            defaultEntry.albedoLayer = 0;
-            defaultEntry.specularPage = 0;
-            defaultEntry.specularLayer = -1;
-            defaultEntry.normalPage = 0;
-            defaultEntry.normalLayer = -1;
-            defaultEntry.flagPage = 0;
-            defaultEntry.flagLayer = 0;
-            defaultEntry.overlayMaterialId = -1;
-            defaultEntry.displacementPolicy = 0;
-            defaultEntry.displacementScale = 0.0f;
-            defaultEntry.heightRangePacked = -1;
-            defaultEntry.uvScaleU = 1.0f;
-            defaultEntry.uvScaleV = 1.0f;
-            defaultEntry.uvOffsetU = 0.0f;
-            defaultEntry.uvOffsetV = 0.0f;
+            vk::Data::MaterialEntry defaultEntry = makeDefaultMaterialEntry(true);
 
             nextEntries.assign(vk::Data::MATERIAL_MAX_ENTRIES, defaultEntry);
             const VkDeviceSize dataSize = nextEntries.size() * sizeof(vk::Data::MaterialEntry);
@@ -322,6 +419,8 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
         entries_ = std::move(nextEntries);
         materialCount_ = std::max(materialCount_, static_cast<uint32_t>(entries_.size()));
         sparseUpdates_++;
+        usingFallback_ = false;
+        revision_++;
         asyncSubmissions_++;
         if (timeline) {
             timelineSubmissions_++;
@@ -354,6 +453,21 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
     return true;
 }
 
+bool MaterialRegistry::hasBuffer() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ssbo_ && ssbo_->isValid();
+}
+
+bool MaterialRegistry::usingFallback() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return usingFallback_;
+}
+
+uint64_t MaterialRegistry::revision() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return revision_;
+}
+
 std::string MaterialRegistry::statusJson() const {
     std::lock_guard<std::mutex> lock(mutex_);
     pollCompletedUploadsLocked();
@@ -372,6 +486,10 @@ std::string MaterialRegistry::statusJson() const {
     out << "{"
         << "\"schema\":\"radser_material_table_status_v1\","
         << "\"materialCount\":" << materialCount_ << ","
+        << "\"hasBuffer\":" << ((ssbo_ && ssbo_->isValid()) ? "true" : "false") << ","
+        << "\"usingFallback\":" << (usingFallback_ ? "true" : "false") << ","
+        << "\"fallbackUploads\":" << fallbackUploads_ << ","
+        << "\"revision\":" << revision_ << ","
         << "\"fullUploads\":" << fullUploads_ << ","
         << "\"sparseUpdates\":" << sparseUpdates_ << ","
         << "\"blockingFenceUploads\":false,"
@@ -406,6 +524,9 @@ void MaterialRegistry::reset() {
     materialCount_ = 0;
     fullUploads_ = 0;
     sparseUpdates_ = 0;
+    fallbackUploads_ = 0;
+    usingFallback_ = false;
+    revision_++;
     asyncSubmissions_ = 0;
     asyncCompletions_ = 0;
     timelineSubmissions_ = 0;
@@ -427,6 +548,9 @@ void MaterialRegistry::retire(GarbageCollector& gc) {
     materialCount_ = 0;
     fullUploads_ = 0;
     sparseUpdates_ = 0;
+    fallbackUploads_ = 0;
+    usingFallback_ = false;
+    revision_++;
     asyncSubmissions_ = 0;
     asyncCompletions_ = 0;
     timelineSubmissions_ = 0;

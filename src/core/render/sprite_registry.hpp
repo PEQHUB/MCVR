@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <vector>
 
 class GarbageCollector;
@@ -39,6 +40,11 @@ class SpriteRegistry {
     /// Upload all entries to the GPU SSBO. Call after all sprites are registered.
     /// Requires valid VMA and Device from the renderer.
     bool uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device);
+    bool ensureFallbackSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device);
+    bool hasBuffer() const;
+    bool usingFallback() const;
+    uint64_t revision() const;
+    std::string statusJson() const;
 
     /// Get the GPU buffer for descriptor binding. Returns nullptr if not uploaded.
     std::shared_ptr<vk::DeviceLocalBuffer> getBuffer() const {
@@ -63,5 +69,7 @@ class SpriteRegistry {
     std::vector<vk::Data::SpriteEntry> entries_;
     uint32_t spriteCount_ = 0;
     std::shared_ptr<vk::DeviceLocalBuffer> ssbo_;
+    uint64_t revision_ = 0;
+    bool usingFallback_ = false;
     mutable std::mutex mutex_;
 };
