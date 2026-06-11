@@ -106,6 +106,16 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
         normalizedPage = request.startLayer / nativeCapacity;
         normalizedStartLayer = request.startLayer % nativeCapacity;
         normalizedCapacity = nativeCapacity;
+
+        // Cross-page boundary guard: reject uploads that would span two native pages.
+        // Java must chunk at nativeCapacity boundaries; this is the safety net.
+        if (request.layerCount > nativeCapacity - normalizedStartLayer) {
+            std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: cross-page boundary"
+                      << " startLayer=" << request.startLayer << " layerCount=" << request.layerCount
+                      << " nativePage=" << normalizedPage << " nativeStartLayer=" << normalizedStartLayer
+                      << " nativeCapacity=" << nativeCapacity << std::endl;
+            return false;
+        }
     }
 
     std::cout << "[TextureLoaderV4] enqueueUpload gen=" << request.generation << " ns=" << request.namespaceId
