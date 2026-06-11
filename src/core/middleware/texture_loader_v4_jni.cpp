@@ -108,7 +108,11 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeBeginTextureLoa
             return JNI_FALSE;
         }
     }
-    return loader.beginGeneration(static_cast<uint64_t>(generation)) ? JNI_TRUE : JNI_FALSE;
+    if (!loader.beginGeneration(static_cast<uint64_t>(generation))) {
+        return JNI_FALSE;
+    }
+    Renderer::textureSystem.beginV4MaterialPages(static_cast<uint64_t>(generation));
+    return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -122,11 +126,32 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
     if (!validateLayerUploadSigned(generation, namespaceId, tier, page, startLayer,
         layerCount, layerCapacity, width, height, vkFormat, channelMask,
         albedoPtr, specularPtr, normalPtr, flagPtr, bytesPerLayer)) {
+        std::cerr << "[TextureLoaderV4JNI] nativeUploadTexturePageV4 rejected invalid arguments"
+                  << " generation=" << generation
+                  << " namespace=" << namespaceId
+                  << " tier=" << tier
+                  << " page=" << page
+                  << " startLayer=" << startLayer
+                  << " layers=" << layerCount
+                  << " capacity=" << layerCapacity
+                  << " width=" << width
+                  << " height=" << height
+                  << " bytesPerLayer=" << bytesPerLayer
+                  << " channelMask=" << channelMask << std::endl;
         return JNI_FALSE;
     }
 
     auto* renderer = Renderer::try_instance();
-    if (!renderer || !renderer->framework()) return JNI_FALSE;
+    if (!renderer || !renderer->framework()) {
+        std::cerr << "[TextureLoaderV4JNI] nativeUploadTexturePageV4 rejected: renderer unavailable"
+                  << " generation=" << generation
+                  << " tier=" << tier
+                  << " page=" << page
+                  << " startLayer=" << startLayer
+                  << " layers=" << layerCount
+                  << " capacity=" << layerCapacity << std::endl;
+        return JNI_FALSE;
+    }
 
     // Build request only after validation — safe to cast now
     TextureLoaderV4::UploadRequest req{};
@@ -150,6 +175,13 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
 
     bool queued = renderer->textureLoaderV4().enqueueUpload(req);
     if (!queued) {
+        std::cerr << "[TextureLoaderV4JNI] nativeUploadTexturePageV4 rejected: queue failed"
+                  << " generation=" << generation
+                  << " tier=" << tier
+                  << " page=" << page
+                  << " startLayer=" << startLayer
+                  << " layers=" << layerCount
+                  << " capacity=" << layerCapacity << std::endl;
         return JNI_FALSE;
     }
 
@@ -163,11 +195,22 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
         &nativeStartLayer,
         &nativeCapacity);
     if (descriptorPage >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX || nativeCapacity == 0) {
+        std::cerr << "[TextureLoaderV4JNI] nativeUploadTexturePageV4 rejected invalid descriptor page"
+                  << " generation=" << generation
+                  << " namespace=" << namespaceId
+                  << " tier=" << tier
+                  << " page=" << page
+                  << " descriptorPage=" << descriptorPage
+                  << " startLayer=" << startLayer
+                  << " nativeStartLayer=" << nativeStartLayer
+                  << " layers=" << layerCount
+                  << " capacity=" << layerCapacity
+                  << " nativeCapacity=" << nativeCapacity << std::endl;
         return JNI_FALSE;
     }
 
     auto framework = renderer->framework();
-    bool published = Renderer::textureSystem.uploadMaterialTextureLayers(
+    bool published = Renderer::textureSystem.uploadMaterialTextureLayersV4(
         descriptorPage,
         static_cast<uint32_t>(width),
         nativeStartLayer,
@@ -181,6 +224,17 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
         framework->vma(),
         framework->device());
     if (!published) {
+        std::cerr << "[TextureLoaderV4JNI] nativeUploadTexturePageV4 rejected: descriptor/material page publication failed"
+                  << " generation=" << generation
+                  << " namespace=" << namespaceId
+                  << " tier=" << tier
+                  << " page=" << page
+                  << " descriptorPage=" << descriptorPage
+                  << " startLayer=" << startLayer
+                  << " nativeStartLayer=" << nativeStartLayer
+                  << " layers=" << layerCount
+                  << " capacity=" << layerCapacity
+                  << " nativeCapacity=" << nativeCapacity << std::endl;
         return JNI_FALSE;
     }
 

@@ -144,6 +144,7 @@ class TextureSystem {
     bool hasPendingTextureUploads() const { return arrayManager_.hasPendingUploads(); }
 
     void setGeneration(uint64_t generation);
+    void beginV4MaterialPages(uint64_t generation);
     uint64_t generation() const { return generation_.load(std::memory_order_acquire); }
 
     std::string statusString() const;
@@ -200,6 +201,15 @@ class TextureSystem {
                                      uint64_t generation,
                                      std::shared_ptr<vk::VMA> vma,
                                      std::shared_ptr<vk::Device> device);
+    bool uploadMaterialTextureLayersV4(uint32_t page, uint32_t spriteSize, uint32_t startLayer,
+                                       uint32_t layerCount, uint32_t layerCapacity,
+                                       const uint8_t* albedoData,
+                                       const uint8_t* specularData,
+                                       const uint8_t* normalData,
+                                       const uint8_t* flagData,
+                                       uint64_t generation,
+                                       std::shared_ptr<vk::VMA> vma,
+                                       std::shared_ptr<vk::Device> device);
 
     /// Get texture array IDs (for descriptor binding).
     uint32_t blockAlbedoArrayId() const { return blockAlbedoArrayId_.load(std::memory_order_acquire); }
@@ -224,6 +234,16 @@ class TextureSystem {
     void retireGpuResourcesLocked(std::shared_ptr<vk::Device> device, const char* reason);
     void resetMaterialTexturePagesLocked();
     bool hasMaterialPageMipsDirtyLocked() const;
+    bool uploadMaterialTextureLayersLocked(uint32_t page, uint32_t spriteSize, uint32_t startLayer,
+                                           uint32_t layerCount, uint32_t layerCapacity,
+                                           const uint8_t* albedoData,
+                                           const uint8_t* specularData,
+                                           const uint8_t* normalData,
+                                           const uint8_t* flagData,
+                                           uint64_t generation,
+                                           std::shared_ptr<vk::VMA> vma,
+                                           std::shared_ptr<vk::Device> device,
+                                           bool allowV4BeforeFinalize);
 
     // Sprite metadata (sorted by identifier, spriteId = index)
     std::vector<SpriteMetadata> sprites_;
@@ -284,5 +304,7 @@ class TextureSystem {
 
     std::atomic<bool> finalized_{false};
     std::atomic<uint64_t> generation_{0};
+    std::atomic<bool> v4MaterialPagesActive_{false};
+    std::atomic<uint64_t> v4MaterialPageGeneration_{0};
     mutable std::mutex mutex_;
 };

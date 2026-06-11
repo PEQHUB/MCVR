@@ -153,6 +153,8 @@ void TextureSystem::retireGpuResourcesLocked(std::shared_ptr<vk::Device> device,
     specMipsInitialized_ = false;
     normMipsInitialized_ = false;
     flagMipsInitialized_ = false;
+    v4MaterialPagesActive_.store(false, std::memory_order_release);
+    v4MaterialPageGeneration_.store(0, std::memory_order_release);
     finalized_ = false;
 }
 
@@ -161,6 +163,8 @@ void TextureSystem::receiveSpriteTable(const SpriteMetadata* table, uint32_t cou
     std::lock_guard<std::mutex> lock(mutex_);
 
     generation_.fetch_add(1, std::memory_order_acq_rel);
+    v4MaterialPagesActive_.store(false, std::memory_order_release);
+    v4MaterialPageGeneration_.store(0, std::memory_order_release);
     finalized_ = false;
     arrayManager_.discardPendingUploads();
     spritePixels_.clear();
@@ -795,7 +799,9 @@ void TextureSystem::flushPendingUploads(std::shared_ptr<vk::VMA> vma,
 	std::shared_ptr<vk::CommandBuffer> cmdBuffer,
 	GarbageCollector& gc) {
     std::lock_guard<std::mutex> lock(mutex_);
-	if (!finalized_) return;
+    const bool finalized = finalized_.load(std::memory_order_acquire);
+    const bool v4Active = v4MaterialPagesActive_.load(std::memory_order_acquire);
+	if (!finalized && !v4Active) return;
     const bool hasPendingUploads = arrayManager_.hasPendingUploads();
 	if (!hasPendingUploads && !hasMaterialPageMipsDirtyLocked()) return;
 
@@ -861,6 +867,16 @@ void TextureSystem::setGeneration(uint64_t generation) {
     if (generation >= current) {
         generation_.store(generation, std::memory_order_release);
     }
+}
+
+void TextureSystem::beginV4MaterialPages(uint64_t generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint64_t current = generation_.load(std::memory_order_acquire);
+    if (generation >= current) {
+        generation_.store(generation, std::memory_order_release);
+    }
+    v4MaterialPageGeneration_.store(generation, std::memory_order_release);
+    v4MaterialPagesActive_.store(true, std::memory_order_release);
 }
 
 bool TextureSystem::stageLayerUpdate(LayerKind layerKind, uint32_t spriteId,
@@ -1068,6 +1084,33 @@ bool TextureSystem::uploadMaterialTextureLayers(uint32_t page, uint32_t spriteSi
                                                 uint64_t generation,
                                                 std::shared_ptr<vk::VMA> vma,
                                                 std::shared_ptr<vk::Device> device) {
+    return uploadMaterialTextureLayersLocked(page, spriteSize, startLayer, layerCount, layerCapacity,
+        albedoData, specularData, normalData, flagData, generation, std::move(vma), std::move(device), false);
+}
+
+bool TextureSystem::uploadMaterialTextureLayersV4(uint32_t page, uint32_t spriteSize, uint32_t startLayer,
+                                                  uint32_t layerCount, uint32_t layerCapacity,
+                                                  const uint8_t* albedoData,
+                                                  const uint8_t* specularData,
+                                                  const uint8_t* normalData,
+                                                  const uint8_t* flagData,
+                                                  uint64_t generation,
+                                                  std::shared_ptr<vk::VMA> vma,
+                                                  std::shared_ptr<vk::Device> device) {
+    return uploadMaterialTextureLayersLocked(page, spriteSize, startLayer, layerCount, layerCapacity,
+        albedoData, specularData, normalData, flagData, generation, std::move(vma), std::move(device), true);
+}
+
+bool TextureSystem::uploadMaterialTextureLayersLocked(uint32_t page, uint32_t spriteSize, uint32_t startLayer,
+                                                      uint32_t layerCount, uint32_t layerCapacity,
+                                                      const uint8_t* albedoData,
+                                                      const uint8_t* specularData,
+                                                      const uint8_t* normalData,
+                                                      const uint8_t* flagData,
+                                                      uint64_t generation,
+                                                      std::shared_ptr<vk::VMA> vma,
+                                                      std::shared_ptr<vk::Device> device,
+                                                      bool allowV4BeforeFinalize) {
     if (page == 0 || page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return false;
     if (spriteSize == 0 || layerCount == 0 || layerCapacity == 0) return false;
     if (startLayer >= layerCapacity || layerCount > layerCapacity - startLayer) return false;
@@ -1081,8 +1124,34 @@ bool TextureSystem::uploadMaterialTextureLayers(uint32_t page, uint32_t spriteSi
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
-    if (!finalized_) return false;
+    const uint64_t textureGeneration = generation_.load(std::memory_order_acquire);
+    const uint64_t v4Generation = v4MaterialPageGeneration_.load(std::memory_order_acquire);
+    if (generation != 0 && generation != textureGeneration) {
+        std::cerr << "[TextureSystem] Material page upload rejected: generation mismatch"
+                  << " page=" << page
+                  << " startLayer=" << startLayer
+                  << " layers=" << layerCount
+                  << " capacity=" << layerCapacity
+                  << " requestedGeneration=" << generation
+                  << " textureGeneration=" << textureGeneration
+                  << " v4Generation=" << v4Generation << std::endl;
+        return false;
+    }
+    const bool finalized = finalized_.load(std::memory_order_acquire);
+    const bool v4Active = v4MaterialPagesActive_.load(std::memory_order_acquire);
+    if (!finalized && (!allowV4BeforeFinalize || !v4Active || (generation != 0 && generation != v4Generation))) {
+        std::cerr << "[TextureSystem] Material page upload rejected: finalize/V4 gate"
+                  << " page=" << page
+                  << " startLayer=" << startLayer
+                  << " layers=" << layerCount
+                  << " capacity=" << layerCapacity
+                  << " generation=" << generation
+                  << " finalized=" << finalized
+                  << " allowV4BeforeFinalize=" << allowV4BeforeFinalize
+                  << " v4Active=" << v4Active
+                  << " v4Generation=" << v4Generation << std::endl;
+        return false;
+    }
 
     const size_t bytesPerLayer = spriteSizeBytes * spriteSizeBytes * 4u;
     if (bytesPerLayer == 0
@@ -1143,7 +1212,10 @@ bool TextureSystem::uploadMaterialTextureLayers(uint32_t page, uint32_t spriteSi
         if (framework) {
             arrayManager_.retireArrays(framework->gc(), newArrayIds);
         }
-        std::cerr << "[TextureSystem] Material page upload failed for page " << page
+        std::cerr << "[TextureSystem] Material page staging failed"
+                  << " page=" << page
+                  << " startLayer=" << startLayer
+                  << " capacity=" << layerCapacity
                   << " staged albedo=" << stagedAlbedo << "/" << layerCount
                   << " specular=" << stagedSpecular << "/" << layerCount
                   << " normal=" << stagedNormal << "/" << layerCount
