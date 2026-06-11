@@ -4,6 +4,7 @@
 #include "core/render/render_framework.hpp"
 #include "core/build/build_info.hpp"
 #include <algorithm>
+#include <exception>
 #include <iostream>
 #include <sstream>
 #include <cstring>
@@ -13,6 +14,52 @@ namespace {
 
 jstring makeString(JNIEnv* env, const std::string& value) {
     return env->NewStringUTF(value.c_str());
+}
+
+void logNativeException(const char* method, jlong generation, const std::exception& ex) {
+    std::cerr << "[TextureLoaderV4JNI] " << method << " caught native exception";
+    if (generation > 0) {
+        std::cerr << " generation=" << generation;
+    }
+    std::cerr << " what=\"" << ex.what() << "\"" << std::endl;
+}
+
+void logNativeException(const char* method, jlong generation) {
+    std::cerr << "[TextureLoaderV4JNI] " << method << " caught unknown native exception";
+    if (generation > 0) {
+        std::cerr << " generation=" << generation;
+    }
+    std::cerr << std::endl;
+}
+
+jstring makeNativeExceptionJson(JNIEnv* env, const char* method) {
+    std::ostringstream out;
+    out << "{\"error\":\"native_exception\",\"method\":\"" << method << "\"}";
+    return makeString(env, out.str());
+}
+
+template <typename Fn>
+jboolean guardedJniBool(const char* method, jlong generation, Fn fn) {
+    try {
+        return fn();
+    } catch (const std::exception& ex) {
+        logNativeException(method, generation, ex);
+    } catch (...) {
+        logNativeException(method, generation);
+    }
+    return JNI_FALSE;
+}
+
+template <typename Fn>
+jstring guardedJniString(JNIEnv* env, const char* method, Fn fn) {
+    try {
+        return fn();
+    } catch (const std::exception& ex) {
+        logNativeException(method, 0, ex);
+    } catch (...) {
+        logNativeException(method, 0);
+    }
+    return makeNativeExceptionJson(env, method);
 }
 
 static constexpr uint32_t CHANNEL_ALBEDO   = 1u << 0;
@@ -132,6 +179,7 @@ bool validateLayerUploadSigned(jlong generation, jint namespaceId, jint tier,
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeBeginTextureLoaderV4(
     JNIEnv*, jclass, jlong generation, jlong manifestPtr, jint manifestBytes) {
+    return guardedJniBool("nativeBeginTextureLoaderV4", generation, [&]() -> jboolean {
     if (generation <= 0) return JNI_FALSE;
     // manifestPtr/manifestBytes can be 0 for initial begin
     auto* renderer = Renderer::try_instance();
@@ -157,11 +205,13 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeBeginTextureLoa
         return JNI_FALSE;
     }
     return JNI_TRUE;
+    });
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeEnsureV4ShaderFallbackResources(
     JNIEnv*, jclass, jlong generation) {
+    return guardedJniBool("nativeEnsureV4ShaderFallbackResources", generation, [&]() -> jboolean {
     if (generation <= 0) return JNI_FALSE;
     auto* renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return JNI_FALSE;
@@ -169,6 +219,7 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeEnsureV4ShaderF
     return Renderer::textureSystem.ensureV4ShaderFallbackResources(
         static_cast<uint64_t>(generation), framework->vma(), framework->device())
         ? JNI_TRUE : JNI_FALSE;
+    });
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -177,6 +228,7 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
     jint startLayer, jint layerCount, jint layerCapacity, jint width, jint height, jint vkFormat,
     jlong albedoPtr, jlong specularPtr, jlong normalPtr, jlong flagPtr,
     jlong bytesPerLayer, jint channelMask, jboolean visible) {
+    return guardedJniBool("nativeUploadTexturePageV4", generation, [&]() -> jboolean {
     // Validate all signed JNI inputs before any unsigned cast.
     // Negative values would become huge native values if cast without validation.
     if (!validateLayerUploadSigned(generation, namespaceId, tier, page, startLayer,
@@ -315,11 +367,13 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
     }
 
     return JNI_TRUE;
+    });
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeCommitTextureLoaderV4(
     JNIEnv*, jclass, jlong generation) {
+    return guardedJniBool("nativeCommitTextureLoaderV4", generation, [&]() -> jboolean {
     if (generation <= 0) return JNI_FALSE;
     auto* renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return JNI_FALSE;
@@ -332,17 +386,20 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeCommitTextureLo
     }
     return renderer->textureLoaderV4().commitGeneration(static_cast<uint64_t>(generation))
         ? JNI_TRUE : JNI_FALSE;
+    });
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeCancelTextureLoaderV4(
     JNIEnv*, jclass, jlong generation, jint reasonCode) {
+    return guardedJniBool("nativeCancelTextureLoaderV4", generation, [&]() -> jboolean {
     if (generation <= 0) return JNI_FALSE;
     auto* renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return JNI_FALSE;
     return renderer->textureLoaderV4().cancelGeneration(
         static_cast<uint64_t>(generation), static_cast<int>(reasonCode))
         ? JNI_TRUE : JNI_FALSE;
+    });
 }
 
 // ---- Sparse registry updates ----
@@ -350,6 +407,7 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeCancelTextureLo
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUpdateMaterialTableSparseV4(
     JNIEnv*, jclass, jlong generation, jlong entriesPtr, jint entryCount) {
+    return guardedJniBool("nativeUpdateMaterialTableSparseV4", generation, [&]() -> jboolean {
     if (generation <= 0 || entriesPtr == 0 || entryCount <= 0) return JNI_FALSE;
     auto* renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return JNI_FALSE;
@@ -359,11 +417,13 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUpdateMaterialT
         static_cast<uint32_t>(entryCount),
         static_cast<uint64_t>(generation),
         framework->vma(), framework->device()) ? JNI_TRUE : JNI_FALSE;
+    });
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUpdateSpriteRegistrySparseV4(
     JNIEnv*, jclass, jlong generation, jlong entriesPtr, jint entryCount) {
+    return guardedJniBool("nativeUpdateSpriteRegistrySparseV4", generation, [&]() -> jboolean {
     if (generation <= 0 || entriesPtr == 0 || entryCount <= 0) return JNI_FALSE;
     auto* renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return JNI_FALSE;
@@ -373,11 +433,13 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUpdateSpriteReg
         static_cast<uint32_t>(entryCount),
         static_cast<uint64_t>(generation),
         framework->vma(), framework->device()) ? JNI_TRUE : JNI_FALSE;
+    });
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUpdateTextureRulesV4(
     JNIEnv*, jclass, jlong generation, jlong entriesPtr, jint entryCount) {
+    return guardedJniBool("nativeUpdateTextureRulesV4", generation, [&]() -> jboolean {
     if (generation <= 0 || entryCount < 0) return JNI_FALSE;
     auto* renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return JNI_FALSE;
@@ -391,6 +453,7 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUpdateTextureRu
         count,
         static_cast<uint64_t>(generation),
         framework->vma(), framework->device()) ? JNI_TRUE : JNI_FALSE;
+    });
 }
 
 // ---- Status JSON ----
@@ -398,50 +461,62 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUpdateTextureRu
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeTextureLoaderV4StatusJson(
     JNIEnv* env, jclass) {
+    return guardedJniString(env, "nativeTextureLoaderV4StatusJson", [&]() -> jstring {
     auto* renderer = Renderer::try_instance();
     if (!renderer) return makeString(env, "{\"error\":\"no_renderer\"}");
     return makeString(env, renderer->textureLoaderV4().statusJson());
+    });
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeTextureTierStatusJsonV4(
     JNIEnv* env, jclass) {
+    return guardedJniString(env, "nativeTextureTierStatusJsonV4", [&]() -> jstring {
     auto* renderer = Renderer::try_instance();
     if (!renderer) return makeString(env, "{\"error\":\"no_renderer\"}");
     return makeString(env, renderer->textureLoaderV4().tierStatusJson());
+    });
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeGpuUploadQueueStatusJsonV4(
     JNIEnv* env, jclass) {
+    return guardedJniString(env, "nativeGpuUploadQueueStatusJsonV4", [&]() -> jstring {
     auto* renderer = Renderer::try_instance();
     if (!renderer) return makeString(env, "{\"error\":\"no_renderer\"}");
     return makeString(env, renderer->textureLoaderV4().uploadQueueStatusJson());
+    });
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeMaterialPagePoolStatusJsonV4(
     JNIEnv* env, jclass) {
+    return guardedJniString(env, "nativeMaterialPagePoolStatusJsonV4", [&]() -> jstring {
     auto* renderer = Renderer::try_instance();
     if (!renderer) return makeString(env, "{\"error\":\"no_renderer\"}");
     return makeString(env, renderer->textureLoaderV4().pagePoolStatusJson());
+    });
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeV4FrameResourceStatusJson(
     JNIEnv* env, jclass) {
+    return guardedJniString(env, "nativeV4FrameResourceStatusJson", [&]() -> jstring {
     auto* renderer = Renderer::try_instance();
     if (!renderer) return makeString(env, "{\"error\":\"no_renderer\"}");
     return makeString(env, Renderer::textureSystem.v4FrameResourceStatusJson());
+    });
 }
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeFirstFrameNativeReadinessJsonV4(
     JNIEnv* env, jclass, jlong generation) {
+    return guardedJniString(env, "nativeFirstFrameNativeReadinessJsonV4", [&]() -> jstring {
     auto* renderer = Renderer::try_instance();
     if (!renderer) return makeString(env, "{\"error\":\"no_renderer\"}");
     return makeString(env, renderer->textureLoaderV4().firstFrameReadinessJson(
         static_cast<uint64_t>(generation)));
+    });
 }
 
 extern "C" JNIEXPORT jint JNICALL

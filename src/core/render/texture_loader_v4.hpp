@@ -10,9 +10,9 @@
 
 /// Native side of texture_loader_v4.
 ///
-/// Owns the GpuUploadService and TexturePagePool.
-/// Receives generation-scoped upload requests from Java via JNI.
-/// Publishes readiness state for first-frame gate.
+/// Tracks descriptor-backed V4 texture generations. Shader-visible page data is
+/// published through TextureSystem; the old page pool/upload service are kept as
+/// dormant status surfaces, not as sampled upload paths.
 class TextureLoaderV4 {
 public:
     struct UploadRequest {

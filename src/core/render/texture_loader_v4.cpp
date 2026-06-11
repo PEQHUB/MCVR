@@ -11,24 +11,15 @@ bool TextureLoaderV4::initialize(std::shared_ptr<vk::Device> device,
     if (initialized_.load(std::memory_order_acquire)) return true;
     if (!device || !vma) return false;
 
-    if (!uploadService_.initialize(device, vma, 256 * 1024 * 1024)) {
-        std::cerr << "[TextureLoaderV4] Failed to initialize GPU upload service" << std::endl;
-        return false;
-    }
-
-    if (!pagePool_.initialize(device, vma, &uploadService_)) {
-        std::cerr << "[TextureLoaderV4] Failed to initialize texture page pool" << std::endl;
-        return false;
-    }
-
     initialized_.store(true, std::memory_order_release);
-    std::cout << "[TextureLoaderV4] Initialized: abi=" << build_info::kTextureLoaderAbiVersion
+    std::cout << "[TextureLoaderV4] Initialized descriptor-backed tracker: abi=" << build_info::kTextureLoaderAbiVersion
               << " cacheSchema=" << build_info::kCacheSchemaVersion << std::endl;
     return true;
 }
 
 void TextureLoaderV4::shutdown() {
-    uploadService_.shutdown();
+    activeGeneration_.store(0, std::memory_order_release);
+    generationCommitted_.store(false, std::memory_order_release);
     initialized_.store(false, std::memory_order_release);
 }
 
@@ -102,10 +93,8 @@ bool TextureLoaderV4::beginGeneration(uint64_t generation) {
     if (!initialized_.load(std::memory_order_acquire)) return false;
     if (generation == 0) return false;
 
-    std::lock_guard<std::mutex> lock(mutex_);
     activeGeneration_.store(generation, std::memory_order_release);
     generationCommitted_.store(false, std::memory_order_release);
-    pagePool_.resetGeneration(generation);
 
     std::cout << "[TextureLoaderV4] Begin generation " << generation << std::endl;
     return true;
@@ -247,7 +236,6 @@ bool TextureLoaderV4::commitGeneration(uint64_t generation) {
     if (!initialized_.load(std::memory_order_acquire)) return false;
     if (generation != activeGeneration_.load(std::memory_order_acquire)) return false;
 
-    std::lock_guard<std::mutex> lock(mutex_);
     generationCommitted_.store(true, std::memory_order_release);
 
     std::cout << "[TextureLoaderV4] Committed generation " << generation << std::endl;
@@ -257,8 +245,9 @@ bool TextureLoaderV4::commitGeneration(uint64_t generation) {
 bool TextureLoaderV4::cancelGeneration(uint64_t generation, int reasonCode) {
     if (!initialized_.load(std::memory_order_acquire)) return false;
 
-    uploadService_.cancelGeneration(generation);
-    pagePool_.cancelGeneration(generation);
+    if (generation == activeGeneration_.load(std::memory_order_acquire)) {
+        generationCommitted_.store(false, std::memory_order_release);
+    }
 
     std::cout << "[TextureLoaderV4] Cancelled generation " << generation
               << " reason=" << reasonCode << std::endl;
@@ -266,19 +255,16 @@ bool TextureLoaderV4::cancelGeneration(uint64_t generation, int reasonCode) {
 }
 
 void TextureLoaderV4::pump(uint64_t frameBudgetBytes) {
-    if (!initialized_.load(std::memory_order_acquire)) return;
-    uploadService_.pump(frameBudgetBytes);
-    uploadService_.pollCompletions();
+    (void)frameBudgetBytes;
 }
 
 void TextureLoaderV4::pollCompletions() {
-    if (!initialized_.load(std::memory_order_acquire)) return;
-    uploadService_.pollCompletions();
 }
 
 bool TextureLoaderV4::generationIdle(uint64_t generation, bool visibleOnly) const {
-    if (!initialized_.load(std::memory_order_acquire)) return true;
-    return uploadService_.generationIdle(generation, visibleOnly);
+    (void)generation;
+    (void)visibleOnly;
+    return true;
 }
 
 std::string TextureLoaderV4::statusJson() const {
