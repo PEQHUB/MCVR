@@ -13,6 +13,7 @@
 #include "core/vulkan/sync.hpp"
 
 #include <iostream>
+#include <mutex>
 
 std::ostream &commandPoolCout() {
     return std::cout << "[CommandPool] ";
@@ -282,6 +283,7 @@ void vk::CommandBuffer::submitMainQueueIndividual(std::shared_ptr<vk::Device> de
 
     vk::DebugUtils::ScopedQueueLabel queueLabel(
         device->mainVkQueue(), "Radiance QueueSubmit: Individual", 0.2f, 0.7f, 1.0f);
+    std::lock_guard<std::mutex> qLock(device->queueMutex());
     vkQueueSubmit(device->mainVkQueue(), 1, &submitInfo, fence == nullptr ? VK_NULL_HANDLE : fence->vkFence());
 }
 
@@ -307,5 +309,6 @@ void vk::CommandBuffer::submitMainQueue(std::shared_ptr<Device> device, SubmitIn
 
     vk::DebugUtils::ScopedQueueLabel queueLabel(
         device->mainVkQueue(), "Radiance QueueSubmit: CommandBuffer", 0.2f, 0.7f, 1.0f);
+    std::lock_guard<std::mutex> qLock(device->queueMutex());
     vkQueueSubmit(device->mainVkQueue(), 1, &vkSubmitInfo, submitInfo.signalFence);
 }

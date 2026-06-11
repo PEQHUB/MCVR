@@ -1022,8 +1022,10 @@ bool TextureSystem::updateMaterialTableSparse(const vk::Data::MaterialEntry* ent
                                               std::shared_ptr<vk::Device> device) {
     if (!entries || count == 0 || !vma || !device) return false;
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
+    }
     // V4 path: do not gate on finalized_ — the V4 upload pipeline bypasses legacy finalize().
     // The material registry will lazily create its SSBO if needed.
     return materials_.updateMaterialsSparse(entries, count, std::move(vma), std::move(device));

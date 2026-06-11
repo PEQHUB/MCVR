@@ -75,6 +75,7 @@ private:
     TexturePagePool pagePool_;
 
     std::atomic<uint64_t> activeGeneration_{0};
+    std::atomic<uint64_t> javaPageContractRejects_{0};
     std::atomic<bool> initialized_{false};
     std::atomic<bool> generationCommitted_{false};
     mutable std::mutex mutex_;

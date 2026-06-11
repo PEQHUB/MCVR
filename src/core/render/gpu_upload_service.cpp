@@ -328,6 +328,7 @@ std::string GpuUploadService::statusJson() const {
         << "\"timelineSubmissions\":" << s.timelineSubmissions << ","
         << "\"actualVkCopyCommands\":" << s.actualVkCopyCommands << ","
         << "\"v4ActualVkCopyCommands\":" << s.actualVkCopyCommands << ","
+        << "\"actualVkCopyBufferToImageCommands\":" << s.actualVkCopyBufferToImageCommands << ","
         << "\"actualVkBufferCopyCommands\":" << s.actualVkBufferCopyCommands << ","
         << "\"vkDeviceWaitIdleDuringLoad\":" << s.vkDeviceWaitIdleDuringLoad
         << "}";

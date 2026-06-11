@@ -107,15 +107,17 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
     uint32_t normalizedCapacity = request.layerCapacity;
 
     if (request.page != UINT32_MAX && request.startLayer != UINT32_MAX) {
-        // CONTRACT ASSERTION: request.page should equal VANILLA_TIER_FIRST_PAGE + tier,
-        // confirming one-page-per-tier. Currently VANILLA_TIER_FIRST_PAGE = 1, so
-        // for tier 0 the page should be 1, tier 1 → page 2, etc.
-        // This is a diagnostic — do not reject yet until Java contract is fully enforced.
+        // CONTRACT ASSERTION: request.page must equal VANILLA_TIER_FIRST_PAGE + tier,
+        // confirming one Java page per tier. Currently VANILLA_TIER_FIRST_PAGE = 1, so
+        // for tier 0 the page should be 1, tier 1 -> page 2, etc.
+        // Bad page hints are rejected before placement so stale callers fail closed.
         const uint32_t expectedPage = 1 + request.tier;
         if (request.page != expectedPage) {
-            std::cout << "[TextureLoaderV4] WARNING: javaPage=" << request.page
-                      << " != expected " << expectedPage << " (1+tier) for tier=" << request.tier
-                      << " — contract assumes one page per tier" << std::endl;
+            javaPageContractRejects_.fetch_add(1, std::memory_order_relaxed);
+            std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: javaPage="
+                      << request.page << " expected=" << expectedPage
+                      << " tier=" << request.tier << std::endl;
+            return false;
         }
 
         // Compute tier-local native page index from Java's absolute startLayer
@@ -223,6 +225,8 @@ std::string TextureLoaderV4::statusJson() const {
         << "\"cacheSchemaVersion\":" << build_info::kCacheSchemaVersion << ","
         << "\"generation\":" << activeGeneration_.load(std::memory_order_acquire) << ","
         << "\"committed\":" << (generationCommitted_.load(std::memory_order_acquire) ? "true" : "false") << ","
+        << "\"javaPageContractWarnings\":0,"
+        << "\"javaPageContractRejects\":" << javaPageContractRejects_.load(std::memory_order_relaxed) << ","
         << "\"vanillaBlockAtlasBypass\":true,"
         << "\"fixedCompatibilityUploadBytes\":0,"
         << "\"legacyFixedBlockUploadCalls\":0,"

@@ -9,8 +9,8 @@
 
 namespace build_info {
 
-inline constexpr int kTextureLoaderAbiVersion = 4;
-inline constexpr int kCacheSchemaVersion = 4;
+inline constexpr int kTextureLoaderAbiVersion = 5;
+inline constexpr int kCacheSchemaVersion = 5;
 
 // Filled by CMake configure step
 inline constexpr const char* kRepoCommit = "@MCVR_REPO_COMMIT@";

@@ -9,14 +9,14 @@
 
 namespace build_info {
 
-inline constexpr int kTextureLoaderAbiVersion = 4;
-inline constexpr int kCacheSchemaVersion = 4;
+inline constexpr int kTextureLoaderAbiVersion = 5;
+inline constexpr int kCacheSchemaVersion = 5;
 
 // Filled by CMake configure step
-inline constexpr const char* kRepoCommit = "f572477f0cab0d74c149b961a6dc6b93fb5bc76f";
+inline constexpr const char* kRepoCommit = "86b482c03320fb2a93b0637f00ff2bed4817cb33";
 inline constexpr const char* kBranch = "fix/texture-loader-v4-critical-correctness";
 inline constexpr bool kDirty = 1;
-inline constexpr const char* kBuildTimestamp = "2026-06-10T12:00:00Z";
+inline constexpr const char* kBuildTimestamp = "2026-06-11T03:38:19Z";
 inline constexpr const char* kDllSha256 = "unknown";
 
 std::string summary();

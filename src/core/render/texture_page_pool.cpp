@@ -115,7 +115,9 @@ TexturePagePool::Allocation TexturePagePool::allocateExact(
     if (tier >= kMaxTiers) return {PageHandle{}, 0, false};
     if (layerCount == 0) return {PageHandle{}, 0, false};
     if (layerCapacity == 0) return {PageHandle{}, 0, false};
-    if (startLayer + layerCount > layerCapacity) return {PageHandle{}, 0, false};
+    if (startLayer >= layerCapacity || layerCount > layerCapacity - startLayer) {
+        return {PageHandle{}, 0, false};
+    }
     if (!device_ || !vma_ || !uploads_) return {PageHandle{}, 0, false};
 
     Page& p = pageForExactAllocationLocked(generation, ns, tier, page, layerCapacity);
@@ -128,11 +130,22 @@ TexturePagePool::Allocation TexturePagePool::allocateExact(
         || !p.flagImage || p.flagImage->vkImage() == VK_NULL_HANDLE) {
         return {PageHandle{}, 0, false};
     }
-    if (startLayer + layerCount > p.layerCapacity) {
+    if (startLayer >= p.layerCapacity || layerCount > p.layerCapacity - startLayer) {
         return {PageHandle{}, 0, false};
     }
 
-    // Mark per-layer state
+    for (uint32_t l = startLayer; l < startLayer + layerCount; ++l) {
+        if (l >= p.layerAllocated.size() || p.layerAllocated[l]) {
+            std::cout << "[TexturePagePool] allocateExact REJECTED: overlap"
+                      << " ns=" << static_cast<uint32_t>(ns)
+                      << " tier=" << tier
+                      << " page=" << page
+                      << " layer=" << l << std::endl;
+            return {PageHandle{}, 0, false};
+        }
+    }
+
+    // Mark per-layer state only after the full range is known to be free.
     for (uint32_t l = startLayer; l < startLayer + layerCount; ++l) {
         if (l < p.layerAllocated.size()) p.layerAllocated[l] = true;
         if (l < p.layerVisible.size()) p.layerVisible[l] = visible;
