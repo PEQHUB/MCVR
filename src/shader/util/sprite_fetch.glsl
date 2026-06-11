@@ -115,7 +115,15 @@ bool materialAlbedoLayerInRange(uint materialId, SpriteEntry se, uint animTick, 
     MaterialEntry material = safeMaterialEntry(materialId);
     bool useSpriteArray = !materialHasV4PageAddress(material) &&
         (materialUsesSpriteArray(material) || material.albedoLayer < 0);
-    layer = useSpriteArray ? spriteAnimLayer(se, animTick) : uint(material.albedoLayer);
+    if (useSpriteArray) {
+        layer = spriteAnimLayer(se, animTick);
+    } else if (materialHasV4PageAddress(material)) {
+        uint tickRate = max(se.tickRate, 1u);
+        uint frameCount = max(se.frameCount, 1u);
+        layer = uint(material.albedoLayer) + ((animTick / tickRate) % frameCount);
+    } else {
+        layer = uint(material.albedoLayer);
+    }
     ivec3 dims = textureSize(blockAlbedo[nonuniformEXT(materialDescriptorPage(material, material.albedoPage))], 0);
     return spriteLayerInRange(layer, dims);
 }
