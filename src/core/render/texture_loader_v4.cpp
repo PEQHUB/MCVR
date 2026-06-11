@@ -198,9 +198,10 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
             // CTM uses namespace-local page ids. Existing Java builds may still send
             // descriptor-space compat pages beginning at 8; normalize them here so
             // page 8 and page 0 both address descriptor slot 64.
-            normalizedPage = request.page >= 8u ? request.page - 8u : request.page;
-            normalizedStartLayer = request.startLayer;
-            normalizedCapacity = request.layerCapacity;
+            const uint32_t basePage = request.page >= 8u ? request.page - 8u : request.page;
+            normalizedPage = basePage + request.startLayer / nativeCapacity;
+            normalizedStartLayer = request.startLayer % nativeCapacity;
+            normalizedCapacity = nativeCapacity;
             if (request.page >= 8u) {
                 ctmLegacyPageNormalizations_.fetch_add(1, std::memory_order_relaxed);
             }
@@ -208,8 +209,10 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
 
         // Cross-page boundary guard: reject uploads that would span two native pages.
         // Java must chunk at nativeCapacity boundaries; this is the safety net.
-        if (vanillaPlacement && request.layerCount > nativeCapacity - normalizedStartLayer) {
-            recordUploadRejection(request, "vanilla_cross_native_page_boundary", UINT32_MAX,
+        if ((vanillaPlacement || ctmPlacement) && request.layerCount > nativeCapacity - normalizedStartLayer) {
+            recordUploadRejection(request, vanillaPlacement
+                    ? "vanilla_cross_native_page_boundary"
+                    : "ctm_cross_native_page_boundary", UINT32_MAX,
                 normalizedPage, normalizedStartLayer, nativeCapacity);
             std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: cross-page boundary"
                       << " startLayer=" << request.startLayer << " layerCount=" << request.layerCount

@@ -74,7 +74,7 @@ uint textureDescriptorIndexV4(uint namespaceId, uint tier, uint page) {
         return min(1u + tier * 8u + page, MATERIAL_TEXTURE_PAGE_MAX - 1u);
     }
     if (namespaceId == 2u) {
-        return min(64u + max(page, 8u) - 8u, MATERIAL_TEXTURE_PAGE_MAX - 1u);
+        return min(64u + page, MATERIAL_TEXTURE_PAGE_MAX - 1u);
     }
     return min(page, MATERIAL_TEXTURE_PAGE_MAX - 1u);
 }

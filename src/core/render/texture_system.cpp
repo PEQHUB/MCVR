@@ -1307,10 +1307,32 @@ bool TextureSystem::uploadMaterialTextureLayersLocked(uint32_t page, uint32_t sp
                                                       std::shared_ptr<vk::VMA> vma,
                                                       std::shared_ptr<vk::Device> device,
                                                       bool allowV4BeforeFinalize) {
-    if (page == 0 || page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) return false;
-    if (spriteSize == 0 || layerCount == 0 || layerCapacity == 0) return false;
-    if (startLayer >= layerCapacity || layerCount > layerCapacity - startLayer) return false;
-    if (!albedoData || !specularData || !normalData || !flagData || !vma || !device) return false;
+    if (page == 0 || page >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX) {
+        std::cerr << "[TextureSystem] Material page upload rejected: invalid page=" << page << std::endl;
+        return false;
+    }
+    if (spriteSize == 0 || layerCount == 0 || layerCapacity == 0) {
+        std::cerr << "[TextureSystem] Material page upload rejected: invalid dimensions page="
+                  << page << " size=" << spriteSize << " layers=" << layerCount
+                  << " capacity=" << layerCapacity << std::endl;
+        return false;
+    }
+    if (startLayer >= layerCapacity || layerCount > layerCapacity - startLayer) {
+        std::cerr << "[TextureSystem] Material page upload rejected: invalid layer range page="
+                  << page << " startLayer=" << startLayer << " layers=" << layerCount
+                  << " capacity=" << layerCapacity << std::endl;
+        return false;
+    }
+    if (!albedoData || !specularData || !normalData || !flagData || !vma || !device) {
+        std::cerr << "[TextureSystem] Material page upload rejected: missing input page="
+                  << page << " albedo=" << (albedoData ? 1 : 0)
+                  << " specular=" << (specularData ? 1 : 0)
+                  << " normal=" << (normalData ? 1 : 0)
+                  << " flag=" << (flagData ? 1 : 0)
+                  << " vma=" << (vma ? 1 : 0)
+                  << " device=" << (device ? 1 : 0) << std::endl;
+        return false;
+    }
     const size_t spriteSizeBytes = static_cast<size_t>(spriteSize);
     if (spriteSizeBytes > std::numeric_limits<size_t>::max() / spriteSizeBytes
         || spriteSizeBytes * spriteSizeBytes > std::numeric_limits<size_t>::max() / 4u) {

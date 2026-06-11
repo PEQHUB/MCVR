@@ -89,8 +89,13 @@ uint32_t descriptorPageForV4(uint32_t namespaceId, uint32_t tier,
     }
 
     if (namespaceId == 2u) {
-        if (nativeCapacity) *nativeCapacity = TexturePagePool::pageLayerCapacityStatic(tier);
-        return 64u + (page >= 8u ? page - 8u : page);
+        const uint32_t capacity = TexturePagePool::pageLayerCapacityStatic(tier);
+        if (capacity == 0) return UINT32_MAX;
+        const uint32_t basePage = page >= 8u ? page - 8u : page;
+        const uint32_t nativePage = basePage + startLayer / capacity;
+        if (nativeStartLayer) *nativeStartLayer = startLayer % capacity;
+        if (nativeCapacity) *nativeCapacity = capacity;
+        return 64u + nativePage;
     }
 
     return page;
