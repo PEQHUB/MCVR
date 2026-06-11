@@ -2,6 +2,7 @@
 
 #include "core/render/gpu_upload_service.hpp"
 #include "core/render/texture_page_pool.hpp"
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -71,11 +72,37 @@ public:
     bool isInitialized() const { return initialized_.load(std::memory_order_acquire); }
 
 private:
+    struct UploadRejection {
+        uint64_t sequence = 0;
+        uint64_t generation = 0;
+        uint32_t namespaceId = 0;
+        uint32_t tier = 0;
+        uint32_t page = 0;
+        uint32_t startLayer = 0;
+        uint32_t layerCount = 0;
+        uint32_t layerCapacity = 0;
+        uint32_t expectedPage = UINT32_MAX;
+        uint32_t nativePage = UINT32_MAX;
+        uint32_t nativeStartLayer = UINT32_MAX;
+        uint32_t nativeCapacity = 0;
+        const char* reason = "unknown";
+    };
+
+    void recordRejection(const UploadRequest& request, const char* reason,
+                         uint32_t expectedPage = UINT32_MAX,
+                         uint32_t nativePage = UINT32_MAX,
+                         uint32_t nativeStartLayer = UINT32_MAX,
+                         uint32_t nativeCapacity = 0);
+    std::string rejectionRingJsonLocked() const;
+
     GpuUploadService uploadService_;
     TexturePagePool pagePool_;
 
     std::atomic<uint64_t> activeGeneration_{0};
     std::atomic<uint64_t> javaPageContractRejects_{0};
+    std::atomic<uint64_t> ctmLegacyPageNormalizations_{0};
+    std::atomic<uint64_t> uploadRejectionSequence_{0};
+    std::array<UploadRejection, 64> uploadRejectionRing_{};
     std::atomic<bool> initialized_{false};
     std::atomic<bool> generationCommitted_{false};
     mutable std::mutex mutex_;

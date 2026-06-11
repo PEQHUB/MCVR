@@ -2,6 +2,7 @@
 #include "core/render/renderer.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/build/build_info.hpp"
+#include <algorithm>
 #include <iostream>
 #include <sstream>
 
@@ -29,6 +30,61 @@ bool TextureLoaderV4::initialize(std::shared_ptr<vk::Device> device,
 void TextureLoaderV4::shutdown() {
     uploadService_.shutdown();
     initialized_.store(false, std::memory_order_release);
+}
+
+void TextureLoaderV4::recordRejection(const UploadRequest& request, const char* reason,
+                                      uint32_t expectedPage,
+                                      uint32_t nativePage,
+                                      uint32_t nativeStartLayer,
+                                      uint32_t nativeCapacity) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const uint64_t sequence = uploadRejectionSequence_.fetch_add(1, std::memory_order_relaxed) + 1u;
+    UploadRejection rejection{};
+    rejection.sequence = sequence;
+    rejection.generation = request.generation;
+    rejection.namespaceId = request.namespaceId;
+    rejection.tier = request.tier;
+    rejection.page = request.page;
+    rejection.startLayer = request.startLayer;
+    rejection.layerCount = request.layerCount;
+    rejection.layerCapacity = request.layerCapacity;
+    rejection.expectedPage = expectedPage;
+    rejection.nativePage = nativePage;
+    rejection.nativeStartLayer = nativeStartLayer;
+    rejection.nativeCapacity = nativeCapacity;
+    rejection.reason = reason ? reason : "unknown";
+
+    uploadRejectionRing_[(sequence - 1u) % uploadRejectionRing_.size()] = rejection;
+}
+
+std::string TextureLoaderV4::rejectionRingJsonLocked() const {
+    std::ostringstream out;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const uint64_t total = uploadRejectionSequence_.load(std::memory_order_relaxed);
+    const uint64_t count = std::min<uint64_t>(total, uploadRejectionRing_.size());
+    out << "[";
+    for (uint64_t i = 0; i < count; ++i) {
+        const uint64_t sequence = total - count + i + 1u;
+        const UploadRejection& r = uploadRejectionRing_[(sequence - 1u) % uploadRejectionRing_.size()];
+        if (i != 0) out << ",";
+        out << "{"
+            << "\"sequence\":" << r.sequence << ","
+            << "\"generation\":" << r.generation << ","
+            << "\"namespaceId\":" << r.namespaceId << ","
+            << "\"tier\":" << r.tier << ","
+            << "\"page\":" << r.page << ","
+            << "\"startLayer\":" << r.startLayer << ","
+            << "\"layerCount\":" << r.layerCount << ","
+            << "\"layerCapacity\":" << r.layerCapacity << ","
+            << "\"expectedPage\":" << r.expectedPage << ","
+            << "\"nativePage\":" << r.nativePage << ","
+            << "\"nativeStartLayer\":" << r.nativeStartLayer << ","
+            << "\"nativeCapacity\":" << r.nativeCapacity << ","
+            << "\"reason\":\"" << r.reason << "\""
+            << "}";
+    }
+    out << "]";
+    return out.str();
 }
 
 bool TextureLoaderV4::beginGeneration(uint64_t generation) {
@@ -63,7 +119,8 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
         return false;
     }
     // Reject chunks that exceed native page capacity — Java should have chunked them
-    if (request.layerCount > TexturePagePool::pageLayerCapacityStatic(request.tier)) {
+    if (request.namespaceId == static_cast<uint32_t>(TexturePagePool::Vanilla)
+        && request.layerCount > TexturePagePool::pageLayerCapacityStatic(request.tier)) {
         std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: layerCount=" << request.layerCount
                   << " exceeds native page capacity=" << TexturePagePool::pageLayerCapacityStatic(request.tier)
                   << " for tier=" << request.tier << std::endl;
@@ -111,23 +168,43 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
         // confirming one Java page per tier. Currently VANILLA_TIER_FIRST_PAGE = 1, so
         // for tier 0 the page should be 1, tier 1 -> page 2, etc.
         // Bad page hints are rejected before placement so stale callers fail closed.
+        const bool vanillaPlacement =
+            request.namespaceId == static_cast<uint32_t>(TexturePagePool::Vanilla);
+        const bool ctmPlacement =
+            request.namespaceId == static_cast<uint32_t>(TexturePagePool::Ctm);
         const uint32_t expectedPage = 1 + request.tier;
-        if (request.page != expectedPage) {
+        if (vanillaPlacement && request.page != expectedPage) {
             javaPageContractRejects_.fetch_add(1, std::memory_order_relaxed);
+            recordRejection(request, "java_page_contract_vanilla_applied_to_vanilla", expectedPage);
             std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: javaPage="
                       << request.page << " expected=" << expectedPage
-                      << " tier=" << request.tier << std::endl;
+                      << " tier=" << request.tier
+                      << " ns=" << request.namespaceId << std::endl;
             return false;
         }
 
-        // Compute tier-local native page index from Java's absolute startLayer
-        normalizedPage = request.startLayer / nativeCapacity;
-        normalizedStartLayer = request.startLayer % nativeCapacity;
-        normalizedCapacity = nativeCapacity;
+        if (vanillaPlacement) {
+            // Compute tier-local native page index from Java's absolute startLayer.
+            normalizedPage = request.startLayer / nativeCapacity;
+            normalizedStartLayer = request.startLayer % nativeCapacity;
+            normalizedCapacity = nativeCapacity;
+        } else if (ctmPlacement) {
+            // CTM uses namespace-local page ids. Existing Java builds may still send
+            // descriptor-space compat pages beginning at 8; normalize them here so
+            // page 8 and page 0 both address descriptor slot 64.
+            normalizedPage = request.page >= 8u ? request.page - 8u : request.page;
+            normalizedStartLayer = request.startLayer;
+            normalizedCapacity = request.layerCapacity;
+            if (request.page >= 8u) {
+                ctmLegacyPageNormalizations_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
 
         // Cross-page boundary guard: reject uploads that would span two native pages.
         // Java must chunk at nativeCapacity boundaries; this is the safety net.
-        if (request.layerCount > nativeCapacity - normalizedStartLayer) {
+        if (vanillaPlacement && request.layerCount > nativeCapacity - normalizedStartLayer) {
+            recordRejection(request, "vanilla_cross_native_page_boundary", UINT32_MAX,
+                normalizedPage, normalizedStartLayer, nativeCapacity);
             std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: cross-page boundary"
                       << " startLayer=" << request.startLayer << " layerCount=" << request.layerCount
                       << " nativePage=" << normalizedPage << " nativeStartLayer=" << normalizedStartLayer
@@ -152,6 +229,8 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
                                          request.layerCount, normalizedCapacity,
                                          request.visible);
         if (!alloc.valid) {
+            recordRejection(request, "page_pool_allocate_exact_failed", UINT32_MAX,
+                normalizedPage, normalizedStartLayer, normalizedCapacity);
             std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: pagePool_.allocateExact() returned invalid"
                       << " page=" << normalizedPage << " startLayer=" << normalizedStartLayer
                       << " layerCount=" << request.layerCount << " capacity=" << normalizedCapacity << std::endl;
@@ -162,6 +241,7 @@ bool TextureLoaderV4::enqueueUpload(const UploadRequest& request) {
         alloc = pagePool_.allocate(request.generation, ns, request.tier,
                                     request.layerCount, request.visible);
         if (!alloc.valid) {
+            recordRejection(request, "page_pool_allocate_failed");
             std::cout << "[TextureLoaderV4] enqueueUpload REJECTED: pagePool_.allocate() returned invalid" << std::endl;
             return false;
         }
@@ -227,6 +307,8 @@ std::string TextureLoaderV4::statusJson() const {
         << "\"committed\":" << (generationCommitted_.load(std::memory_order_acquire) ? "true" : "false") << ","
         << "\"javaPageContractWarnings\":0,"
         << "\"javaPageContractRejects\":" << javaPageContractRejects_.load(std::memory_order_relaxed) << ","
+        << "\"ctmLegacyPageNormalizations\":" << ctmLegacyPageNormalizations_.load(std::memory_order_relaxed) << ","
+        << "\"uploadRejectionCount\":" << uploadRejectionSequence_.load(std::memory_order_relaxed) << ","
         << "\"vanillaBlockAtlasBypass\":true,"
         << "\"fixedCompatibilityUploadBytes\":0,"
         << "\"legacyFixedBlockUploadCalls\":0,"
@@ -247,6 +329,7 @@ std::string TextureLoaderV4::statusJson() const {
         << "\"mip0Clamp\":true,"
         << "\"diskCacheEnabled\":true,"
         << "\"timeoutReadinessAllowed\":false,"
+        << "\"uploadRejections\":" << rejectionRingJsonLocked() << ","
         << "\"uploadService\":" << uploadService_.statusJson() << ","
         << "\"pagePool\":" << pagePool_.statusJson()
         << "}";
