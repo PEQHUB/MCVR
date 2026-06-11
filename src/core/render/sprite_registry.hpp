@@ -33,6 +33,9 @@ class SpriteRegistry {
     /// Refresh mutable height/source flags for a live-updated normal layer.
     bool updateHeightMetadata(uint16_t spriteId, uint32_t flags, int32_t maskLayer);
 
+    /// Replace the first N entries from a v4 registry upload.
+    bool replacePrefix(const vk::Data::SpriteEntry* entries, uint32_t count);
+
     /// Upload all entries to the GPU SSBO. Call after all sprites are registered.
     /// Requires valid VMA and Device from the renderer.
     bool uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device);

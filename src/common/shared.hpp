@@ -597,11 +597,13 @@ namespace Data {
     static constexpr uint32_t SPRITE_SOURCE_FLAT = 3u;
     static constexpr uint32_t SPRITE_MAX_ENTRIES        = 4096u;
     static constexpr uint32_t MATERIAL_MAX_ENTRIES      = 65536u;
-    static constexpr uint32_t MATERIAL_TEXTURE_PAGE_MAX = 64u;
+    static constexpr uint32_t MATERIAL_TEXTURE_PAGE_MAX = 128u;
     static constexpr uint32_t MATERIAL_PAGE_NAMESPACE_MASK = 0xF0000000u;
-    static constexpr uint32_t MATERIAL_PAGE_INDEX_MASK = 0x0FFFFFFFu;
+    static constexpr uint32_t MATERIAL_PAGE_TIER_MASK = 0x0F000000u;
+    static constexpr uint32_t MATERIAL_PAGE_INDEX_MASK = 0x00FFFFFFu;
     static constexpr uint32_t MATERIAL_PAGE_NAMESPACE_MATERIAL = 0x00000000u;
     static constexpr uint32_t MATERIAL_PAGE_NAMESPACE_VANILLA_TIER = 0x80000000u;
+    static constexpr uint32_t MATERIAL_PAGE_NAMESPACE_CTM = 0x20000000u;
     static constexpr uint32_t MATERIAL_FLAG_VALID = 1u << 0;
     static constexpr uint32_t MATERIAL_FLAG_VANILLA_SPRITE = 1u << 1;
     static constexpr uint32_t MATERIAL_FLAG_COMPAT_VIRTUAL = 1u << 2;
@@ -612,6 +614,7 @@ namespace Data {
     static constexpr uint32_t MATERIAL_FLAG_HAS_NORMAL = 1u << 7;
     static constexpr uint32_t MATERIAL_FLAG_DISPLACEMENT_ELIGIBLE = 1u << 8;
     static constexpr uint32_t MATERIAL_FLAG_CUTOUT_DISPLACEMENT_BLOCKED = 1u << 9;
+    static constexpr uint32_t MATERIAL_FLAG_V4_PAGE_ADDRESS = 1u << 10;
     static constexpr uint32_t MATERIAL_DISPLACEMENT_DISABLED = 0u;
     static constexpr uint32_t MATERIAL_DISPLACEMENT_AUTHORED_HEIGHT = 1u;
     static constexpr uint32_t MATERIAL_DISPLACEMENT_BLOCKED_CUTOUT = 2u;
@@ -675,11 +678,13 @@ namespace Data {
     #define SPRITE_SOURCE_FLAT 3u
     #define SPRITE_MAX_ENTRIES       4096u
     #define MATERIAL_MAX_ENTRIES     65536u
-    #define MATERIAL_TEXTURE_PAGE_MAX 64u
+    #define MATERIAL_TEXTURE_PAGE_MAX 128u
     #define MATERIAL_PAGE_NAMESPACE_MASK 0xF0000000u
-    #define MATERIAL_PAGE_INDEX_MASK 0x0FFFFFFFu
+    #define MATERIAL_PAGE_TIER_MASK 0x0F000000u
+    #define MATERIAL_PAGE_INDEX_MASK 0x00FFFFFFu
     #define MATERIAL_PAGE_NAMESPACE_MATERIAL 0x00000000u
     #define MATERIAL_PAGE_NAMESPACE_VANILLA_TIER 0x80000000u
+    #define MATERIAL_PAGE_NAMESPACE_CTM 0x20000000u
     #define MATERIAL_FLAG_VALID (1u << 0)
     #define MATERIAL_FLAG_VANILLA_SPRITE (1u << 1)
     #define MATERIAL_FLAG_COMPAT_VIRTUAL (1u << 2)
@@ -690,6 +695,7 @@ namespace Data {
     #define MATERIAL_FLAG_HAS_NORMAL (1u << 7)
     #define MATERIAL_FLAG_DISPLACEMENT_ELIGIBLE (1u << 8)
     #define MATERIAL_FLAG_CUTOUT_DISPLACEMENT_BLOCKED (1u << 9)
+    #define MATERIAL_FLAG_V4_PAGE_ADDRESS (1u << 10)
     #define MATERIAL_DISPLACEMENT_DISABLED 0u
     #define MATERIAL_DISPLACEMENT_AUTHORED_HEIGHT 1u
     #define MATERIAL_DISPLACEMENT_BLOCKED_CUTOUT 2u

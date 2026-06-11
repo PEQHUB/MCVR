@@ -84,6 +84,26 @@ bool SpriteRegistry::updateHeightMetadata(uint16_t spriteId, uint32_t flags, int
     return true;
 }
 
+bool SpriteRegistry::replacePrefix(const vk::Data::SpriteEntry* entries, uint32_t count) {
+    if (!entries || count == 0 || count > vk::Data::SPRITE_MAX_ENTRIES) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (entries_.size() < count) {
+        vk::Data::SpriteEntry defaultEntry{};
+        defaultEntry.baseLayer = 0;
+        defaultEntry.frameCount = 1;
+        defaultEntry.tickRate = 1;
+        defaultEntry.flags = 0;
+        defaultEntry.specularLayer = -1;
+        defaultEntry.normalLayer = -1;
+        defaultEntry.overlaySprite = -1;
+        defaultEntry.maskLayer = -1;
+        entries_.resize(count, defaultEntry);
+    }
+    std::copy(entries, entries + count, entries_.begin());
+    spriteCount_ = std::max(spriteCount_, count);
+    return true;
+}
+
 bool SpriteRegistry::uploadSSBO(std::shared_ptr<vk::VMA> vma, std::shared_ptr<vk::Device> device) {
     if (!vma || !device) return false;
 

@@ -28,13 +28,15 @@ uint materialRuleSpriteId(uint materialId) {
 }
 
 bool materialUsesSpriteArray(MaterialEntry material) {
+    if ((material.flags & MATERIAL_FLAG_V4_PAGE_ADDRESS) != 0u) return false;
     return (material.flags & (MATERIAL_FLAG_VANILLA_SPRITE | MATERIAL_FLAG_FALLBACK)) != 0u;
 }
 
 uint materialPackedPageNamespace(uint packedPage) {
     uint ns = packedPage & MATERIAL_PAGE_NAMESPACE_MASK;
     if (ns == MATERIAL_PAGE_NAMESPACE_VANILLA_TIER) return 1u;
-    if (ns == MATERIAL_PAGE_NAMESPACE_MATERIAL) return 2u;
+    if (ns == MATERIAL_PAGE_NAMESPACE_CTM) return 2u;
+    if (ns == 0x30000000u) return 3u;
     return 0u;
 }
 
@@ -43,12 +45,7 @@ uint materialPackedPageIndex(uint packedPage) {
 }
 
 uint materialPackedPageTier(uint packedPage) {
-    uint ns = packedPage & MATERIAL_PAGE_NAMESPACE_MASK;
-    uint page = materialPackedPageIndex(packedPage);
-    if (ns == MATERIAL_PAGE_NAMESPACE_VANILLA_TIER) {
-        return clamp(page - 1u, 0u, 6u);
-    }
-    return 3u;
+    return (packedPage & MATERIAL_PAGE_TIER_MASK) >> 24u;
 }
 
 // V4 semantics over the preserved 80-byte ABI: namespace and tier are encoded

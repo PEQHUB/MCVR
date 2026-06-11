@@ -26,6 +26,29 @@ uint32_t tierSizePixels(uint32_t tier) {
     return SIZES[tier];
 }
 
+uint32_t descriptorPageForV4(uint32_t namespaceId, uint32_t tier,
+    uint32_t page, uint32_t startLayer, uint32_t* nativeStartLayer,
+    uint32_t* nativeCapacity) {
+    if (nativeStartLayer) *nativeStartLayer = startLayer;
+    if (nativeCapacity) *nativeCapacity = 0;
+
+    if (namespaceId == 1u) {
+        const uint32_t capacity = TexturePagePool::pageLayerCapacityStatic(tier);
+        if (capacity == 0) return UINT32_MAX;
+        const uint32_t nativePage = startLayer / capacity;
+        if (nativeStartLayer) *nativeStartLayer = startLayer % capacity;
+        if (nativeCapacity) *nativeCapacity = capacity;
+        return 1u + tier * 8u + nativePage;
+    }
+
+    if (namespaceId == 2u) {
+        if (nativeCapacity) *nativeCapacity = TexturePagePool::pageLayerCapacityStatic(tier);
+        return 64u + (page >= 8u ? page - 8u : page);
+    }
+
+    return page;
+}
+
 /// Validate signed JNI inputs before any unsigned cast.
 /// Accepts four-plane channel masks; requires a non-null pointer for every set bit.
 /// page and startLayer must be non-negative (no -1 sentinel; Java provides explicit values).
@@ -130,6 +153,37 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUploadTexturePa
         return JNI_FALSE;
     }
 
+    uint32_t nativeStartLayer = static_cast<uint32_t>(startLayer);
+    uint32_t nativeCapacity = static_cast<uint32_t>(layerCapacity);
+    uint32_t descriptorPage = descriptorPageForV4(
+        static_cast<uint32_t>(namespaceId),
+        static_cast<uint32_t>(tier),
+        static_cast<uint32_t>(page),
+        static_cast<uint32_t>(startLayer),
+        &nativeStartLayer,
+        &nativeCapacity);
+    if (descriptorPage >= vk::Data::MATERIAL_TEXTURE_PAGE_MAX || nativeCapacity == 0) {
+        return JNI_FALSE;
+    }
+
+    auto framework = renderer->framework();
+    bool published = Renderer::textureSystem.uploadMaterialTextureLayers(
+        descriptorPage,
+        static_cast<uint32_t>(width),
+        nativeStartLayer,
+        static_cast<uint32_t>(layerCount),
+        nativeCapacity,
+        reinterpret_cast<const uint8_t*>(albedoPtr),
+        reinterpret_cast<const uint8_t*>(specularPtr),
+        reinterpret_cast<const uint8_t*>(normalPtr),
+        reinterpret_cast<const uint8_t*>(flagPtr),
+        static_cast<uint64_t>(generation),
+        framework->vma(),
+        framework->device());
+    if (!published) {
+        return JNI_FALSE;
+    }
+
     return JNI_TRUE;
 }
 
@@ -174,8 +228,14 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUpdateSpriteRegistrySparseV4(
     JNIEnv*, jclass, jlong generation, jlong entriesPtr, jint entryCount) {
     if (generation <= 0 || entriesPtr == 0 || entryCount <= 0) return JNI_FALSE;
-    // Sprite registry sparse updates will be implemented in the full v4 path
-    return JNI_FALSE;
+    auto* renderer = Renderer::try_instance();
+    if (!renderer || !renderer->framework()) return JNI_FALSE;
+    auto framework = renderer->framework();
+    return Renderer::textureSystem.updateSpriteRegistrySparse(
+        reinterpret_cast<const vk::Data::SpriteEntry*>(entriesPtr),
+        static_cast<uint32_t>(entryCount),
+        static_cast<uint64_t>(generation),
+        framework->vma(), framework->device()) ? JNI_TRUE : JNI_FALSE;
 }
 
 // ---- Status JSON ----

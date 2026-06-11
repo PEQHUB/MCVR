@@ -1033,6 +1033,20 @@ bool TextureSystem::updateMaterialTableSparse(const vk::Data::MaterialEntry* ent
     return materials_.updateMaterialsSparse(entries, count, std::move(vma), std::move(device));
 }
 
+bool TextureSystem::updateSpriteRegistrySparse(const vk::Data::SpriteEntry* entries, uint32_t count,
+                                               uint64_t generation,
+                                               std::shared_ptr<vk::VMA> vma,
+                                               std::shared_ptr<vk::Device> device) {
+    if (!entries || count == 0 || !vma || !device) return false;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
+        if (!registry_.replacePrefix(entries, count)) return false;
+    }
+    return registry_.uploadSSBO(std::move(vma), std::move(device));
+}
+
 bool TextureSystem::uploadMaterialTexturePage(uint32_t page, uint32_t spriteSize, uint32_t layerCount,
                                               const uint8_t* albedoData,
                                               const uint8_t* specularData,

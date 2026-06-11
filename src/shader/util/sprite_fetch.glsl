@@ -70,13 +70,23 @@ uint materialTexturePage(uint page) {
 
 // V4: Compute texture descriptor index from namespace, tier, page
 uint textureDescriptorIndexV4(uint namespaceId, uint tier, uint page) {
-    // Namespace 0=fallback, 1=vanilla, 2=ctm, 3=dynamic
-    // Vanilla tier pages: 1-7 (one per tier)
-    // CTM pages: 8+
-    if (namespaceId == 1u) { // Vanilla
-        return min(1u + tier, MATERIAL_TEXTURE_PAGE_MAX - 1u);
+    if (namespaceId == 1u) {
+        return min(1u + tier * 8u + page, MATERIAL_TEXTURE_PAGE_MAX - 1u);
+    }
+    if (namespaceId == 2u) {
+        return min(64u + max(page, 8u) - 8u, MATERIAL_TEXTURE_PAGE_MAX - 1u);
     }
     return min(page, MATERIAL_TEXTURE_PAGE_MAX - 1u);
+}
+
+bool materialHasV4PageAddress(MaterialEntry material) {
+    return (material.flags & MATERIAL_FLAG_V4_PAGE_ADDRESS) != 0u;
+}
+
+uint materialDescriptorPage(MaterialEntry material, uint packedPage) {
+    if (!materialHasV4PageAddress(material)) return materialTexturePage(packedPage);
+    return textureDescriptorIndexV4(materialPackedPageNamespace(packedPage),
+        materialPackedPageTier(packedPage), materialPackedPageIndex(packedPage));
 }
 
 ivec3 materialAlbedoTextureSize(MaterialEntry material) {
@@ -103,9 +113,11 @@ ivec3 materialFlagTextureSize(MaterialEntry material) {
 
 bool materialAlbedoLayerInRange(uint materialId, SpriteEntry se, uint animTick, out uint layer) {
     MaterialEntry material = safeMaterialEntry(materialId);
-    bool useSpriteArray = materialUsesSpriteArray(material) || material.albedoLayer < 0;
+    bool useSpriteArray = !materialHasV4PageAddress(material) &&
+        (materialUsesSpriteArray(material) || material.albedoLayer < 0);
     layer = useSpriteArray ? spriteAnimLayer(se, animTick) : uint(material.albedoLayer);
-    return spriteLayerInRange(layer, materialAlbedoTextureSize(material));
+    ivec3 dims = textureSize(blockAlbedo[nonuniformEXT(materialDescriptorPage(material, material.albedoPage))], 0);
+    return spriteLayerInRange(layer, dims);
 }
 
 int materialSpecularLayer(uint materialId, SpriteEntry se) {
@@ -116,7 +128,8 @@ int materialSpecularLayer(uint materialId, SpriteEntry se) {
 bool materialSpecularLayerInRange(uint materialId, SpriteEntry se, out int layer) {
     MaterialEntry material = safeMaterialEntry(materialId);
     layer = materialSpecularLayer(materialId, se);
-    return layer >= 0 && spriteLayerInRange(layer, materialSpecularTextureSize(material));
+    ivec3 dims = textureSize(blockSpecular[nonuniformEXT(materialDescriptorPage(material, material.specularPage))], 0);
+    return layer >= 0 && spriteLayerInRange(layer, dims);
 }
 
 int materialNormalLayer(uint materialId, SpriteEntry se) {
@@ -127,7 +140,8 @@ int materialNormalLayer(uint materialId, SpriteEntry se) {
 bool materialNormalLayerInRange(uint materialId, SpriteEntry se, out int layer) {
     MaterialEntry material = safeMaterialEntry(materialId);
     layer = materialNormalLayer(materialId, se);
-    return layer >= 0 && spriteLayerInRange(layer, materialNormalTextureSize(material));
+    ivec3 dims = textureSize(blockNormal[nonuniformEXT(materialDescriptorPage(material, material.normalPage))], 0);
+    return layer >= 0 && spriteLayerInRange(layer, dims);
 }
 
 int materialFlagLayer(uint materialId) {
@@ -139,7 +153,8 @@ int materialFlagLayer(uint materialId) {
 bool materialFlagLayerInRange(uint materialId, out int layer) {
     MaterialEntry material = safeMaterialEntry(materialId);
     layer = materialFlagLayer(materialId);
-    return layer >= 0 && spriteLayerInRange(layer, materialFlagTextureSize(material));
+    ivec3 dims = textureSize(blockFlag[nonuniformEXT(materialDescriptorPage(material, material.flagPage))], 0);
+    return layer >= 0 && spriteLayerInRange(layer, dims);
 }
 
 vec2 materialRegistryUv(uint materialId, vec2 uv) {
@@ -180,7 +195,7 @@ vec4 fetchBlockAlbedoTex(uint materialId, vec2 uv, uint animTick) {
     SpriteEntry se = safeMaterialSpriteEntry(materialId);
     uint layer;
     if (!materialAlbedoLayerInRange(materialId, se, animTick, layer)) return vec4(1.0);
-    return texture(blockAlbedo[nonuniformEXT(materialTexturePage(material.albedoPage))],
+    return texture(blockAlbedo[nonuniformEXT(materialDescriptorPage(material, material.albedoPage))],
         vec3(materialRuleUv(materialId, uv), float(layer)));
 }
 
@@ -190,7 +205,7 @@ vec4 fetchBlockAlbedoLod(uint materialId, vec2 uv, uint animTick, float lod) {
     SpriteEntry se = safeMaterialSpriteEntry(materialId);
     uint layer;
     if (!materialAlbedoLayerInRange(materialId, se, animTick, layer)) return vec4(1.0);
-    return textureLod(blockAlbedo[nonuniformEXT(materialTexturePage(material.albedoPage))],
+    return textureLod(blockAlbedo[nonuniformEXT(materialDescriptorPage(material, material.albedoPage))],
         vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
 }
 
@@ -200,7 +215,7 @@ vec4 fetchBlockSpecularTex(uint materialId, vec2 uv) {
     SpriteEntry se = safeMaterialSpriteEntry(materialId);
     int layer;
     if (!materialSpecularLayerInRange(materialId, se, layer)) return vec4(0.0);
-    return texture(blockSpecular[nonuniformEXT(materialTexturePage(material.specularPage))],
+    return texture(blockSpecular[nonuniformEXT(materialDescriptorPage(material, material.specularPage))],
         vec3(materialRuleUv(materialId, uv), float(layer)));
 }
 
@@ -209,7 +224,7 @@ vec4 fetchBlockSpecularLod(uint materialId, vec2 uv, float lod) {
     SpriteEntry se = safeMaterialSpriteEntry(materialId);
     int layer;
     if (!materialSpecularLayerInRange(materialId, se, layer)) return vec4(0.0);
-    return textureLod(blockSpecular[nonuniformEXT(materialTexturePage(material.specularPage))],
+    return textureLod(blockSpecular[nonuniformEXT(materialDescriptorPage(material, material.specularPage))],
         vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
 }
 
@@ -219,7 +234,7 @@ vec4 fetchBlockNormalTex(uint materialId, vec2 uv) {
     SpriteEntry se = safeMaterialSpriteEntry(materialId);
     int layer;
     if (!materialNormalLayerInRange(materialId, se, layer)) return vec4(0.5, 0.5, 1.0, 1.0); // flat normal
-    return texture(blockNormal[nonuniformEXT(materialTexturePage(material.normalPage))],
+    return texture(blockNormal[nonuniformEXT(materialDescriptorPage(material, material.normalPage))],
         vec3(materialRuleUv(materialId, uv), float(layer)));
 }
 
@@ -228,7 +243,7 @@ vec4 fetchBlockNormalLod(uint materialId, vec2 uv, float lod) {
     SpriteEntry se = safeMaterialSpriteEntry(materialId);
     int layer;
     if (!materialNormalLayerInRange(materialId, se, layer)) return vec4(0.5, 0.5, 1.0, 1.0);
-    return textureLod(blockNormal[nonuniformEXT(materialTexturePage(material.normalPage))],
+    return textureLod(blockNormal[nonuniformEXT(materialDescriptorPage(material, material.normalPage))],
         vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
 }
 
@@ -236,7 +251,7 @@ ivec4 fetchBlockFlagLod(uint materialId, vec2 uv, float lod) {
     MaterialEntry material = safeMaterialEntry(materialId);
     int layer;
     if (!materialFlagLayerInRange(materialId, layer)) return ivec4(0);
-    vec4 flagValue = textureLod(blockFlag[nonuniformEXT(materialTexturePage(material.flagPage))],
+    vec4 flagValue = textureLod(blockFlag[nonuniformEXT(materialDescriptorPage(material, material.flagPage))],
         vec3(materialRuleUv(materialId, uv), float(layer)), materialRuleLod(materialId, lod));
     return ivec4(round(flagValue * 255.0));
 }

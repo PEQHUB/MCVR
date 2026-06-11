@@ -179,6 +179,10 @@ class TextureSystem {
                                    uint64_t generation,
                                    std::shared_ptr<vk::VMA> vma,
                                    std::shared_ptr<vk::Device> device);
+    bool updateSpriteRegistrySparse(const vk::Data::SpriteEntry* entries, uint32_t count,
+                                    uint64_t generation,
+                                    std::shared_ptr<vk::VMA> vma,
+                                    std::shared_ptr<vk::Device> device);
     bool uploadMaterialTexturePage(uint32_t page, uint32_t spriteSize, uint32_t layerCount,
                                    const uint8_t* albedoData,
                                    const uint8_t* specularData,
