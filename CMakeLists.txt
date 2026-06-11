@@ -26,7 +26,8 @@ else()
     endif()
 endif()
 
-set(MCVR_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/src ${JAVA_PROJECT_ROOT_DIR}/src/main/native/include/)
+set(MCVR_GENERATED_INCLUDE_DIR ${CMAKE_BINARY_DIR}/generated/include)
+set(MCVR_INCLUDE_DIR ${MCVR_GENERATED_INCLUDE_DIR} ${PROJECT_SOURCE_DIR}/src ${JAVA_PROJECT_ROOT_DIR}/src/main/native/include/)
 message(STATUS "Include dir: ${MCVR_INCLUDE_DIR}")
 
 set(MCVR_INSTALL_BIN_DIR ${PROJECT_SOURCE_DIR}/bin)
@@ -222,7 +223,7 @@ add_custom_target(generate_config DEPENDS
 # --- V2 engine (behind build flag, default OFF) ---
 option(MCVR_ENABLE_ENGINE_V2 "Enable v2 engine subsystems" OFF)
 
-# --- Build info generation (Phase 0: Texture Loader v4) ---
+# --- Build info generation (V4 pipeline, ABI 5 contract) ---
 execute_process(
     COMMAND git rev-parse HEAD
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -251,9 +252,10 @@ endif()
 string(TIMESTAMP MCVR_BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
 set(MCVR_DLL_SHA256 "unknown")
 
+file(MAKE_DIRECTORY ${MCVR_GENERATED_INCLUDE_DIR}/core/build)
 configure_file(
     ${CMAKE_SOURCE_DIR}/src/core/build/build_info.hpp.in
-    ${CMAKE_SOURCE_DIR}/src/core/build/build_info.hpp
+    ${MCVR_GENERATED_INCLUDE_DIR}/core/build/build_info.hpp
     @ONLY
 )
 

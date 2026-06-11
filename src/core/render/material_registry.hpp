@@ -70,5 +70,6 @@ class MaterialRegistry {
     uint64_t rejectedSparseEntries_ = 0;
     std::shared_ptr<vk::DeviceLocalBuffer> ssbo_;
     mutable std::deque<PendingUpload> pendingUploads_;
+    std::mutex operationMutex_;
     mutable std::mutex mutex_;
 };

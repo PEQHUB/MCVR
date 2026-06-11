@@ -42,6 +42,8 @@ bool MaterialRegistry::uploadMaterials(const vk::Data::MaterialEntry* entries, u
                                        std::shared_ptr<vk::VMA> vma,
                                        std::shared_ptr<vk::Device> device) {
     if (!entries || count == 0 || !vma || !device) return false;
+    std::lock_guard<std::mutex> operationLock(operationMutex_);
+
     auto renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return false;
     auto framework = renderer->framework();
@@ -165,6 +167,8 @@ bool MaterialRegistry::updateMaterialsSparse(const vk::Data::MaterialEntry* entr
                                              std::shared_ptr<vk::VMA> vma,
                                              std::shared_ptr<vk::Device> device) {
     if (!entries || count == 0 || !vma || !device) return false;
+    std::lock_guard<std::mutex> operationLock(operationMutex_);
+
     auto renderer = Renderer::try_instance();
     if (!renderer || !renderer->framework()) return false;
     auto framework = renderer->framework();
@@ -396,6 +400,7 @@ std::string MaterialRegistry::statusJson() const {
 }
 
 void MaterialRegistry::reset() {
+    std::lock_guard<std::mutex> operationLock(operationMutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     entries_.clear();
     materialCount_ = 0;
@@ -414,6 +419,7 @@ void MaterialRegistry::reset() {
 }
 
 void MaterialRegistry::retire(GarbageCollector& gc) {
+    std::lock_guard<std::mutex> operationLock(operationMutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     pollCompletedUploadsLocked();
     gc.collect(ssbo_);

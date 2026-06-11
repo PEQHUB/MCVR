@@ -1010,9 +1010,11 @@ bool TextureSystem::uploadMaterialTable(const vk::Data::MaterialEntry* entries, 
                                         std::shared_ptr<vk::Device> device) {
     if (!entries || count == 0 || !vma || !device) return false;
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
-    if (!finalized_) return false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
+        if (!finalized_) return false;
+    }
     return materials_.uploadMaterials(entries, count, std::move(vma), std::move(device));
 }
 

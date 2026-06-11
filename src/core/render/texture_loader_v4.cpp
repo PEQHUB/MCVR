@@ -231,6 +231,8 @@ std::string TextureLoaderV4::statusJson() const {
         << "\"fixedCompatibilityUploadBytes\":0,"
         << "\"legacyFixedBlockUploadCalls\":0,"
         << "\"v4ActualVkCopyCommands\":" << uploadService_.status().actualVkCopyCommands << ","
+        << "\"actualVkCopyBufferToImageCommands\":"
+        << uploadService_.status().actualVkCopyBufferToImageCommands << ","
         << "\"tieredArrays\":true,"
         << "\"auxPlaneUploadsAccepted\":true,"
         << "\"fourPlanePageUploads\":true,"

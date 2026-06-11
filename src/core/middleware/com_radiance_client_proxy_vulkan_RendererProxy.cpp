@@ -16,14 +16,20 @@
 #include "core/render/world.hpp"
 #include "core/vulkan/vma.hpp"
 
+#include <array>
 #include <atomic>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #if defined(_WIN32)
 #    include <windows.h>
+#    include <bcrypt.h>
 using DYNLIB_HANDLE = HMODULE;
 
 static DYNLIB_HANDLE try_get_loaded_handle(const wchar_t *wname) {
@@ -80,6 +86,158 @@ std::string json_escape(const char *text) {
     }
     return out;
 }
+
+std::string json_escape(const std::string& text) {
+    return json_escape(text.c_str());
+}
+
+struct FileIdentity {
+    std::string path;
+    std::string sha256 = "unavailable";
+    uint64_t sizeBytes = 0;
+    std::string error;
+};
+
+#if defined(_WIN32)
+std::string utf8FromWide(const std::wstring& text) {
+    if (text.empty()) return {};
+    int size = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()),
+                                   nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+    std::string out(static_cast<size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()),
+                        out.data(), size, nullptr, nullptr);
+    return out;
+}
+
+std::string sha256File(const std::filesystem::path& path, std::string& error) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    DWORD objectLength = 0;
+    DWORD bytesWritten = 0;
+    std::vector<UCHAR> hashObject;
+    std::array<UCHAR, 32> digest{};
+
+    auto cleanup = [&]() {
+        if (hash) {
+            BCryptDestroyHash(hash);
+        }
+        if (algorithm) {
+            BCryptCloseAlgorithmProvider(algorithm, 0);
+        }
+    };
+
+    NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
+    if (!BCRYPT_SUCCESS(status)) {
+        error = "BCryptOpenAlgorithmProvider failed";
+        cleanup();
+        return "unavailable";
+    }
+    status = BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+                               reinterpret_cast<PUCHAR>(&objectLength),
+                               sizeof(objectLength), &bytesWritten, 0);
+    if (!BCRYPT_SUCCESS(status) || objectLength == 0) {
+        error = "BCryptGetProperty(BCRYPT_OBJECT_LENGTH) failed";
+        cleanup();
+        return "unavailable";
+    }
+    hashObject.resize(objectLength);
+    status = BCryptCreateHash(algorithm, &hash, hashObject.data(), objectLength, nullptr, 0, 0);
+    if (!BCRYPT_SUCCESS(status)) {
+        error = "BCryptCreateHash failed";
+        cleanup();
+        return "unavailable";
+    }
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        error = "failed to open DLL for hashing";
+        cleanup();
+        return "unavailable";
+    }
+
+    std::array<char, 1024 * 1024> buffer{};
+    while (input) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize read = input.gcount();
+        if (read > 0) {
+            status = BCryptHashData(hash, reinterpret_cast<PUCHAR>(buffer.data()),
+                                    static_cast<ULONG>(read), 0);
+            if (!BCRYPT_SUCCESS(status)) {
+                error = "BCryptHashData failed";
+                cleanup();
+                return "unavailable";
+            }
+        }
+    }
+    if (input.bad()) {
+        error = "DLL read failed";
+        cleanup();
+        return "unavailable";
+    }
+    status = BCryptFinishHash(hash, digest.data(), static_cast<ULONG>(digest.size()), 0);
+    if (!BCRYPT_SUCCESS(status)) {
+        error = "BCryptFinishHash failed";
+        cleanup();
+        return "unavailable";
+    }
+
+    std::ostringstream out;
+    out << std::uppercase << std::hex << std::setfill('0');
+    for (const auto byte : digest) {
+        out << std::setw(2) << static_cast<int>(byte);
+    }
+    cleanup();
+    return out.str();
+}
+
+FileIdentity currentDllIdentity() {
+    FileIdentity identity;
+    HMODULE module = nullptr;
+    const DWORD flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    if (!GetModuleHandleExW(flags, reinterpret_cast<LPCWSTR>(&g_rendererClosed), &module) || module == nullptr) {
+        identity.error = "GetModuleHandleExW failed";
+        return identity;
+    }
+
+    std::wstring modulePath(MAX_PATH, L'\0');
+    while (true) {
+        DWORD length = GetModuleFileNameW(module, modulePath.data(), static_cast<DWORD>(modulePath.size()));
+        if (length == 0) {
+            identity.error = "GetModuleFileNameW failed";
+            return identity;
+        }
+        if (length < modulePath.size() - 1) {
+            modulePath.resize(length);
+            break;
+        }
+        modulePath.resize(modulePath.size() * 2);
+    }
+
+    std::filesystem::path path(modulePath);
+    identity.path = utf8FromWide(modulePath);
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec) {
+        identity.error = "file_size failed: " + ec.message();
+    } else {
+        identity.sizeBytes = static_cast<uint64_t>(size);
+    }
+    std::string hashError;
+    identity.sha256 = sha256File(path, hashError);
+    if (!hashError.empty()) {
+        identity.error = identity.error.empty() ? hashError : identity.error + "; " + hashError;
+    }
+    return identity;
+}
+#else
+FileIdentity currentDllIdentity() {
+    FileIdentity identity;
+    identity.error = "runtime DLL hashing is only implemented on Windows";
+    return identity;
+}
+#endif
 
 inline bool rendererUsable() {
     return Renderer::is_initialized() &&
@@ -189,6 +347,7 @@ extern "C" JNIEXPORT jint JNICALL Java_com_radiance_client_proxy_vulkan_Renderer
 
 extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_RendererProxy_nativeBuildInfoJson(JNIEnv *env,
                                                                                                              jclass) {
+    const FileIdentity dllIdentity = currentDllIdentity();
     std::ostringstream json;
     json << "{";
     json << "\"repository\":\"radser-mcvr\",";
@@ -196,7 +355,11 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_radiance_client_proxy_vulkan_Rende
     json << "\"branch\":\"" << json_escape(build_info::kBranch) << "\",";
     json << "\"dirty\":" << (build_info::kDirty ? "true" : "false") << ",";
     json << "\"buildTimestamp\":\"" << json_escape(build_info::kBuildTimestamp) << "\",";
-    json << "\"dllSha256\":\"" << json_escape(build_info::kDllSha256) << "\",";
+    json << "\"dllSha256\":\"" << json_escape(dllIdentity.sha256) << "\",";
+    json << "\"dllPath\":\"" << json_escape(dllIdentity.path) << "\",";
+    json << "\"dllSizeBytes\":" << dllIdentity.sizeBytes << ",";
+    json << "\"dllHashError\":\"" << json_escape(dllIdentity.error) << "\",";
+    json << "\"compileTimeDllSha256\":\"" << json_escape(build_info::kDllSha256) << "\",";
     json << "\"textureLoaderAbiVersion\":" << build_info::kTextureLoaderAbiVersion << ",";
     json << "\"cacheSchemaVersion\":" << build_info::kCacheSchemaVersion << ",";
     json << "\"features\":{";
