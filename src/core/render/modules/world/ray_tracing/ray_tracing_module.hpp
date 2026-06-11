@@ -232,6 +232,12 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
         VkBuffer spriteRegistryBuffer = VK_NULL_HANDLE;
         VkBuffer materialRegistryBuffer = VK_NULL_HANDLE;
         VkBuffer textureRuleBuffer = VK_NULL_HANDLE;
+        uint64_t textureRuleRevision = UINT64_MAX;
+        uint64_t spriteRegistryRevision = UINT64_MAX;
+        uint64_t materialRegistryRevision = UINT64_MAX;
+        bool textureRulesUsingFallback = false;
+        bool spriteRegistryUsingFallback = false;
+        bool materialRegistryUsingFallback = false;
     };
     std::vector<TextureDescriptorSlotState> textureDescriptorSlotStates_;
 

@@ -3744,6 +3744,112 @@ void RayTracingModuleContext::render() {
             &shaderPackVisualSettings, sizeof(ShaderPackVisualSettings), 0);
     }
 
+    auto& texSystem = Renderer::textureSystem;
+    auto vma = framework->vma();
+    auto device = framework->device();
+    const bool ensuredV4FrameFallbackResources =
+        [&]<typename TextureSystemT>(TextureSystemT& system) {
+            if constexpr (requires { system.ensureV4ShaderFallbackResources(vma, device); }) {
+                system.ensureV4ShaderFallbackResources(vma, device);
+                return true;
+            } else {
+                system.ensureDescriptorFallbackArrays(vma, device);
+                return system.descriptorFallbackArraysReady();
+            }
+        }(texSystem);
+
+    const auto spriteRegBuffer =
+        [&]<typename TextureSystemT>(TextureSystemT& system) {
+            if constexpr (requires { system.spriteRegistryBufferOrFallback(); }) {
+                return system.spriteRegistryBufferOrFallback();
+            } else {
+                return system.registry().getBuffer();
+            }
+        }(texSystem);
+    const auto materialRegBuffer =
+        [&]<typename TextureSystemT>(TextureSystemT& system) {
+            if constexpr (requires { system.materialRegistryBufferOrFallback(); }) {
+                return system.materialRegistryBufferOrFallback();
+            } else {
+                return system.materials().getBuffer();
+            }
+        }(texSystem);
+    const auto textureRuleBuffer =
+        [&]<typename TextureSystemT>(TextureSystemT& system) {
+            if constexpr (requires { system.textureRuleBufferOrFallback(); }) {
+                return system.textureRuleBufferOrFallback();
+            } else {
+                return system.textureRules().getBuffer();
+            }
+        }(texSystem);
+    const VkBuffer spriteRegistryBuffer = spriteRegBuffer ? spriteRegBuffer->vkBuffer() : VK_NULL_HANDLE;
+    const VkBuffer materialRegistryBuffer = materialRegBuffer ? materialRegBuffer->vkBuffer() : VK_NULL_HANDLE;
+    const VkBuffer textureRuleVkBuffer = textureRuleBuffer ? textureRuleBuffer->vkBuffer() : VK_NULL_HANDLE;
+    const bool spriteRegistryUsingFallback =
+        [&]<typename TextureSystemT>(TextureSystemT& system) {
+            if constexpr (requires { system.spriteRegistryUsingFallback(); }) {
+                return system.spriteRegistryUsingFallback();
+            } else {
+                return false;
+            }
+        }(texSystem);
+    const bool materialRegistryUsingFallback =
+        [&]<typename TextureSystemT>(TextureSystemT& system) {
+            if constexpr (requires { system.materialRegistryUsingFallback(); }) {
+                return system.materialRegistryUsingFallback();
+            } else {
+                return false;
+            }
+        }(texSystem);
+    const bool textureRulesUsingFallback =
+        [&]<typename TextureSystemT>(TextureSystemT& system) {
+            if constexpr (requires { system.textureRulesUsingFallback(); }) {
+                return system.textureRulesUsingFallback();
+            } else {
+                return false;
+            }
+        }(texSystem);
+    const uint64_t spriteRegistryRevision =
+        [&]<typename TextureSystemT>(TextureSystemT& system) -> uint64_t {
+            if constexpr (requires { system.spriteRegistryRevision(); }) {
+                return system.spriteRegistryRevision();
+            } else {
+                return 0;
+            }
+        }(texSystem);
+    const uint64_t materialRegistryRevision =
+        [&]<typename TextureSystemT>(TextureSystemT& system) -> uint64_t {
+            if constexpr (requires { system.materialRegistryRevision(); }) {
+                return system.materialRegistryRevision();
+            } else {
+                return 0;
+            }
+        }(texSystem);
+    const uint64_t textureRuleRevision =
+        [&]<typename TextureSystemT>(TextureSystemT& system) -> uint64_t {
+            if constexpr (requires { system.textureRulesRevision(); }) {
+                return system.textureRulesRevision();
+            } else {
+                return 0;
+            }
+        }(texSystem);
+    const bool textureRulesReady =
+        [&]<typename TextureSystemT>(TextureSystemT& system) {
+            if constexpr (requires { system.textureRulesReady(); }) {
+                return system.textureRulesReady();
+            } else {
+                return textureRuleBuffer != nullptr;
+            }
+        }(texSystem);
+    const std::string v4FrameResourceStatusJson =
+        [&]<typename TextureSystemT>(TextureSystemT& system) -> std::string {
+            if constexpr (requires { system.v4FrameResourceStatusJson(); }) {
+                return system.v4FrameResourceStatusJson();
+            } else {
+                return "{}";
+            }
+        }(texSystem);
+
     // Batch all per-frame buffer bindings into a single vkUpdateDescriptorSets call
     using BB = vk::DescriptorTable::BufferBinding;
     std::vector<BB> bufferBindings = {
@@ -3766,19 +3872,13 @@ void RayTracingModuleContext::render() {
     if (worldPrepareContext->biomeColorBuffer) {
         bufferBindings.push_back({worldPrepareContext->biomeColorBuffer, 1, 10});
     }
-    // SpriteRegistry SSBO for texture array metadata
-    auto spriteRegBuffer = Renderer::textureSystem.registry().getBuffer();
-    const VkBuffer spriteRegistryBuffer = spriteRegBuffer ? spriteRegBuffer->vkBuffer() : VK_NULL_HANDLE;
+    // SpriteRegistry SSBO for texture array metadata, resolved to real-or-fallback.
     if (spriteRegBuffer) {
         bufferBindings.push_back({spriteRegBuffer, 1, 13});
     }
-    auto materialRegBuffer = Renderer::textureSystem.materials().getBuffer();
-    const VkBuffer materialRegistryBuffer = materialRegBuffer ? materialRegBuffer->vkBuffer() : VK_NULL_HANDLE;
     if (materialRegBuffer) {
         bufferBindings.push_back({materialRegBuffer, 1, 14});
     }
-    auto textureRuleBuffer = Renderer::textureSystem.textureRules().getBuffer();
-    const VkBuffer textureRuleVkBuffer = textureRuleBuffer ? textureRuleBuffer->vkBuffer() : VK_NULL_HANDLE;
     if (textureRuleBuffer) {
         bufferBindings.push_back({textureRuleBuffer, 1, 11});
     }
@@ -3804,15 +3904,12 @@ void RayTracingModuleContext::render() {
     rayTracingDescriptorTable->bindImages(frameImageBindings);
 
     // Bind block sprite texture arrays (set 0, bindings 3-5)
-    auto& texSystem = Renderer::textureSystem;
     const uint64_t textureGeneration = texSystem.generation();
     uint64_t materialTexturePageRevision = texSystem.materialTexturePageRevision();
     std::string textureDescriptorLabel = "RT:TexturePublishAndDescriptors gen=" +
         std::to_string(textureGeneration) + " frame=" + std::to_string(context->frameIndex);
     worldCommandBuffer->beginLabel(textureDescriptorLabel.c_str(), 0.95f, 0.35f, 0.1f);
     ScopedGpuProfile textureProfile(profileCmd, "RT.TexturePublish");
-    auto vma = framework->vma();
-    auto device = framework->device();
     const bool v4MaterialPagesActiveBeforeFlush = texSystem.hasV4MaterialPagesActive();
     const bool materialPagesAllocatedBeforeFlush = texSystem.hasAllocatedMaterialTexturePages();
     if (v4MaterialPagesActiveBeforeFlush || materialPagesAllocatedBeforeFlush) {
@@ -3853,7 +3950,7 @@ void RayTracingModuleContext::render() {
         hasFallbackAlbedo && hasFallbackSpec && hasFallbackNorm && hasFallbackFlag;
     const uint32_t readyMaterialPages = texSystem.readyMaterialTexturePageCount();
     const uint32_t pendingMaterialMipPages = texSystem.pendingMaterialMipPageCount();
-    const bool v4ArraysReady = readyMaterialPages > 0 && fallbackArraysReady;
+    const bool v4ArraysReady = fallbackArraysReady;
 
     const VkImageView albedoView = hasFallbackAlbedo ? fallbackAlbedoInfo.image->vkImageView() : VK_NULL_HANDLE;
     const VkImageView specView = hasFallbackSpec ? fallbackSpecInfo.image->vkImageView() : VK_NULL_HANDLE;
@@ -3861,20 +3958,41 @@ void RayTracingModuleContext::render() {
     const VkImageView flagView = hasFallbackFlag ? fallbackFlagInfo.image->vkImageView() : VK_NULL_HANDLE;
 
     if (!v4ArraysReady || !spriteRegBuffer || !materialRegBuffer || !textureRuleBuffer) {
-        renderDiag("RT descriptors missing V4 texture resources finalized=%d v4Ready=%d fallbackReady=%d readyMaterialPages=%u pendingMaterialMipPages=%u spriteReg=%d materialReg=%d rules=%d; skipping RT",
+        renderDiag("RT v4 frame contract finalized=%d v4Ready=%d fallbackReady=%d ensuredFallback=%d readyMaterialPages=%u pendingMaterialMipPages=%u spriteReg=%d spriteFallback=%d materialReg=%d materialFallback=%d rules=%d rulesFallback=%d rulesReady=%d ruleRevision=%llu status=missing-required-fallback; skipping RT",
                    texSystem.isFinalized() ? 1 : 0,
                    v4ArraysReady ? 1 : 0,
                    fallbackArraysReady ? 1 : 0,
+                   ensuredV4FrameFallbackResources ? 1 : 0,
                    readyMaterialPages,
                    pendingMaterialMipPages,
                    spriteRegBuffer ? 1 : 0,
+                   spriteRegistryUsingFallback ? 1 : 0,
                    materialRegBuffer ? 1 : 0,
-                   textureRuleBuffer ? 1 : 0);
+                   materialRegistryUsingFallback ? 1 : 0,
+                   textureRuleBuffer ? 1 : 0,
+                   textureRulesUsingFallback ? 1 : 0,
+                   textureRulesReady ? 1 : 0,
+                   static_cast<unsigned long long>(textureRuleRevision));
         g_crashRing.record("RT:descriptors_missing_textures");
         textureProfile.close();
         worldCommandBuffer->endLabel();
         return;
     }
+    renderDiag("RT v4 frame contract finalized=%d v4Ready=%d fallbackReady=%d ensuredFallback=%d readyMaterialPages=%u pendingMaterialMipPages=%u spriteReg=%d spriteFallback=%d materialReg=%d materialFallback=%d rules=1 rulesFallback=%d rulesReady=%d ruleRevision=%llu status=%s",
+               texSystem.isFinalized() ? 1 : 0,
+               v4ArraysReady ? 1 : 0,
+               fallbackArraysReady ? 1 : 0,
+               ensuredV4FrameFallbackResources ? 1 : 0,
+               readyMaterialPages,
+               pendingMaterialMipPages,
+               spriteRegBuffer ? 1 : 0,
+               spriteRegistryUsingFallback ? 1 : 0,
+               materialRegBuffer ? 1 : 0,
+               materialRegistryUsingFallback ? 1 : 0,
+               textureRulesUsingFallback ? 1 : 0,
+               textureRulesReady ? 1 : 0,
+               static_cast<unsigned long long>(textureRuleRevision),
+               v4FrameResourceStatusJson.c_str());
 
     auto bindBlockTextureArrays = [&](const std::shared_ptr<vk::DescriptorTable>& table) {
         if (!table) return;
@@ -3923,7 +4041,13 @@ void RayTracingModuleContext::render() {
         flagView != descriptorSlotState.flagTextureView ||
         spriteRegistryBuffer != descriptorSlotState.spriteRegistryBuffer ||
         materialRegistryBuffer != descriptorSlotState.materialRegistryBuffer ||
-        textureRuleVkBuffer != descriptorSlotState.textureRuleBuffer;
+        textureRuleVkBuffer != descriptorSlotState.textureRuleBuffer ||
+        spriteRegistryRevision != descriptorSlotState.spriteRegistryRevision ||
+        materialRegistryRevision != descriptorSlotState.materialRegistryRevision ||
+        textureRuleRevision != descriptorSlotState.textureRuleRevision ||
+        spriteRegistryUsingFallback != descriptorSlotState.spriteRegistryUsingFallback ||
+        materialRegistryUsingFallback != descriptorSlotState.materialRegistryUsingFallback ||
+        textureRulesUsingFallback != descriptorSlotState.textureRulesUsingFallback;
 
     if (textureDescriptorGenerationChanged) {
         bindBlockTextureArrays(rayTracingDescriptorTable);
@@ -3956,7 +4080,9 @@ void RayTracingModuleContext::render() {
             "v4Ready=%d fallbackReady=%d readyMaterialPages=%u pendingMaterialMipPages=%u "
             "boundV4AlbedoPages=%u boundFallbackPages=%u firstReadyPage=%u firstReadyAlbedoArrayId=%u "
             "fallbackAlbedoId=%u fallbackSpecId=%u fallbackNormId=%u fallbackFlagId=%u "
-            "spriteRegistry=0x%llx materialRegistry=0x%llx materialPageRevision=%llu",
+            "spriteRegistry=0x%llx spriteFallback=%d spriteRevision=%llu "
+            "materialRegistry=0x%llx materialFallback=%d materialRevision=%llu "
+            "textureRules=0x%llx rulesFallback=%d rulesReady=%d ruleRevision=%llu materialPageRevision=%llu",
             static_cast<unsigned long long>(textureGeneration),
             context->frameIndex,
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(fallbackAlbedoInfo.image->vkImage())),
@@ -3984,7 +4110,15 @@ void RayTracingModuleContext::render() {
             texSystem.fallbackNormalArrayId(),
             texSystem.fallbackFlagArrayId(),
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(spriteRegistryBuffer)),
+            spriteRegistryUsingFallback ? 1 : 0,
+            static_cast<unsigned long long>(spriteRegistryRevision),
             static_cast<unsigned long long>(vk::DebugUtils::objectHandle(materialRegistryBuffer)),
+            materialRegistryUsingFallback ? 1 : 0,
+            static_cast<unsigned long long>(materialRegistryRevision),
+            static_cast<unsigned long long>(vk::DebugUtils::objectHandle(textureRuleVkBuffer)),
+            textureRulesUsingFallback ? 1 : 0,
+            textureRulesReady ? 1 : 0,
+            static_cast<unsigned long long>(textureRuleRevision),
             static_cast<unsigned long long>(materialTexturePageRevision));
         descriptorSlotState.generation = textureGeneration;
         descriptorSlotState.materialTexturePageRevision = materialTexturePageRevision;
@@ -3995,8 +4129,15 @@ void RayTracingModuleContext::render() {
         descriptorSlotState.spriteRegistryBuffer = spriteRegistryBuffer;
         descriptorSlotState.materialRegistryBuffer = materialRegistryBuffer;
         descriptorSlotState.textureRuleBuffer = textureRuleVkBuffer;
+        descriptorSlotState.spriteRegistryRevision = spriteRegistryRevision;
+        descriptorSlotState.materialRegistryRevision = materialRegistryRevision;
+        descriptorSlotState.textureRuleRevision = textureRuleRevision;
+        descriptorSlotState.spriteRegistryUsingFallback = spriteRegistryUsingFallback;
+        descriptorSlotState.materialRegistryUsingFallback = materialRegistryUsingFallback;
+        descriptorSlotState.textureRulesUsingFallback = textureRulesUsingFallback;
     } else {
         bindBlockTextureArrays(rayTracingDescriptorTable);
+        bindSpriteRegistry(rayTracingDescriptorTable);
         bindMaterialRegistry(rayTracingDescriptorTable);
         bindTextureRules(rayTracingDescriptorTable);
     }
