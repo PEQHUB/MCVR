@@ -234,6 +234,13 @@ layout(push_constant) uniform PushConstant {
 #define RT_DEBUG_MATERIAL_MODE_SHIFT 24u
 #define RT_DEBUG_MATERIAL_MODE_MASK  15u
 #define RT_DEBUG_MATERIAL_MODE       ((pc.rtDebugFlags >> RT_DEBUG_MATERIAL_MODE_SHIFT) & RT_DEBUG_MATERIAL_MODE_MASK)
+#define RT_DEBUG_MATERIAL_ROUGHNESS  9u
+#define RT_DEBUG_FOG_TRANSMITTANCE   10u
+#define RT_DEBUG_FOG_ADDITIVE        11u
+#define RT_DEBUG_FIRST_HIT_DIRECT    12u
+#define RT_DEBUG_FIRST_HIT_INDIRECT  13u
+#define RT_DEBUG_FINAL_RADIANCE      14u
+#define RT_DEBUG_MATERIAL_COLOR_LAYER 15u
 
 layout(location = 0) rayPayloadEXT MainRay mainRay;
 layout(location = 1) rayPayloadEXT ShadowRay shadowRay;
@@ -1399,12 +1406,36 @@ void main() {
         imageStore(transparencyLayerMvecsImage, ivec2(pixel), vec4(0.0));
     }
 
-    if (RT_DEBUG_MATERIAL_MODE != 0u && !psrHitSky) {
+    if (RT_DEBUG_MATERIAL_MODE != 0u &&
+        (RT_DEBUG_MATERIAL_MODE <= RT_DEBUG_MATERIAL_ROUGHNESS ||
+         RT_DEBUG_MATERIAL_MODE == RT_DEBUG_MATERIAL_COLOR_LAYER) &&
+        !psrHitSky) {
         imageStore(outputImage, ivec2(pixel), vec4(clamp(firstHitMat.albedoValue.rgb, vec3(0.0), vec3(1.0)), 1.0));
+        return;
+    }
+    if (RT_DEBUG_MATERIAL_MODE == RT_DEBUG_FOG_TRANSMITTANCE) {
+        float transmittance = composeFogTransmittance < 0.0 ? 1.0 : composeFogTransmittance;
+        imageStore(outputImage, ivec2(pixel), vec4(vec3(clamp(transmittance, 0.0, 1.0)), 1.0));
+        return;
+    }
+    if (RT_DEBUG_MATERIAL_MODE == RT_DEBUG_FOG_ADDITIVE) {
+        imageStore(outputImage, ivec2(pixel), vec4(clamp(composeFogAdditive, vec3(0.0), vec3(1.0)), 1.0));
         return;
     }
 
     float maxRadiance = (NO_EMISSION_CLAMP ? 65504.0 : 65000.0) / max(pc.preExposure, 1.0);
+    if (RT_DEBUG_MATERIAL_MODE == RT_DEBUG_FIRST_HIT_DIRECT) {
+        imageStore(outputImage, ivec2(pixel), vec4(min(max(firstHitDirectRadiance, vec3(0.0)), vec3(maxRadiance)) * pc.preExposure, 1.0));
+        return;
+    }
+    if (RT_DEBUG_MATERIAL_MODE == RT_DEBUG_FIRST_HIT_INDIRECT) {
+        imageStore(outputImage, ivec2(pixel), vec4(min(max(firstHitIndirectRadiance, vec3(0.0)), vec3(maxRadiance)) * pc.preExposure, 1.0));
+        return;
+    }
+    if (RT_DEBUG_MATERIAL_MODE == RT_DEBUG_FINAL_RADIANCE) {
+        imageStore(outputImage, ivec2(pixel), vec4(min(max(mainRay.radiance, vec3(0.0)), vec3(maxRadiance)) * pc.preExposure, 1.0));
+        return;
+    }
     imageStore(outputImage, ivec2(pixel), vec4(min(mainRay.radiance, vec3(maxRadiance)) * pc.preExposure, 1.0));
 #endif
 }

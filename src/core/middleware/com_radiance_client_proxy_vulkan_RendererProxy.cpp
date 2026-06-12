@@ -198,7 +198,7 @@ std::string sha256File(const std::filesystem::path& path, std::string& error) {
         return "unavailable";
     }
 
-    std::array<char, 1024 * 1024> buffer{};
+    std::vector<char> buffer(1024 * 1024);
     while (input) {
         input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const std::streamsize read = input.gcount();

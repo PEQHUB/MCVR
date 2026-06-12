@@ -21,6 +21,7 @@ class MaterialRegistry {
     bool ensureFallbackMaterials(std::shared_ptr<vk::VMA> vma,
                                  std::shared_ptr<vk::Device> device);
     bool updateMaterialsSparse(const vk::Data::MaterialEntry* entries, uint32_t count,
+                               uint64_t generation,
                                std::shared_ptr<vk::VMA> vma,
                                std::shared_ptr<vk::Device> device);
     bool hasBuffer() const;

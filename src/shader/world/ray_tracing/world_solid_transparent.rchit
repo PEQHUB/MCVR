@@ -145,6 +145,12 @@ layout(push_constant) uniform PushConstant {
 #define RT_DEBUG_MATERIAL_PAGE_LAYER 2u
 #define RT_DEBUG_MATERIAL_DISPLACE_ELIGIBLE 3u
 #define RT_DEBUG_MATERIAL_DISPLACE_HEIGHT   4u
+#define RT_DEBUG_MATERIAL_RAW_ALBEDO        5u
+#define RT_DEBUG_MATERIAL_TINTED_ALBEDO     6u
+#define RT_DEBUG_MATERIAL_BSDF_ALBEDO       7u
+#define RT_DEBUG_MATERIAL_METALLIC          8u
+#define RT_DEBUG_MATERIAL_ROUGHNESS         9u
+#define RT_DEBUG_MATERIAL_COLOR_LAYER       15u
 
 layout(set = 3, binding = 3, rgba32f) uniform readonly image2D normalRoughnessImage;
 layout(set = 3, binding = 4, rg32f) uniform readonly image2D motionVectorImage;
@@ -198,12 +204,19 @@ vec3 materialDebugDisplacementHeight(uint materialId, vec2 uv, float lod) {
 }
 #endif
 
-vec3 materialDebugColor(uint materialId, vec2 uv, float lod) {
+vec3 materialDebugColor(uint materialId, vec2 uv, float lod, vec3 rawAlbedo, vec3 tintedAlbedo, LabPBRMat mat,
+                        vec3 colorLayer, bool useColorLayer) {
     uint mode = RT_DEBUG_MATERIAL_MODE;
     if (mode == RT_DEBUG_MATERIAL_ID) return materialDebugHashColor(materialId);
     if (mode == RT_DEBUG_MATERIAL_PAGE_LAYER) return materialDebugPageLayer(materialId);
     if (mode == RT_DEBUG_MATERIAL_DISPLACE_ELIGIBLE) return materialDebugDisplacementEligible(materialId);
     if (mode == RT_DEBUG_MATERIAL_DISPLACE_HEIGHT) return materialDebugDisplacementHeight(materialId, uv, lod);
+    if (mode == RT_DEBUG_MATERIAL_RAW_ALBEDO) return clamp(rawAlbedo, vec3(0.0), vec3(1.0));
+    if (mode == RT_DEBUG_MATERIAL_TINTED_ALBEDO) return clamp(tintedAlbedo, vec3(0.0), vec3(1.0));
+    if (mode == RT_DEBUG_MATERIAL_BSDF_ALBEDO) return clamp(mat.albedo, vec3(0.0), vec3(1.0));
+    if (mode == RT_DEBUG_MATERIAL_METALLIC) return vec3(clamp(mat.metallic, 0.0, 1.0));
+    if (mode == RT_DEBUG_MATERIAL_ROUGHNESS) return vec3(clamp(mat.roughness, 0.0, 1.0));
+    if (mode == RT_DEBUG_MATERIAL_COLOR_LAYER) return useColorLayer ? clamp(colorLayer, vec3(0.0), vec3(1.0)) : vec3(1.0, 0.0, 1.0);
     return vec3(0.0);
 }
 
@@ -404,19 +417,24 @@ void main() {
     int normalTextureID = -1;
     int flagTextureID = -1;
     vec2 textureUVRaw = vec2(0.0);
+    vec3 dposdu = vec3(1.0, 0.0, 0.0);
+    vec3 dposdv = vec3(0.0, 1.0, 0.0);
+    float lod = 0.0;
 
     if (useTexture) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
         textureUVRaw = textureUV;
+        computedposduDv(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, dposdu, dposdv);
+        float coneRadiusWorld = mainRay.coneWidth + gl_HitTEXT * mainRay.coneSpread;
 
         if (isBlockGeometry) {
             // === BLOCK GEOMETRY: material-id sampling via MaterialRegistry ===
             uint materialId = textureID;
+            lod = lodWithConeTextureSize(materialAlbedoTextureSize2D(materialId), coneRadiusWorld, dposdu, dposdv);
 
             uvMin = vec2(0.0);
             uvMax = vec2(1.0);
 
-            float lod = 0;
             albedoValue = fetchBlockAlbedoLod(materialId, textureUV, worldUbo.animTick, lod);
 
             rawAlbedoLinear = albedoValue.rgb;
@@ -440,7 +458,7 @@ void main() {
             uvMin = min(min(v0.textureUV, v1.textureUV), v2.textureUV);
             uvMax = max(max(v0.textureUV, v1.textureUV), v2.textureUV);
 
-            float lod = 0;
+            lod = lodWithCone(textures[nonuniformEXT(textureID)], textureUV, coneRadiusWorld, dposdu, dposdv);
             albedoValue = textureLod(textures[nonuniformEXT(textureID)], textureUV, lod);
             rawAlbedoLinear = albedoValue.rgb;
             if (specularTextureID >= 0) {
@@ -536,7 +554,8 @@ void main() {
                 displacedGeometricNormal = displacementHit.geometricNormal;
                 displacedPlaneAtUv = planeAtDisplacedUv;
 
-                float lod = 0.0;
+                float lod = lodWithConeTextureSize(materialAlbedoTextureSize2D(textureID),
+                    mainRay.coneWidth + actualHitT * mainRay.coneSpread, dposdu, dposdv);
                 albedoValue = fetchBlockAlbedoLod(textureID, textureUV, worldUbo.animTick, lod);
                 rawAlbedoLinear = albedoValue.rgb;
                 specularValue = fetchBlockSpecularLod(textureID, textureUV, lod);
@@ -596,11 +615,8 @@ void main() {
     tint = CS_BT709_TO_BT2020 * tint;  // BT.709 -> BT.2020 working space
 
     albedoValue = vec4(tint, albedoValue.a);
-    if (isBlockGeometry && RT_DEBUG_MATERIAL_MODE != 0u) {
-        albedoValue = vec4(materialDebugColor(materialRuleTextureID, textureUV, 0.0), 1.0);
-        tint = albedoValue.rgb;
-    }
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
+    LabPBRMat preRuleMat = mat;
     if (isBlockGeometry) {
         applyTextureRule(materialRuleTextureID, mat);
     }
@@ -609,6 +625,16 @@ void main() {
         mat.metallic < 0.5 && mat.transmission <= EPS) {
         mat.roughness = max(mat.roughness, 0.35);
         mat.coatWeight = min(mat.coatWeight, 0.15);
+    }
+    if (isBlockGeometry && RT_DEBUG_MATERIAL_MODE != 0u &&
+        (RT_DEBUG_MATERIAL_MODE <= RT_DEBUG_MATERIAL_ROUGHNESS ||
+         RT_DEBUG_MATERIAL_MODE == RT_DEBUG_MATERIAL_COLOR_LAYER)) {
+        bool debugHasColorLayer = biomeTintType != 0u || ((v0.flags & PBR_FLAG_USE_COLOR_LAYER) != 0u);
+        LabPBRMat debugMat = RT_DEBUG_MATERIAL_MODE == RT_DEBUG_MATERIAL_BSDF_ALBEDO ? preRuleMat : mat;
+        albedoValue = vec4(materialDebugColor(materialRuleTextureID, textureUV, 0.0, rawAlbedoLinear, albedoValue.rgb, debugMat,
+                                              colorLayer, debugHasColorLayer), 1.0);
+        tint = albedoValue.rgb;
+        mat.albedo = albedoValue.rgb;
     }
 
     // The normal blue channel carries legacy LabPBR/raster AO for compatibility and audit.

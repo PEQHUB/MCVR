@@ -240,6 +240,8 @@ class RayTracingModule : public WorldModule, public SharedObject<RayTracingModul
         bool materialRegistryUsingFallback = false;
     };
     std::vector<TextureDescriptorSlotState> textureDescriptorSlotStates_;
+    uint64_t lastDescriptorTruthMaterialPageRevision_ = UINT64_MAX;
+    uint64_t lastDescriptorTruthTextureGeneration_ = UINT64_MAX;
 
     uint32_t numRayBounces_ = 2;
     bool useJitter_ = true;

@@ -2206,6 +2206,8 @@ void RayTracingModule::preClose() {
     Renderer::emissionImages.clear();
     Renderer::renderResHdrImages.clear();
     textureDescriptorSlotStates_.clear();
+    lastDescriptorTruthMaterialPageRevision_ = UINT64_MAX;
+    lastDescriptorTruthTextureGeneration_ = UINT64_MAX;
 }
 
 void RayTracingModule::initDescriptorTables() {
@@ -2216,6 +2218,8 @@ void RayTracingModule::initDescriptorTables() {
     rayTracingDescriptorTables_.resize(size);
     shaderPackVisualSettingBuffers_.resize(size);
     textureDescriptorSlotStates_.assign(size, TextureDescriptorSlotState{});
+    lastDescriptorTruthMaterialPageRevision_ = UINT64_MAX;
+    lastDescriptorTruthTextureGeneration_ = UINT64_MAX;
 
     for (int i = 0; i < size; i++) {
         shaderPackVisualSettingBuffers_[i] = vk::HostVisibleBuffer::create(
@@ -3758,6 +3762,10 @@ void RayTracingModuleContext::render() {
             }
         }(texSystem);
 
+    auto& textureLoaderV4 = Renderer::instance().textureLoaderV4();
+    textureLoaderV4.pollCompletions();
+    textureLoaderV4.pump(64ull * 1024ull * 1024ull);
+
     const auto spriteRegBuffer =
         [&]<typename TextureSystemT>(TextureSystemT& system) {
             if constexpr (requires { system.spriteRegistryBufferOrFallback(); }) {
@@ -4120,7 +4128,10 @@ void RayTracingModuleContext::render() {
             textureRulesReady ? 1 : 0,
             static_cast<unsigned long long>(textureRuleRevision),
             static_cast<unsigned long long>(materialTexturePageRevision));
-        {
+        const bool shouldLogDescriptorTruth =
+            textureGeneration != module->lastDescriptorTruthTextureGeneration_ ||
+            materialTexturePageRevision != module->lastDescriptorTruthMaterialPageRevision_;
+        if (shouldLogDescriptorTruth) {
             // Per-slot bind truth: which descriptor slots carry real page images vs the
             // silent fallback (arrayId present but snapshot unresolvable), with extents.
             std::ostringstream slotTruth;
@@ -4153,6 +4164,8 @@ void RayTracingModuleContext::render() {
             }
             RadianceLogger::log("TextureDescriptors", "INFO", "entry-truth-v4%s",
                 entryTruth.str().c_str());
+            module->lastDescriptorTruthTextureGeneration_ = textureGeneration;
+            module->lastDescriptorTruthMaterialPageRevision_ = materialTexturePageRevision;
         }
         descriptorSlotState.generation = textureGeneration;
         descriptorSlotState.materialTexturePageRevision = materialTexturePageRevision;

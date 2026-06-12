@@ -125,12 +125,17 @@ void main() {
 
     if (useTexture) {
         textureUV = baryCoords.x * v0.textureUV + baryCoords.y * v1.textureUV + baryCoords.z * v2.textureUV;
+        vec3 dposdu = vec3(1.0, 0.0, 0.0);
+        vec3 dposdv = vec3(0.0, 1.0, 0.0);
+        computedposduDv(v0.pos, v1.pos, v2.pos, v0.textureUV, v1.textureUV, v2.textureUV, dposdu, dposdv);
+        float coneRadiusWorld = mainRay.coneWidth + gl_HitTEXT * mainRay.coneSpread;
 
         if (isBlockGeometry) {
             // === BLOCK GEOMETRY: material-id sampling via MaterialRegistry ===
             uint materialId = textureID;
 
-            float lod = 0;
+            float lod = lodWithConeTextureSize(materialAlbedoTextureSize2D(materialId),
+                coneRadiusWorld, dposdu, dposdv);
             albedoValue = fetchBlockAlbedoLod(materialId, textureUV, worldUbo.animTick, lod);
             specularValue = fetchBlockSpecularLod(materialId, textureUV, lod);
             normalValue = fetchBlockNormalLod(materialId, textureUV, lod);
@@ -147,7 +152,8 @@ void main() {
             int normalTextureID = mapping.entries[textureID].normal;
             int flagTextureID = mapping.entries[textureID].flag;
 
-            float lod = 0;
+            float lod = lodWithCone(textures[nonuniformEXT(textureID)], textureUV,
+                coneRadiusWorld, dposdu, dposdv);
             albedoValue = textureLod(textures[nonuniformEXT(textureID)], textureUV, lod);
             if (specularTextureID >= 0) {
                 specularValue = textureLod(textures[nonuniformEXT(specularTextureID)], textureUV, lod);

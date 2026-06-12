@@ -40,19 +40,22 @@ void computedposduDv(vec3 pos0, vec3 pos1, vec3 pos2, vec2 uv0, vec2 uv1, vec2 u
     dposdv = (-dpos1 * duv2.x + dpos2 * duv1.x) * invDet;
 }
 
-float lodWithCone(sampler2D tex, vec2 uv, float coneRadiusWorld, vec3 dposdu, vec3 dposdv) {
+float lodWithConeTextureSize(ivec2 texDim, float coneRadiusWorld, vec3 dposdu, vec3 dposdv) {
     float su = max(length(dposdu), 1e-6);
     float sv = max(length(dposdv), 1e-6);
 
     float du = coneRadiusWorld / su;
     float dv = coneRadiusWorld / sv;
 
-    ivec2 texDim = textureSize(tex, 0);
     float footprintTexels = max(du * float(texDim.x), dv * float(texDim.y));
 
     float lod = max(log2(max(footprintTexels, 1e-6)), 0.0);
 
     return lod;
+}
+
+float lodWithCone(sampler2D tex, vec2 uv, float coneRadiusWorld, vec3 dposdu, vec3 dposdv) {
+    return lodWithConeTextureSize(textureSize(tex, 0), coneRadiusWorld, dposdu, dposdv);
 }
 
 float roughnessToExtraSpread(float roughness) {

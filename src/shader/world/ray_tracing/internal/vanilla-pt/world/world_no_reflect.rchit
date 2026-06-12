@@ -94,6 +94,12 @@ layout(push_constant) uniform PushConstant {
 #define RT_DEBUG_MATERIAL_PAGE_LAYER 2u
 #define RT_DEBUG_MATERIAL_DISPLACE_ELIGIBLE 3u
 #define RT_DEBUG_MATERIAL_DISPLACE_HEIGHT   4u
+#define RT_DEBUG_MATERIAL_RAW_ALBEDO        5u
+#define RT_DEBUG_MATERIAL_TINTED_ALBEDO     6u
+#define RT_DEBUG_MATERIAL_BSDF_ALBEDO       7u
+#define RT_DEBUG_MATERIAL_METALLIC          8u
+#define RT_DEBUG_MATERIAL_ROUGHNESS         9u
+#define RT_DEBUG_MATERIAL_COLOR_LAYER       15u
 
 layout(set = 3, binding = 1, rgba8) uniform image2D diffuseAlbedoImage;
 layout(set = 3, binding = 2, rgba8) uniform image2D specularAlbedoImage;
@@ -146,12 +152,19 @@ vec3 materialDebugDisplacementHeight(uint materialId, vec4 normalValue) {
     return vec3(clamp(normalValue.a, 0.0, 1.0));
 }
 
-vec3 materialDebugColor(uint materialId, vec4 normalValue) {
+vec3 materialDebugColor(uint materialId, vec3 rawAlbedo, vec3 tintedAlbedo, LabPBRMat mat, vec4 normalValue,
+                        vec3 colorLayer, bool useColorLayer) {
     uint mode = RT_DEBUG_MATERIAL_MODE;
     if (mode == RT_DEBUG_MATERIAL_ID) return materialDebugHashColor(materialId);
     if (mode == RT_DEBUG_MATERIAL_PAGE_LAYER) return materialDebugPageLayer(materialId);
     if (mode == RT_DEBUG_MATERIAL_DISPLACE_ELIGIBLE) return materialDebugDisplacementEligible(materialId);
     if (mode == RT_DEBUG_MATERIAL_DISPLACE_HEIGHT) return materialDebugDisplacementHeight(materialId, normalValue);
+    if (mode == RT_DEBUG_MATERIAL_RAW_ALBEDO) return clamp(rawAlbedo, vec3(0.0), vec3(1.0));
+    if (mode == RT_DEBUG_MATERIAL_TINTED_ALBEDO) return clamp(tintedAlbedo, vec3(0.0), vec3(1.0));
+    if (mode == RT_DEBUG_MATERIAL_BSDF_ALBEDO) return clamp(mat.albedo, vec3(0.0), vec3(1.0));
+    if (mode == RT_DEBUG_MATERIAL_METALLIC) return vec3(clamp(mat.metallic, 0.0, 1.0));
+    if (mode == RT_DEBUG_MATERIAL_ROUGHNESS) return vec3(clamp(mat.roughness, 0.0, 1.0));
+    if (mode == RT_DEBUG_MATERIAL_COLOR_LAYER) return useColorLayer ? clamp(colorLayer, vec3(0.0), vec3(1.0)) : vec3(1.0, 0.0, 1.0);
     return vec3(0.0);
 }
 
@@ -205,6 +218,7 @@ void main() {
     vec4 specularValue;
     vec4 normalValue;
     ivec4 flagValue = ivec4(0);
+    vec3 rawAlbedo = vec3(1.0);
     vec2 textureUV = vec2(0.0);
     bool blockOverlayComposited = false;
     if (useTexture) {
@@ -216,7 +230,9 @@ void main() {
         float coneRadiusWorld = mainRay.coneWidth + gl_HitTEXT * mainRay.coneSpread;
         vec3 dposdu, dposdv;
         computedposduDv(p0.pos, p1.pos, p2.pos, m0.textureUV, m1.textureUV, m2.textureUV, dposdu, dposdv);
-        float lod = isBlockGeometry ? 0.0 : lodWithCone(textures[nonuniformEXT(textureID)], textureUV, coneRadiusWorld, dposdu, dposdv);
+        float lod = isBlockGeometry
+            ? lodWithConeTextureSize(materialAlbedoTextureSize2D(textureID), coneRadiusWorld, dposdu, dposdv)
+            : lodWithCone(textures[nonuniformEXT(textureID)], textureUV, coneRadiusWorld, dposdu, dposdv);
 
         if (isBlockGeometry) {
             albedoValue = fetchBlockAlbedoLod(textureID, textureUV, worldUBO.animTick, lod);
@@ -230,6 +246,7 @@ void main() {
                     textureID, textureUV, worldUBO.animTick, lod, colorLayer,
                     materialRuleTextureID);
             }
+            rawAlbedo = albedoValue.rgb;
         } else {
             int specularTextureID = mapping.entries[textureID].specular;
             int normalTextureID = mapping.entries[textureID].normal;
@@ -246,6 +263,7 @@ void main() {
             } else {
                 normalValue = vec4(0.0);
             }
+            rawAlbedo = albedoValue.rgb;
         }
     } else {
         albedoValue = vec4(1.0);
@@ -271,12 +289,18 @@ void main() {
     }
 
     albedoValue = vec4(tint, albedoValue.a);
-    if (isBlockGeometry && RT_DEBUG_MATERIAL_MODE != 0u) {
-        albedoValue = vec4(materialDebugColor(materialRuleTextureID, normalValue), 1.0);
-        tint = albedoValue.rgb;
-    }
     LabPBRMat mat = convertLabPBRMaterial(albedoValue, specularValue, normalValue);
+    LabPBRMat preRuleMat = mat;
     if (isBlockGeometry) { applyTextureRule(materialRuleTextureID, mat); }
+    if (isBlockGeometry && RT_DEBUG_MATERIAL_MODE != 0u &&
+        (RT_DEBUG_MATERIAL_MODE <= RT_DEBUG_MATERIAL_ROUGHNESS ||
+         RT_DEBUG_MATERIAL_MODE == RT_DEBUG_MATERIAL_COLOR_LAYER)) {
+        LabPBRMat debugMat = RT_DEBUG_MATERIAL_MODE == RT_DEBUG_MATERIAL_BSDF_ALBEDO ? preRuleMat : mat;
+        albedoValue = vec4(materialDebugColor(materialRuleTextureID, rawAlbedo, albedoValue.rgb, debugMat, normalValue,
+                                              colorLayer, useColorLayer), 1.0);
+        tint = albedoValue.rgb;
+        mat.albedo = albedoValue.rgb;
+    }
 
     // add glowing radiance
     mainRay.radiance += 12 * tint * mat.emission * mainRay.throughput;

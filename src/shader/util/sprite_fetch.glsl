@@ -99,6 +99,11 @@ ivec3 materialAlbedoTextureSizeV4(MaterialEntry material) {
         materialPackedPageIndex(material.albedoPage)))], 0);
 }
 
+ivec2 materialAlbedoTextureSize2D(uint materialId) {
+    MaterialEntry material = materialSamplingEntry(materialId);
+    return textureSize(blockAlbedo[nonuniformEXT(materialDescriptorPage(material, material.albedoPage))], 0).xy;
+}
+
 ivec3 materialSpecularTextureSize(MaterialEntry material) {
     return textureSize(blockSpecular[nonuniformEXT(materialTexturePage(material.specularPage))], 0);
 }

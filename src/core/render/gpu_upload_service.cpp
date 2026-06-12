@@ -162,6 +162,8 @@ bool GpuUploadService::enqueueTextureUpload(const TextureUpload& upload) {
 bool GpuUploadService::enqueueBufferUpload(const BufferUpload& upload) {
     if (!initialized_ || upload.data == nullptr || upload.bytes == 0) return false;
     if (upload.generation == 0) return false;
+    if (upload.dst == VK_NULL_HANDLE) return false;
+    if (upload.regionCount > 0 && upload.regions == nullptr) return false;
 
     Pending pending{};
     pending.kind = Kind::BufferRange;
@@ -170,7 +172,17 @@ bool GpuUploadService::enqueueBufferUpload(const BufferUpload& upload) {
     pending.visible = upload.visible;
     pending.dstBuffer = upload.dst;
     pending.dstOffset = upload.dstOffset;
+    pending.dstOwner = upload.dstOwner;
     pending.payload.assign(upload.data, upload.data + upload.bytes);
+    if (upload.regionCount > 0) {
+        pending.copyRegions.assign(upload.regions, upload.regions + upload.regionCount);
+        for (const VkBufferCopy& region : pending.copyRegions) {
+            if (region.size == 0) return false;
+            if (region.srcOffset > upload.bytes || region.size > upload.bytes - region.srcOffset) {
+                return false;
+            }
+        }
+    }
 
     std::lock_guard<std::mutex> lock(mutex_);
     int idx = static_cast<int>(upload.priority);
@@ -528,13 +540,22 @@ bool GpuUploadService::submitBufferUploadLocked(const Pending& pending) {
         return false;
     }
 
-    // Record buffer copy: staging -> destination buffer
-    if (pending.dstBuffer != VK_NULL_HANDLE) {
+    uint32_t copyCommandCount = 0;
+    if (!pending.copyRegions.empty()) {
+        std::vector<VkBufferCopy> regions = pending.copyRegions;
+        for (VkBufferCopy& region : regions) {
+            region.srcOffset += stagingOffset;
+        }
+        vkCmdCopyBuffer(cmd, stagingRing_->vkBuffer(), pending.dstBuffer,
+                        static_cast<uint32_t>(regions.size()), regions.data());
+        copyCommandCount = static_cast<uint32_t>(regions.size());
+    } else if (pending.dstBuffer != VK_NULL_HANDLE) {
         VkBufferCopy region{};
         region.srcOffset = stagingOffset;
         region.dstOffset = pending.dstOffset;
         region.size = payloadSize;
         vkCmdCopyBuffer(cmd, stagingRing_->vkBuffer(), pending.dstBuffer, 1, &region);
+        copyCommandCount = 1;
     }
 
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
@@ -571,6 +592,7 @@ bool GpuUploadService::submitBufferUploadLocked(const Pending& pending) {
     flight.cmd = cmd;
     flight.cmdPool = transferCmdPool_->vkCommandPool();
     flight.stagingBuffer = stagingRing_;
+    flight.dstOwner = pending.dstOwner;
     flight.timeline = uploadTimeline_;
     flight.timelineValue = timelineValue;
     flight.bytes = payloadSize;
@@ -578,7 +600,7 @@ bool GpuUploadService::submitBufferUploadLocked(const Pending& pending) {
     inFlight_.push_back(std::move(flight));
 
     timelineSubmissions_.fetch_add(1, std::memory_order_relaxed);
-    actualVkBufferCopyCommands_.fetch_add(pending.dstBuffer != VK_NULL_HANDLE ? 1 : 0, std::memory_order_relaxed);
+    actualVkBufferCopyCommands_.fetch_add(copyCommandCount, std::memory_order_relaxed);
     return true;
 }
 

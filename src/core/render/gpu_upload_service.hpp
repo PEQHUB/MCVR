@@ -63,8 +63,11 @@ public:
         VkDeviceSize dstOffset = 0;
         const uint8_t* data   = nullptr;
         uint64_t bytes        = 0;
+        const VkBufferCopy* regions = nullptr;
+        uint32_t regionCount = 0;
         bool visible          = false;
         Priority priority     = Priority::BackgroundCtm;
+        std::shared_ptr<vk::DeviceLocalBuffer> dstOwner;
     };
 
     struct Status {
@@ -124,6 +127,8 @@ private:
         // Buffer fields
         VkBuffer dstBuffer;
         VkDeviceSize dstOffset;
+        std::shared_ptr<vk::DeviceLocalBuffer> dstOwner;
+        std::vector<VkBufferCopy> copyRegions;
         // Data
         std::vector<uint8_t> payload;
         std::function<void(uint64_t)> onComplete;
@@ -134,6 +139,7 @@ private:
         VkCommandBuffer cmd;
         VkCommandPool cmdPool;
         std::shared_ptr<vk::HostVisibleBuffer> stagingBuffer;
+        std::shared_ptr<vk::DeviceLocalBuffer> dstOwner;
         std::shared_ptr<vk::TimelineSemaphore> timeline;
         uint64_t timelineValue;
         uint64_t bytes;

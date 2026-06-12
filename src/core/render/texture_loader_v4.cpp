@@ -6,10 +6,17 @@
 #include <iostream>
 #include <sstream>
 
+namespace {
+constexpr uint64_t kUploadServiceStagingBytes = 256ull * 1024ull * 1024ull;
+}
+
 bool TextureLoaderV4::initialize(std::shared_ptr<vk::Device> device,
                                   std::shared_ptr<vk::VMA> vma) {
     if (initialized_.load(std::memory_order_acquire)) return true;
     if (!device || !vma) return false;
+    if (!uploadService_.initialize(device, vma, kUploadServiceStagingBytes)) {
+        return false;
+    }
 
     initialized_.store(true, std::memory_order_release);
     std::cout << "[TextureLoaderV4] Initialized descriptor-backed tracker: abi=" << build_info::kTextureLoaderAbiVersion
@@ -18,6 +25,7 @@ bool TextureLoaderV4::initialize(std::shared_ptr<vk::Device> device,
 }
 
 void TextureLoaderV4::shutdown() {
+    uploadService_.shutdown();
     activeGeneration_.store(0, std::memory_order_release);
     generationCommitted_.store(false, std::memory_order_release);
     initialized_.store(false, std::memory_order_release);
@@ -247,6 +255,7 @@ bool TextureLoaderV4::commitGeneration(uint64_t generation) {
 
 bool TextureLoaderV4::cancelGeneration(uint64_t generation, int reasonCode) {
     if (!initialized_.load(std::memory_order_acquire)) return false;
+    uploadService_.cancelGeneration(generation);
 
     if (generation == activeGeneration_.load(std::memory_order_acquire)) {
         generationCommitted_.store(false, std::memory_order_release);
@@ -258,16 +267,15 @@ bool TextureLoaderV4::cancelGeneration(uint64_t generation, int reasonCode) {
 }
 
 void TextureLoaderV4::pump(uint64_t frameBudgetBytes) {
-    (void)frameBudgetBytes;
+    uploadService_.pump(frameBudgetBytes);
 }
 
 void TextureLoaderV4::pollCompletions() {
+    uploadService_.pollCompletions();
 }
 
 bool TextureLoaderV4::generationIdle(uint64_t generation, bool visibleOnly) const {
-    (void)generation;
-    (void)visibleOnly;
-    return true;
+    return uploadService_.generationIdle(generation, visibleOnly);
 }
 
 std::string TextureLoaderV4::statusJson() const {

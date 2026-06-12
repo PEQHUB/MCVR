@@ -1209,8 +1209,8 @@ bool TextureSystem::updateMaterialTableSparse(const vk::Data::MaterialEntry* ent
         if (generation != 0 && generation != generation_.load(std::memory_order_acquire)) return false;
     }
     // V4 path: do not gate on finalized_ — the V4 upload pipeline bypasses legacy finalize().
-    // The material registry will lazily create its SSBO if needed.
-    return materials_.updateMaterialsSparse(entries, count, std::move(vma), std::move(device));
+    // Sparse deltas require the fallback/full material table created during V4 begin.
+    return materials_.updateMaterialsSparse(entries, count, generation, std::move(vma), std::move(device));
 }
 
 bool TextureSystem::updateSpriteRegistrySparse(const vk::Data::SpriteEntry* entries, uint32_t count,
