@@ -3,16 +3,31 @@
 #include "core/render/renderer.hpp"
 #include "core/render/render_framework.hpp"
 #include "core/build/build_info.hpp"
+#include "mz.h"
+#include "mz_strm.h"
+#include "mz_zip.h"
+#include "mz_zip_rw.h"
+#include <nlohmann/json.hpp>
 #include <algorithm>
+#include <chrono>
+#include <cctype>
 #include <exception>
+#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <cstring>
 #include <climits>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace {
+
+using json = nlohmann::json;
 
 jstring makeString(JNIEnv* env, const std::string& value) {
     return env->NewStringUTF(value.c_str());
@@ -53,6 +68,7 @@ std::string jsonEscape(const std::string& value) {
 
 struct PackIndexSnapshotState {
     bool hasSnapshot = false;
+    bool diffReady = false;
     uint64_t generation = 0;
     uint64_t submitCount = 0;
     size_t snapshotBytes = 0;
@@ -61,11 +77,370 @@ struct PackIndexSnapshotState {
     uint32_t ruleFileCount = 0;
     uint32_t sidecarCount = 0;
     uint64_t javaCaptureMillis = 0;
+    uint64_t nativeIndexMillis = 0;
+    uint32_t activeDiskPackCount = 0;
+    uint32_t nativeResourceCount = 0;
+    uint32_t nativeSidecarCount = 0;
+    uint32_t nativeRuleFileCount = 0;
+    uint32_t virtualJavaOnlyResourceCount = 0;
+    uint32_t missingCount = 0;
+    uint32_t winnerMismatchCount = 0;
+    uint32_t flagMismatchCount = 0;
+    uint32_t extraNativeCount = 0;
     std::string packStackHash;
+    std::string indexError;
+    std::string diffJson = "{\"ok\":false,\"reason\":\"not_captured\"}";
 };
 
 std::mutex g_packIndexMutex;
 PackIndexSnapshotState g_packIndexState;
+
+struct PackIndexResource {
+    std::string resource;
+    std::string winnerPackId;
+    bool sidecar = false;
+    bool ruleFile = false;
+    int precedence = -1;
+};
+
+struct PackIndexBuildResult {
+    bool ok = true;
+    bool diffReady = false;
+    uint64_t nativeIndexMillis = 0;
+    uint32_t activeDiskPackCount = 0;
+    uint32_t nativeResourceCount = 0;
+    uint32_t nativeSidecarCount = 0;
+    uint32_t nativeRuleFileCount = 0;
+    uint32_t virtualJavaOnlyResourceCount = 0;
+    uint32_t missingCount = 0;
+    uint32_t winnerMismatchCount = 0;
+    uint32_t flagMismatchCount = 0;
+    uint32_t extraNativeCount = 0;
+    std::string error;
+    std::string diffJson;
+};
+
+bool startsWith(std::string_view value, std::string_view prefix) {
+    return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
+}
+
+bool endsWith(std::string_view value, std::string_view suffix) {
+    return value.size() >= suffix.size() && value.substr(value.size() - suffix.size()) == suffix;
+}
+
+std::string toLowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return value;
+}
+
+std::string normalizeSlash(std::string value) {
+    std::replace(value.begin(), value.end(), '\\', '/');
+    return value;
+}
+
+bool isSidecarResourcePath(std::string_view path) {
+    return endsWith(path, "_n.png")
+        || endsWith(path, "_normal.png")
+        || endsWith(path, "_norm.png")
+        || endsWith(path, "_s.png")
+        || endsWith(path, "_spec.png")
+        || endsWith(path, "_specular.png")
+        || endsWith(path, "_e.png")
+        || endsWith(path, "_emissive.png")
+        || endsWith(path, "_f.png")
+        || endsWith(path, "_roughness.png")
+        || endsWith(path, "_rough.png")
+        || endsWith(path, "_metallic.png")
+        || endsWith(path, "_metalness.png")
+        || endsWith(path, "_height.png")
+        || endsWith(path, "_displacement.png")
+        || endsWith(path, "_disp.png")
+        || endsWith(path, "_ao.png")
+        || endsWith(path, "_ambientocclusion.png")
+        || endsWith(path, "_ambient_occlusion.png");
+}
+
+std::optional<PackIndexResource> resourceFromAssetPath(const std::string& rawPath,
+    const std::string& packId, int precedence) {
+    std::string path = toLowerAscii(normalizeSlash(rawPath));
+    if (endsWith(path, "/")) {
+        return std::nullopt;
+    }
+    static constexpr std::string_view ASSETS = "assets/";
+    if (!startsWith(path, ASSETS)) {
+        return std::nullopt;
+    }
+    size_t namespaceStart = ASSETS.size();
+    size_t namespaceEnd = path.find('/', namespaceStart);
+    if (namespaceEnd == std::string::npos || namespaceEnd == namespaceStart || namespaceEnd + 1 >= path.size()) {
+        return std::nullopt;
+    }
+    std::string ns = path.substr(namespaceStart, namespaceEnd - namespaceStart);
+    std::string resourcePath = path.substr(namespaceEnd + 1);
+    bool interestingTexture = startsWith(resourcePath, "textures/")
+        && (endsWith(resourcePath, ".png") || endsWith(resourcePath, ".png.mcmeta"));
+    bool ruleFile = (startsWith(resourcePath, "optifine/") || startsWith(resourcePath, "mcpatcher/"))
+        && endsWith(resourcePath, ".properties");
+    if (!interestingTexture && !ruleFile) {
+        return std::nullopt;
+    }
+    PackIndexResource out;
+    out.resource = ns + ":" + resourcePath;
+    out.winnerPackId = packId;
+    out.sidecar = interestingTexture && isSidecarResourcePath(resourcePath);
+    out.ruleFile = ruleFile;
+    out.precedence = precedence;
+    return out;
+}
+
+void mergeResource(std::unordered_map<std::string, PackIndexResource>& table, PackIndexResource resource) {
+    auto it = table.find(resource.resource);
+    if (it == table.end() || resource.precedence >= it->second.precedence) {
+        table[resource.resource] = std::move(resource);
+    }
+}
+
+uint32_t countSidecars(const std::unordered_map<std::string, PackIndexResource>& table) {
+    uint32_t count = 0;
+    for (const auto& [_, resource] : table) {
+        if (resource.sidecar) count++;
+    }
+    return count;
+}
+
+uint32_t countRuleFiles(const std::unordered_map<std::string, PackIndexResource>& table) {
+    uint32_t count = 0;
+    for (const auto& [_, resource] : table) {
+        if (resource.ruleFile) count++;
+    }
+    return count;
+}
+
+void scanZipPack(const std::string& packId, const std::filesystem::path& path, int precedence,
+    std::unordered_map<std::string, PackIndexResource>& table, std::vector<std::string>& errors) {
+    std::shared_ptr<void> zipReader(mz_zip_reader_create(), [](void* handle) {
+        void* zipReaderHandle = handle;
+        mz_zip_reader_delete(&zipReaderHandle);
+    });
+    if (!zipReader) {
+        errors.push_back(packId + ": create zip reader failed");
+        return;
+    }
+    int32_t openResult = mz_zip_reader_open_file(zipReader.get(), path.string().c_str());
+    if (openResult != MZ_OK) {
+        errors.push_back(packId + ": open zip failed " + std::to_string(openResult));
+        return;
+    }
+    int32_t entryResult = mz_zip_reader_goto_first_entry(zipReader.get());
+    while (entryResult == MZ_OK) {
+        mz_zip_file* info = nullptr;
+        if (mz_zip_reader_entry_get_info(zipReader.get(), &info) == MZ_OK
+            && info != nullptr && info->filename != nullptr) {
+            if (auto resource = resourceFromAssetPath(info->filename, packId, precedence)) {
+                mergeResource(table, std::move(*resource));
+            }
+        }
+        entryResult = mz_zip_reader_goto_next_entry(zipReader.get());
+    }
+    int32_t closeResult = mz_zip_reader_close(zipReader.get());
+    if (closeResult != MZ_OK) {
+        errors.push_back(packId + ": close zip failed " + std::to_string(closeResult));
+    }
+}
+
+void scanDirectoryPack(const std::string& packId, const std::filesystem::path& root, int precedence,
+    std::unordered_map<std::string, PackIndexResource>& table, std::vector<std::string>& errors) {
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator it(root,
+        std::filesystem::directory_options::skip_permission_denied, ec);
+    std::filesystem::recursive_directory_iterator end;
+    if (ec) {
+        errors.push_back(packId + ": open directory failed " + ec.message());
+        return;
+    }
+    for (; it != end; it.increment(ec)) {
+        if (ec) {
+            errors.push_back(packId + ": directory walk failed " + ec.message());
+            ec.clear();
+            continue;
+        }
+        if (!it->is_regular_file(ec) || ec) {
+            ec.clear();
+            continue;
+        }
+        std::filesystem::path relative = std::filesystem::relative(it->path(), root, ec);
+        if (ec) {
+            errors.push_back(packId + ": relative path failed " + ec.message());
+            ec.clear();
+            continue;
+        }
+        if (auto resource = resourceFromAssetPath(relative.string(), packId, precedence)) {
+            mergeResource(table, std::move(*resource));
+        }
+    }
+}
+
+std::string jsonString(const json& object, const char* key) {
+    auto it = object.find(key);
+    return it != object.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
+
+bool jsonBool(const json& object, const char* key, bool fallback = false) {
+    auto it = object.find(key);
+    return it != object.end() && it->is_boolean() ? it->get<bool>() : fallback;
+}
+
+int jsonInt(const json& object, const char* key, int fallback = 0) {
+    auto it = object.find(key);
+    return it != object.end() && it->is_number_integer() ? it->get<int>() : fallback;
+}
+
+json resourceJson(const PackIndexResource& resource) {
+    json out = json::object();
+    out["resource"] = resource.resource;
+    out["winnerPackId"] = resource.winnerPackId;
+    out["sidecar"] = resource.sidecar;
+    out["ruleFile"] = resource.ruleFile;
+    return out;
+}
+
+PackIndexBuildResult buildPackIndexFromSnapshot(const std::string& snapshotJson) {
+    auto started = std::chrono::steady_clock::now();
+    PackIndexBuildResult result;
+    json snapshot = json::parse(snapshotJson);
+    std::unordered_map<std::string, PackIndexResource> truth;
+    std::unordered_map<std::string, PackIndexResource> native;
+    std::vector<std::string> errors;
+
+    const json* truthResources = nullptr;
+    if (snapshot.contains("vanillaTruth") && snapshot["vanillaTruth"].is_object()
+        && snapshot["vanillaTruth"].contains("resources")
+        && snapshot["vanillaTruth"]["resources"].is_array()) {
+        truthResources = &snapshot["vanillaTruth"]["resources"];
+    }
+    if (truthResources == nullptr) {
+        throw std::runtime_error("snapshot missing vanillaTruth.resources");
+    }
+
+    for (const auto& item : *truthResources) {
+        if (!item.is_object()) continue;
+        PackIndexResource resource;
+        resource.resource = jsonString(item, "resource");
+        resource.winnerPackId = jsonString(item, "winnerPackId");
+        resource.sidecar = jsonBool(item, "sidecar");
+        resource.ruleFile = jsonBool(item, "ruleFile");
+        resource.precedence = startsWith(resource.winnerPackId, "file/") ? -1 : 0;
+        if (resource.resource.empty()) continue;
+        truth[resource.resource] = resource;
+        if (!startsWith(resource.winnerPackId, "file/")) {
+            native[resource.resource] = resource;
+            result.virtualJavaOnlyResourceCount++;
+        }
+    }
+
+    if (snapshot.contains("packs") && snapshot["packs"].is_array()) {
+        for (const auto& item : snapshot["packs"]) {
+            if (!item.is_object() || !jsonBool(item, "active")) {
+                continue;
+            }
+            std::string sourceKind = jsonString(item, "sourceKind");
+            if (sourceKind != "zip" && sourceKind != "directory") {
+                continue;
+            }
+            std::string packId = jsonString(item, "id");
+            std::string path = jsonString(item, "path");
+            int precedence = jsonInt(item, "nativePrecedence", -1);
+            if (packId.empty() || path.empty() || precedence < 0) {
+                continue;
+            }
+            result.activeDiskPackCount++;
+            if (sourceKind == "zip") {
+                scanZipPack(packId, std::filesystem::path(path), precedence, native, errors);
+            } else {
+                scanDirectoryPack(packId, std::filesystem::path(path), precedence, native, errors);
+            }
+        }
+    }
+
+    json diff = json::object();
+    diff["ok"] = true;
+    diff["schema"] = "radser_pack_index_diff_v1";
+    diff["generation"] = snapshot.value("generation", 0);
+    diff["nativeAcceptedSnapshot"] = true;
+    diff["diffReady"] = true;
+    diff["indexMode"] = "native_l1_disk_plus_virtual_java";
+    diff["contentHashReady"] = false;
+    diff["nativeCentralDirectoryScan"] = true;
+
+    json samples = json::array();
+    for (const auto& [resourceId, expected] : truth) {
+        auto actualIt = native.find(resourceId);
+        if (actualIt == native.end()) {
+            result.missingCount++;
+            if (samples.size() < 32) {
+                json sample = json::object();
+                sample["kind"] = "missing_native_resource";
+                sample["expected"] = resourceJson(expected);
+                samples.push_back(sample);
+            }
+            continue;
+        }
+        const PackIndexResource& actual = actualIt->second;
+        bool winnerMismatch = expected.winnerPackId != actual.winnerPackId;
+        bool flagMismatch = expected.sidecar != actual.sidecar || expected.ruleFile != actual.ruleFile;
+        if (winnerMismatch) result.winnerMismatchCount++;
+        if (flagMismatch) result.flagMismatchCount++;
+        if ((winnerMismatch || flagMismatch) && samples.size() < 32) {
+            json sample = json::object();
+            sample["kind"] = winnerMismatch ? "winner_mismatch" : "flag_mismatch";
+            sample["expected"] = resourceJson(expected);
+            sample["actual"] = resourceJson(actual);
+            samples.push_back(sample);
+        }
+    }
+    for (const auto& [resourceId, actual] : native) {
+        if (truth.find(resourceId) == truth.end()) {
+            result.extraNativeCount++;
+            if (samples.size() < 32) {
+                json sample = json::object();
+                sample["kind"] = "extra_native_resource";
+                sample["actual"] = resourceJson(actual);
+                samples.push_back(sample);
+            }
+        }
+    }
+
+    result.nativeResourceCount = static_cast<uint32_t>(native.size());
+    result.nativeSidecarCount = countSidecars(native);
+    result.nativeRuleFileCount = countRuleFiles(native);
+    result.diffReady = true;
+    result.ok = errors.empty();
+    auto elapsed = std::chrono::steady_clock::now() - started;
+    result.nativeIndexMillis =
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+
+    diff["diffCount"] = result.missingCount + result.winnerMismatchCount
+        + result.flagMismatchCount + result.extraNativeCount;
+    diff["missingCount"] = result.missingCount;
+    diff["winnerMismatchCount"] = result.winnerMismatchCount;
+    diff["flagMismatchCount"] = result.flagMismatchCount;
+    diff["extraNativeCount"] = result.extraNativeCount;
+    diff["nativeTotals"] = {
+        {"resourceCount", result.nativeResourceCount},
+        {"sidecarResources", result.nativeSidecarCount},
+        {"ruleFiles", result.nativeRuleFileCount},
+        {"activeDiskPackCount", result.activeDiskPackCount},
+        {"virtualJavaOnlyResourceCount", result.virtualJavaOnlyResourceCount},
+        {"nativeIndexMillis", result.nativeIndexMillis}
+    };
+    diff["vanillaTotals"] = snapshot.value("totals", json::object());
+    diff["samples"] = samples;
+    diff["errors"] = errors;
+    result.error = errors.empty() ? "" : "pack_scan_errors";
+    result.diffJson = diff.dump();
+    return result;
+}
 
 std::string packIndexStatusJson() {
     std::lock_guard<std::mutex> lock(g_packIndexMutex);
@@ -73,8 +448,9 @@ std::string packIndexStatusJson() {
     out << "{";
     out << "\"ok\":true";
     out << ",\"schema\":\"radser_native_pack_index_status_v1\"";
-    out << ",\"indexMode\":\"snapshot_ingest_only\"";
+    out << ",\"indexMode\":\"native_l1_disk_plus_virtual_java\"";
     out << ",\"hasSnapshot\":" << (g_packIndexState.hasSnapshot ? "true" : "false");
+    out << ",\"diffReady\":" << (g_packIndexState.diffReady ? "true" : "false");
     out << ",\"generation\":" << g_packIndexState.generation;
     out << ",\"submitCount\":" << g_packIndexState.submitCount;
     out << ",\"snapshotBytes\":" << g_packIndexState.snapshotBytes;
@@ -83,9 +459,25 @@ std::string packIndexStatusJson() {
     out << ",\"ruleFileCount\":" << g_packIndexState.ruleFileCount;
     out << ",\"sidecarCount\":" << g_packIndexState.sidecarCount;
     out << ",\"javaCaptureMillis\":" << g_packIndexState.javaCaptureMillis;
+    out << ",\"nativeIndexMillis\":" << g_packIndexState.nativeIndexMillis;
+    out << ",\"activeDiskPackCount\":" << g_packIndexState.activeDiskPackCount;
+    out << ",\"nativeResourceCount\":" << g_packIndexState.nativeResourceCount;
+    out << ",\"nativeSidecarCount\":" << g_packIndexState.nativeSidecarCount;
+    out << ",\"nativeRuleFileCount\":" << g_packIndexState.nativeRuleFileCount;
+    out << ",\"virtualJavaOnlyResourceCount\":" << g_packIndexState.virtualJavaOnlyResourceCount;
+    out << ",\"missingCount\":" << g_packIndexState.missingCount;
+    out << ",\"winnerMismatchCount\":" << g_packIndexState.winnerMismatchCount;
+    out << ",\"flagMismatchCount\":" << g_packIndexState.flagMismatchCount;
+    out << ",\"extraNativeCount\":" << g_packIndexState.extraNativeCount;
     out << ",\"packStackHash\":\"" << jsonEscape(g_packIndexState.packStackHash) << "\"";
+    out << ",\"indexError\":\"" << jsonEscape(g_packIndexState.indexError) << "\"";
     out << "}";
     return out.str();
+}
+
+std::string packIndexDiffJson() {
+    std::lock_guard<std::mutex> lock(g_packIndexMutex);
+    return g_packIndexState.diffJson;
 }
 
 void logNativeException(const char* method, jlong generation, const std::exception& ex) {
@@ -550,9 +942,11 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeSubmitPackStack
         return JNI_FALSE;
     }
     std::string hash = readJString(env, packStackHash);
+    PackIndexBuildResult index = buildPackIndexFromSnapshot(snapshot);
     {
         std::lock_guard<std::mutex> lock(g_packIndexMutex);
         g_packIndexState.hasSnapshot = true;
+        g_packIndexState.diffReady = index.diffReady;
         g_packIndexState.generation = static_cast<uint64_t>(generation);
         g_packIndexState.submitCount++;
         g_packIndexState.snapshotBytes = snapshot.size();
@@ -561,9 +955,21 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeSubmitPackStack
         g_packIndexState.ruleFileCount = static_cast<uint32_t>(ruleFileCount);
         g_packIndexState.sidecarCount = static_cast<uint32_t>(sidecarCount);
         g_packIndexState.javaCaptureMillis = static_cast<uint64_t>(javaCaptureMillis);
+        g_packIndexState.nativeIndexMillis = index.nativeIndexMillis;
+        g_packIndexState.activeDiskPackCount = index.activeDiskPackCount;
+        g_packIndexState.nativeResourceCount = index.nativeResourceCount;
+        g_packIndexState.nativeSidecarCount = index.nativeSidecarCount;
+        g_packIndexState.nativeRuleFileCount = index.nativeRuleFileCount;
+        g_packIndexState.virtualJavaOnlyResourceCount = index.virtualJavaOnlyResourceCount;
+        g_packIndexState.missingCount = index.missingCount;
+        g_packIndexState.winnerMismatchCount = index.winnerMismatchCount;
+        g_packIndexState.flagMismatchCount = index.flagMismatchCount;
+        g_packIndexState.extraNativeCount = index.extraNativeCount;
         g_packIndexState.packStackHash = std::move(hash);
+        g_packIndexState.indexError = index.error;
+        g_packIndexState.diffJson = std::move(index.diffJson);
     }
-    return JNI_TRUE;
+    return index.ok ? JNI_TRUE : JNI_FALSE;
     });
 }
 
@@ -572,6 +978,14 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativePackIndexStatus
     JNIEnv* env, jclass) {
     return guardedJniString(env, "nativePackIndexStatusJson", [&]() -> jstring {
     return makeString(env, packIndexStatusJson());
+    });
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativePackIndexDiffAgainstVanillaJson(
+    JNIEnv* env, jclass) {
+    return guardedJniString(env, "nativePackIndexDiffAgainstVanillaJson", [&]() -> jstring {
+    return makeString(env, packIndexDiffJson());
     });
 }
 
