@@ -221,6 +221,9 @@ class TextureSystem {
     uint32_t materialSpecularPageArrayId(uint32_t page) const;
     uint32_t materialNormalPageArrayId(uint32_t page) const;
     uint32_t materialFlagPageArrayId(uint32_t page) const;
+    bool materialEntrySnapshot(uint32_t materialId, vk::Data::MaterialEntry* out) const {
+        return materials_.entryForId(materialId, out);
+    }
     uint64_t materialTexturePageRevision() const {
         return materialTexturePageRevision_.load(std::memory_order_acquire);
     }

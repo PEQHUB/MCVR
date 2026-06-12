@@ -4120,6 +4120,40 @@ void RayTracingModuleContext::render() {
             textureRulesReady ? 1 : 0,
             static_cast<unsigned long long>(textureRuleRevision),
             static_cast<unsigned long long>(materialTexturePageRevision));
+        {
+            // Per-slot bind truth: which descriptor slots carry real page images vs the
+            // silent fallback (arrayId present but snapshot unresolvable), with extents.
+            std::ostringstream slotTruth;
+            for (uint32_t page = 0; page < vk::Data::MATERIAL_TEXTURE_PAGE_MAX; page++) {
+                const uint32_t arrayId = texSystem.materialAlbedoPageArrayId(page);
+                if (arrayId == UINT32_MAX) continue;
+                TextureArrayManager::ArrayInfo slotInfo{};
+                const bool snapOk = texArrayMgr.getArraySnapshot(arrayId, slotInfo)
+                    && slotInfo.image && slotInfo.sampler;
+                slotTruth << " " << page << ":a" << arrayId << (snapOk ? ":ok:" : ":FB:")
+                          << slotInfo.spriteSize << "x" << slotInfo.layerCount
+                          << "m" << slotInfo.mipLevels;
+            }
+            RadianceLogger::log("TextureDescriptors", "INFO", "slot-truth-v4 gen=%llu%s",
+                static_cast<unsigned long long>(textureGeneration), slotTruth.str().c_str());
+
+            // Entry truth: CPU mirror of uploaded material entries for probe ids
+            // (vanilla low/mid/high + first CTM + a residency-updated CTM id).
+            static const uint32_t kEntryProbeIds[] = {1u, 100u, 500u, 1000u, 1500u, 1809u,
+                                                      1810u, 2000u, 2238u};
+            std::ostringstream entryTruth;
+            for (uint32_t probeId : kEntryProbeIds) {
+                vk::Data::MaterialEntry probeEntry{};
+                if (!texSystem.materialEntrySnapshot(probeId, &probeEntry)) continue;
+                entryTruth << " " << probeId << ":f0x" << std::hex << probeEntry.flags
+                           << ":p0x" << static_cast<uint32_t>(probeEntry.albedoPage) << std::dec
+                           << ":l" << probeEntry.albedoLayer
+                           << ":s" << probeEntry.baseSpriteId
+                           << ":fb" << probeEntry.fallbackMaterialId;
+            }
+            RadianceLogger::log("TextureDescriptors", "INFO", "entry-truth-v4%s",
+                entryTruth.str().c_str());
+        }
         descriptorSlotState.generation = textureGeneration;
         descriptorSlotState.materialTexturePageRevision = materialTexturePageRevision;
         descriptorSlotState.albedoTextureView = albedoView;

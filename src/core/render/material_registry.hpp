@@ -36,6 +36,14 @@ class MaterialRegistry {
         std::lock_guard<std::mutex> lock(mutex_);
         return materialCount_;
     }
+
+    // CPU mirror of the last-uploaded entry for materialId; false if never uploaded.
+    bool entryForId(uint32_t materialId, vk::Data::MaterialEntry* out) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!out || materialId >= entries_.size()) return false;
+        *out = entries_[materialId];
+        return true;
+    }
     std::string statusJson() const;
 
     void reset();
