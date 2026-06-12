@@ -7,12 +7,17 @@
 #include "mz_strm.h"
 #include "mz_zip.h"
 #include "mz_zip_rw.h"
+#define XXH_INLINE_ALL
+#include "xxhash.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -20,6 +25,7 @@
 #include <climits>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -87,6 +93,11 @@ struct PackIndexSnapshotState {
     uint32_t winnerMismatchCount = 0;
     uint32_t flagMismatchCount = 0;
     uint32_t extraNativeCount = 0;
+    uint32_t nativeContentHashReadyCount = 0;
+    uint32_t nativeContentHashMissingCount = 0;
+    uint32_t diskBackedContentHashReadyCount = 0;
+    uint32_t diskBackedContentHashMissingCount = 0;
+    uint32_t virtualJavaOnlyContentHashMissingCount = 0;
     std::string packStackHash;
     std::string indexError;
     std::string diffJson = "{\"ok\":false,\"reason\":\"not_captured\"}";
@@ -100,6 +111,10 @@ struct PackIndexResource {
     std::string winnerPackId;
     bool sidecar = false;
     bool ruleFile = false;
+    bool virtualJavaOnly = false;
+    bool contentHashReady = false;
+    uint64_t contentHash64 = 0;
+    uint64_t contentSizeBytes = 0;
     int precedence = -1;
 };
 
@@ -116,6 +131,11 @@ struct PackIndexBuildResult {
     uint32_t winnerMismatchCount = 0;
     uint32_t flagMismatchCount = 0;
     uint32_t extraNativeCount = 0;
+    uint32_t nativeContentHashReadyCount = 0;
+    uint32_t nativeContentHashMissingCount = 0;
+    uint32_t diskBackedContentHashReadyCount = 0;
+    uint32_t diskBackedContentHashMissingCount = 0;
+    uint32_t virtualJavaOnlyContentHashMissingCount = 0;
     std::string error;
     std::string diffJson;
 };
@@ -137,6 +157,51 @@ std::string toLowerAscii(std::string value) {
 std::string normalizeSlash(std::string value) {
     std::replace(value.begin(), value.end(), '\\', '/');
     return value;
+}
+
+std::string hex64(uint64_t value) {
+    std::ostringstream out;
+    out << std::hex << std::nouppercase << std::setfill('0') << std::setw(16) << value;
+    return out.str();
+}
+
+class Xxh3Stream {
+public:
+    Xxh3Stream() : state_(XXH3_createState()) {
+        if (!state_ || XXH3_64bits_reset(state_) == XXH_ERROR) {
+            throw std::runtime_error("XXH3 state initialization failed");
+        }
+    }
+
+    ~Xxh3Stream() {
+        XXH3_freeState(state_);
+    }
+
+    void update(const void* data, size_t length) {
+        if (length == 0) return;
+        if (XXH3_64bits_update(state_, data, length) == XXH_ERROR) {
+            throw std::runtime_error("XXH3 update failed");
+        }
+        size_ += static_cast<uint64_t>(length);
+    }
+
+    uint64_t digest() const {
+        return static_cast<uint64_t>(XXH3_64bits_digest(state_));
+    }
+
+    uint64_t size() const {
+        return size_;
+    }
+
+private:
+    XXH3_state_t* state_ = nullptr;
+    uint64_t size_ = 0;
+};
+
+void applyContentHash(PackIndexResource& resource, uint64_t hash64, uint64_t sizeBytes) {
+    resource.contentHashReady = true;
+    resource.contentHash64 = hash64;
+    resource.contentSizeBytes = sizeBytes;
 }
 
 bool isSidecarResourcePath(std::string_view path) {
@@ -201,6 +266,74 @@ void mergeResource(std::unordered_map<std::string, PackIndexResource>& table, Pa
     }
 }
 
+void hashCurrentZipEntry(void* zipReader, const std::string& packId, const std::string& filename,
+    PackIndexResource& resource, std::vector<std::string>& errors) {
+    int32_t openResult = mz_zip_reader_entry_open(zipReader);
+    if (openResult != MZ_OK) {
+        errors.push_back(packId + ": open zip entry failed " + std::to_string(openResult) + " " + filename);
+        return;
+    }
+
+    bool closeNeeded = true;
+    try {
+        Xxh3Stream stream;
+        std::array<char, 64 * 1024> buffer{};
+        for (;;) {
+            int32_t read = mz_zip_reader_entry_read(zipReader, buffer.data(), static_cast<int32_t>(buffer.size()));
+            if (read > 0) {
+                stream.update(buffer.data(), static_cast<size_t>(read));
+                continue;
+            }
+            if (read < 0) {
+                errors.push_back(packId + ": read zip entry failed " + std::to_string(read) + " " + filename);
+            }
+            break;
+        }
+
+        int32_t closeResult = mz_zip_reader_entry_close(zipReader);
+        closeNeeded = false;
+        if (closeResult != MZ_OK) {
+            errors.push_back(packId + ": close zip entry failed " + std::to_string(closeResult) + " " + filename);
+            return;
+        }
+        applyContentHash(resource, stream.digest(), stream.size());
+    } catch (const std::exception& ex) {
+        errors.push_back(packId + ": hash zip entry failed " + std::string(ex.what()) + " " + filename);
+    }
+
+    if (closeNeeded) {
+        mz_zip_reader_entry_close(zipReader);
+    }
+}
+
+void hashDirectoryFile(const std::string& packId, const std::filesystem::path& path,
+    PackIndexResource& resource, std::vector<std::string>& errors) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        errors.push_back(packId + ": open file for hash failed " + path.string());
+        return;
+    }
+
+    try {
+        Xxh3Stream stream;
+        std::array<char, 64 * 1024> buffer{};
+        while (file) {
+            file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            std::streamsize got = file.gcount();
+            if (got > 0) {
+                stream.update(buffer.data(), static_cast<size_t>(got));
+            }
+        }
+        if (!file.eof()) {
+            errors.push_back(packId + ": read file for hash failed " + path.string());
+            return;
+        }
+        applyContentHash(resource, stream.digest(), stream.size());
+    } catch (const std::exception& ex) {
+        errors.push_back(packId + ": hash file failed " + std::string(ex.what()) + " " + path.string());
+    }
+}
+
 uint32_t countSidecars(const std::unordered_map<std::string, PackIndexResource>& table) {
     uint32_t count = 0;
     for (const auto& [_, resource] : table) {
@@ -215,6 +348,30 @@ uint32_t countRuleFiles(const std::unordered_map<std::string, PackIndexResource>
         if (resource.ruleFile) count++;
     }
     return count;
+}
+
+void countContentHashes(const std::unordered_map<std::string, PackIndexResource>& table,
+    uint32_t& ready, uint32_t& missing, uint32_t& diskReady, uint32_t& diskMissing, uint32_t& virtualMissing) {
+    ready = 0;
+    missing = 0;
+    diskReady = 0;
+    diskMissing = 0;
+    virtualMissing = 0;
+    for (const auto& [_, resource] : table) {
+        if (resource.contentHashReady) {
+            ready++;
+            if (!resource.virtualJavaOnly) {
+                diskReady++;
+            }
+            continue;
+        }
+        missing++;
+        if (resource.virtualJavaOnly) {
+            virtualMissing++;
+        } else {
+            diskMissing++;
+        }
+    }
 }
 
 void scanZipPack(const std::string& packId, const std::filesystem::path& path, int precedence,
@@ -238,6 +395,7 @@ void scanZipPack(const std::string& packId, const std::filesystem::path& path, i
         if (mz_zip_reader_entry_get_info(zipReader.get(), &info) == MZ_OK
             && info != nullptr && info->filename != nullptr) {
             if (auto resource = resourceFromAssetPath(info->filename, packId, precedence)) {
+                hashCurrentZipEntry(zipReader.get(), packId, info->filename, *resource, errors);
                 mergeResource(table, std::move(*resource));
             }
         }
@@ -276,6 +434,7 @@ void scanDirectoryPack(const std::string& packId, const std::filesystem::path& r
             continue;
         }
         if (auto resource = resourceFromAssetPath(relative.string(), packId, precedence)) {
+            hashDirectoryFile(packId, it->path(), *resource, errors);
             mergeResource(table, std::move(*resource));
         }
     }
@@ -302,6 +461,13 @@ json resourceJson(const PackIndexResource& resource) {
     out["winnerPackId"] = resource.winnerPackId;
     out["sidecar"] = resource.sidecar;
     out["ruleFile"] = resource.ruleFile;
+    out["virtualJavaOnly"] = resource.virtualJavaOnly;
+    out["contentHashReady"] = resource.contentHashReady;
+    if (resource.contentHashReady) {
+        out["contentHashAlgorithm"] = "xxh3_64";
+        out["contentHash64"] = hex64(resource.contentHash64);
+        out["contentSizeBytes"] = resource.contentSizeBytes;
+    }
     return out;
 }
 
@@ -334,6 +500,7 @@ PackIndexBuildResult buildPackIndexFromSnapshot(const std::string& snapshotJson)
         if (resource.resource.empty()) continue;
         truth[resource.resource] = resource;
         if (!startsWith(resource.winnerPackId, "file/")) {
+            resource.virtualJavaOnly = true;
             native[resource.resource] = resource;
             result.virtualJavaOnlyResourceCount++;
         }
@@ -370,7 +537,6 @@ PackIndexBuildResult buildPackIndexFromSnapshot(const std::string& snapshotJson)
     diff["nativeAcceptedSnapshot"] = true;
     diff["diffReady"] = true;
     diff["indexMode"] = "native_l1_disk_plus_virtual_java";
-    diff["contentHashReady"] = false;
     diff["nativeCentralDirectoryScan"] = true;
 
     json samples = json::array();
@@ -414,6 +580,12 @@ PackIndexBuildResult buildPackIndexFromSnapshot(const std::string& snapshotJson)
     result.nativeResourceCount = static_cast<uint32_t>(native.size());
     result.nativeSidecarCount = countSidecars(native);
     result.nativeRuleFileCount = countRuleFiles(native);
+    countContentHashes(native,
+        result.nativeContentHashReadyCount,
+        result.nativeContentHashMissingCount,
+        result.diskBackedContentHashReadyCount,
+        result.diskBackedContentHashMissingCount,
+        result.virtualJavaOnlyContentHashMissingCount);
     result.diffReady = true;
     result.ok = errors.empty();
     auto elapsed = std::chrono::steady_clock::now() - started;
@@ -426,12 +598,25 @@ PackIndexBuildResult buildPackIndexFromSnapshot(const std::string& snapshotJson)
     diff["winnerMismatchCount"] = result.winnerMismatchCount;
     diff["flagMismatchCount"] = result.flagMismatchCount;
     diff["extraNativeCount"] = result.extraNativeCount;
+    diff["contentHashReady"] = result.nativeContentHashMissingCount == 0;
+    diff["contentHashAlgorithm"] = "xxh3_64";
+    diff["nativeContentHashReadyCount"] = result.nativeContentHashReadyCount;
+    diff["nativeContentHashMissingCount"] = result.nativeContentHashMissingCount;
+    diff["diskBackedContentHashReady"] = result.diskBackedContentHashMissingCount == 0;
+    diff["diskBackedContentHashReadyCount"] = result.diskBackedContentHashReadyCount;
+    diff["diskBackedContentHashMissingCount"] = result.diskBackedContentHashMissingCount;
+    diff["virtualJavaOnlyContentHashMissingCount"] = result.virtualJavaOnlyContentHashMissingCount;
     diff["nativeTotals"] = {
         {"resourceCount", result.nativeResourceCount},
         {"sidecarResources", result.nativeSidecarCount},
         {"ruleFiles", result.nativeRuleFileCount},
         {"activeDiskPackCount", result.activeDiskPackCount},
         {"virtualJavaOnlyResourceCount", result.virtualJavaOnlyResourceCount},
+        {"contentHashReadyCount", result.nativeContentHashReadyCount},
+        {"contentHashMissingCount", result.nativeContentHashMissingCount},
+        {"diskBackedContentHashReadyCount", result.diskBackedContentHashReadyCount},
+        {"diskBackedContentHashMissingCount", result.diskBackedContentHashMissingCount},
+        {"virtualJavaOnlyContentHashMissingCount", result.virtualJavaOnlyContentHashMissingCount},
         {"nativeIndexMillis", result.nativeIndexMillis}
     };
     diff["vanillaTotals"] = snapshot.value("totals", json::object());
@@ -469,6 +654,16 @@ std::string packIndexStatusJson() {
     out << ",\"winnerMismatchCount\":" << g_packIndexState.winnerMismatchCount;
     out << ",\"flagMismatchCount\":" << g_packIndexState.flagMismatchCount;
     out << ",\"extraNativeCount\":" << g_packIndexState.extraNativeCount;
+    out << ",\"contentHashReady\":" << (g_packIndexState.nativeContentHashMissingCount == 0 ? "true" : "false");
+    out << ",\"contentHashAlgorithm\":\"xxh3_64\"";
+    out << ",\"nativeContentHashReadyCount\":" << g_packIndexState.nativeContentHashReadyCount;
+    out << ",\"nativeContentHashMissingCount\":" << g_packIndexState.nativeContentHashMissingCount;
+    out << ",\"diskBackedContentHashReady\":"
+        << (g_packIndexState.diskBackedContentHashMissingCount == 0 ? "true" : "false");
+    out << ",\"diskBackedContentHashReadyCount\":" << g_packIndexState.diskBackedContentHashReadyCount;
+    out << ",\"diskBackedContentHashMissingCount\":" << g_packIndexState.diskBackedContentHashMissingCount;
+    out << ",\"virtualJavaOnlyContentHashMissingCount\":"
+        << g_packIndexState.virtualJavaOnlyContentHashMissingCount;
     out << ",\"packStackHash\":\"" << jsonEscape(g_packIndexState.packStackHash) << "\"";
     out << ",\"indexError\":\"" << jsonEscape(g_packIndexState.indexError) << "\"";
     out << "}";
@@ -965,6 +1160,11 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeSubmitPackStack
         g_packIndexState.winnerMismatchCount = index.winnerMismatchCount;
         g_packIndexState.flagMismatchCount = index.flagMismatchCount;
         g_packIndexState.extraNativeCount = index.extraNativeCount;
+        g_packIndexState.nativeContentHashReadyCount = index.nativeContentHashReadyCount;
+        g_packIndexState.nativeContentHashMissingCount = index.nativeContentHashMissingCount;
+        g_packIndexState.diskBackedContentHashReadyCount = index.diskBackedContentHashReadyCount;
+        g_packIndexState.diskBackedContentHashMissingCount = index.diskBackedContentHashMissingCount;
+        g_packIndexState.virtualJavaOnlyContentHashMissingCount = index.virtualJavaOnlyContentHashMissingCount;
         g_packIndexState.packStackHash = std::move(hash);
         g_packIndexState.indexError = index.error;
         g_packIndexState.diffJson = std::move(index.diffJson);
