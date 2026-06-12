@@ -9,11 +9,83 @@
 #include <sstream>
 #include <cstring>
 #include <climits>
+#include <mutex>
+#include <string>
 
 namespace {
 
 jstring makeString(JNIEnv* env, const std::string& value) {
     return env->NewStringUTF(value.c_str());
+}
+
+std::string readJString(JNIEnv* env, jstring value) {
+    if (!value) return {};
+    const char* chars = env->GetStringUTFChars(value, nullptr);
+    if (!chars) return {};
+    std::string out(chars);
+    env->ReleaseStringUTFChars(value, chars);
+    return out;
+}
+
+std::string jsonEscape(const std::string& value) {
+    std::ostringstream out;
+    for (char c : value) {
+        switch (c) {
+            case '\\': out << "\\\\"; break;
+            case '"': out << "\\\""; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    const auto uc = static_cast<unsigned char>(c);
+                    out << "\\u";
+                    static const char* HEX = "0123456789abcdef";
+                    out << "00" << HEX[(uc >> 4) & 0xF] << HEX[uc & 0xF];
+                } else {
+                    out << c;
+                }
+                break;
+        }
+    }
+    return out.str();
+}
+
+struct PackIndexSnapshotState {
+    bool hasSnapshot = false;
+    uint64_t generation = 0;
+    uint64_t submitCount = 0;
+    size_t snapshotBytes = 0;
+    uint32_t packCount = 0;
+    uint32_t resourceCount = 0;
+    uint32_t ruleFileCount = 0;
+    uint32_t sidecarCount = 0;
+    uint64_t javaCaptureMillis = 0;
+    std::string packStackHash;
+};
+
+std::mutex g_packIndexMutex;
+PackIndexSnapshotState g_packIndexState;
+
+std::string packIndexStatusJson() {
+    std::lock_guard<std::mutex> lock(g_packIndexMutex);
+    std::ostringstream out;
+    out << "{";
+    out << "\"ok\":true";
+    out << ",\"schema\":\"radser_native_pack_index_status_v1\"";
+    out << ",\"indexMode\":\"snapshot_ingest_only\"";
+    out << ",\"hasSnapshot\":" << (g_packIndexState.hasSnapshot ? "true" : "false");
+    out << ",\"generation\":" << g_packIndexState.generation;
+    out << ",\"submitCount\":" << g_packIndexState.submitCount;
+    out << ",\"snapshotBytes\":" << g_packIndexState.snapshotBytes;
+    out << ",\"packCount\":" << g_packIndexState.packCount;
+    out << ",\"resourceCount\":" << g_packIndexState.resourceCount;
+    out << ",\"ruleFileCount\":" << g_packIndexState.ruleFileCount;
+    out << ",\"sidecarCount\":" << g_packIndexState.sidecarCount;
+    out << ",\"javaCaptureMillis\":" << g_packIndexState.javaCaptureMillis;
+    out << ",\"packStackHash\":\"" << jsonEscape(g_packIndexState.packStackHash) << "\"";
+    out << "}";
+    return out.str();
 }
 
 void logNativeException(const char* method, jlong generation, const std::exception& ex) {
@@ -462,6 +534,46 @@ Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeUpdateTextureRu
 }
 
 // ---- Status JSON ----
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeSubmitPackStackSnapshotV1(
+    JNIEnv* env, jclass, jlong generation, jstring snapshotJson,
+    jint packCount, jint resourceCount, jint ruleFileCount, jint sidecarCount,
+    jstring packStackHash, jlong javaCaptureMillis) {
+    return guardedJniBool("nativeSubmitPackStackSnapshotV1", generation, [&]() -> jboolean {
+    if (generation <= 0 || !snapshotJson || packCount < 0 || resourceCount < 0
+        || ruleFileCount < 0 || sidecarCount < 0 || javaCaptureMillis < 0) {
+        return JNI_FALSE;
+    }
+    std::string snapshot = readJString(env, snapshotJson);
+    if (snapshot.empty()) {
+        return JNI_FALSE;
+    }
+    std::string hash = readJString(env, packStackHash);
+    {
+        std::lock_guard<std::mutex> lock(g_packIndexMutex);
+        g_packIndexState.hasSnapshot = true;
+        g_packIndexState.generation = static_cast<uint64_t>(generation);
+        g_packIndexState.submitCount++;
+        g_packIndexState.snapshotBytes = snapshot.size();
+        g_packIndexState.packCount = static_cast<uint32_t>(packCount);
+        g_packIndexState.resourceCount = static_cast<uint32_t>(resourceCount);
+        g_packIndexState.ruleFileCount = static_cast<uint32_t>(ruleFileCount);
+        g_packIndexState.sidecarCount = static_cast<uint32_t>(sidecarCount);
+        g_packIndexState.javaCaptureMillis = static_cast<uint64_t>(javaCaptureMillis);
+        g_packIndexState.packStackHash = std::move(hash);
+    }
+    return JNI_TRUE;
+    });
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativePackIndexStatusJson(
+    JNIEnv* env, jclass) {
+    return guardedJniString(env, "nativePackIndexStatusJson", [&]() -> jstring {
+    return makeString(env, packIndexStatusJson());
+    });
+}
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_radiance_client_proxy_vulkan_TextureArrayBridgeV4_nativeTextureLoaderV4StatusJson(
